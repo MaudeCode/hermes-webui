@@ -4488,6 +4488,27 @@ async function switchToWorkspace(path,name){
 
 // ── Profile panel + dropdown ──
 let _profilesCache = null;
+let _profileSwitchGeneration = 0;
+
+async function _profileSwitchPanelLoad(){
+  if (_currentPanel === 'skills') await loadSkills();
+  if (_currentPanel === 'memory') await loadMemory();
+  if (_currentPanel === 'tasks') await loadCrons();
+  if (_currentPanel === 'kanban') await loadKanban();
+  if (_currentPanel === 'profiles') await loadProfilesPanel();
+  if (_currentPanel === 'workspaces') await loadWorkspacesPanel();
+}
+
+function _refreshProfileSwitchBackground(gen){
+  window._modelDropdownReady=null;
+  if (typeof window._ensureModelDropdownReady === 'function') {
+    Promise.resolve(window._ensureModelDropdownReady()).catch(()=>{});
+  }
+  Promise.resolve(loadWorkspaceList()).then(()=>{
+    if (gen !== _profileSwitchGeneration) return;
+    if (S.session && typeof syncTopbar === 'function') syncTopbar();
+  }).catch(()=>{});
+}
 
 async function loadProfilesPanel() {
   const panel = $('profilesPanel');
@@ -4750,6 +4771,7 @@ async function switchToProfile(name) {
   const _chip = $('profileChip');
   const _chipLabel = $('profileChipLabel');
   const _prevProfileName = S.activeProfile || 'default';
+  const _switchGen = ++_profileSwitchGeneration;
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
   // Optimistic name update — shows the target name right away
   if (_chipLabel) _chipLabel.textContent = name;
@@ -4765,35 +4787,52 @@ async function switchToProfile(name) {
 
   try {
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }) });
+    if (_switchGen !== _profileSwitchGeneration) return;
     S.activeProfile = data.active || name;
 
     // Update composer placeholder and title bar while the core profile-switch
     // state is still close to the profile API response.
     if (typeof applyBotName === 'function') applyBotName();
 
-    // ── Model + Workspace (parallelized) ───────────────────────────────────
-    // populateModelDropdown hits /api/models; loadWorkspaceList hits /api/workspaces.
-    // They are fully independent — run both simultaneously to cut switch time ~50%.
+    // ── Model + Workspace ──────────────────────────────────────────────────
+    // Apply the profile defaults returned by /api/profile/switch immediately.
+    // Refreshing the full model/workspace catalogs is useful, but it should not
+    // hold the visible switch animation open.
     if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
     else localStorage.removeItem('hermes-webui-model');
     _skillsData = null;
     _workspaceList = null;
-    await Promise.all([populateModelDropdown(), loadWorkspaceList()]);
+    if (data.default_model) window._defaultModel = data.default_model;
+    if (data.default_model_provider) window._activeProvider = data.default_model_provider;
 
     // ── Apply model ────────────────────────────────────────────────────────
     if (data.default_model) {
       const sel = $('modelSelect');
-      const resolved = _applyModelToDropdown(data.default_model, sel, window._activeProvider||null);
+      const providerId = data.default_model_provider || window._activeProvider || null;
+      const existingDefaultOpt = sel ? Array.from(sel.options).find(o => o.value === data.default_model) : null;
+      if (existingDefaultOpt && providerId && !existingDefaultOpt.dataset.provider) {
+        existingDefaultOpt.dataset.provider = providerId;
+      }
+      if (sel && !existingDefaultOpt) {
+        const opt = document.createElement('option');
+        opt.value = data.default_model;
+        opt.textContent = typeof getModelLabel === 'function' ? getModelLabel(data.default_model) : data.default_model;
+        opt.dataset.custom = '1';
+        if (providerId) opt.dataset.provider = providerId;
+        sel.querySelectorAll('option[data-custom]').forEach(o => o.remove());
+        sel.appendChild(opt);
+      }
+      const resolved = _applyModelToDropdown(data.default_model, sel, providerId);
       const modelToUse = resolved || data.default_model;
       const modelState = (typeof _modelStateForSelect==='function')
         ? _modelStateForSelect(sel, modelToUse)
-        : {model:modelToUse,model_provider:null};
+        : {model:modelToUse,model_provider:providerId};
       S._pendingProfileModel = modelToUse;
-      S._pendingProfileModelProvider = modelState.model_provider||null;
+      S._pendingProfileModelProvider = modelState.model_provider||providerId||null;
       // Only patch the in-memory session model if we're NOT about to replace the session
       if (S.session && !sessionInProgress) {
         S.session.model = modelToUse;
-        S.session.model_provider = modelState.model_provider||null;
+        S.session.model_provider = modelState.model_provider||providerId||null;
       }
     }
 
@@ -4822,23 +4861,14 @@ async function switchToProfile(name) {
 
     // ── Session ────────────────────────────────────────────────────────────
     _showAllProfiles = false;
+    if (typeof animateNextSessionListRefresh === 'function') animateNextSessionListRefresh();
 
     if (sessionInProgress) {
       // The current session has messages and belongs to the previous profile.
       // Start a new session for the new profile so nothing gets cross-tagged.
-      await newSession(false);
-      // Apply profile default workspace to the newly created session (fixes #424)
-      if (S._profileDefaultWorkspace && S.session) {
-        try {
-          await api('/api/session/update', { method: 'POST', body: JSON.stringify({
-            session_id: S.session.session_id,
-            workspace: S._profileDefaultWorkspace,
-            model: S.session.model,
-            model_provider: S.session.model_provider||null,
-          })});
-          S.session.workspace = S._profileDefaultWorkspace;
-        } catch (_) {}
-      }
+      const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
+      await newSession(false, {awaitWorkspaceLoad: workspaceVisible});
+      if (_switchGen !== _profileSwitchGeneration) return;
       // Keep topbar chips (workspace/profile) in sync after creating the
       // new profile-scoped session.
       syncTopbar();
@@ -4847,28 +4877,27 @@ async function switchToProfile(name) {
     } else {
       // No messages yet — just refresh the list and topbar in place
       await renderSessionList();
+      if (_switchGen !== _profileSwitchGeneration) return;
       syncTopbar();
       // Refresh workspace file tree so the right panel shows the new
       // profile's workspace, not the previous one (#1214).
-      if (S.session && S.session.workspace) loadDir('.');
+      if (S.session && S.session.workspace) {
+        const dirLoad = loadDir('.');
+        if (typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed') await dirLoad;
+      }
       showToast(t('profile_switched', name));
     }
 
-    // ── Sidebar panels ─────────────────────────────────────────────────────
-    if (_currentPanel === 'skills') await loadSkills();
-    if (_currentPanel === 'memory') await loadMemory();
-    if (_currentPanel === 'tasks') await loadCrons();
-    if (_currentPanel === 'kanban') await loadKanban();
-    if (_currentPanel === 'profiles') await loadProfilesPanel();
-    if (_currentPanel === 'workspaces') await loadWorkspacesPanel();
+    await _profileSwitchPanelLoad();
+    _refreshProfileSwitchBackground(_switchGen);
 
   } catch (e) {
     // Revert the optimistic name update on error
-    if (_chipLabel) _chipLabel.textContent = _prevProfileName;
-    showToast(t('switch_failed') + e.message);
+    if (_switchGen === _profileSwitchGeneration && _chipLabel) _chipLabel.textContent = _prevProfileName;
+    if (_switchGen === _profileSwitchGeneration) showToast(t('switch_failed') + e.message);
   } finally {
     // Always remove loading indicator regardless of success or failure
-    if (_chip) { _chip.classList.remove('switching'); _chip.disabled = false; }
+    if (_switchGen === _profileSwitchGeneration && _chip) { _chip.classList.remove('switching'); _chip.disabled = false; }
   }
 }
 
@@ -5770,7 +5799,7 @@ async function loadProvidersPanel(){
   try{
     const data=await api('/api/providers');
     const quota=await _fetchProviderQuotaStatus(false).catch(e=>({ok:false,status:'unavailable',quota:null,message:e.message||t('provider_quota_unavailable'),client_fetched_at:new Date().toISOString()}));
-    const providers=(data.providers||[]).filter(p=>p.configurable||p.is_oauth);
+    const providers=(data.providers||[]).filter(p=>p.configurable||p.is_oauth||p.is_custom);
     list.innerHTML='';
     _providerCardEls.clear();
     const quotaCard=_buildProviderQuotaCard(quota);
@@ -6097,48 +6126,59 @@ function _buildProviderCard(p){
     return card;
   }
 
-  const field=document.createElement('div');
-  field.className='provider-card-field';
-  const label=document.createElement('label');
-  label.className='provider-card-label';
-  label.textContent=t('providers_status_api_key');
-  field.appendChild(label);
+  let input=null;
+  let saveBtn=null;
+  if(p.configurable){
+    const field=document.createElement('div');
+    field.className='provider-card-field';
+    const label=document.createElement('label');
+    label.className='provider-card-label';
+    label.textContent=t('providers_status_api_key');
+    field.appendChild(label);
 
-  const row=document.createElement('div');
-  row.className='provider-card-row';
-  const input=document.createElement('input');
-  input.type='password';
-  input.className='provider-card-input';
-  input.placeholder=p.has_key?t('providers_key_placeholder_replace'):t('providers_key_placeholder_new');
-  input.autocomplete='off';
-  const toggleBtn=document.createElement('button');
-  toggleBtn.type='button';
-  toggleBtn.className='provider-card-btn provider-card-btn-ghost';
-  toggleBtn.textContent='Show';
-  toggleBtn.onclick=()=>{
-    const revealed=input.type==='text';
-    input.type=revealed?'password':'text';
-    toggleBtn.textContent=revealed?'Show':'Hide';
-  };
-  const saveBtn=document.createElement('button');
-  saveBtn.type='button';
-  saveBtn.className='provider-card-btn provider-card-btn-primary';
-  saveBtn.textContent=t('providers_save');
-  saveBtn.onclick=()=>_saveProviderKey(p.id);
-  saveBtn.disabled=true;
-  row.appendChild(input);
-  row.appendChild(toggleBtn);
-  row.appendChild(saveBtn);
-  if(p.has_key){
-    const removeBtn=document.createElement('button');
-    removeBtn.type='button';
-    removeBtn.className='provider-card-btn provider-card-btn-danger';
-    removeBtn.textContent=t('providers_remove');
-    removeBtn.onclick=()=>_removeProviderKey(p.id);
-    row.appendChild(removeBtn);
+    const row=document.createElement('div');
+    row.className='provider-card-row';
+    input=document.createElement('input');
+    input.type='password';
+    input.className='provider-card-input';
+    input.placeholder=p.has_key?t('providers_key_placeholder_replace'):t('providers_key_placeholder_new');
+    input.autocomplete='off';
+    const toggleBtn=document.createElement('button');
+    toggleBtn.type='button';
+    toggleBtn.className='provider-card-btn provider-card-btn-ghost';
+    toggleBtn.textContent='Show';
+    toggleBtn.onclick=()=>{
+      const revealed=input.type==='text';
+      input.type=revealed?'password':'text';
+      toggleBtn.textContent=revealed?'Show':'Hide';
+    };
+    saveBtn=document.createElement('button');
+    saveBtn.type='button';
+    saveBtn.className='provider-card-btn provider-card-btn-primary';
+    saveBtn.textContent=t('providers_save');
+    saveBtn.onclick=()=>_saveProviderKey(p.id);
+    saveBtn.disabled=true;
+    row.appendChild(input);
+    row.appendChild(toggleBtn);
+    row.appendChild(saveBtn);
+    if(p.has_key){
+      const removeBtn=document.createElement('button');
+      removeBtn.type='button';
+      removeBtn.className='provider-card-btn provider-card-btn-danger';
+      removeBtn.textContent=t('providers_remove');
+      removeBtn.onclick=()=>_removeProviderKey(p.id);
+      row.appendChild(removeBtn);
+    }
+    field.appendChild(row);
+    body.appendChild(field);
+  }else{
+    const hint=document.createElement('div');
+    hint.className='provider-card-hint';
+    hint.textContent=p.is_custom
+      ? 'Custom provider loaded from config.yaml / hermes model. Edit it from the CLI or config file.'
+      : 'Provider is managed outside the WebUI.';
+    body.appendChild(hint);
   }
-  field.appendChild(row);
-  body.appendChild(field);
 
   // Model list — show when provider has known models
   if(modelCount>0){
@@ -6192,8 +6232,10 @@ function _buildProviderCard(p){
   body.appendChild(refreshRow);
   card.appendChild(body);
 
-  _providerCardEls.set(p.id,{card,input,saveBtn,hasKey:p.has_key});
-  input.addEventListener('input',()=>{saveBtn.disabled=!input.value.trim();});
+  if(input&&saveBtn){
+    _providerCardEls.set(p.id,{card,input,saveBtn,hasKey:p.has_key});
+    input.addEventListener('input',()=>{saveBtn.disabled=!input.value.trim();});
+  }
   header.addEventListener('click',e=>{
     // Don't toggle when clicking inside body (defensive; body isn't inside header)
     if(e.target.closest('.provider-card-body')) return;
@@ -6364,7 +6406,7 @@ async function checkUpdatesNow(){
   if(label) label.textContent=t('settings_checking');
   if(status) status.textContent='';
   try {
-    const data=await api('/api/updates/check?force=1');
+    const data=await api('/api/updates/check?force=1',{timeoutMs:60000});
     if(data.disabled){
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
     } else {

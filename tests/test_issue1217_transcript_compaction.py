@@ -1,10 +1,13 @@
-from api.models import Session
+from api.models import Session, reconciled_state_db_messages_for_session
 import contextlib
+from types import SimpleNamespace
 
 from api.streaming import (
     _assistant_reply_added_after_current_turn,
     _context_messages_for_new_turn,
+    _dedupe_replayed_active_context,
     _merge_display_messages_after_agent_result,
+    _new_turn_context_from_messages,
     _sanitize_messages_for_api,
     _session_context_messages,
 )
@@ -225,6 +228,60 @@ def test_append_only_agent_result_preserves_normal_delta_behavior():
     assert merged == result_messages
 
 
+def test_replayed_active_tail_after_compression_is_not_duplicated():
+    previous_display = [
+        {"role": "assistant", "content": "old visible transcript"},
+        {"role": "user", "content": "choose agent"},
+        {"role": "assistant", "content": "checking agents"},
+        {"role": "tool", "content": "agent list"},
+        {"role": "assistant", "content": "agent answer"},
+    ]
+    previous_context = [
+        {"role": "assistant", "content": "[Session Arc Summary] compacted history"},
+        {"role": "user", "content": "choose agent"},
+        {"role": "assistant", "content": "checking agents"},
+        {"role": "tool", "content": "agent list"},
+        {"role": "assistant", "content": "agent answer"},
+    ]
+    result_messages = previous_context + [
+        # The new compressed state.db segment can replay the already-visible
+        # active tail before adding the next turn.
+        {"role": "user", "content": "choose agent"},
+        {"role": "assistant", "content": "checking agents"},
+        {"role": "tool", "content": "agent list"},
+        {"role": "assistant", "content": "agent answer"},
+        {"role": "user", "content": "choose B"},
+        {"role": "assistant", "content": "using B"},
+    ]
+
+    merged = _merge_display_messages_after_agent_result(
+        previous_display,
+        previous_context,
+        result_messages,
+        "choose B",
+    )
+    next_context = _dedupe_replayed_active_context(previous_context, result_messages)
+
+    assert [m["content"] for m in merged] == [
+        "old visible transcript",
+        "choose agent",
+        "checking agents",
+        "agent list",
+        "agent answer",
+        "choose B",
+        "using B",
+    ]
+    assert [m["content"] for m in next_context] == [
+        "[Session Arc Summary] compacted history",
+        "choose agent",
+        "checking agents",
+        "agent list",
+        "agent answer",
+        "choose B",
+        "using B",
+    ]
+
+
 def test_repeated_user_text_after_compaction_is_not_dropped():
     previous_display = [
         {"role": "user", "content": "continue"},
@@ -312,6 +369,40 @@ def test_explicit_continue_keeps_compacted_active_task_context(tmp_path):
     )
 
     assert _context_messages_for_new_turn(session, "继续") == compacted_task_context
+
+
+def test_streaming_reconciled_context_keeps_casual_greeting_suppression():
+    compacted_task_context = [
+        {
+            "role": "user",
+            "content": (
+                "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted. "
+                "Your current task is identified in the Active Task section — resume exactly from there."
+            ),
+            "timestamp": 1.0,
+        },
+        {"role": "assistant", "content": "I will inspect api/config.py next.", "timestamp": 2.0},
+    ]
+    session = SimpleNamespace(
+        session_id="issue2308-streaming",
+        messages=[{"role": "user", "content": "old task", "timestamp": 0.5}],
+        context_messages=compacted_task_context,
+    )
+    external_state_messages = list(compacted_task_context)
+
+    # Mirror the streaming pre-turn assembly for prefer_context=True: reconcile
+    # sidecar context with one state.db snapshot, then apply the normal new-turn
+    # context filter that suppresses casual greetings from resuming stale tasks.
+    previous_context_messages = _new_turn_context_from_messages(
+        reconciled_state_db_messages_for_session(
+            session,
+            prefer_context=True,
+            state_messages=external_state_messages,
+        ),
+        "你好",
+    )
+
+    assert previous_context_messages == []
 
 
 def test_all_cjk_greetings_drop_stale_compaction_context(tmp_path):

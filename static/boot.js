@@ -1201,9 +1201,10 @@ const _SKINS=[
   {name:'Sienna',   colors:['#D97757','#C06A49','#9A523A']},
   {name:'Catppuccin',colors:['#CBA6F7','#B4BEFE','#8839EF']},
   {name:'Nous',     colors:['#4682B4','#3A6E9A','#2C5F88']},
+  {name:'Geist Contrast', value:'geist-contrast', colors:['#000000','#ffffff','#FFF175']},
 ];
 const _VALID_THEMES=new Set((_THEMES||[]).map(t=>t.value));
-const _VALID_SKINS=new Set((_SKINS||[]).map(s=>s.name.toLowerCase()));
+const _VALID_SKINS=new Set((_SKINS||[]).map(s=>(s.value||s.name).toLowerCase()));
 const _LEGACY_THEME_MAP={
   slate:{theme:'dark',skin:'slate'},
   solarized:{theme:'dark',skin:'poseidon'},
@@ -1365,30 +1366,25 @@ function _buildSkinPicker(activeSkin){
   if(!grid) return;
   grid.innerHTML='';
   for(const skin of _SKINS){
-    const key=skin.name.toLowerCase();
+    const key=(skin.value||skin.name).toLowerCase();
     const btn=document.createElement('button');
     btn.type='button';
     btn.className='skin-pick-btn';
     btn.dataset.skinVal=key;
     btn.style.cssText='border:1px solid var(--border2);border-radius:8px;padding:8px 4px;text-align:center;cursor:pointer;background:none;transition:all .15s';
-    btn.onclick=()=>_pickSkin(skin.name);
+    btn.onclick=()=>_pickSkin(key);
     const dots=skin.colors.map(c=>`<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${c}"></span>`).join('');
-    btn.innerHTML=`<div style="display:flex;gap:3px;justify-content:center;margin-bottom:4px">${dots}</div><span style="font-size:11px;color:var(--text)">${skin.name}</span>`;
+    const label=skin.label||skin.name;
+    btn.innerHTML=`<div style="display:flex;gap:3px;justify-content:center;margin-bottom:4px">${dots}</div><span style="font-size:11px;color:var(--text)">${label}</span>`;
     grid.appendChild(btn);
   }
   _syncSkinPicker((activeSkin||'default').toLowerCase());
 }
 
 function applyBotName(){
-  // Prefer profile name over global bot_name for personalised placeholder.
-  // If activeProfile is set and not 'default', use it (capitalised).
-  // Falls back to window._botName (global bot_name setting) or 'Hermes'.
-  let name;
-  if(S.activeProfile && S.activeProfile!=='default'){
-    name=S.activeProfile.charAt(0).toUpperCase()+S.activeProfile.slice(1);
-  }else{
-    name=window._botName||'Hermes';
-  }
+  // The saved assistant name applies to the default profile only.
+  // Non-default profiles use their own profile names.
+  const name=assistantDisplayName();
   document.title=name;
   const sidebarH1=document.querySelector('.sidebar-header h1');
   if(sidebarH1) sidebarH1.textContent=name;
@@ -1425,7 +1421,30 @@ function applyBotName(){
     window._busyInputMode=(s.busy_input_mode||'queue');
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
     window._botName=s.bot_name||'Hermes';
-    if(s.default_model) window._defaultModel=s.default_model;
+    if(s.default_model_provider) window._activeProvider=s.default_model_provider;
+    if(s.default_model){
+      window._defaultModel=s.default_model;
+      const sel=$('modelSelect');
+      const savedState=(typeof _readPersistedModelState==='function')
+        ? _readPersistedModelState()
+        : (localStorage.getItem('hermes-webui-model')?{model:localStorage.getItem('hermes-webui-model'),model_provider:null}:null);
+      if(sel&&!savedState&&typeof _applyModelToDropdown==='function'){
+        const existingDefaultOpt=Array.from(sel.options).find(o=>o.value===s.default_model);
+        if(existingDefaultOpt&&window._activeProvider&&!existingDefaultOpt.dataset.provider){
+          existingDefaultOpt.dataset.provider=window._activeProvider;
+        }
+        if(!existingDefaultOpt){
+          const opt=document.createElement('option');
+          opt.value=s.default_model;
+          opt.textContent=typeof getModelLabel==='function'?getModelLabel(s.default_model):s.default_model;
+          opt.dataset.custom='1';
+          opt.dataset.provider=window._activeProvider||'';
+          sel.querySelectorAll('option[data-custom]').forEach(o=>o.remove());
+          sel.appendChild(opt);
+        }
+        _applyModelToDropdown(s.default_model,sel,window._activeProvider||null);
+      }
+    }
     window._sessionJumpButtonsEnabled=!!s.session_jump_buttons;
     // Reconcile appearance: prefer localStorage (what the user last saw) over
     // the server.  If they diverge (e.g. a previous autosave POST failed),
@@ -1469,7 +1488,6 @@ function applyBotName(){
       setLocale(_lang);
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }
-    applyBotName();
     // TTS: apply enabled state on boot so buttons show/hide correctly (#499)
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }catch(e){
@@ -1497,7 +1515,6 @@ function applyBotName(){
       setLocale(_lang);
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }
-    applyBotName();
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }
   // Non-blocking update check (fire-and-forget, once per tab session)
@@ -1509,13 +1526,14 @@ function applyBotName(){
   }
   // Fetch active profile
   try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';}catch(e){S.activeProfile='default';}
+  applyBotName();
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
   // Fetch available models without blocking session restore. The static HTML
   // options are enough for first paint; the dynamic provider list can settle
   // after the saved session is visible.
-  const _modelDropdownReady=populateModelDropdown().then(()=>{
+  const _hydrateBootModelDropdown=()=>populateModelDropdown().then(()=>{
     const savedState=(typeof _readPersistedModelState==='function')
       ? _readPersistedModelState()
       : (localStorage.getItem('hermes-webui-model')?{model:localStorage.getItem('hermes-webui-model'),model_provider:null}:null);
@@ -1534,13 +1552,25 @@ function applyBotName(){
     }
     if(S.session) syncTopbar();
   }).catch(()=>{});
-  window._modelDropdownReady=_modelDropdownReady;
-  // Pre-load workspace list so sidebar name is correct from first render.
+  const _startBootModelDropdown=()=>{
+    const ready=window._modelDropdownReady;
+    if(ready&&typeof ready.then==='function') return ready;
+    const next=_hydrateBootModelDropdown();
+    window._modelDropdownReady=next;
+    return next;
+  };
+  window._modelDropdownReady=null;
+  window._ensureModelDropdownReady=_startBootModelDropdown;
+  // Start independent boot fetches without holding the conversation list behind
+  // them. The sidebar can render from /api/sessions while workspace/onboarding
+  // metadata settles in parallel.
+  const _workspaceListReady=loadWorkspaceList();
+  const _onboardingReady=_bootSettings.onboarding_completed?Promise.resolve(false):loadOnboardingWizard();
   // Render the session list before restoring the saved conversation so a stale
   // saved-session/client-side boot error cannot leave the sidebar empty forever.
-  await loadWorkspaceList();
-  await loadOnboardingWizard();
   await renderSessionList();
+  await _workspaceListReady;
+  await _onboardingReady;
   _initResizePanels();
   // Workspace panel restore happens AFTER loadSession so we know if
   // the session has a workspace — prevents the snap-open-then-closed flash (#576).
