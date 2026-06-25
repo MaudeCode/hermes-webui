@@ -3,6 +3,18 @@
 
 ## [Unreleased]
 
+## [v0.51.645] — 2026-06-25 — Release XA (cron-heavy session lists no longer pin the CPU)
+
+### Fixed
+
+- **`GET /api/sessions` no longer pins CPU to 100% and takes multiple seconds on profiles with many cron sessions.** The sidebar projection that turns agent state.db rows into sidebar entries did three pieces of redundant per-row file I/O — an uncached sidecar JSON read (open + 64KB prefix read + key scan), a `get_last_workspace()` resolve (up to two file reads + a directory probe), and a full `cron/jobs.json` read+parse for each untitled cron row — across both the visible pass and the higher-capped (up to 200 rows) cron-only second pass. On a cron-heavy install that was hundreds of file reads per build, and because the session-list cache is keyed on a state.db fingerprint that advances on every streamed message, the whole scan was re-paid on essentially every 5s poll during a live turn (the recurring "100% CPU / slow `/api/sessions`" from #4672 → #4808 → #4842). The sidecar metadata read is now memoized per file by its `(path, mtime_ns, size, ctime_ns)` stat signature so a warm build re-stats instead of re-reads (a rename/archive/edit still invalidates just that one entry), and the workspace resolve + jobs.json parse now happen once per build instead of once per row. Output is unchanged. Thanks @rodboev for the independent profiling. (#4842)
+
+## [v0.51.644] — 2026-06-25 — Release WZ (browse, install, and uninstall extensions from a gallery)
+
+### Added
+
+- **A new Extensions gallery (Settings → Extensions) to browse, install, and uninstall WebUI extensions from the curated registry.** Previously the extension infrastructure (path-safety, manifest loading, static serving, enable/disable) existed but there was no way to discover or install extensions from the UI. The gallery fetches the curated registry, shows each extension's description, capabilities, and a permissions disclosure, and installs with a verified download: HTTPS + host-allowlist (redirects to other hosts are rejected), SHA-256 verification of the downloaded bytes before extraction, zip-bomb and zip-slip guards, symlinked-target rejection, and a tracked file manifest so uninstall removes exactly what was installed (and cleans up empty directories). An Installed tab and a Diagnostics tab (with an explicit trust-model note) round out the surface. Thanks @rodboev, with review by @franksong2702. (#4879, closes #4746)
+
 ## [v0.51.643] — 2026-06-25 — Release WX (unassigned tasks show up on the mobile Kanban board)
 
 ### Fixed
