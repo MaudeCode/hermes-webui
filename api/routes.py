@@ -6809,6 +6809,12 @@ def _pre_compression_continuation_session_id(session) -> str | None:
                 continue
             row_seen_ids.add(child_sid)
             rows.append(entry)
+        # Guarantee here is index MEMBERSHIP-completeness, not per-entry content
+        # freshness: if any persisted continuation sidecar is absent from the index
+        # we bail to the full scan. A sidecar that IS in the index but whose entry is
+        # content-stale (mid-write) still yields a valid continuation of the same
+        # snapshot; proving freshness would require reading every sidecar, defeating
+        # the optimization, so membership-completeness is the intended bar.
         if persisted_sidecar_ids - indexed_ids - seen_ids:
             return None
         return rows
@@ -6874,12 +6880,18 @@ def _pre_compression_continuation_session_id(session) -> str | None:
             return None
         latest = max(
             candidates,
-            key=lambda child: float(
-                _safe_first(
-                    _row_value(child, "updated_at"),
-                    _row_value(child, "created_at"),
-                    0,
-                ) or 0
+            key=lambda child: (
+                float(
+                    _safe_first(
+                        _row_value(child, "updated_at"),
+                        _row_value(child, "created_at"),
+                        0,
+                    ) or 0
+                ),
+                # Secondary tiebreaker so the index-fast-path and the sidecar-scan
+                # path resolve byte-identically on an updated_at/created_at tie
+                # (otherwise the chosen sid could differ by iteration order).
+                str(_safe_first(_row_value(child, "session_id"), "") or ""),
             ),
         )
         latest_sid = _safe_first(_row_value(latest, "session_id", None)) or None
