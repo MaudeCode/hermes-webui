@@ -8097,7 +8097,7 @@ def _run_agent_streaming(
                 )
                 _last_err = getattr(agent, '_last_error', None) or result.get('error') or ''
                 _classification = _classify_provider_error(
-                    _last_err,
+                    str(_last_err) if _last_err else '',
                     _last_err,
                     silent_failure=not bool(_last_err),
                 )

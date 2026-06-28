@@ -259,6 +259,26 @@ def test_auth_401_seeded_multi_turn_partial_persists_error_turn(tmp_path, monkey
     assert not any(event == "done" for event, _ in events)
 
 
+def test_auth_401_classification_receives_stringified_probe_text(tmp_path, monkeypatch):
+    session = _prepare_session("auth_probe_text", "stream_auth_probe_text", pending_user_message="Please fail")
+    agent_cls = _build_auth_failure_agent(token_text=None)
+    observed = {}
+    real_classify = streaming._classify_provider_error
+
+    def _spy_classify_provider_error(err_str, exc=None, *, silent_failure=False):
+        observed["err_str"] = err_str
+        observed["exc"] = exc
+        observed["silent_failure"] = silent_failure
+        return real_classify(err_str, exc, silent_failure=silent_failure)
+
+    with mock.patch.object(streaming, "_classify_provider_error", side_effect=_spy_classify_provider_error):
+        _run_stream(monkeypatch, session, "stream_auth_probe_text", agent_cls, workspace=str(tmp_path))
+
+    assert observed["err_str"] == str(_auth_failure_error_payload())
+    assert observed["exc"] == _auth_failure_error_payload()
+    assert observed["silent_failure"] is False
+
+
 def test_auth_401_seeded_replayed_assistant_does_not_satisfy_current_turn(tmp_path, monkeypatch):
     session = _prepare_session("auth_seeded_replay", "stream_auth_seeded_replay", pending_user_message="Please respond now")
     _seed_prior_turn(
