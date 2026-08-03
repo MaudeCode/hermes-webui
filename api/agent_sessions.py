@@ -799,6 +799,114 @@ def _empty_lineage_report(session_id: str, *, found: bool = False) -> dict:
     }
 
 
+def resolve_live_compression_tip(
+    db_path: Path,
+    session_id: str | None,
+    max_hops: int = 20,
+) -> str:
+    """Return the unique live continuation for a compression-ended session.
+
+    WebUI JSON keeps the browser-visible session id stable until a completed
+    turn can migrate it. If the process restarts between Hermes rotating its
+    state.db row and WebUI settlement, a cold agent would otherwise reopen the
+    closed ancestor and have every durable append rejected. Walk only valid,
+    same-source compression continuations and fail closed to the requested id
+    when the lineage is missing, ambiguous, cyclic, or deeper than the bound.
+    """
+    sid = str(session_id or '').strip()
+    if not sid:
+        return sid
+    db_path = Path(db_path)
+    if not db_path.exists():
+        return sid
+
+    try:
+        with closing(open_state_db_readonly(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(sessions)")
+            session_cols = {row[1] for row in cur.fetchall()}
+            required = {
+                'id', 'source', 'parent_session_id', 'started_at',
+                'ended_at', 'end_reason',
+            }
+            if not required.issubset(session_cols):
+                return sid
+
+            session_source_expr = _optional_col('session_source', session_cols)
+
+            def fetch_one(row_id: str) -> dict | None:
+                cur.execute(
+                    f"""
+                    SELECT s.id, s.source, {session_source_expr},
+                           s.parent_session_id, s.started_at,
+                           s.ended_at, s.end_reason
+                    FROM sessions s
+                    WHERE s.id = ?
+                    """,
+                    (row_id,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+
+            target = fetch_one(sid)
+            if not target or target.get('ended_at') is None:
+                return sid
+            if target.get('end_reason') not in {'compression', 'cli_close'}:
+                return sid
+
+            frontier = [target]
+            seen = {sid}
+            live_tips: dict[str, dict] = {}
+            truncated = False
+            for _hop in range(max(0, int(max_hops))):
+                parent_by_id = {row['id']: row for row in frontier}
+                parent_ids = list(parent_by_id)
+                if not parent_ids:
+                    break
+                placeholders = ','.join('?' * len(parent_ids))
+                cur.execute(
+                    f"""
+                    SELECT s.id, s.source, {session_source_expr},
+                           s.parent_session_id, s.started_at,
+                           s.ended_at, s.end_reason
+                    FROM sessions s
+                    WHERE s.parent_session_id IN ({placeholders})
+                    """,
+                    parent_ids,
+                )
+                next_frontier = []
+                for raw_child in cur.fetchall():
+                    child = dict(raw_child)
+                    child_id = str(child.get('id') or '')
+                    parent = parent_by_id.get(child.get('parent_session_id'))
+                    if not child_id or child_id in seen or not parent:
+                        continue
+                    if not _is_continuation_session(parent, child):
+                        continue
+                    seen.add(child_id)
+                    if child.get('ended_at') is None:
+                        live_tips[child_id] = child
+                    elif child.get('end_reason') in {'compression', 'cli_close'}:
+                        next_frontier.append(child)
+                frontier = next_frontier
+                if not frontier:
+                    break
+            else:
+                truncated = bool(frontier)
+
+            if truncated or len(live_tips) != 1:
+                return sid
+            return next(iter(live_tips))
+    except Exception:
+        logger.debug(
+            "Failed to resolve live compression tip for %s",
+            sid,
+            exc_info=True,
+        )
+        return sid
+
+
 def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops: int = 20) -> dict:
     """Return a bounded, read-only lifecycle report for a session lineage.
 

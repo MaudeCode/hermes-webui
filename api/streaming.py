@@ -7609,6 +7609,30 @@ def _cached_agent_matches_session(agent, session_id: str) -> bool:
     return identity is None or identity == str(session_id)
 
 
+def _resolve_agent_execution_session_id(state_db_path, session_id: str) -> str:
+    """Resolve a stale WebUI owner id to its unique live Hermes segment."""
+    if not state_db_path:
+        return str(session_id)
+    try:
+        from api.agent_sessions import resolve_live_compression_tip
+
+        resolved = resolve_live_compression_tip(Path(state_db_path), session_id)
+    except Exception:
+        logger.debug(
+            "Failed to resolve agent execution session for %s",
+            session_id,
+            exc_info=True,
+        )
+        return str(session_id)
+    if resolved != str(session_id):
+        logger.info(
+            "Recovered cold WebUI agent session after compression: owner=%s live_tip=%s",
+            session_id,
+            resolved,
+        )
+    return resolved
+
+
 def _refresh_cached_agent_primary_runtime_snapshot(agent) -> None:
     """Keep AIAgent's primary-runtime snapshot aligned with refreshed creds.
 
@@ -8968,6 +8992,10 @@ def _run_agent_streaming(
             # Initialize SessionDB so session_search works in WebUI sessions
             _state_db_path = (Path(_profile_home) / "state.db") if _profile_home else None
             _session_db = _build_session_db_for_stream(_state_db_path)
+            _agent_session_id = _resolve_agent_execution_session_id(
+                _state_db_path,
+                session_id,
+            )
             # #5979: publish catalog provenance from the durable disk cache when
             # memory is cold, so the custom-proxy resolver below sees the
             # endpoint-advertised model ids (non-blocking, disk-only, never
@@ -9210,7 +9238,7 @@ def _run_agent_streaming(
                 quiet_mode=True,
                 enabled_toolsets=_toolsets,
                 fallback_model=_fallback_resolved,
-                session_id=session_id,
+                session_id=_agent_session_id,
                 session_db=_session_db,
                 prefill_messages=_prefill_messages,
                 stream_delta_callback=on_token,
@@ -9301,7 +9329,7 @@ def _run_agent_streaming(
                     _cached = SESSION_AGENT_CACHE.get(session_id)
                     if _cached and _cached[1] == _agent_sig:
                         _cached_agent = _cached[0]
-                        if _cached_agent_matches_session(_cached_agent, session_id):
+                        if _cached_agent_matches_session(_cached_agent, _agent_session_id):
                             agent = _cached_agent
                             SESSION_AGENT_CACHE.move_to_end(session_id)  # LRU: mark as recently used
                             logger.debug('[webui] Reusing cached agent for session %s', session_id)
