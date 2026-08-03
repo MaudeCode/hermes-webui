@@ -101,6 +101,65 @@ console.log(JSON.stringify(metrics));
     assert metrics["bottomPad"] == 0
 
 
+def test_message_virtual_window_uses_prefix_for_large_transcript_lookup():
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+eval(extractFunc('_messageVirtualWindow'));
+let roleCalls = 0;
+const total = 6000;
+const rowHeight = 120;
+const prefixHeights = Array.from({length: total + 1}, (_, i) => i * rowHeight);
+function _messageVirtualDefaultHeightForRole(){ return rowHeight; }
+const metrics = _messageVirtualWindow({
+  total,
+  scrollTop: 500000,
+  viewportHeight: 720,
+  heights: [],
+  prefixHeights,
+  defaultHeight: rowHeight,
+  roleForIdx(){ roleCalls++; return 'assistant'; },
+  bufferPx: 900,
+  threshold: 80,
+  keepTailCount: 50,
+});
+console.log(JSON.stringify({metrics, roleCalls}));
+"""
+    result = json.loads(_run_node(source))
+    assert result["roleCalls"] == 0
+    assert result["metrics"]["virtualized"] is True
+    assert result["metrics"]["start"] > 4000
+    assert result["metrics"]["end"] - result["metrics"]["start"] < 40
+
+
+def test_unchanged_height_cache_skips_full_visible_entry_clone():
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+const total = 6000;
+let reads = 0;
+const messages = Array.from({length: total}, (_, i) => ({id: i}));
+const visWithIdx = messages.map((message, i) => ({
+  get rawIdx(){ reads++; return i; },
+  get m(){ reads++; return message; },
+}));
+let S = {messages};
+let _messageVirtualHeightCache = new Array(total);
+let _messageVirtualHeightCacheEntries = new Array(total);
+let _messageVirtualHeightCacheLen = total;
+let _messageVirtualHeightCacheSrc = messages;
+let _messageVirtualEstimatedRowHeight = 140;
+let _messageVirtualWindowKey = '';
+let _messageVirtualHeightPrefixDirty = false;
+function _clearMessageVirtualHeightCache(){ throw new Error('must not clear'); }
+function _messageVirtualHeightEntryMatches(){ throw new Error('must not compare'); }
+function _messageVirtualHeightPrefixEntryMatches(){ throw new Error('must not compare'); }
+eval(extractFunc('_syncMessageVirtualHeightCache'));
+_syncMessageVirtualHeightCache(visWithIdx);
+console.log(JSON.stringify({reads}));
+"""
+    result = json.loads(_run_node(source))
+    assert result["reads"] == 0
+
+
 def test_render_messages_uses_virtual_window_and_spacer_measurement_path():
     js = UI_JS_PATH.read_text(encoding="utf-8")
     render_start = js.index("function renderMessages(options)")

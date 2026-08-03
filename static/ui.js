@@ -541,6 +541,8 @@ let _messageRenderWindowSid=null;
 let _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
 let _messageVirtualHeightCache=[];
 let _messageVirtualHeightCacheEntries=[];
+let _messageVirtualHeightPrefix=[];
+let _messageVirtualHeightPrefixDirty=true;
 let _messageVirtualHeightCacheLen=0;
 let _messageVirtualHeightCacheSrc=null;
 let _messageVirtualEstimatedRowHeight=_messageVirtualDefaultHeightForRole('default');
@@ -589,6 +591,8 @@ function clearVisibleMessageRowCache(){
 function _clearMessageVirtualHeightCache(){
   _messageVirtualHeightCache=[];
   _messageVirtualHeightCacheEntries=[];
+  _messageVirtualHeightPrefix=[];
+  _messageVirtualHeightPrefixDirty=true;
   _messageVirtualHeightCacheLen=0;
   _messageVirtualHeightCacheSrc=null;
   _messageVirtualEstimatedRowHeight=_messageVirtualDefaultHeightForRole('default');
@@ -662,6 +666,31 @@ function _messageVirtualWindow(opts){
   const scrollTop=Math.max(0, Number(opts&&opts.scrollTop)||0);
   const targetTop=Math.max(0, scrollTop-bufferPx);
   const targetBottom=scrollTop+viewportHeight+bufferPx;
+  const prefix=Array.isArray(opts&&opts.prefixHeights)?opts.prefixHeights:null;
+  if(prefix&&prefix.length===total+1&&Number.isFinite(Number(prefix[tailStart]))){
+    let low=0;
+    let high=tailStart;
+    while(low<high){
+      const mid=Math.ceil((low+high)/2);
+      if(Number(prefix[mid])<=targetTop) low=mid;
+      else high=mid-1;
+    }
+    const start=low;
+    const offset=Math.max(0,Number(prefix[start])||0);
+    if(start>=tailStart){
+      return {virtualized:true,start:tailStart,end:tailStart,topPad:offset,bottomPad:0,total,tailStart};
+    }
+    low=start;
+    high=tailStart;
+    while(low<high){
+      const mid=Math.floor((low+high)/2);
+      if(Number(prefix[mid])<targetBottom) low=mid+1;
+      else high=mid;
+    }
+    const end=Math.max(start+1,Math.min(tailStart,low));
+    const bottomPad=Math.max(0,(Number(prefix[tailStart])||0)-(Number(prefix[end])||0));
+    return {virtualized:true,start,end,topPad:offset,bottomPad,total,tailStart};
+  }
   let start=0;
   let offset=0;
   while(start<tailStart&&offset+rowHeightFor(start)<=targetTop){
@@ -751,14 +780,13 @@ function _messageVirtualHeightPrefixEntryMatches(previousEntry, nextEntry){
   );
 }
 function _syncMessageVirtualHeightCache(visWithIdx){
-  const nextEntries=Array.isArray(visWithIdx)
-    ? visWithIdx.map(entry=>entry?{rawIdx:entry.rawIdx,m:entry.m}:entry)
-    : [];
+  const source=Array.isArray(visWithIdx)?visWithIdx:[];
   if(
     _messageVirtualHeightCacheLen===S.messages.length &&
     _messageVirtualHeightCacheSrc===S.messages &&
-    _messageVirtualHeightCacheEntries.length===nextEntries.length
+    _messageVirtualHeightCacheEntries.length===source.length
   ) return;
+  const nextEntries=source.map(entry=>entry?{rawIdx:entry.rawIdx,m:entry.m}:entry);
   const previousEntries=Array.isArray(_messageVirtualHeightCacheEntries)?_messageVirtualHeightCacheEntries:[];
   const previousHeights=Array.isArray(_messageVirtualHeightCache)?_messageVirtualHeightCache.slice():[];
   let nextHeights=null;
@@ -808,6 +836,7 @@ function _syncMessageVirtualHeightCache(visWithIdx){
   _messageVirtualHeightCacheEntries=nextEntries;
   _messageVirtualHeightCacheLen=S.messages.length;
   _messageVirtualHeightCacheSrc=S.messages;
+  _messageVirtualHeightPrefixDirty=true;
 }
 function _messageVirtualRoleForEntry(entry){
   const m=entry&&entry.m;
@@ -822,6 +851,24 @@ function _messageVirtualRoleForEntry(entry){
     return 'assistant';
   }
   return 'default';
+}
+function _ensureMessageVirtualHeightPrefix(visWithIdx){
+  const list=Array.isArray(visWithIdx)?visWithIdx:[];
+  if(!_messageVirtualHeightPrefixDirty&&_messageVirtualHeightPrefix.length===list.length+1){
+    return _messageVirtualHeightPrefix;
+  }
+  const prefix=new Array(list.length+1);
+  prefix[0]=0;
+  for(let i=0;i<list.length;i++){
+    const cached=Number(_messageVirtualHeightCache[i]);
+    const height=(Number.isFinite(cached)&&cached>0)
+      ? cached
+      : _messageVirtualDefaultHeightForRole(_messageVirtualRoleForEntry(list[i]));
+    prefix[i+1]=prefix[i]+Math.max(1,height);
+  }
+  _messageVirtualHeightPrefix=prefix;
+  _messageVirtualHeightPrefixDirty=false;
+  return prefix;
 }
 function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
   _syncMessageVirtualHeightCache(visWithIdx);
@@ -840,6 +887,9 @@ function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
     scrollTop:container?container.scrollTop:0,
     viewportHeight:container?container.clientHeight:(_messageVirtualEstimatedRowHeight*6),
     heights:_messageVirtualHeightCache,
+    prefixHeights:typeof _ensureMessageVirtualHeightPrefix==='function'
+      ? _ensureMessageVirtualHeightPrefix(visWithIdx)
+      : null,
     defaultHeight:_messageVirtualEstimatedRowHeight,
     roleForIdx:idx=>_messageVirtualRoleForEntry(visWithIdx[idx]),
     keepTailCount,
@@ -1379,9 +1429,14 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
     measuredCount++;
   }
   if(measuredCount>0){
-    _messageVirtualEstimatedRowHeight=Math.max(60, Math.round(measuredTotal/measuredCount));
+    const nextEstimatedHeight=Math.max(60, Math.round(measuredTotal/measuredCount));
+    if(nextEstimatedHeight!==_messageVirtualEstimatedRowHeight){
+      _messageVirtualEstimatedRowHeight=nextEstimatedHeight;
+      _messageVirtualHeightPrefixDirty=true;
+    }
   }
   if(changed){
+    _messageVirtualHeightPrefixDirty=true;
     _scheduleMessageVirtualMeasurementRefresh(virtualWindow);
   }else{
     _markMessageVirtualMeasurementsSettled(virtualWindow);
