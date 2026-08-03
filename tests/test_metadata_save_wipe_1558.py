@@ -140,7 +140,12 @@ def test_archive_route_reloads_metadata_only_cached_session(temp_session_dir, mo
     monkeypatch.setattr(routes, "SESSIONS", SESSIONS)
 
     sid = _make_session_on_disk(temp_session_dir, n_msgs=12, with_active_stream=False)
+    original = Session.load(sid)
+    assert original is not None
+    original.pinned = True
+    original.save(skip_index=True)
     stub = get_session(sid, metadata_only=True)
+    assert stub.pinned is True
     assert getattr(stub, "_loaded_metadata_only", False) is True
     assert stub.messages == []
 
@@ -167,9 +172,12 @@ def test_archive_route_reloads_metadata_only_cached_session(temp_session_dir, mo
 
     assert captured["status"] == 200
     assert captured["payload"]["session"]["archived"] is True
+    assert captured["payload"]["session"]["pinned"] is False
 
     reloaded = Session.load(sid)
+    assert reloaded is not None
     assert reloaded.archived is True
+    assert reloaded.pinned is False
     assert len(reloaded.messages) == 12
 
     with LOCK:

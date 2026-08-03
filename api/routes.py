@@ -450,6 +450,13 @@ def _visible_pinned_lineage_ids(session_rows) -> set[str]:
     return roots
 
 
+# In-flight pins are reserved separately from the session LRU. The LRU may
+# retain deleted, archived, or no-longer-sidebar-visible objects and must never
+# become quota authority. A reservation only spans the gap between the locked
+# quota check and the durable session save.
+_PIN_QUOTA_RESERVATIONS: set[str] = set()
+
+
 # ── Profile-scoped session/project filtering (#1611, #1614) ────────────────
 #
 # Sessions and projects are stored in the WebUI sidecar without per-row
@@ -15899,53 +15906,49 @@ def handle_post(handler, parsed) -> bool:
         except KeyError:
             return bad(handler, "Session not found", 404)
         pin_requested = bool(body.get("pinned", True))
-        # TOCTOU guard (Opus stage-389): the count check and the pin write
-        # must happen under the same lock, otherwise two parallel pin
-        # requests can both pass `len(pinned_ids) >= 3` against the same
-        # snapshot and both succeed, leaving the user with 4 pins. The check
-        # must be careful not to nest `all_sessions()` (which acquires LOCK
-        # internally) inside a `with LOCK:` block — that's a deadlock since
-        # LOCK is a non-reentrant `threading.Lock`. We snapshot the
-        # persisted index outside the lock, then re-check the in-memory
-        # mutation set inside the lock and commit the pin atomically.
+        # TOCTOU guard: the durable count check and an in-flight lineage
+        # reservation happen under the same lock. The session LRU is not quota
+        # authority because it can contain stale objects that are no longer in
+        # the sidebar or persisted index. all_sessions() acquires LOCK internally,
+        # so snapshot durable rows before entering our own non-reentrant lock.
         if pin_requested and not getattr(s, "pinned", False):
-            # Pre-snapshot from persisted index (acquires LOCK internally,
-            # so must run outside our own LOCK acquire below).
-            persisted_rows = [
-                existing for existing in all_sessions()
-                if _session_counts_toward_pin_quota(existing)
-            ]
+            # Snapshot the complete persisted row set outside LOCK. It is the
+            # durable quota authority and also supplies unpinned ancestors needed
+            # to resolve continuation lineages correctly. Cached SESSIONS entries
+            # are deliberately excluded: the LRU can retain stale pinned objects
+            # after a row stops being sidebar-visible.
+            persisted_rows = list(all_sessions())
+            target_row = s.compact()
+            lineage_rows = list(persisted_rows)
+            lineage_rows.append(target_row)
+            target_lineage = _session_row_lineage_root_id(
+                target_row,
+                {
+                    str(_session_field(row, "session_id", "") or ""): row
+                    for row in lineage_rows
+                    if _session_field(row, "session_id", None)
+                },
+            )
+            previous_pinned = bool(getattr(s, "pinned", False))
             with LOCK:
-                # Final authoritative count: merge persisted pinned rows with the
-                # in-memory SESSIONS snapshot. Count logical sidebar-visible pin
-                # lineages rather than raw session rows so continuation siblings
-                # in the same visible lineage do not consume extra pin quota.
-                candidate_rows = list(persisted_rows)
-                candidate_rows.extend(
-                    existing.compact() for existing in SESSIONS.values()
-                    if _session_counts_toward_pin_quota(existing)
-                )
-                target_row = s.compact()
-                candidate_rows.append(target_row)
-                pinned_lineage_ids = _visible_pinned_lineage_ids(candidate_rows)
-                target_lineage = _session_row_lineage_root_id(
-                    target_row,
-                    {
-                        str(_session_field(row, "session_id", "") or ""): row
-                        for row in candidate_rows
-                        if _session_field(row, "session_id", None)
-                    },
-                )
+                pinned_lineage_ids = _visible_pinned_lineage_ids(persisted_rows)
+                pinned_lineage_ids.update(_PIN_QUOTA_RESERVATIONS)
                 pinned_lineage_ids.discard(target_lineage)
                 pinned_sessions_limit = int(load_settings().get("pinned_sessions_limit", 3) or 3)
                 if len(pinned_lineage_ids) >= pinned_sessions_limit:
                     return bad(handler, f"Up to {pinned_sessions_limit} sessions can be pinned. Unpin one before pinning another.", 400)
-                # Mark in-memory pin state under LOCK so concurrent pin
-                # requests see the increment immediately, even before
-                # save() finishes flushing to disk.
+                _PIN_QUOTA_RESERVATIONS.add(target_lineage)
                 s.pinned = True
-            with _get_session_agent_lock(body["session_id"]):
-                s.save()
+            try:
+                with _get_session_agent_lock(body["session_id"]):
+                    s.save()
+            except Exception:
+                with LOCK:
+                    s.pinned = previous_pinned
+                raise
+            finally:
+                with LOCK:
+                    _PIN_QUOTA_RESERVATIONS.discard(target_lineage)
         else:
             with _get_session_agent_lock(body["session_id"]):
                 s.pinned = pin_requested
@@ -16038,7 +16041,13 @@ def handle_post(handler, parsed) -> bool:
                 s.session_key = cli_meta.get("session_key")
                 s.platform = cli_meta.get("platform")
         with _get_session_agent_lock(sid):
-            s.archived = bool(body.get("archived", True))
+            next_archived = bool(body.get("archived", True))
+            s.archived = next_archived
+            if next_archived:
+                # Archived conversations leave the actionable sidebar. Clear the
+                # pin rather than hiding a pin that can unexpectedly return when
+                # the conversation is restored.
+                s.pinned = False
             s.save(touch_updated_at=False)
         publish_session_list_changed(
             "session_archive",
