@@ -14730,11 +14730,29 @@ def handle_post(handler, parsed) -> bool:
             sid = query.get("session_id", [""])[0] if parsed.query else ""
             if not sid:
                 return bad(handler, "session_id is required", 400)
+            from api.session_drafts import draft_path, read_session_draft
+
             try:
-                s = get_session(sid)
-            except KeyError:
-                return bad(handler, "Session not found", 404)
-            draft = getattr(s, "composer_draft", {}) or {}
+                has_draft_sidecar = draft_path(sid).exists()
+            except ValueError:
+                return bad(handler, "Invalid session_id", 400)
+            if has_draft_sidecar:
+                with LOCK:
+                    cached_session = SESSIONS.get(sid)
+                if cached_session is None and not (SESSION_DIR / f"{sid}.json").exists():
+                    return bad(handler, "Session not found", 404)
+                draft = read_session_draft(sid)
+                if cached_session is not None:
+                    cached_session.composer_draft = draft
+            else:
+                try:
+                    s = get_session(sid, metadata_only=True)
+                except KeyError:
+                    return bad(handler, "Session not found", 404)
+                draft = read_session_draft(
+                    sid,
+                    fallback=getattr(s, "composer_draft", None),
+                )
             return j(handler, {"draft": draft})
         # POST
         try:
@@ -14760,15 +14778,30 @@ def handle_post(handler, parsed) -> bool:
             files = []
         if isinstance(files, list) and len(files) > _MAX_DRAFT_FILES:
             files = files[:_MAX_DRAFT_FILES]
+        from api.session_drafts import draft_path, read_session_draft, write_session_draft
+
         try:
-            s = get_session(sid)
-        except KeyError:
-            return bad(handler, "Session not found", 404)
+            has_draft_sidecar = draft_path(sid).exists()
+        except ValueError:
+            return bad(handler, "Invalid session_id", 400)
+        if has_draft_sidecar:
+            with LOCK:
+                s = SESSIONS.get(sid)
+            if s is None and not (SESSION_DIR / f"{sid}.json").exists():
+                return bad(handler, "Session not found", 404)
+        else:
+            try:
+                s = get_session(sid, metadata_only=True)
+            except KeyError:
+                return bad(handler, "Session not found", 404)
         _draft_mark("after_get_session")
         unchanged = False
         with _get_session_agent_lock(sid):
             _draft_mark("acquired_lock")
-            current_draft = dict(getattr(s, "composer_draft", {}) or {})
+            current_draft = read_session_draft(
+                sid,
+                fallback=getattr(s, "composer_draft", None),
+            )
             next_draft = dict(current_draft)
             if text is not None:
                 next_draft["text"] = text
@@ -14778,15 +14811,19 @@ def handle_post(handler, parsed) -> bool:
                 unchanged = True
                 saved_draft = current_draft
             else:
-                s.composer_draft = next_draft
-                # Draft persistence is not conversation activity. Touching updated_at
-                # here makes the active-session external-refresh poll force-reload the
-                # current chat every few seconds while the user is typing, and that
-                # delayed reload can restore an older draft over newer local input.
+                # Draft persistence is not conversation activity. Keep frequent
+                # composer updates in a tiny atomic sidecar instead of rewriting
+                # the complete transcript. A never-persisted new-session shell
+                # is saved once so it remains discoverable after a restart.
                 _draft_mark("before_save")
-                s.save(touch_updated_at=False, skip_index=True)
+                if s is not None and not s.path.exists():
+                    s.composer_draft = next_draft
+                    s.save(touch_updated_at=False, skip_index=False)
+                    _draft_mark("after_shell_save")
+                saved_draft = write_session_draft(sid, next_draft)
+                if s is not None:
+                    s.composer_draft = saved_draft
                 _draft_mark("after_save")
-                saved_draft = s.composer_draft
         _draft_mark("released_lock")
         payload = {"ok": True, "draft": saved_draft}
         if unchanged:
@@ -14932,6 +14969,12 @@ def handle_post(handler, parsed) -> bool:
                 p.with_suffix('.json.bak').unlink(missing_ok=True)
             except Exception:
                 logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
+            try:
+                from api.session_drafts import delete_session_draft
+
+                delete_session_draft(sid)
+            except Exception:
+                logger.debug("Failed to delete composer draft for %s", sid, exc_info=True)
             if sidecar_deleted and not is_messaging_session:
                 try:
                     _record_webui_deleted_session_tombstone(sid)

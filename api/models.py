@@ -1569,6 +1569,15 @@ class Session:
                     )
                 except Exception:
                     logger.debug("legacy sidecar facts cache populate failed for %s", sid, exc_info=True)
+        try:
+            from api.session_drafts import read_session_draft
+
+            session.composer_draft = read_session_draft(
+                sid,
+                fallback=getattr(session, 'composer_draft', None),
+            )
+        except Exception:
+            logger.debug("Failed to overlay composer draft for %s", sid, exc_info=True)
         return session
 
     @classmethod
