@@ -43,7 +43,8 @@ def test_settled_collapsed_worklog_defers_row_dom():
 
 def test_toggle_materializes_deferred_rows_on_expand():
     body = _function_body(UI_JS, "_toggleActivityGroup")
-    assert "if(!collapsed) _materializeDeferredWorklogRows(group);" in body
+    assert "_materializeDeferredWorklogRows(group);" in body
+    assert "_materializeDeferredRegularWorklog(group);" in body
 
 
 def test_materialize_helper_recovers_rows_after_cache_restore():
@@ -75,10 +76,14 @@ def test_cache_restore_rehydrates_deferred_worklogs():
     assert "removeAttribute('data-worklog-rows-deferred')" in body
 
 
-def test_blank_turn_reveal_materializes_deferred_rows():
-    # The "blank turn" safety reveal force-expands a collapsed worklog; it must
-    # also materialize deferred rows or the revealed worklog would be empty.
-    assert UI_JS.count("_materializeDeferredWorklogRows(group)") >= 3
+def test_blank_turn_reveal_keeps_dense_worklog_collapsed():
+    # The summary is visible content by itself. A prose-less turn must not force
+    # thousands of hidden tool-detail nodes into the DOM merely to avoid blankness.
+    marker = "// No visible content — surface the folded Worklog so the turn isn't blank."
+    body = UI_JS[UI_JS.index(marker) : UI_JS.index("// Last resort:", UI_JS.index(marker))]
+    assert "group.textContent&&group.textContent.trim()" in body
+    assert "_materializeDeferredWorklogRows" not in body
+    assert "classList.remove('tool-call-group-collapsed')" not in body
 
 
 def test_materialize_postprocesses_and_restores_disclosure():
@@ -101,4 +106,14 @@ def test_rebuild_stashes_disclosure_on_deferred_groups():
     still-deferred group for _materializeDeferredWorklogRows to apply on expand."""
     assert "group._deferredWorklogDisclosure=worklogDetailDisclosureState;" in UI_JS
     # stash happens right after the main restore pass over the rebuilt transcript
-    assert 'querySelectorAll(\'[data-worklog-rows-deferred="1"]\')' in UI_JS
+    assert '[data-worklog-rows-deferred="1"],[data-regular-worklog-rows-deferred="1"]' in UI_JS
+
+
+def test_dense_regular_worklogs_defer_rows_while_collapsed():
+    render_body = _function_body(UI_JS, "renderMessages")
+    assert "data-regular-worklog-rows-deferred" in render_body
+    assert "state.group._deferredRegularWorklogSteps=state.steps" in render_body
+    assert "if(collapsed&&dense)" in render_body
+    helper = _function_body(UI_JS, "_materializeDeferredRegularWorklog")
+    assert "_regularDeferredWorklogStepCache.get(cacheKey)" in helper
+    assert "_appendWorklogStep" in helper

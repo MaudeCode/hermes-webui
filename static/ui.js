@@ -11990,6 +11990,38 @@ function _materializeDeferredWorklogRows(group){
   }
   return true;
 }
+const _regularDeferredWorklogStepCache=new Map();
+function _regularDeferredWorklogCacheKey(group){
+  const sid=S.session&&S.session.session_id;
+  const activityKey=group&&group.getAttribute&&group.getAttribute('data-activity-disclosure-key');
+  return sid&&activityKey?`${sid}:${activityKey}`:'';
+}
+function _materializeDeferredRegularWorklog(group){
+  // Dense non-anchor Worklogs use the same lazy contract as settled anchor
+  // scenes. Keep their tool/reasoning rows out of the DOM while collapsed.
+  if(!group||group.getAttribute('data-regular-worklog-rows-deferred')!=='1') return false;
+  const cacheKey=_regularDeferredWorklogCacheKey(group);
+  const steps=group._deferredRegularWorklogSteps
+    || (cacheKey?_regularDeferredWorklogStepCache.get(cacheKey):null);
+  group.removeAttribute('data-regular-worklog-rows-deferred');
+  group._deferredRegularWorklogSteps=null;
+  group._deferredRegularWorklogCards=null;
+  if(cacheKey) _regularDeferredWorklogStepCache.delete(cacheKey);
+  if(!steps||!steps.length) return false;
+  for(const step of steps){
+    _appendWorklogStep(group,step.anchorRow,step.cards,step.thinkingText,step.opts);
+  }
+  _syncToolCallGroupSummary(group);
+  const disclosure=group._deferredWorklogDisclosure;
+  group._deferredWorklogDisclosure=null;
+  if(disclosure&&disclosure.size) _restoreWorklogDetailDisclosureState(group,disclosure);
+  if(typeof _postProcessWithAnchorSuppression==='function'){
+    requestAnimationFrame(()=>{
+      if(group&&group.isConnected) _postProcessWithAnchorSuppression(group);
+    });
+  }
+  return true;
+}
 function _deferredWorklogRowsFromGroup(group){
   // Recover a settled worklog's rows from S.messages using the group's
   // disclosure key `anchor-scene:<rawIdx>`. Used after an HTML-cache restore
@@ -12021,9 +12053,12 @@ function _toggleActivityGroup(summary){
   const collapsed=group.classList.toggle('tool-call-group-collapsed');
   group.classList.toggle('open',!collapsed);
   summary.setAttribute('aria-expanded',String(!collapsed));
-  // #5839: materialize deferred settled rows on first expand (lazy render).
-  if(!collapsed) _materializeDeferredWorklogRows(group);
   _writeActivityDisclosureState(group.getAttribute('data-activity-disclosure-key'), !collapsed);
+  // Build deferred settled rows only when the user opens the Worklog.
+  if(!collapsed){
+    _materializeDeferredWorklogRows(group);
+    _materializeDeferredRegularWorklog(group);
+  }
   if(typeof _onLiveActivityToggle==='function') _onLiveActivityToggle(group);
 }
 function _toggleToolWorklogGroup(summary){
@@ -12038,9 +12073,11 @@ function _toggleToolWorklogGroup(summary){
 }
 function _finalizeLiveActivityDisclosureGroup(group){
   if(!group) return;
-  const keepOpen=!!(
-    group.querySelector&&group.querySelector('.tool-card.open,.thinking-card.open,.tool-group.open,.tool-worklog-tool-group.open')
-  );
+  // Internal tool-card expansion is transient streaming UI, not user intent.
+  // Carry the whole Worklog open only when the user explicitly opened it (or
+  // explicitly configured Worklogs to open by default).
+  const keepOpen=_liveActivityUserExpanded===true
+    || (_liveActivityUserExpanded===undefined&&window._worklogDetailsExpandedByDefault===true);
   const disclosureKey=group.getAttribute('data-activity-disclosure-key')||group.getAttribute('data-tool-worklog-key')||'';
   group.removeAttribute('data-live-activity-current');
   group.removeAttribute('data-live-tool-call-group');
@@ -16953,20 +16990,43 @@ function renderMessages(options){
           const list=_toolWorklogListEl(group);
           if(!list) continue;
           list.innerHTML='';
-          state={group,cards:[],seenReasons:new Set(),seenTools:new Set()};
+          state={group,cards:[],steps:[],seenReasons:new Set(),seenTools:new Set()};
           activityByTurn.set(anchorTurn,state);
         }
         state.cards.push(...cards);
-        _appendWorklogStep(state.group, anchorRow, cards, thinkingText, {
-          live:false,
-          includeAnchorReason:!!includeAnchorReason&&!!anchorReasonHtml,
-          thinkingKey:thinkingText?`thinking:${_normalizeThinkingEchoCompare(thinkingText)}`:'',
-          thinkingDisclosureKey:thinkingText?`thinking:${entry.key}`:'',
-          seenReasons:state.seenReasons,
-          seenTools:state.seenTools,
+        state.steps.push({
+          anchorRow,
+          cards,
+          thinkingText,
+          opts:{
+            live:false,
+            includeAnchorReason:!!includeAnchorReason&&!!anchorReasonHtml,
+            thinkingKey:thinkingText?`thinking:${_normalizeThinkingEchoCompare(thinkingText)}`:'',
+            thinkingDisclosureKey:thinkingText?`thinking:${entry.key}`:'',
+            seenReasons:state.seenReasons,
+            seenTools:state.seenTools,
+          },
         });
       }
       activityByTurn.forEach(state=>{
+        const collapsed=state.group.classList.contains('tool-call-group-collapsed');
+        const dense=state.cards.length+state.steps.filter(step=>!!step.thinkingText).length>=6;
+        if(collapsed&&dense){
+          state.group.setAttribute('data-regular-worklog-rows-deferred','1');
+          state.group._deferredRegularWorklogSteps=state.steps;
+          state.group._deferredRegularWorklogCards=state.cards;
+          const deferredCacheKey=_regularDeferredWorklogCacheKey(state.group);
+          if(deferredCacheKey){
+            if(_regularDeferredWorklogStepCache.size>=128){
+              _regularDeferredWorklogStepCache.delete(_regularDeferredWorklogStepCache.keys().next().value);
+            }
+            _regularDeferredWorklogStepCache.set(deferredCacheKey,state.steps);
+          }
+        }else{
+          for(const step of state.steps){
+            _appendWorklogStep(state.group,step.anchorRow,step.cards,step.thinkingText,step.opts);
+          }
+        }
         _syncToolCallGroupSummary(state.group);
       });
     }else{
@@ -17055,7 +17115,7 @@ function renderMessages(options){
   // captured state on each still-deferred group; _materializeDeferredWorklogRows
   // re-applies it (key-scoped + idempotent) once the rows exist on expand.
   if(worklogDetailDisclosureState&&worklogDetailDisclosureState.size){
-    inner.querySelectorAll('[data-worklog-rows-deferred="1"]').forEach(group=>{
+    inner.querySelectorAll('[data-worklog-rows-deferred="1"],[data-regular-worklog-rows-deferred="1"]').forEach(group=>{
       group._deferredWorklogDisclosure=worklogDetailDisclosureState;
     });
   }
@@ -17247,23 +17307,10 @@ function renderMessages(options){
       const groups=turn.querySelectorAll('.tool-worklog-group,.tool-call-group');
       let revealed=false;
       for(const group of groups){
-        if(!(group.textContent||'').trim()) continue; // empty group can't help
-        if(group.classList.contains('tool-call-group-collapsed')){
-          group.classList.remove('tool-call-group-collapsed');
-          group.classList.add('open');
-          const summary=group.querySelector('.tool-call-group-summary,.activity-summary');
-          if(summary) summary.setAttribute('aria-expanded','true');
-          // #5839: this turn is otherwise blank, so materialize any deferred
-          // settled rows now that we're force-expanding the worklog to fill it.
-          if(typeof _materializeDeferredWorklogRows==='function') _materializeDeferredWorklogRows(group);
-        }
-        // `revealed` means "this turn has a non-empty Worklog group that the user
-        // can see" — NOT "we just expanded something". An already-open non-empty
-        // group is itself visible (it slips past _turnHasVisibleContent only
-        // because that check inspects .assistant-segment nodes, not group bodies),
-        // so the turn isn't truly blank and the last-resort un-hide below is
-        // unnecessary. Keep this assignment OUTSIDE the if(collapsed) branch.
-        revealed=true;
+        // The collapsed Worklog summary is itself visible content. Do not eagerly
+        // expand and materialize a dense tool transcript merely because the turn
+        // has no final prose yet; the user can open it on demand.
+        if(group.textContent&&group.textContent.trim()) revealed=true;
       }
       // Last resort: no usable worklog group either, but hidden worklog-source
       // segments carry the real text — un-hide them so nothing is lost.
@@ -18058,11 +18105,15 @@ function _syncToolCallGroupSummary(group){
   if(!group) return;
   if(group.getAttribute('data-tool-worklog-group')==='1') _syncToolWorklogToolGroup(group);
   const cards=Array.from((_toolWorklogListEl(group)||group).querySelectorAll('.tool-card-row .tool-card,.tool-card-row.tl'));
-  const toolCount=cards.length;
+  const deferredCards=Array.isArray(group._deferredRegularWorklogCards)
+    ? group._deferredRegularWorklogCards
+    : [];
+  const toolCount=cards.length||deferredCards.length;
   const label=group.querySelector('.tool-worklog-label') || group.querySelector('.tool-call-group-label');
   const isWorklogGroup=!!(group.getAttribute('data-tool-worklog-group')==='1');
   const isLiveWorklog=!!(group.getAttribute('data-live-tool-worklog-group')==='1' || group.getAttribute('data-live-tool-call-group')==='1');
-  const hasRunningTool=cards.some(card=>card.classList.contains('tool-card-running'));
+  const hasRunningTool=cards.some(card=>card.classList.contains('tool-card-running'))
+    || deferredCards.some(card=>card&&card.done===false);
   if(isWorklogGroup){
     if(hasRunningTool) group.setAttribute('data-tool-worklog-running','1');
     else group.removeAttribute('data-tool-worklog-running');

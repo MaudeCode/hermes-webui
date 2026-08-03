@@ -1662,7 +1662,8 @@ def test_live_processed_anchor_is_clickable_while_streaming():
     assert "summary.disabled=false" in ensure
     assert "group.removeAttribute('data-live-tool-call-group')" in finalize
     assert "group.removeAttribute('data-live-tool-worklog-group')" in finalize
-    assert ".tool-card.open,.thinking-card.open,.tool-group.open,.tool-worklog-tool-group.open" in finalize
+    assert "_liveActivityUserExpanded===true" in finalize
+    assert ".tool-card.open,.thinking-card.open" not in finalize
     assert "group.classList.toggle('tool-call-group-collapsed', !keepOpen)" in finalize
     assert "if(keepOpen&&disclosureKey) _writeActivityDisclosureState(disclosureKey, true);" in finalize
     assert "summary.removeAttribute('data-live-summary-static')" in finalize
