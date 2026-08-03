@@ -15,6 +15,11 @@ BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 
 
+def get(path):
+    with urllib.request.urlopen(BASE + path, timeout=10) as response:
+        return json.loads(response.read())
+
+
 def post(path, body=None):
     data = json.dumps(body or {}).encode()
     req = urllib.request.Request(
@@ -27,6 +32,12 @@ def post(path, body=None):
             return json.loads(r.read()), r.status
     except urllib.error.HTTPError as e:
         return json.loads(e.read()), e.code
+
+
+def restore_pin_limit(original_settings):
+    limit = (original_settings or {}).get("pinned_sessions_limit")
+    if isinstance(limit, int):
+        post("/api/settings", {"pinned_sessions_limit": limit})
 
 
 def make_session(created, title):
@@ -59,6 +70,7 @@ def test_pin_limit_setting_is_exposed_and_wired_through_ui():
 
 
 def test_settings_api_persists_integer_pin_limit_and_rejects_invalid_values():
+    original_limit = get("/api/settings")
     try:
         d, status = post("/api/settings", {"pinned_sessions_limit": 5})
         assert status == 200
@@ -76,10 +88,11 @@ def test_settings_api_persists_integer_pin_limit_and_rejects_invalid_values():
         assert status == 200
         assert d["pinned_sessions_limit"] == 7
     finally:
-        post("/api/settings", {"pinned_sessions_limit": 3})
+        restore_pin_limit(original_limit)
 
 
 def test_session_pin_endpoint_uses_configured_limit():
+    original_limit = get("/api/settings")
     created = []
     try:
         d, status = post("/api/settings", {"pinned_sessions_limit": 4})
@@ -97,6 +110,6 @@ def test_session_pin_endpoint_uses_configured_limit():
         assert status == 400
         assert "4 sessions" in d.get("error", "")
     finally:
-        post("/api/settings", {"pinned_sessions_limit": 3})
+        restore_pin_limit(original_limit)
         for sid in created:
             post("/api/session/delete", {"session_id": sid})

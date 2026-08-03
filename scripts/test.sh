@@ -5,6 +5,37 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_DIR="$ROOT/.venv"
 REQ_FILE="$ROOT/requirements-dev.txt"
 
+# Establish the destructive-state boundary before starting Python. Pytest
+# plugins can import api.config before tests/conftest.py runs; when test.sh is
+# launched from a live WebUI turn, inherited HERMES_* values otherwise bind
+# those early imports to the production state tree for the whole test process.
+_TEST_STATE_AUTO=0
+if [[ -z "${HERMES_WEBUI_TEST_STATE_DIR:-}" ]]; then
+  _TEST_STATE_ROOT="${HERMES_WEBUI_TEST_STATE_ROOT:-${TMPDIR:-/tmp}/hermes-webui-tests}"
+  HERMES_WEBUI_TEST_STATE_DIR="${_TEST_STATE_ROOT%/}/test-sh-$$"
+  _TEST_STATE_AUTO=1
+fi
+case "$HERMES_WEBUI_TEST_STATE_DIR" in
+  "$HOME/.hermes"|"$HOME/.hermes/"*)
+    echo "REFUSING TO RUN: test state dir is inside production Hermes home: $HERMES_WEBUI_TEST_STATE_DIR" >&2
+    exit 2
+    ;;
+esac
+mkdir -p "$HERMES_WEBUI_TEST_STATE_DIR/test-workspace"
+export HERMES_WEBUI_TEST_STATE_DIR
+export HERMES_WEBUI_STATE_DIR="$HERMES_WEBUI_TEST_STATE_DIR"
+export HERMES_WEBUI_DEFAULT_WORKSPACE="$HERMES_WEBUI_TEST_STATE_DIR/test-workspace"
+export HERMES_HOME="$HERMES_WEBUI_TEST_STATE_DIR"
+export HERMES_BASE_HOME="$HERMES_WEBUI_TEST_STATE_DIR"
+export HERMES_CONFIG_PATH="$HERMES_WEBUI_TEST_STATE_DIR/config.yaml"
+
+cleanup_auto_test_state() {
+  if [[ "$_TEST_STATE_AUTO" == "1" && -n "${HERMES_WEBUI_TEST_STATE_DIR:-}" ]]; then
+    rm -rf -- "$HERMES_WEBUI_TEST_STATE_DIR"
+  fi
+}
+trap cleanup_auto_test_state EXIT
+
 resolve_venv_python() {
   local candidate
   for candidate in "$VENV_DIR/bin/python" "$VENV_DIR/Scripts/python.exe"; do
@@ -229,4 +260,4 @@ if [[ $# -eq 0 ]]; then
   set -- tests/ -v --timeout=60
 fi
 
-exec "$PYTHON_BIN" -m pytest "$@"
+"$PYTHON_BIN" -m pytest "$@"
