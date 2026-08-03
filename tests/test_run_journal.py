@@ -1,5 +1,7 @@
 import json
+import os
 from pathlib import Path
+import time
 
 from api.run_journal import (
     RunJournalWriter,
@@ -263,6 +265,110 @@ def test_stale_interrupted_event_reports_non_terminal_journal(tmp_path, monkeypa
     assert "process restarted" not in event["payload"]["message"]
     assert "lost the live worker" not in event["payload"]["message"]
     assert "live worker stopped" in event["payload"]["message"]
+
+
+def test_prune_settled_journals_keeps_recent_and_nonterminal_runs(tmp_path):
+    import api.run_journal as run_journal
+
+    now = time.time()
+    old = now - (15 * 24 * 60 * 60)
+    session_id = "session_retention"
+
+    for index in range(5):
+        run_id = f"run_{index}"
+        append_run_event(
+            session_id,
+            run_id,
+            "token",
+            {"text": f"payload-{index}"},
+            session_dir=tmp_path,
+        )
+        append_run_event(
+            session_id,
+            run_id,
+            "done",
+            {"session": {"session_id": session_id}},
+            session_dir=tmp_path,
+        )
+        path = run_journal._run_path(session_id, run_id, session_dir=tmp_path)
+        os.utime(path, (old + index, old + index))
+
+    append_run_event(
+        session_id,
+        "run_active",
+        "token",
+        {"text": "still running"},
+        session_dir=tmp_path,
+    )
+    active_path = run_journal._run_path(
+        session_id,
+        "run_active",
+        session_dir=tmp_path,
+    )
+    os.utime(active_path, (old, old))
+
+    result = run_journal.prune_settled_run_journals(
+        session_dir=tmp_path,
+        now=now,
+        retention_seconds=14 * 24 * 60 * 60,
+        keep_recent=2,
+    )
+
+    assert result["pruned"] == 3
+    assert result["bytes_reclaimed"] > 0
+    assert active_path.exists()
+    assert run_journal._run_path(
+        session_id, "run_3", session_dir=tmp_path
+    ).exists()
+    assert run_journal._run_path(
+        session_id, "run_4", session_dir=tmp_path
+    ).exists()
+
+    for index in range(3):
+        run_id = f"run_{index}"
+        assert not run_journal._run_path(
+            session_id, run_id, session_dir=tmp_path
+        ).exists()
+        summary = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+        assert summary["terminal"] is True
+        assert summary["terminal_state"] == "completed"
+        assert summary["journal_pruned"] is True
+        found = find_run_summary(run_id, session_dir=tmp_path)
+        assert found is not None
+        assert found["session_id"] == session_id
+
+
+def test_pruned_cursor_requests_transcript_reload_status(tmp_path):
+    import api.run_journal as run_journal
+
+    now = time.time()
+    append_run_event(
+        "session_cursor",
+        "run_old",
+        "done",
+        {"session": {"session_id": "session_cursor"}},
+        session_dir=tmp_path,
+    )
+    path = run_journal._run_path(
+        "session_cursor", "run_old", session_dir=tmp_path
+    )
+    old = now - 100
+    os.utime(path, (old, old))
+
+    run_journal.prune_settled_run_journals(
+        session_dir=tmp_path,
+        now=now,
+        retention_seconds=10,
+        keep_recent=0,
+    )
+    replay = run_journal.read_session_run_events(
+        "session_cursor",
+        after_event_id="run_old:1",
+        session_dir=tmp_path,
+    )
+
+    assert replay["status"] == "cursor_pruned"
+    assert replay["events"] == []
 
 
 def test_stale_interrupted_event_skips_terminal_journal(tmp_path, monkeypatch):

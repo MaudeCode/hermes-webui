@@ -6,6 +6,7 @@ the existing in-process streaming path without changing execution ownership.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import threading
@@ -13,6 +14,8 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Iterable
+
+logger = logging.getLogger(__name__)
 
 RUN_JOURNAL_DIR_NAME = "_run_journal"
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -56,6 +59,17 @@ _SNAPSHOT_ARGS_MAX_DEPTH = 8
 _SNAPSHOT_ARGS_MAX_STRING_CHARS = 8192
 _SNAPSHOT_ARGS_MAX_TOTAL_CHARS = 64 * 1024
 _SNAPSHOT_ARGS_TRUNCATED_SUFFIX = "...[truncated]"
+_PRUNED_SUMMARY_SUFFIX = ".summary.json"
+_RUN_JOURNAL_RETENTION_DAYS_ENV = "HERMES_WEBUI_RUN_JOURNAL_RETENTION_DAYS"
+_RUN_JOURNAL_KEEP_RECENT_ENV = "HERMES_WEBUI_RUN_JOURNAL_KEEP_RECENT"
+_RUN_JOURNAL_DEFAULT_RETENTION_DAYS = 14.0
+_RUN_JOURNAL_DEFAULT_KEEP_RECENT = 3
+_RUN_JOURNAL_PRUNE_INTERVAL_SECONDS = 6 * 60 * 60
+_RUN_JOURNAL_TAIL_MAX_BYTES = 64 * 1024 * 1024
+_RUN_JOURNAL_TAIL_MAX_EVENTS = 32
+_PRUNE_THREAD: threading.Thread | None = None
+_PRUNE_LAST_STARTED = 0.0
+_PRUNE_LOCK = threading.Lock()
 
 
 def _default_session_dir() -> Path:
@@ -170,6 +184,80 @@ def _read_jsonl(path: Path) -> tuple[list[dict], list[dict]]:
         else:
             malformed.append({"line": line_no, "raw": raw})
     return events, malformed
+
+
+def _pruned_summary_path(path: Path) -> Path:
+    return path.with_name(f"{path.stem}{_PRUNED_SUMMARY_SUFFIX}")
+
+
+def _load_pruned_summary(path: Path) -> dict | None:
+    summary_path = _pruned_summary_path(path)
+    try:
+        parsed = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    return dict(parsed) if isinstance(parsed, dict) else None
+
+
+def _read_tail_events(path: Path) -> list[dict]:
+    """Read only the bounded tail needed to classify a settled journal."""
+    try:
+        size = path.stat().st_size
+        start = max(0, size - _RUN_JOURNAL_TAIL_MAX_BYTES)
+        with path.open("rb") as fh:
+            fh.seek(start)
+            raw = fh.read(_RUN_JOURNAL_TAIL_MAX_BYTES)
+    except (FileNotFoundError, OSError):
+        return []
+    if start:
+        newline = raw.find(b"\n")
+        if newline < 0:
+            return []
+        raw = raw[newline + 1 :]
+    events: list[dict] = []
+    for line in raw.splitlines()[-_RUN_JOURNAL_TAIL_MAX_EVENTS:]:
+        try:
+            parsed = json.loads(line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(parsed, dict):
+            events.append(parsed)
+    return events
+
+
+def _summary_from_tail(session_id: str, run_id: str, events: list[dict]) -> dict | None:
+    if not events or str(events[-1].get("event") or "") not in TERMINAL_SSE_EVENTS:
+        return None
+    summary = _summary_from_events(session_id, run_id, events)
+    last = events[-1]
+    last_seq = int(last.get("seq") or 0)
+    if last_seq <= 0:
+        return None
+    summary["event_count"] = last_seq
+    summary["last_seq"] = last_seq
+    summary["journal_pruned"] = True
+    return summary
+
+
+def _write_pruned_summary(path: Path, summary: dict) -> Path:
+    summary_path = _pruned_summary_path(path)
+    tmp_path = summary_path.with_name(
+        f".{summary_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    payload = json.dumps(summary, ensure_ascii=False, separators=(",", ":")) + "\n"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with tmp_path.open("w", encoding="utf-8") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, summary_path)
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return summary_path
 
 
 def _parse_run_journal_event_id(raw: str | None) -> tuple[str | None, int | None]:
@@ -433,7 +521,9 @@ def append_run_event(
         _discard_cached_summary(path)
         if created_file:
             _fsync_parent_dir(path)
-        return event
+    if terminal_state and session_dir is None:
+        schedule_run_journal_prune()
+    return event
 
 
 class RunJournalWriter:
@@ -526,6 +616,10 @@ def _summary_from_events(session_id: str, run_id: str, events: Iterable[dict]) -
 
 def latest_run_summary(session_id: str, run_id: str, *, session_dir: Path | None = None) -> dict:
     path = _run_path(session_id, run_id, session_dir=session_dir)
+    if not path.exists():
+        pruned = _load_pruned_summary(path)
+        if pruned is not None:
+            return pruned
     cached = _get_cached_summary(path)
     if cached is not None:
         return cached
@@ -584,6 +678,12 @@ def find_run_summary(run_id: str, *, session_dir: Path | None = None) -> dict | 
             _cache_summary(path, summary, expected_signature=pre_read_signature)
         summary["path"] = str(path)
         return summary
+    for summary_path in journal_root.glob(f"*/{rid}{_PRUNED_SUMMARY_SUFFIX}"):
+        path = summary_path.with_name(f"{rid}.jsonl")
+        summary = _load_pruned_summary(path)
+        if summary is not None:
+            summary["path"] = str(summary_path)
+            return summary
     return None
 
 
@@ -676,6 +776,16 @@ def read_session_run_events(
     runs.sort(key=lambda run: (run[0], run[1]))
     cursor_index = next((index for index, (_created_at, run_id, _events) in enumerate(runs) if run_id == cursor_run_id), None)
     if cursor_index is None:
+        if cursor_run_id and _pruned_summary_path(
+            session_root / f"{cursor_run_id}.jsonl"
+        ).exists():
+            return {
+                "session_id": sid,
+                "cursor_run_id": cursor_run_id,
+                "cursor_seq": cursor_seq,
+                "status": "cursor_pruned",
+                "events": [],
+            }
         foreign_paths = root.joinpath(RUN_JOURNAL_DIR_NAME).glob(f"*/{cursor_run_id}.jsonl") if cursor_run_id else []
         foreign_session_id = next((path.parent.name for path in foreign_paths if path.parent.name != sid), "")
         status = "cursor_run_missing"
@@ -701,6 +811,160 @@ def read_session_run_events(
         "status": "ok",
         "events": replay_events,
     }
+
+
+def _retention_seconds_from_env() -> float:
+    raw = os.environ.get(
+        _RUN_JOURNAL_RETENTION_DAYS_ENV,
+        str(_RUN_JOURNAL_DEFAULT_RETENTION_DAYS),
+    )
+    try:
+        days = float(raw)
+    except (TypeError, ValueError):
+        days = _RUN_JOURNAL_DEFAULT_RETENTION_DAYS
+    return max(0.0, days) * 24 * 60 * 60
+
+
+def _retention_keep_recent_from_env() -> int:
+    raw = os.environ.get(
+        _RUN_JOURNAL_KEEP_RECENT_ENV,
+        str(_RUN_JOURNAL_DEFAULT_KEEP_RECENT),
+    )
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return _RUN_JOURNAL_DEFAULT_KEEP_RECENT
+
+
+def prune_settled_run_journals(
+    *,
+    session_dir: Path | None = None,
+    now: float | None = None,
+    retention_seconds: float | None = None,
+    keep_recent: int | None = None,
+    dry_run: bool = False,
+) -> dict:
+    """Compact expired terminal journals while preserving active recovery data."""
+    root = Path(session_dir) if session_dir is not None else _default_session_dir()
+    journal_root = root / RUN_JOURNAL_DIR_NAME
+    retention = float(
+        _retention_seconds_from_env()
+        if retention_seconds is None
+        else max(0.0, retention_seconds)
+    )
+    cutoff = float(now if now is not None else time.time()) - retention
+    keep = (
+        _retention_keep_recent_from_env()
+        if keep_recent is None
+        else max(0, int(keep_recent))
+    )
+    result = {
+        "examined": 0,
+        "terminal": 0,
+        "pruned": 0,
+        "bytes_reclaimed": 0,
+    }
+    if retention <= 0 or not journal_root.exists():
+        return result
+
+    for session_root in journal_root.iterdir():
+        if not session_root.is_dir() or not _SAFE_ID_RE.fullmatch(session_root.name):
+            continue
+        terminal_runs: list[tuple[int, Path, dict]] = []
+        for path in session_root.glob("*.jsonl"):
+            result["examined"] += 1
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            events = _read_tail_events(path)
+            summary = _summary_from_tail(session_root.name, path.stem, events)
+            if summary is None:
+                continue
+            result["terminal"] += 1
+            terminal_runs.append((int(stat.st_mtime_ns), path, summary))
+
+        terminal_runs.sort(key=lambda item: (item[0], item[1].name), reverse=True)
+        for index, (_mtime_ns, path, _summary) in enumerate(terminal_runs):
+            if index < keep:
+                continue
+            lock = _lock_for(path)
+            with lock:
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                if stat.st_mtime > cutoff:
+                    continue
+                events = _read_tail_events(path)
+                current = _summary_from_tail(session_root.name, path.stem, events)
+                if current is None:
+                    continue
+                if dry_run:
+                    result["pruned"] += 1
+                    result["bytes_reclaimed"] += int(stat.st_size)
+                    continue
+                current.update(
+                    {
+                        "journal_pruned": True,
+                        "journal_pruned_at": float(
+                            now if now is not None else time.time()
+                        ),
+                        "original_size": int(stat.st_size),
+                        "original_mtime": float(stat.st_mtime),
+                    }
+                )
+                try:
+                    _write_pruned_summary(path, current)
+                    path.unlink()
+                except OSError:
+                    logger.warning(
+                        "run-journal retention failed for %s",
+                        path,
+                        exc_info=True,
+                    )
+                    continue
+                _discard_cached_summary(path)
+                with _SEQ_CACHE_LOCK:
+                    _SEQ_CACHE.pop(str(path), None)
+                result["pruned"] += 1
+                result["bytes_reclaimed"] += int(stat.st_size)
+    return result
+
+
+def schedule_run_journal_prune(*, delay_seconds: float = 0.0) -> bool:
+    """Schedule one non-blocking retention pass, coalesced to once per interval."""
+    global _PRUNE_LAST_STARTED, _PRUNE_THREAD
+
+    started_at = time.monotonic()
+    with _PRUNE_LOCK:
+        if _PRUNE_THREAD is not None and _PRUNE_THREAD.is_alive():
+            return False
+        if started_at - _PRUNE_LAST_STARTED < _RUN_JOURNAL_PRUNE_INTERVAL_SECONDS:
+            return False
+        _PRUNE_LAST_STARTED = started_at
+
+        def _runner() -> None:
+            if delay_seconds > 0:
+                time.sleep(float(delay_seconds))
+            try:
+                result = prune_settled_run_journals()
+                if result["pruned"]:
+                    logger.info(
+                        "run-journal retention pruned %d files (%d bytes)",
+                        result["pruned"],
+                        result["bytes_reclaimed"],
+                    )
+            except Exception:
+                logger.warning("run-journal retention pass failed", exc_info=True)
+
+        _PRUNE_THREAD = threading.Thread(
+            target=_runner,
+            name="hermes-webui-run-journal-retention",
+            daemon=True,
+        )
+        _PRUNE_THREAD.start()
+        return True
 
 
 def delete_run_journal(session_id: str, *, session_dir: Path | None = None) -> bool:

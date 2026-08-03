@@ -121,6 +121,31 @@ The on-disk locations below assume the default `~/.hermes/webui` state directory
 
 ---
 
+## Run-journal storage keeps growing
+
+Completed runs retain their full replay journal for 14 days by default. WebUI
+also keeps at least the three newest terminal journals per session regardless of
+age, and never prunes a journal whose last event is nonterminal. Retention runs
+in a background thread at startup and is coalesced to at most once every six
+hours after terminal events.
+
+Before removing an expired full journal, WebUI atomically writes a compact
+`<run_id>.summary.json` beside it. Status lookups remain auditable from that
+summary. A reconnect cursor aimed at a pruned journal returns `cursor_pruned`,
+which tells the caller to reload the settled transcript rather than replay stale
+events.
+
+The policy can be adjusted with:
+
+- `HERMES_WEBUI_RUN_JOURNAL_RETENTION_DAYS`, default `14`; set `0` to disable
+  retention.
+- `HERMES_WEBUI_RUN_JOURNAL_KEEP_RECENT`, default `3`; the minimum number of
+  terminal journals preserved per session.
+
+Changing these values does not affect active/nonterminal run recovery.
+
+---
+
 ## "Context compression exhausted" after a long-running turn
 
 **Symptom.** A long-running session, often with many tool calls or a small
