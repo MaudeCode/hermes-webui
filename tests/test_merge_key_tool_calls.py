@@ -281,3 +281,37 @@ class TestVisibleDuplicateLargePayloadPerformance:
 
         assert _matching_visible_duplicate(visible_key, {sidecar_key}) == sidecar_key
         assert len(calls) == 2
+
+    def test_high_cardinality_role_bucket_skips_fuzzy_scan(self, monkeypatch):
+        def fail_if_called(_content):
+            raise AssertionError("large role buckets should remain exact-only")
+
+        monkeypatch.setattr(models, "_loose_session_message_content", fail_if_called)
+        visible_keys = {
+            ("assistant", f"settled assistant output {index}", "")
+            for index in range(models._MAX_FUZZY_VISIBLE_DUPLICATE_CANDIDATES + 1)
+        }
+
+        assert _matching_visible_duplicate(
+            ("assistant", "new unmatched output", ""),
+            visible_keys,
+        ) is None
+
+    def test_high_cardinality_role_bucket_keeps_exact_lookup(self):
+        exact_key = ("assistant", "exact settled output", "")
+        visible_keys = {
+            ("assistant", f"settled assistant output {index}", "")
+            for index in range(models._MAX_FUZZY_VISIBLE_DUPLICATE_CANDIDATES + 1)
+        }
+        visible_keys.add(exact_key)
+
+        assert _matching_visible_duplicate(exact_key, visible_keys) == exact_key
+
+    def test_high_cardinality_bucket_preserves_distinct_tool_calls(self):
+        visible_keys = {
+            ("assistant", "same tool summary", f'{{"call": {index}}}')
+            for index in range(models._MAX_FUZZY_VISIBLE_DUPLICATE_CANDIDATES + 1)
+        }
+        candidate = ("assistant", "same tool summary", '{"call": "new"}')
+
+        assert _matching_visible_duplicate(candidate, visible_keys) is None

@@ -8473,6 +8473,9 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
     return {"keys": visible_keys, "by_role": by_role, "loose_by_key": {}}
 
 
+_MAX_FUZZY_VISIBLE_DUPLICATE_CANDIDATES = 256
+
+
 def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lookup: dict | None = None):
     if visible_key in visible_keys:
         return visible_key
@@ -8482,9 +8485,16 @@ def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lo
         return None
     if lookup is None:
         lookup = _build_visible_duplicate_lookup(visible_keys)
+    role_candidates = lookup.get("by_role", {}).get(role, [])
+    # Exact equality remains O(1) above. Fuzzy substring/token matching is a
+    # compatibility fallback, not permission to scan an unbounded transcript
+    # bucket for every lineage row. Large assistant/tool histories otherwise
+    # turn limited chat loads quadratic.
+    if len(role_candidates) > _MAX_FUZZY_VISIBLE_DUPLICATE_CANDIDATES:
+        return None
     loose_content = None
     loose_by_key = lookup.setdefault("loose_by_key", {})
-    for existing_key in lookup.get("by_role", {}).get(role, []):
+    for existing_key in role_candidates:
         existing_role = existing_key[0]
         existing_content = existing_key[1] if len(existing_key) > 1 else ""
         if role != existing_role or not existing_content:
