@@ -8669,6 +8669,7 @@ def _state_db_anchor_index(state_messages: list, anchor_key) -> int | None:
             expected_attachments = 0
 
     exact_timestamp_matches = []
+    fuzzy_timestamp_matches = []
     for idx, message in enumerate(state_messages or []):
         if _message_role(message) != anchor_role:
             continue
@@ -8693,10 +8694,116 @@ def _state_db_anchor_index(state_messages: list, anchor_key) -> int | None:
         if abs(message_ts - anchor_ts) <= 1e-6:
             exact_timestamp_matches.append(idx)
             continue
+        # The sidecar and state.db timestamps are committed by separate writers.
+        # A completed assistant row can therefore carry a small wall-clock skew
+        # even when role, normalized text, and attachment shape are identical.
+        # Keep this fallback deliberately narrow and reject multiple timestamp
+        # clusters so repeated prose cannot select a stale compaction boundary.
+        if abs(message_ts - anchor_ts) <= 5.0:
+            fuzzy_timestamp_matches.append((idx, message_ts))
 
     if exact_timestamp_matches:
         return exact_timestamp_matches[-1]
+    if fuzzy_timestamp_matches:
+        timestamp_clusters = {
+            round(message_ts, 6)
+            for _idx, message_ts in fuzzy_timestamp_matches
+        }
+        if len(timestamp_clusters) == 1:
+            return fuzzy_timestamp_matches[-1][0]
     return None
+
+
+_VERIFIED_LINEAGE_ANCHOR_CACHE_LOCK = threading.Lock()
+_VERIFIED_LINEAGE_ANCHOR_CACHE: dict[tuple, float] = {}
+_VERIFIED_LINEAGE_ANCHOR_CACHE_MAX = 256
+
+
+def _verified_lineage_anchor_timestamp(session, anchor_key, lineage_state_messages=None):
+    """Verify a continuation anchor once and return its state.db timestamp."""
+    sid = getattr(session, 'session_id', None)
+    cache_key = None
+    if lineage_state_messages is None and sid and isinstance(anchor_key, dict):
+        cache_key = (
+            str(sid),
+            str(anchor_key.get('role') or ''),
+            _normalized_compression_anchor_text(anchor_key.get('text')),
+            _compression_anchor_timestamp_as_float(anchor_key.get('ts')),
+            anchor_key.get('attachments'),
+        )
+        with _VERIFIED_LINEAGE_ANCHOR_CACHE_LOCK:
+            cached = _VERIFIED_LINEAGE_ANCHOR_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+        lineage_state_messages = get_state_db_session_messages(
+            sid,
+            stitch_continuations=True,
+            profile=getattr(session, 'profile', None),
+        )
+    lineage_rows = list(lineage_state_messages or [])
+    lineage_anchor_index = _state_db_anchor_index(lineage_rows, anchor_key)
+    if lineage_anchor_index is None:
+        return None
+    lineage_anchor_ts = _message_timestamp_as_float(lineage_rows[lineage_anchor_index])
+    if lineage_anchor_ts is None:
+        return None
+    if cache_key is not None:
+        with _VERIFIED_LINEAGE_ANCHOR_CACHE_LOCK:
+            if len(_VERIFIED_LINEAGE_ANCHOR_CACHE) >= _VERIFIED_LINEAGE_ANCHOR_CACHE_MAX:
+                _VERIFIED_LINEAGE_ANCHOR_CACHE.pop(next(iter(_VERIFIED_LINEAGE_ANCHOR_CACHE)), None)
+            _VERIFIED_LINEAGE_ANCHOR_CACHE[cache_key] = lineage_anchor_ts
+    return lineage_anchor_ts
+
+
+def _repair_misordered_active_turn_users(messages: list) -> list:
+    """Move a compaction-misplaced active user row back to its stable-id boundary."""
+    repaired = list(messages or [])
+    for current_idx, message in list(enumerate(repaired)):
+        if not isinstance(message, dict) or not message.get('_active_turn_token'):
+            continue
+        if _message_role(message) != 'user':
+            continue
+        message_id = message.get('id')
+        if not isinstance(message_id, int) or isinstance(message_id, bool):
+            stable_ids: list[int] = []
+            for row in repaired:
+                row_id = row.get('id') if isinstance(row, dict) else None
+                if isinstance(row_id, int) and not isinstance(row_id, bool):
+                    stable_ids.append(row_id)
+            one_row_gaps = [
+                left + 1
+                for left, right in zip(stable_ids, stable_ids[1:], strict=False)
+                if right == left + 2
+            ]
+            if len(one_row_gaps) != 1:
+                continue
+            message_id = one_row_gaps[0]
+            message = dict(message)
+            message['id'] = message_id
+            repaired[current_idx] = message
+        has_lower_row_after = False
+        for row in repaired[current_idx + 1 :]:
+            row_id = row.get('id') if isinstance(row, dict) else None
+            if isinstance(row_id, int) and not isinstance(row_id, bool) and row_id < message_id:
+                has_lower_row_after = True
+                break
+        if not has_lower_row_after:
+            continue
+        moved = repaired.pop(current_idx)
+        insert_at = len(repaired)
+        for idx, row in enumerate(repaired):
+            row_id = row.get('id') if isinstance(row, dict) else None
+            if isinstance(row_id, int) and not isinstance(row_id, bool) and row_id > message_id:
+                insert_at = idx
+                break
+        repaired.insert(insert_at, moved)
+        logger.warning(
+            "Repaired compaction-misordered active user row id=%s from index %s to %s",
+            message_id,
+            current_idx,
+            insert_at,
+        )
+    return repaired
 
 
 def _tool_call_assistant_should_precede_content_assistant(existing: dict, msg: dict) -> bool:
@@ -9232,7 +9339,11 @@ def merge_session_messages_append_only(
 
 
 def reconciled_state_db_messages_for_session(
-    session, *, prefer_context: bool = False, state_messages: list | None = None
+    session,
+    *,
+    prefer_context: bool = False,
+    state_messages: list | None = None,
+    lineage_state_messages: list | None = None,
 ) -> list:
     """Return append-only messages reconciled with state.db for a WebUI session."""
     if session is None:
@@ -9246,6 +9357,9 @@ def reconciled_state_db_messages_for_session(
             using_context_messages = True
     if not local_messages:
         local_messages = getattr(session, 'messages', None) or []
+    local_messages = list(local_messages)
+    if prefer_context and using_context_messages:
+        local_messages = _repair_misordered_active_turn_users(local_messages)
     if state_messages is None:
         state_messages = get_state_db_session_messages(getattr(session, 'session_id', None))
     if prefer_context and local_messages:
@@ -9277,12 +9391,40 @@ def reconciled_state_db_messages_for_session(
                         return list(local_messages)
                     anchor_index = _state_db_anchor_index(state_messages, anchor_key)
                     if anchor_index is None:
-                        logger.debug(
-                            "Compressed context for session %s has an unverifiable compression anchor; using context_messages only",
-                            getattr(session, "session_id", None),
+                        # A continuation stores only its own state.db rows, while
+                        # the compression anchor normally belongs to its parent
+                        # segment. Verify that boundary against the compatible
+                        # stitched lineage, then keep only this segment's rows
+                        # strictly after the verified anchor. Do not replay the
+                        # stitched parent transcript into the compacted context.
+                        if (
+                            lineage_state_messages is None
+                            and not getattr(session, 'parent_session_id', None)
+                        ):
+                            logger.debug(
+                                "Compressed context for session %s has an unverifiable compression anchor; using context_messages only",
+                                getattr(session, "session_id", None),
+                            )
+                            return list(local_messages)
+                        lineage_anchor_ts = _verified_lineage_anchor_timestamp(
+                            session,
+                            anchor_key,
+                            lineage_state_messages=lineage_state_messages,
                         )
-                        return list(local_messages)
-                    state_messages = list(state_messages or [])[anchor_index + 1 :]
+                        if lineage_anchor_ts is None:
+                            logger.debug(
+                                "Compressed context for session %s has an unverifiable compression anchor; using context_messages only",
+                                getattr(session, "session_id", None),
+                            )
+                            return list(local_messages)
+                        post_anchor_state_messages = []
+                        for message in state_messages or []:
+                            message_ts = _message_timestamp_as_float(message)
+                            if message_ts is None or message_ts > lineage_anchor_ts:
+                                post_anchor_state_messages.append(message)
+                        state_messages = post_anchor_state_messages
+                    else:
+                        state_messages = list(state_messages or [])[anchor_index + 1 :]
         state_messages = state_db_delta_after_context(local_messages, state_messages)
     return merge_session_messages_append_only(
         local_messages,

@@ -1618,6 +1618,35 @@ def _materialize_active_turn_user(identity, msg_text, source):
     return message
 
 
+def _insert_after_latest_shared_context_row(previous_context, result_messages):
+    """Return the result boundary after the newest stable pre-turn row.
+
+    Compression can rewrite the prefix while preserving the protected tail.  In
+    that shape ``current_turn_user_idx - len(previous_context)`` points near the
+    beginning of the compressed result and used to prepend the live user prompt
+    ahead of older history.  Stable message ids let us anchor the missing prompt
+    immediately after the newest preserved pre-turn row instead.
+    """
+    result_by_id = {}
+    for idx, message in enumerate(result_messages or []):
+        if not isinstance(message, dict):
+            continue
+        message_id = message.get('id')
+        if message_id is None or isinstance(message_id, bool):
+            continue
+        result_by_id[message_id] = idx
+    for message in reversed(list(previous_context or [])[-64:]):
+        if not isinstance(message, dict):
+            continue
+        message_id = message.get('id')
+        if message_id is None or isinstance(message_id, bool):
+            continue
+        idx = result_by_id.get(message_id)
+        if idx is not None:
+            return idx + 1
+    return None
+
+
 def _settle_current_turn_boundary(previous_context, result_messages, identity, msg_text, source):
     """Insert the pending turn before assistant/tool output when it is absent."""
     result_messages = list(result_messages or [])
@@ -1636,11 +1665,16 @@ def _settle_current_turn_boundary(previous_context, result_messages, identity, m
     if _messages_have_prefix(result_messages, previous_context):
         insert_at = len(previous_context)
     elif _active_turn_boundary_is_valid(identity):
-        insert_at = identity['current_turn_user_idx'] - len(previous_context)
-        if insert_at < 0 or insert_at > len(result_messages):
-            insert_at = identity['current_turn_user_idx']
-        if insert_at < 0 or insert_at > len(result_messages):
-            insert_at = None
+        insert_at = _insert_after_latest_shared_context_row(
+            previous_context,
+            result_messages,
+        )
+        if insert_at is None:
+            insert_at = identity['current_turn_user_idx'] - len(previous_context)
+            if insert_at < 0 or insert_at > len(result_messages):
+                insert_at = identity['current_turn_user_idx']
+            if insert_at < 0 or insert_at > len(result_messages):
+                insert_at = None
     else:
         insert_at = None
     if insert_at is None and all(
@@ -1653,11 +1687,27 @@ def _settle_current_turn_boundary(previous_context, result_messages, identity, m
             insert_at += 1
     if insert_at is None:
         return result_messages
-    return (
-        result_messages[:insert_at]
-        + [_materialize_active_turn_user(identity, msg_text, source)]
-        + result_messages[insert_at:]
-    )
+    active_user = _materialize_active_turn_user(identity, msg_text, source)
+    # Result rows are assigned stable ids before the compaction-aware boundary
+    # repair runs. Recover the one-row gap between the last preserved history row
+    # and the first current-turn output so the inserted user keeps chronological
+    # identity in both context alignment and later self-repair.
+    before_id = None
+    after_id = None
+    if insert_at > 0 and isinstance(result_messages[insert_at - 1], dict):
+        before_id = result_messages[insert_at - 1].get('id')
+    if insert_at < len(result_messages) and isinstance(result_messages[insert_at], dict):
+        after_id = result_messages[insert_at].get('id')
+    if (
+        isinstance(before_id, int)
+        and not isinstance(before_id, bool)
+        and isinstance(after_id, int)
+        and not isinstance(after_id, bool)
+        and after_id == before_id + 2
+    ):
+        active_user['id'] = before_id + 1
+    result_messages.insert(insert_at, active_user)
+    return result_messages
 
 
 def _align_current_turn_display(previous_display, previous_context, identity):
