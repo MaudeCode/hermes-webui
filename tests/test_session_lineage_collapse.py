@@ -53,8 +53,8 @@ eval(extractFunc('_isChildSession'));
 eval(extractFunc('_sessionLineageKey'));
 eval(extractFunc('_collapseSessionLineageForSidebar'));
 const sessions = [
-  {{session_id:'root', title:'Hermes WebUI', message_count:10, updated_at:10, last_message_at:10, _lineage_root_id:'root', _lineage_tip_id:'root'}},
-  {{session_id:'tip', title:'Hermes WebUI', message_count:20, updated_at:20, last_message_at:20, _lineage_root_id:'root', _lineage_tip_id:'tip'}},
+  {{session_id:'root', title:'Hermes WebUI', message_count:10, updated_at:10, last_message_at:10, pinned:true, _lineage_root_id:'root', _lineage_tip_id:'tip'}},
+  {{session_id:'tip', title:'Hermes WebUI', message_count:20, updated_at:20, last_message_at:20, pinned:false, _lineage_root_id:'root', _lineage_tip_id:'tip'}},
   {{session_id:'solo', title:'Other', message_count:5, updated_at:15, last_message_at:15}},
 ];
 const collapsed = _collapseSessionLineageForSidebar(sessions);
@@ -64,6 +64,8 @@ console.log(JSON.stringify(collapsed));
     by_sid = {row["session_id"]: row for row in collapsed}
     assert set(by_sid) == {"tip", "solo"}
     assert by_sid["tip"]["_lineage_collapsed_count"] == 2
+    assert by_sid["tip"]["pinned"] is True
+    assert by_sid["tip"]["_lineage_pinned_session_ids"] == ["root"]
     assert [seg["session_id"] for seg in by_sid["tip"]["_lineage_segments"]] == ["tip", "root"]
 
 

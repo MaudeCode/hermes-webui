@@ -133,6 +133,65 @@ def test_all_sessions_exposes_state_db_lineage_metadata_for_webui_json_sessions(
         conn.close()
 
 
+def test_all_sessions_tolerates_subsecond_compression_timestamp_overlap(_isolate):
+    """Continuation creation can win the race with the parent's final DB write."""
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("lineage_overlap_root", title="Workstream", updated_at=t0)
+        _save_webui_session("lineage_overlap_tip", title="Workstream", updated_at=t0 + 10)
+        _insert_state_row(
+            conn,
+            "lineage_overlap_root",
+            started_at=t0,
+            ended_at=t0 + 5,
+            end_reason="compression",
+        )
+        _insert_state_row(
+            conn,
+            "lineage_overlap_tip",
+            parent="lineage_overlap_root",
+            started_at=t0 + 4.75,
+        )
+
+        rows = {row["session_id"]: row for row in all_sessions()}
+
+        assert rows["lineage_overlap_tip"].get("_lineage_root_id") == "lineage_overlap_root"
+        assert rows["lineage_overlap_tip"].get("_compression_segment_count") == 2
+        assert rows["lineage_overlap_tip"].get("relationship_type") != "child_session"
+    finally:
+        conn.close()
+
+
+def test_all_sessions_keeps_materially_overlapping_child_separate(_isolate):
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("lineage_overlap_parent", title="Parent", updated_at=t0)
+        _save_webui_session("lineage_overlap_child", title="Child", updated_at=t0 + 10)
+        _insert_state_row(
+            conn,
+            "lineage_overlap_parent",
+            started_at=t0,
+            ended_at=t0 + 5,
+            end_reason="compression",
+        )
+        _insert_state_row(
+            conn,
+            "lineage_overlap_child",
+            parent="lineage_overlap_parent",
+            started_at=t0 + 3,
+        )
+
+        rows = {row["session_id"]: row for row in all_sessions()}
+
+        child = rows["lineage_overlap_child"]
+        assert child.get("relationship_type") == "child_session"
+        assert "_lineage_root_id" not in child
+    finally:
+        conn.close()
+
+
 def test_all_sessions_keeps_explicit_forks_out_of_state_db_lineage_metadata(_isolate):
     conn = _ensure_state_db(_isolate)
     t0 = time.time() - 100

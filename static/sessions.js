@@ -4871,12 +4871,26 @@ function _openSessionActionMenu(session, anchorEl){
     async()=>{
       closeSessionActionMenu();
       const newPinned=!session.pinned;
+      const targetIds=newPinned
+        ? [session.session_id]
+        : (Array.isArray(session._lineage_pinned_session_ids)&&session._lineage_pinned_session_ids.length
+          ? [...new Set(session._lineage_pinned_session_ids)]
+          : [session.session_id]);
       try{
-        await api('/api/session/pin',{method:'POST',body:JSON.stringify({session_id:session.session_id,pinned:newPinned})});
+        for(const targetId of targetIds){
+          await api('/api/session/pin',{method:'POST',body:JSON.stringify({session_id:targetId,pinned:newPinned})});
+        }
         session.pinned=newPinned;
-        const cached=(_allSessions||[]).find(s=>s&&s.session_id===session.session_id);
-        if(cached) cached.pinned=newPinned;
-        if(S.session&&S.session.session_id===session.session_id) S.session.pinned=newPinned;
+        session._lineage_pinned_session_ids=newPinned?[session.session_id]:[];
+        if(Array.isArray(session._lineage_segments)){
+          for(const segment of session._lineage_segments){
+            if(segment&&targetIds.includes(segment.session_id)) segment.pinned=newPinned;
+          }
+        }
+        for(const cached of (_allSessions||[])){
+          if(cached&&targetIds.includes(cached.session_id)) cached.pinned=newPinned;
+        }
+        if(S.session&&targetIds.includes(S.session.session_id)) S.session.pinned=newPinned;
         renderSessionListFromCache();
         void renderSessionList();
       }catch(err){
@@ -7131,7 +7145,18 @@ function _collapseSessionLineageForSidebar(sessions){
       ? _authoritativeLineageTipId(item)
       : item&&(item._lineage_tip_id||item._parent_lineage_tip_id)||null).filter(Boolean));
     const chosen=sorted.find(item=>tipIds.has(item&&item.session_id))||sorted[0];
-    result.push({...chosen,_lineage_key:key,_lineage_collapsed_count:items.length,_lineage_segments:sorted});
+    const pinnedSessionIds=sorted.filter(item=>item&&item.pinned).map(item=>item.session_id).filter(Boolean);
+    result.push({
+      ...chosen,
+      // Pinning is a logical-conversation property in the sidebar. A preserved
+      // segment can own the durable pin while a newer continuation represents
+      // the row, so bubble the pin instead of rendering pinned and unpinned copies.
+      pinned:pinnedSessionIds.length>0,
+      _lineage_pinned_session_ids:pinnedSessionIds,
+      _lineage_key:key,
+      _lineage_collapsed_count:items.length,
+      _lineage_segments:sorted,
+    });
   }
   return result;
 }

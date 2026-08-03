@@ -331,7 +331,11 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
         # continuations when no boundary timestamp is available.
         return True
     try:
-        return float(child.get('started_at') or 0) >= float(ended_at)
+        # Rotation startup and parent finalization are separate writes. In real
+        # state.db data, same-source continuations can be stamped a few hundred
+        # milliseconds before the parent's ended_at commit. Keep genuinely
+        # overlapping child work separate while tolerating that write-order skew.
+        return float(child.get('started_at') or 0) + 1.0 >= float(ended_at)
     except (TypeError, ValueError):
         return False
 
