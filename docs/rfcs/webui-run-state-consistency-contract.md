@@ -121,6 +121,12 @@ and 5; it does not mark every run-state boundary implemented.
 8. **Every mutation names its layer.** A PR touching streaming, recovery,
    context reconstruction, compression, replay, or sidebar metadata should state
    which layer it changes and what regression proves the invariant still holds.
+9. **Detached completions follow their live owner.** The immutable session id
+   captured when background work is commissioned proves ownership. Before any
+   busy-state check or transcript mutation, WebUI must resolve that owner through
+   compression lineage and act on the live continuation. Durable completions with
+   no recoverable owner may retry startup races, but must eventually enter an
+   auditable terminal quarantine rather than replay forever.
 
 ## Review Checklist
 

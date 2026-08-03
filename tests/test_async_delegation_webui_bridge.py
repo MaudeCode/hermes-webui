@@ -65,6 +65,7 @@ def _install_fake_durable_delivery_api(monkeypatch):
     calls = {
         "claim": [],
         "complete": [],
+        "drop": [],
         "release": [],
         "mark": [],
         "legacy": [],
@@ -92,6 +93,11 @@ def _install_fake_durable_delivery_api(monkeypatch):
             "dropped" if calls["delivery_attempts"] >= 8 else "pending"
         )
 
+    def _drop(delegation_id, claim_id):
+        calls["drop"].append((delegation_id, claim_id))
+        calls["delivery_state"] = "dropped"
+        return True
+
     def _get_durable(delegation_id):
         if calls["delivery_state"] == "pending":
             calls["pending_ids"].add(delegation_id)
@@ -118,6 +124,7 @@ def _install_fake_durable_delivery_api(monkeypatch):
 
     fake_mod.claim_event_delivery = _claim
     fake_mod.complete_event_delivery = _complete
+    fake_mod.drop_completion_delivery = _drop  # type: ignore[attr-defined]
     fake_mod.release_event_delivery = _release
     fake_mod.get_durable_delegation = _get_durable
     fake_mod.restore_undelivered_completions = _restore
@@ -297,6 +304,89 @@ def test_background_unmapped_legacy_event_is_requeued_best_effort(monkeypatch):
 
     bp._process_one(retried)
     assert registry.completion_queue.empty()
+
+
+def test_background_unmapped_recent_durable_event_stays_retryable(monkeypatch):
+    _reset_wakeup_state()
+    _install_fake_process_registry(monkeypatch)
+    delivery = _install_fake_durable_delivery_api(monkeypatch)
+    monkeypatch.setattr(bp, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 10.0)
+    evt = _async_delegation_event(session_key="missing-session")
+
+    try:
+        bp._process_one(evt)
+
+        assert delivery["claim"] == []
+        assert delivery["drop"] == []
+        assert delivery["delivery_state"] == "pending"
+        assert peu.async_delivery_retry_timer_count() == 1
+    finally:
+        _reset_wakeup_state()
+
+
+def test_background_unmapped_expired_durable_event_is_quarantined(monkeypatch):
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    delivery = _install_fake_durable_delivery_api(monkeypatch)
+    evt = _async_delegation_event(
+        session_key="missing-session",
+        completed_at=time.time()
+        - bp.ASYNC_DELIVERY_UNROUTABLE_MAX_AGE_SECONDS
+        - 1,
+    )
+
+    bp._process_one(evt)
+
+    assert [consumer for _evt, consumer in delivery["claim"]] == [
+        "webui-unroutable-quarantine"
+    ]
+    assert len(delivery["drop"]) == 1
+    assert delivery["delivery_state"] == "dropped"
+    assert registry.completion_queue.empty()
+    assert peu.async_delivery_retry_timer_count() == 0
+
+
+def test_background_completion_follows_exact_owner_to_live_continuation(monkeypatch):
+    _reset_wakeup_state()
+    _install_fake_process_registry(monkeypatch)
+    delivery = _install_fake_durable_delivery_api(monkeypatch)
+    cfg.PROCESS_SESSION_INDEX["mutable-key"] = "unrelated-session"
+    started = []
+
+    from api import models, routes
+
+    monkeypatch.setattr(
+        models,
+        "get_session",
+        lambda session_id, metadata_only=False: types.SimpleNamespace(
+            session_id=session_id,
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_pre_compression_continuation_session_id",
+        lambda session: (
+            "continuation-session"
+            if session.session_id == "snapshot-session"
+            else None
+        ),
+    )
+    monkeypatch.setattr(bp, "_session_has_active_turn", lambda _session_id: False)
+    monkeypatch.setattr(
+        bp,
+        "_start_async_delegation_wakeup_turn",
+        lambda session_id, *_args, **_kwargs: started.append(session_id),
+    )
+
+    bp._process_one(
+        _async_delegation_event(
+            session_key="mutable-key",
+            origin_ui_session_id="snapshot-session",
+        )
+    )
+
+    assert started == ["continuation-session"]
+    assert len(delivery["claim"]) == 1
 
 
 def test_background_wakeup_releases_claim_when_dispatch_fails(monkeypatch):

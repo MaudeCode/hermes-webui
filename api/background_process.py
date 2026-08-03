@@ -50,9 +50,11 @@ from typing import Any, Optional
 
 from api.process_event_utils import (
     ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
+    ASYNC_DELIVERY_UNROUTABLE_MAX_AGE_SECONDS,
     claim_async_delegation_delivery,
     complete_async_delegation_delivery,
     completion_delivery_id,
+    drop_async_delegation_delivery,
     release_async_delegation_delivery,
     requeue_async_delegation_event,
     schedule_async_delegation_claim_retry,
@@ -1068,20 +1070,50 @@ def _process_async_delegation_event(
         )
 
 
+def _resolve_live_completion_target(session_id: str) -> str:
+    """Follow a compression snapshot to its current WebUI continuation.
+
+    Detached work keeps the immutable session id that commissioned it. That id
+    remains the ownership proof, but an out-of-place compression can close the
+    corresponding sidecar before the completion arrives. Reuse the same
+    continuation resolver exposed by ``GET /api/session`` so routing, busy-state
+    checks, and persistence all act on one canonical live id.
+    """
+    candidate = str(session_id or "")
+    if not candidate:
+        return ""
+    try:
+        from api.models import get_session
+        from api.routes import _pre_compression_continuation_session_id
+
+        session = get_session(candidate, metadata_only=True)
+        continuation = _pre_compression_continuation_session_id(session)
+        if continuation:
+            return str(continuation)
+    except Exception:
+        logger.debug(
+            "async completion continuation lookup failed for %r",
+            candidate,
+            exc_info=True,
+        )
+    return candidate
+
+
 def _resolve_completion_target(
     *,
     session_key_resolved_sid: str,
     origin_ui_session_id: str,
 ) -> str:
-    """Return the WebUI session that owns a detached completion event.
+    """Return the live WebUI session that owns a detached completion event.
 
     Modern Hermes Agent events carry ``origin_ui_session_id`` as an exact,
     immutable return address captured from the commissioning browser turn.
     It is authoritative over the mutable/legacy session-key index. Older
-    Agent events omit it and retain the existing session-key fallback.
+    Agent events omit it and retain the existing session-key fallback. Both
+    identities are canonicalized through compression lineage before comparison.
     """
-    resolved = str(session_key_resolved_sid or "")
-    owner = str(origin_ui_session_id or "")
+    resolved = _resolve_live_completion_target(session_key_resolved_sid)
+    owner = _resolve_live_completion_target(origin_ui_session_id)
     if not owner:
         return resolved
     if resolved and resolved != owner:
@@ -1092,6 +1124,46 @@ def _resolve_completion_target(
             owner,
         )
     return owner
+
+
+def _retry_or_quarantine_unroutable_async_delegation(
+    process_registry: Any,
+    evt: dict,
+) -> None:
+    """Retry startup races, but quarantine durable events with stale owners."""
+    delegation_id = str(evt.get("delegation_id") or "")
+    try:
+        completed_at = float(evt.get("completed_at") or 0.0)
+    except (TypeError, ValueError):
+        completed_at = 0.0
+    age_seconds = max(0.0, time.time() - completed_at) if completed_at else 0.0
+    expired = bool(
+        delegation_id
+        and completed_at > 0.0
+        and age_seconds >= ASYNC_DELIVERY_UNROUTABLE_MAX_AGE_SECONDS
+    )
+    if not expired:
+        _retry_unclaimed_async_delegation_event(process_registry, evt)
+        return
+
+    claim = claim_async_delegation_delivery(
+        evt,
+        "webui-unroutable-quarantine",
+    )
+    if claim is None:
+        schedule_async_delegation_claim_retry(process_registry, evt)
+        return
+    if drop_async_delegation_delivery(evt, claim):
+        logger.warning(
+            "quarantined async delegation %s after %.0fs without a recoverable "
+            "WebUI session owner",
+            delegation_id,
+            age_seconds,
+        )
+        return
+
+    release_async_delegation_delivery(evt, claim)
+    _retry_unclaimed_async_delegation_event(process_registry, evt)
 
 
 def _process_one(evt: dict) -> None:
@@ -1143,7 +1215,10 @@ def _process_one(evt: dict) -> None:
             process_id,
         )
         if evt.get("type") == "async_delegation":
-            _retry_unclaimed_async_delegation_event(_process_registry, evt)
+            _retry_or_quarantine_unroutable_async_delegation(
+                _process_registry,
+                evt,
+            )
         return
     session_id = ""
     if session_key:
@@ -1156,7 +1231,10 @@ def _process_one(evt: dict) -> None:
         # registered shortly after process restore.
         logger.debug("process_complete drop: no session mapping for key=%r", session_key)
         if evt.get("type") == "async_delegation":
-            _retry_unclaimed_async_delegation_event(_process_registry, evt)
+            _retry_or_quarantine_unroutable_async_delegation(
+                _process_registry,
+                evt,
+            )
         return
     # ── xsession wakeup misroute defense-in-depth (Option 3) ──────────────
     # First retain the process-registry spawn-owner cross-check for legacy

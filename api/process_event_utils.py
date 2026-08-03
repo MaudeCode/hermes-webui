@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 LEGACY_ASYNC_DELIVERY_DEDUPE_MAX = 1024
 ASYNC_DELIVERY_CLAIM_RETRY_SECONDS = 301.0
 ASYNC_DELIVERY_ROUTING_RETRY_SECONDS = 5.0
+# A completion whose durable owner has not been recoverable for a full day is
+# no longer in a startup race. Quarantine it instead of restoring it forever.
+ASYNC_DELIVERY_UNROUTABLE_MAX_AGE_SECONDS = 24 * 60 * 60
 _LEGACY_ASYNC_DELIVERY_LOCK = threading.Lock()
 _LEGACY_ASYNC_DELIVERY_IDS: OrderedDict[str, None] = OrderedDict()
 _ASYNC_DELIVERY_RETRY_LOCK = threading.Lock()
@@ -467,6 +470,37 @@ def release_async_delegation_delivery(
             claim.delegation_id,
             exc_info=True,
         )
+    finally:
+        _release_bounded_local(claim.delegation_id)
+
+
+def drop_async_delegation_delivery(
+    evt: Any,
+    claim: AsyncDelegationDeliveryClaim,
+) -> bool:
+    """Terminally quarantine a claimed completion with no recoverable owner.
+
+    ``dropped`` is intentionally distinct from ``delivered`` in Hermes Agent's
+    durable ledger. The event remains auditable, while restart recovery stops
+    replaying it into the WebUI hot queue.
+    """
+    dropped = False
+    try:
+        if not claim.durable:
+            return False
+        from tools.async_delegation import drop_completion_delivery
+
+        dropped = bool(
+            drop_completion_delivery(claim.delegation_id, claim.claim_id)
+        )
+        return dropped
+    except Exception:
+        logger.warning(
+            "Failed to quarantine durable async delegation delivery for %s",
+            claim.delegation_id,
+            exc_info=True,
+        )
+        return False
     finally:
         _release_bounded_local(claim.delegation_id)
 
