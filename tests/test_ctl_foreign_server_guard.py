@@ -47,6 +47,13 @@ def _start_dummy_http_server(port: int, status: int = 200) -> subprocess.Popen:
     code = textwrap.dedent(
         f"""
         from http.server import BaseHTTPRequestHandler, HTTPServer
+        from socketserver import TCPServer
+
+        class FastHTTPServer(HTTPServer):
+            def server_bind(self):
+                TCPServer.server_bind(self)
+                self.server_name = str(self.server_address[0])
+                self.server_port = int(self.server_address[1])
 
         class H(BaseHTTPRequestHandler):
             def do_GET(self):
@@ -60,7 +67,7 @@ def _start_dummy_http_server(port: int, status: int = 200) -> subprocess.Popen:
             def log_message(self, *args):
                 pass
 
-        HTTPServer(("127.0.0.1", {port}), H).serve_forever()
+        FastHTTPServer(("127.0.0.1", {port}), H).serve_forever()
         """
     )
     proc = subprocess.Popen([sys.executable, "-c", code])
@@ -631,6 +638,13 @@ def test_start_health_probe_ignores_all_proxy_env(tmp_path):
             #!/usr/bin/env python3
             import sys
             from http.server import BaseHTTPRequestHandler, HTTPServer
+            from socketserver import TCPServer
+
+            class FastHTTPServer(HTTPServer):
+                def server_bind(self):
+                    TCPServer.server_bind(self)
+                    self.server_name = str(self.server_address[0])
+                    self.server_port = int(self.server_address[1])
 
             class HealthHandler(BaseHTTPRequestHandler):
                 def do_GET(self):
@@ -643,7 +657,7 @@ def test_start_health_probe_ignores_all_proxy_env(tmp_path):
                 def log_message(self, *args):
                     pass
 
-            HTTPServer(("127.0.0.1", int(sys.argv[-1])), HealthHandler).serve_forever()
+            FastHTTPServer(("127.0.0.1", int(sys.argv[-1])), HealthHandler).serve_forever()
             """
         ).lstrip(),
         encoding="utf-8",
@@ -693,9 +707,15 @@ def test_ipv6_host_probe_builds_bracketed_url(tmp_path):
         f"""
         import socket
         from http.server import BaseHTTPRequestHandler, HTTPServer
+        from socketserver import TCPServer
 
         class V6Server(HTTPServer):
             address_family = socket.AF_INET6
+
+            def server_bind(self):
+                TCPServer.server_bind(self)
+                self.server_name = str(self.server_address[0])
+                self.server_port = int(self.server_address[1])
 
         class H(BaseHTTPRequestHandler):
             def do_GET(self):

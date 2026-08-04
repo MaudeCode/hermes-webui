@@ -356,6 +356,8 @@ const _sessionListSnapshotById = new Map();
 const _sessionListSourceById = new Map();
 let _sessionListPointerActive = false;
 let _sessionListLastScrollAt = 0;
+let _sessionListLastPointerMoveAt = 0;
+let _sessionListLastKeyboardAt = 0;
 let _pendingSessionListPayload = null;
 let _pendingSessionListApplyTimer = 0;
 let _sessionListLoadError = null;
@@ -1728,23 +1730,12 @@ async function loadSession(sid){
   _yoloEnabled=false;_updateYoloPill();
   if(typeof stopClarifyPolling==='function') stopClarifyPolling();
   if(typeof hideClarifyCard==='function') hideClarifyCard(forceReload, forceReload?'external-refresh':'dismissed');
-  // Show loading indicator immediately for responsiveness.
-  // Cleared by renderMessages() once full session data arrives.
   // Persist the current composer draft before switching away so it can be
   // restored when the user switches back (#1060). Save to server now so the
   // draft survives page refresh and syncs across clients.
   if (currentSid && currentSid !== sid) {
     if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();
     if(typeof _clearQueueCardDisplay==='function') _clearQueueCardDisplay(currentSid);
-    await _saveComposerDraftNow(currentSid, ($('msg') || {}).value || '', S.pendingFiles ? [...S.pendingFiles] : []);
-    // The awaited draft save above yields the event loop. If another
-    // loadSession() started for a different session while we were waiting
-    // (rapid switch B→C), _loadingSessionId now points at that newer load —
-    // bail out before the destructive state-clearing block below so this stale
-    // continuation can't wipe S.messages / write the loading placeholder /
-    // close streams for the session the user actually landed on (#1060 guard,
-    // extended to cover the new pre-switch await).
-    if (!_isCurrentLoad()) return;
     // Snapshot the live turn before msgInner is replaced. Preserves the activity
     // timer, partial response, and tool cards so switching back does not rebuild
     // the stream UI from scratch.
@@ -1761,6 +1752,20 @@ async function loadSession(sid){
       }
       snapshotLiveTurnHtmlForSession(currentSid);
     }
+    // Give immediate visual feedback before the durable draft save yields to the
+    // network. The load-generation guard below still prevents this continuation
+    // from mutating a newer rapid-switch target after the save settles.
+    const loadingInner=$('msgInner');
+    if(loadingInner) loadingInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
+    await _saveComposerDraftNow(currentSid, ($('msg') || {}).value || '', S.pendingFiles ? [...S.pendingFiles] : []);
+    // The awaited draft save above yields the event loop. If another
+    // loadSession() started for a different session while we were waiting
+    // (rapid switch B→C), _loadingSessionId now points at that newer load —
+    // bail out before the destructive state-clearing block below so this stale
+    // continuation can't wipe S.messages / write the loading placeholder /
+    // close streams for the session the user actually landed on (#1060 guard,
+    // extended to cover the new pre-switch await).
+    if (!_isCurrentLoad()) return;
   }
   const _keepStaleUntilLoaded = !!opts.keepStaleUntilLoaded && sameSessionForceReload;
   if (currentSid !== sid || forceReload) {
@@ -5271,12 +5276,11 @@ function _mergeOptimisticFirstTurnSessions(fetchedSessions){
 
 function _isSessionListUserInteracting(){
   const now=Date.now();
-  const list=$('sessionList');
-  const pointerOverList=Boolean(list&&(list.matches(':hover')||list.matches(':focus-within')));
   return Boolean(
     _sessionListPointerActive ||
-    pointerOverList ||
-    (_sessionListLastScrollAt && now-_sessionListLastScrollAt<SESSION_LIST_INTERACTION_IDLE_MS)
+    (_sessionListLastScrollAt && now-_sessionListLastScrollAt<SESSION_LIST_INTERACTION_IDLE_MS) ||
+    (_sessionListLastPointerMoveAt && now-_sessionListLastPointerMoveAt<SESSION_LIST_INTERACTION_IDLE_MS) ||
+    (_sessionListLastKeyboardAt && now-_sessionListLastKeyboardAt<SESSION_LIST_INTERACTION_IDLE_MS)
   );
 }
 
@@ -7367,14 +7371,24 @@ function _ensureSessionVirtualScrollHandler(list){
   _sessionVirtualScrollList=list;
   list.addEventListener('scroll', _scheduleSessionVirtualizedRender, {passive:true});
   list.addEventListener('pointerdown', _markSessionListPointerDown, {passive:true});
+  list.addEventListener('pointermove', _markSessionListPointerMove, {passive:true});
   list.addEventListener('pointerup', _markSessionListPointerUp, {passive:true});
   list.addEventListener('pointercancel', _markSessionListPointerUp, {passive:true});
   list.addEventListener('pointerleave', _markSessionListPointerUp, {passive:true});
+  list.addEventListener('keydown', _markSessionListKeyboardInteraction);
 }
 
 function _markSessionListPointerDown(){
   _sessionListPointerActive=true;
   _sessionListLastScrollAt=Date.now();
+}
+
+function _markSessionListPointerMove(){
+  _sessionListLastPointerMoveAt=Date.now();
+}
+
+function _markSessionListKeyboardInteraction(){
+  _sessionListLastKeyboardAt=Date.now();
 }
 
 function _markSessionListPointerUp(){

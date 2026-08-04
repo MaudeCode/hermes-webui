@@ -10,19 +10,30 @@ Covers:
   3. Refresh path parity — configured aux routing still applies to the
      adaptive title refresh path.
 """
+import importlib
 import sys
 import threading
 import types
 import unittest
 from unittest.mock import MagicMock, patch
 
-# Stub agent.auxiliary_client so it is importable in the test environment
-# (the real package lives in hermes-agent, which is not installed here).
-_agent_stub = types.ModuleType('agent')
-_aux_stub = types.ModuleType('agent.auxiliary_client')
-sys.modules.setdefault('agent', _agent_stub)
-sys.modules.setdefault('agent.auxiliary_client', _aux_stub)
-_agent_stub.auxiliary_client = _aux_stub
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _optional_agent_auxiliary_module(monkeypatch):
+    try:
+        importlib.import_module('agent.auxiliary_client')
+        return
+    except ImportError:
+        pass
+
+    # Standalone WebUI checkouts do not include the optional agent package.
+    _agent_stub = sys.modules.get('agent') or types.ModuleType('agent')
+    _aux_stub = types.ModuleType('agent.auxiliary_client')
+    monkeypatch.setitem(sys.modules, 'agent', _agent_stub)
+    monkeypatch.setitem(sys.modules, 'agent.auxiliary_client', _aux_stub)
+    monkeypatch.setattr(_agent_stub, 'auxiliary_client', _aux_stub, raising=False)
 
 
 def _patch_tg_config(config_dict):

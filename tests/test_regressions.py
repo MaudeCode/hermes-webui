@@ -570,14 +570,15 @@ def test_queue_card_cross_session_clear_called_before_draft_save(cleanup_test_se
     survive into the destination session.
     """
     src = (REPO_ROOT / "static/sessions.js").read_text()
-    block_pattern = re.compile(
-        r"if \(currentSid && currentSid !== sid\) \{\s*"
-        r"if\(typeof window\._clearPendingSelections==='function'\) window\._clearPendingSelections\(\);\s*"
-        r"if\(typeof _clearQueueCardDisplay==='function'\) _clearQueueCardDisplay\(currentSid\);\s*"
-        r"await _saveComposerDraftNow\(currentSid",
-        re.S,
-    )
-    assert block_pattern.search(src), (
+    load_start = src.find("async function loadSession(sid){")
+    load_end = src.find("  // Sync context usage indicator from session data", load_start)
+    load_body = src[load_start:load_end]
+    cross_start = load_body.find("if (currentSid && currentSid !== sid) {")
+    cross_end = load_body.find("if (currentSid !== sid || forceReload) {", cross_start)
+    cross_body = load_body[cross_start:cross_end]
+    clear_idx = cross_body.find("_clearQueueCardDisplay(currentSid);")
+    save_idx = cross_body.find("await _saveComposerDraftNow(currentSid")
+    assert clear_idx != -1 and save_idx != -1 and clear_idx < save_idx, (
         "cross-session loadSession path must clear queue card display via"
         " _clearQueueCardDisplay(currentSid) before awaiting _saveComposerDraftNow"
     )

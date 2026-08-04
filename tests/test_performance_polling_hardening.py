@@ -42,3 +42,19 @@ def test_approval_and_clarify_fallback_polls_do_not_overlap():
     assert "_clarifyFallbackPollInFlight = true" in src
     assert "finally {\n      _clarifyFallbackPollInFlight = false;\n    }" in src
     assert "_clarifyFallbackPollInFlight = false;\n  _clarifyPollingSessionId = null;" in src
+
+
+def test_idle_sidebar_hover_or_focus_cannot_defer_fresh_payloads_forever():
+    src = _source(SESSIONS_JS)
+    start = src.index("function _isSessionListUserInteracting(){")
+    end = src.index("\n}\n", start) + 2
+    body = src[start:end]
+
+    assert ":hover" not in body
+    assert ":focus-within" not in body
+    assert "_sessionListLastPointerMoveAt" in body
+    assert "_sessionListLastKeyboardAt" in body
+    assert "now-_sessionListLastPointerMoveAt<SESSION_LIST_INTERACTION_IDLE_MS" in body
+    assert "now-_sessionListLastKeyboardAt<SESSION_LIST_INTERACTION_IDLE_MS" in body
+    assert "list.addEventListener('pointermove', _markSessionListPointerMove" in src
+    assert "list.addEventListener('keydown', _markSessionListKeyboardInteraction)" in src

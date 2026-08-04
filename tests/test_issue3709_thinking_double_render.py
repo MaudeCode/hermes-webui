@@ -83,8 +83,11 @@ def _function_body(name: str) -> str:
 
 def test_settled_thinking_renders_through_worklog_item_path():
     body = _render_messages_body()
-    assert "_appendWorklogStep(state.group, anchorRow, cards, thinkingText" in body, (
-        "Settled Thinking should render through the #3401 Worklog item path."
+    assert "thinkingText," in body and "state.steps.push({" in body, (
+        "Settled Thinking should be retained in the #3401 Worklog step model."
+    )
+    assert "_appendWorklogStep(state.group,step.anchorRow,step.cards,step.thinkingText,step.opts)" in body, (
+        "Materialized Worklog steps must still render their settled Thinking card."
     )
     assert "_thinkingActivityNode(thinkingText, false, thinkingDisclosureKey)" in UI_JS, (
         "Thinking should remain a dedicated Worklog Thinking Card node."

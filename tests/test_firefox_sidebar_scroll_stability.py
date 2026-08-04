@@ -64,15 +64,17 @@ def test_only_background_refreshes_defer_while_sidebar_is_interacting():
     assert "pfToggle.onclick=()=>{_setShowAllProfiles(true);renderSessionList({deferWhileInteracting:false});};" in SESSIONS_JS
     assert "pfToggle.onclick=()=>{_setShowAllProfiles(false);renderSessionList({deferWhileInteracting:false});};" in SESSIONS_JS
 
-def test_session_list_pointer_hover_and_scroll_activity_are_tracked():
+def test_session_list_recent_pointer_keyboard_and_scroll_activity_are_tracked():
     interaction_block = _block("function _isSessionListUserInteracting()", "function _schedulePendingSessionListApply")
     schedule_block = _block("function _scheduleSessionVirtualizedRender()", "function _ensureSessionVirtualScrollHandler")
     ensure_block = _block("function _ensureSessionVirtualScrollHandler", "function renderSessionListFromCache")
 
-    assert "list.matches(':hover')" in interaction_block
-    assert "list.matches(':focus-within')" in interaction_block
+    assert "list.matches(':hover')" not in interaction_block
+    assert "list.matches(':focus-within')" not in interaction_block
+    assert "_sessionListLastPointerMoveAt" in interaction_block
+    assert "_sessionListLastKeyboardAt" in interaction_block
     assert "_sessionListLastScrollAt=Date.now();" in schedule_block
-    for event_name in ["pointerdown", "pointerup", "pointercancel", "pointerleave"]:
+    for event_name in ["pointerdown", "pointerup", "pointercancel", "pointerleave", "pointermove", "keydown"]:
         assert event_name in ensure_block
     assert "_sessionListPointerActive=true;" in ensure_block
     assert "_sessionListPointerActive=false;" in ensure_block

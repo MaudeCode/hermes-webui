@@ -1979,29 +1979,47 @@ def _cancelled_turn_content(message: str = 'Task cancelled.', agent_name: str | 
     )
 
 
-def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> None:
+def _persist_cancelled_turn(
+    session,
+    *,
+    message: str = 'Task cancelled.',
+    stream_id: str | None = None,
+) -> bool:
     """Persist a user-cancelled terminal state without provider-error wording.
 
-    cancel_stream() usually writes this marker first, but the streaming thread can
-    later unwind through the silent-failure or exception path. Those paths must
-    not append a misleading provider no-response error after an explicit cancel.
+    Cancel usually writes this marker before the worker finishes unwinding. A
+    late worker must never clear or materialize a newer turn that now owns the
+    same session.
     """
+    active_stream_id = str(getattr(session, 'active_stream_id', None) or '')
+    if stream_id and active_stream_id and active_stream_id != str(stream_id):
+        logger.info(
+            "Skipping stale cancelled-turn finalization for stream %s; active_stream_id=%s",
+            stream_id,
+            active_stream_id,
+        )
+        return False
+    # cancel_stream() normally persisted the terminal marker already. Check this
+    # BEFORE touching pending state so a delayed worker cannot consume a successor
+    # turn merely to discover that its own marker was already present.
+    if _session_has_cancel_marker(session):
+        return False
     _materialize_pending_user_turn_before_error(session)
     session.active_stream_id = None
     session.pending_user_message = None
     session.pending_attachments = []
     session.pending_started_at = None
     session.pending_user_source = None
-    if not _session_has_cancel_marker(session):
-        agent_name = _preferred_agent_display_name_for_session(session)
-        session.messages.append({
-            'role': 'assistant',
-            'content': _cancelled_turn_content(message, agent_name),
-            '_error': True,
-            'provider_details': str(message or 'Task cancelled.').strip(),
-            'provider_details_label': 'Cancellation details',
-            'timestamp': int(time.time()),
-        })
+    agent_name = _preferred_agent_display_name_for_session(session)
+    session.messages.append({
+        'role': 'assistant',
+        'content': _cancelled_turn_content(message, agent_name),
+        '_error': True,
+        'provider_details': str(message or 'Task cancelled.').strip(),
+        'provider_details_label': 'Cancellation details',
+        'timestamp': int(time.time()),
+    })
+    return True
 
 
 def _cleanup_ephemeral_cancelled_turn(session) -> None:
@@ -2018,16 +2036,24 @@ def _cleanup_ephemeral_cancelled_turn(session) -> None:
         logger.debug("Failed to clean up ephemeral cancelled session", exc_info=True)
 
 
-def _finalize_cancelled_turn(session, *, ephemeral: bool = False, message: str = 'Task cancelled.') -> None:
+def _finalize_cancelled_turn(
+    session,
+    *,
+    ephemeral: bool = False,
+    message: str = 'Task cancelled.',
+    stream_id: str | None = None,
+) -> bool:
     """Finalize a cancelled turn for persistent or ephemeral sessions."""
     if ephemeral:
         _cleanup_ephemeral_cancelled_turn(session)
-        return
-    _persist_cancelled_turn(session, message=message)
+        return True
+    if not _persist_cancelled_turn(session, message=message, stream_id=stream_id):
+        return False
     try:
         session.save()
     except Exception:
         logger.debug("Failed to persist cancelled turn", exc_info=True)
+    return True
 
 
 def _aiagent_import_error_detail() -> str:
@@ -8199,7 +8225,12 @@ def _run_agent_streaming(
         # Check for pre-flight cancel (user cancelled before agent even started)
         if cancel_event.is_set():
             with _agent_lock:
-                _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.')
+                _finalize_cancelled_turn(
+                    s,
+                    ephemeral=ephemeral,
+                    message='Task cancelled before start.',
+                    stream_id=stream_id,
+                )
             put('cancel', _cancel_event_payload('Cancelled before start'))
             return
 
@@ -9485,7 +9516,12 @@ def _run_agent_streaming(
                     except Exception:
                         logger.debug("Failed to interrupt agent before start")
                     with _agent_lock:
-                        _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.')
+                        _finalize_cancelled_turn(
+                            s,
+                            ephemeral=ephemeral,
+                            message='Task cancelled before start.',
+                            stream_id=stream_id,
+                        )
                     put('cancel', _cancel_event_payload('Cancelled by user'))
                     return
 
@@ -9688,7 +9724,7 @@ def _run_agent_streaming(
                     _cleanup_ephemeral_cancelled_turn(s)
                 else:
                     with _agent_lock:
-                        _finalize_cancelled_turn(s, ephemeral=False)
+                        _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                         try:
                             append_turn_journal_event_for_stream(
                                 s.session_id,
@@ -9730,7 +9766,7 @@ def _run_agent_streaming(
                 _ckpt_thread.join(timeout=15)
             if cancel_event.is_set():
                 with _agent_lock:
-                    _finalize_cancelled_turn(s, ephemeral=False)
+                    _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                     try:
                         append_turn_journal_event_for_stream(
                             s.session_id,
@@ -9791,7 +9827,7 @@ def _run_agent_streaming(
                         if isinstance(result, dict):
                             result = {**result, 'messages': _result_messages}
                     if cancel_event.is_set():
-                        _finalize_cancelled_turn(s, ephemeral=False)
+                        _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                         try:
                             append_turn_journal_event_for_stream(
                                 s.session_id,
@@ -10043,7 +10079,7 @@ def _run_agent_streaming(
                 # _token_sent tracks whether on_token() was called (any streamed text)
                 if _terminal_failure or (not _assistant_added and not _token_sent):
                     if cancel_event.is_set():
-                        _finalize_cancelled_turn(s, ephemeral=ephemeral)
+                        _finalize_cancelled_turn(s, ephemeral=ephemeral, stream_id=stream_id)
                         if not ephemeral:
                             try:
                                 append_turn_journal_event_for_stream(
@@ -10704,7 +10740,7 @@ def _run_agent_streaming(
                         except Exception:
                             logger.debug("Failed to append assistant_started turn journal event", exc_info=True)
                 if cancel_event.is_set():
-                    _finalize_cancelled_turn(s, ephemeral=False)
+                    _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                     try:
                         append_turn_journal_event_for_stream(
                             s.session_id,
@@ -10722,7 +10758,7 @@ def _run_agent_streaming(
                 with _stream_writeback_stage(_writeback_timings, "session_save"):
                     s.save()
                 if cancel_event.is_set():
-                    _finalize_cancelled_turn(s, ephemeral=False)
+                    _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                     try:
                         append_turn_journal_event_for_stream(
                             s.session_id,
@@ -10826,7 +10862,7 @@ def _run_agent_streaming(
             _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
             with _lock_ctx:
                 if cancel_event.is_set():
-                    _finalize_cancelled_turn(s, ephemeral=False)
+                    _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                     try:
                         append_turn_journal_event_for_stream(
                             s.session_id,
@@ -10858,7 +10894,7 @@ def _run_agent_streaming(
                             s.save(touch_updated_at=False)
                         except Exception:
                             logger.debug("Failed to persist restored process wakeup pause", exc_info=True)
-                        _finalize_cancelled_turn(s, ephemeral=False)
+                        _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                         try:
                             append_turn_journal_event_for_stream(
                                 s.session_id,
@@ -10881,7 +10917,7 @@ def _run_agent_streaming(
                             s.save(touch_updated_at=False)
                         except Exception:
                             logger.debug("Failed to persist restored process wakeup pause", exc_info=True)
-                        _finalize_cancelled_turn(s, ephemeral=False)
+                        _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                         try:
                             append_turn_journal_event_for_stream(
                                 s.session_id,
@@ -11239,18 +11275,25 @@ def _run_agent_streaming(
                     _ckpt_thread.join(timeout=15)
                 _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
                 with _lock_ctx:
+                    _pause_recorded = False
                     if (
                         not ephemeral
                         and _turn_pending_source == 'process_wakeup'
                         and _exc_is_credential_pool_empty
                     ):
-                        record_process_wakeup_provider_unavailable_pause(
+                        _pause_recorded = record_process_wakeup_provider_unavailable_pause(
                             s,
                             classification=_classification['type'],
                             model=_turn_route_model,
                             provider=_turn_route_provider,
                         )
-                    _finalize_cancelled_turn(s, ephemeral=ephemeral)
+                    _cancel_finalized = _finalize_cancelled_turn(
+                        s,
+                        ephemeral=ephemeral,
+                        stream_id=stream_id,
+                    )
+                    if _pause_recorded and not _cancel_finalized:
+                        s.save(touch_updated_at=False)
                     if not ephemeral:
                         try:
                             append_turn_journal_event_for_stream(

@@ -392,7 +392,9 @@ def test_session_visit_overlapping_stale_calls_do_not_duplicate_over_budget_rebu
 
     assert all(result == stale_catalog for result in results)
     assert rebuild_count == 1
-    time.sleep(0.1)
+    deadline = time.monotonic() + 2.0
+    while cfg._available_models_cache != rebuilt_catalog and time.monotonic() < deadline:
+        time.sleep(0.01)
     assert cfg._available_models_cache == rebuilt_catalog
     assert cfg._cache_build_in_progress is False
 

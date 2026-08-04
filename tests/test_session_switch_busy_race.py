@@ -62,6 +62,18 @@ def test_loadSession_snapshots_live_turn_before_wiping_message_pane():
     assert snap_pos < wipe_pos, "snapshot must run before msgInner is replaced with the loading placeholder"
 
 
+def test_loadSession_shows_loading_state_before_durable_draft_save_wait():
+    body = _function_body(SESSIONS_SRC, "async function loadSession(")
+
+    wipe_pos = body.find("Loading conversation...")
+    draft_wait_pos = body.find("await _saveComposerDraftNow(")
+    assert wipe_pos != -1, "cross-session navigation must show a loading state"
+    assert draft_wait_pos != -1, "cross-session navigation must still durably save the outgoing draft"
+    assert wipe_pos < draft_wait_pos, (
+        "visual session-switch feedback must not wait for the outgoing draft's network save"
+    )
+
+
 def test_loadSession_restores_live_turn_on_active_stream_return_path():
     body = _function_body(SESSIONS_SRC, "async function loadSession(")
 

@@ -346,6 +346,27 @@ def test_background_unmapped_expired_durable_event_is_quarantined(monkeypatch):
     assert peu.async_delivery_retry_timer_count() == 0
 
 
+def test_expired_unroutable_claim_contention_retries_on_completion_queue(monkeypatch):
+    registry = _FakeProcessRegistry()
+    evt = _async_delegation_event(
+        session_key="missing-session",
+        completed_at=time.time()
+        - bp.ASYNC_DELIVERY_UNROUTABLE_MAX_AGE_SECONDS
+        - 1,
+    )
+    scheduled = []
+    monkeypatch.setattr(bp, "claim_async_delegation_delivery", lambda *_args: None)
+    monkeypatch.setattr(
+        bp,
+        "schedule_async_delegation_claim_retry",
+        lambda event, completion_queue: scheduled.append((event, completion_queue)) or True,
+    )
+
+    bp._retry_or_quarantine_unroutable_async_delegation(registry, evt)
+
+    assert scheduled == [(evt, registry.completion_queue)]
+
+
 def test_background_completion_follows_exact_owner_to_live_continuation(monkeypatch):
     _reset_wakeup_state()
     _install_fake_process_registry(monkeypatch)

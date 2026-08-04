@@ -26,7 +26,7 @@ class _DummySession:
     def __init__(self, path: str = ''):
         self.path = path
         self.messages = []
-        self.active_stream_id = 'stream-1'
+        self.active_stream_id: str | None = 'stream-1'
         self.pending_user_message = 'hello'
         self.pending_attachments = ['a.txt']
         self.pending_started_at = 123
@@ -89,6 +89,44 @@ class TestCancelledTurnFinalizer:
         assert session.messages[-1]['provider_details'] == 'Task cancelled.'
         assert session.messages[-1]['provider_details_label'] == 'Cancellation details'
         assert session.messages[-1]['_error'] is True
+
+    def test_stale_cancelled_worker_does_not_touch_successor_turn(self):
+        session = _DummySession()
+        session.active_stream_id = "stream-2"
+        session.pending_user_message = "successor message"
+        session.pending_attachments = ["successor.txt"]
+
+        persisted = _finalize_cancelled_turn(
+            session,
+            ephemeral=False,
+            stream_id="stream-1",
+        )
+
+        assert persisted is False
+        assert session.active_stream_id == "stream-2"
+        assert session.pending_user_message == "successor message"
+        assert session.pending_attachments == ["successor.txt"]
+        assert session.messages == []
+        assert session.saved == 0
+
+    def test_existing_cancel_marker_is_checked_before_pending_state_mutation(self):
+        session = _DummySession()
+        session.active_stream_id = None
+        session.pending_user_message = "successor message"
+        session.messages = [{"role": "assistant", "content": "**Task cancelled:** old turn."}]
+
+        persisted = _finalize_cancelled_turn(
+            session,
+            ephemeral=False,
+            stream_id="stream-1",
+        )
+
+        assert persisted is False
+        assert session.pending_user_message == "successor message"
+        assert session.messages == [
+            {"role": "assistant", "content": "**Task cancelled:** old turn."}
+        ]
+        assert session.saved == 0
 
     def test_ephemeral_cancel_finalizer_unlinks_temp_session_without_saving_error_marker(self, tmp_path):
         temp_session = tmp_path / 'btw-session.json'

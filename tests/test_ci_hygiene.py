@@ -42,7 +42,8 @@ def test_local_test_runner_uses_supported_venv_before_pytest_collection():
     assert '"$VENV_DIR/bin/python" "$VENV_DIR/Scripts/python.exe"' in runner
     assert 'if [[ -x "$candidate" ]]; then' in resolve_body
     assert 'printf \'%s\\n\' "$candidate"' in resolve_body
-    assert "exec \"$PYTHON_BIN\" -m pytest" in runner
+    assert '"$PYTHON_BIN" -m pytest "$@"' in runner
+    assert "trap cleanup_auto_test_state EXIT" in runner
     # Destructive-fs guard: never create/clear a virtualenv through a symlinked .venv
     # (`python -m venv --clear` would empty the symlink's target).
     assert '-L "$VENV_DIR"' in runner

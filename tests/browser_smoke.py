@@ -93,6 +93,17 @@ def main():
         return 2
 
     state_dir = tempfile.mkdtemp(prefix="hermes-browser-smoke-")
+    no_agent_dir = os.path.join(state_dir, "no-agent")
+    plugins_dir = os.path.join(state_dir, "plugins")
+    workspace_dir = os.path.join(state_dir, "workspace")
+    os.makedirs(no_agent_dir, exist_ok=True)
+    os.makedirs(plugins_dir, exist_ok=True)
+    os.makedirs(workspace_dir, exist_ok=True)
+    # Discovery deliberately accepts source roots, not arbitrary directories.
+    # A minimal module keeps this test hermetic while still exercising the
+    # supported explicit-agent-dir path.
+    with open(os.path.join(no_agent_dir, "run_agent.py"), "w", encoding="utf-8") as f:
+        f.write("# agent-free browser smoke sentinel\n")
     env = os.environ.copy()
     # Strip real provider keys so nothing leaks into the smoke server.
     for k in list(env):
@@ -104,10 +115,22 @@ def main():
         "HERMES_WEBUI_STATE_DIR": state_dir,
         "HERMES_HOME": state_dir,
         "HERMES_BASE_HOME": state_dir,
+        "HERMES_WEBUI_DEFAULT_WORKSPACE": workspace_dir,
+        "HERMES_WEBUI_PLUGINS_DIR": plugins_dir,
+        # Never inherit the operator's production auth setting: a redirect to
+        # /login would make all three routes exercise the same login page rather
+        # than the application shell this gate is meant to protect.
+        "HERMES_WEBUI_PASSWORD": "",
         "HERMES_WEBUI_SKIP_ONBOARDING": "1",
-        # Point agent discovery at a path that doesn't exist — the server is
-        # designed to boot and serve the UI even when the agent is absent.
-        "HERMES_WEBUI_AGENT_DIR": os.path.join(state_dir, "no-agent"),
+        # Keep bootstrap on this isolated test interpreter. Without the explicit
+        # override it may re-exec into a discovered production agent venv before
+        # the page-load gate starts, coupling this agent-free smoke to unrelated
+        # provider/plugin dependencies on the host.
+        "HERMES_WEBUI_PYTHON": sys.executable,
+        # Point discovery at the minimal isolated source root above. A nonexistent
+        # override is intentionally skipped by startup discovery, which would fall
+        # through to ~/.hermes/hermes-agent and defeat the isolation promised here.
+        "HERMES_WEBUI_AGENT_DIR": no_agent_dir,
     })
 
     log = open(os.path.join(state_dir, "server.log"), "w")
@@ -133,9 +156,9 @@ def main():
                 ctx = browser.new_context(base_url=BASE)
                 page = ctx.new_page()
                 errors = []
-                page.on("console", lambda m: errors.append(("console", m.text))
+                page.on("console", lambda m, errors=errors: errors.append(("console", m.text))
                         if m.type == "error" else None)
-                page.on("pageerror", lambda e: errors.append(("pageerror", str(e))))
+                page.on("pageerror", lambda e, errors=errors: errors.append(("pageerror", str(e))))
 
                 page.goto(path, wait_until="domcontentloaded")
                 # Give boot.js / view init time to run and throw if it's going to.

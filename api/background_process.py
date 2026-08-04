@@ -1151,7 +1151,10 @@ def _retry_or_quarantine_unroutable_async_delegation(
         "webui-unroutable-quarantine",
     )
     if claim is None:
-        schedule_async_delegation_claim_retry(process_registry, evt)
+        schedule_async_delegation_claim_retry(
+            evt,
+            getattr(process_registry, "completion_queue", None),
+        )
         return
     if drop_async_delegation_delivery(evt, claim):
         logger.warning(

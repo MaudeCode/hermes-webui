@@ -8732,9 +8732,11 @@ _VERIFIED_LINEAGE_ANCHOR_CACHE_MAX = 256
 def _verified_lineage_anchor_timestamp(session, anchor_key, lineage_state_messages=None):
     """Verify a continuation anchor once and return its state.db timestamp."""
     sid = getattr(session, 'session_id', None)
+    profile = getattr(session, 'profile', None)
     cache_key = None
     if lineage_state_messages is None and sid and isinstance(anchor_key, dict):
         cache_key = (
+            str(profile or 'default'),
             str(sid),
             str(anchor_key.get('role') or ''),
             _normalized_compression_anchor_text(anchor_key.get('text')),
@@ -8748,7 +8750,7 @@ def _verified_lineage_anchor_timestamp(session, anchor_key, lineage_state_messag
         lineage_state_messages = get_state_db_session_messages(
             sid,
             stitch_continuations=True,
-            profile=getattr(session, 'profile', None),
+            profile=profile,
         )
     lineage_rows = list(lineage_state_messages or [])
     lineage_anchor_index = _state_db_anchor_index(lineage_rows, anchor_key)

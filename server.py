@@ -10,6 +10,8 @@ import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
 def _ignore_sigpipe() -> None:
     """Keep broken client writes from terminating the server process."""
     if (sigpipe := getattr(signal, "SIGPIPE", None)) is not None:
@@ -107,6 +109,7 @@ from api.helpers import (
     _build_csp_report_only_policy,
     _CLIENT_DISCONNECT_ERRORS,
 )
+from api.http_server import bind_without_reverse_dns
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers
 from api.startup import auto_install_agent_deps, fix_credential_permissions
@@ -143,16 +146,12 @@ class QuietHTTPServer(ThreadingHTTPServer):
             self.allow_reuse_address = False
             SO_EXCLUSIVEADDRUSE = getattr(socket, 'SO_EXCLUSIVEADDRUSE', -5)
             self.socket.setsockopt(socket.SOL_SOCKET, SO_EXCLUSIVEADDRUSE, 1)
-            # Retry bind on Windows to handle the case where a previous
-            # process (e.g. during self-update) is still releasing the port.
-            # The old process calls os._exit(0) which starts tearing down
-            # its socket, but with SO_EXCLUSIVEADDRUSE the OS blocks new
-            # binds until the teardown completes.  Retry for up to 10 s.
+            # Allow a previous self-update process up to 10 seconds to release the port.
             max_retries = 20
             retry_delay = 0.5
             for attempt in range(max_retries):
                 try:
-                    super().server_bind()
+                    bind_without_reverse_dns(self)
                     return
                 except OSError as e:
                     if e.winerror == 10048 and attempt < max_retries - 1:  # WSAEADDRINUSE
@@ -160,7 +159,7 @@ class QuietHTTPServer(ThreadingHTTPServer):
                     else:
                         raise
         else:
-            super().server_bind()
+            bind_without_reverse_dns(self)
 
     def get_request(self):
         """Accept raw sockets and defer TLS handshake work to request threads."""

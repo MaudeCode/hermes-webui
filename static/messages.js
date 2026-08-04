@@ -1296,6 +1296,16 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   return restoredVisible;
 }
 
+function _abortSendAfterOwnerSwitch(activeSid, draftText, filesSnapshot, clearPromise){
+  const visibleSid=(S.session&&S.session.session_id)||null;
+  if(visibleSid===activeSid) return false;
+  _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, activeSid, clearPromise);
+  if(typeof showToast==='function'){
+    showToast('Send paused after the session switch. Your message is saved in the original draft.',3200);
+  }
+  return true;
+}
+
 async function send(){
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
@@ -1599,6 +1609,7 @@ async function send(){
   let uploaded=[];
   try{uploaded=await uploadPendingFiles({files:_submittedFiles, sessionId:activeSid, clearPending:false});}
   catch(e){if(!text){setComposerStatus(`Upload error: ${e.message}`);return;}}
+  if(_abortSendAfterOwnerSwitch(activeSid,_failedSendDraftText,_failedSendFilesSnapshot,_composerDraftClearPromise)) return;
   // Clear the uploading status now that upload is done — if we don't clear here
   // it stays visible for the entire duration of the agent stream, since
   // setComposerStatus('') is only called in setBusy(false), not setBusy(true).
@@ -1613,6 +1624,7 @@ async function send(){
     const _pending=_forcedSkillDirectivePending;
     if(!_pending.sessionId||_pending.sessionId===activeSid){
       const _directivePayload = await _pending.promise;
+      if(_abortSendAfterOwnerSwitch(activeSid,_failedSendDraftText,_failedSendFilesSnapshot,_composerDraftClearPromise)) return;
       if(_forcedSkillDirectivePending===_pending)_forcedSkillDirectivePending = null;
       if(_directivePayload){
         const _directive = typeof _directivePayload==='string'
