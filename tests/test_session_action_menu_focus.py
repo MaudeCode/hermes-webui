@@ -42,6 +42,24 @@ def _fixture_script() -> str:
             "let _sessionActionAnchor = null;",
             "let _sessionActionSessionId = null;",
             "let _sessionActionPreviousFocus = null;",
+            "let _sessionActionMenuRenderPending = false;",
+            "let _sessionActionMenuRepaints = 0;",
+            "let _sessionActionMenuReplaceRowsOnRender = false;",
+            "let _sessionActionMenuReplacementFocusTarget = null;",
+            "function renderSessionListFromCache(){",
+            "  _sessionActionMenuRepaints += 1;",
+            "  if(!_sessionActionMenuReplaceRowsOnRender) return;",
+            "  const oldRow=document.querySelector('.session-item[data-sid=focus-refresh]');",
+            "  if(!oldRow) return;",
+            "  const replacement=document.createElement('div');",
+            "  replacement.className='session-item';",
+            "  replacement.dataset.sid='focus-refresh';",
+            "  const trigger=document.createElement('button');",
+            "  trigger.className='session-actions-trigger';",
+            "  replacement.appendChild(trigger);",
+            "  oldRow.replaceWith(replacement);",
+            "  _sessionActionMenuReplacementFocusTarget=trigger;",
+            "}",
             "const esc = value => String(value);",
             "function _positionSessionActionMenu(){}",
             "function _playSessionActionMenuEntrance(){}",
@@ -118,6 +136,97 @@ def _fixture_script() -> str:
               row.remove();
               return result;
             };
+
+            window.__sessionActionMenuPendingRenderResult = () => {
+              _sessionActionMenuRepaints = 0;
+              const row = document.createElement('div');
+              row.className = 'session-item';
+              const trigger = document.createElement('button');
+              trigger.className = 'session-actions-trigger';
+              row.appendChild(trigger);
+              document.body.appendChild(row);
+              const menu = document.createElement('div');
+              menu.className = 'session-action-menu';
+              menu.id = 'sessionActionMenu-pending-render-test';
+              menu.appendChild(_buildSessionAction('Rename conversation', '', '', () => {}));
+              _mountSessionActionMenu(menu, {session_id: 'pending-render-test'}, trigger);
+              _sessionActionMenuRenderPending = true;
+              closeSessionActionMenu();
+              const result = {
+                menuRemoved: !document.querySelector('.session-action-menu'),
+                pendingCleared: !_sessionActionMenuRenderPending,
+                repaintCount: _sessionActionMenuRepaints,
+              };
+              row.remove();
+              return result;
+            };
+
+            window.__sessionActionMenuReplaceResult = () => {
+              _sessionActionMenuRepaints = 0;
+              const rowA = document.createElement('div');
+              rowA.className = 'session-item';
+              const triggerA = document.createElement('button');
+              triggerA.className = 'session-actions-trigger';
+              rowA.appendChild(triggerA);
+              const rowB = document.createElement('div');
+              rowB.className = 'session-item';
+              const triggerB = document.createElement('button');
+              triggerB.className = 'session-actions-trigger';
+              rowB.appendChild(triggerB);
+              document.body.append(rowA, rowB);
+              const menuA = document.createElement('div');
+              menuA.id = 'menu-a';
+              menuA.appendChild(_buildSessionAction('A', '', '', () => {}));
+              _mountSessionActionMenu(menuA, {session_id: 'a'}, triggerA);
+              _sessionActionMenuRenderPending = true;
+              closeSessionActionMenu({flushPendingRender:false});
+              const beforeB = {
+                repaintCount: _sessionActionMenuRepaints,
+                pending: _sessionActionMenuRenderPending,
+                anchorConnected: triggerB.isConnected,
+              };
+              const menuB = document.createElement('div');
+              menuB.id = 'menu-b';
+              menuB.appendChild(_buildSessionAction('B', '', '', () => {}));
+              _mountSessionActionMenu(menuB, {session_id: 'b'}, triggerB);
+              closeSessionActionMenu();
+              const result = {
+                beforeB,
+                finalRepaintCount: _sessionActionMenuRepaints,
+                pendingCleared: !_sessionActionMenuRenderPending,
+              };
+              rowA.remove();
+              rowB.remove();
+              return result;
+            };
+
+            window.__sessionActionMenuRepaintFocusResult = () => {
+              _sessionActionMenuRepaints = 0;
+              _sessionActionMenuReplaceRowsOnRender = true;
+              _sessionActionMenuReplacementFocusTarget = null;
+              const row = document.createElement('div');
+              row.className = 'session-item';
+              row.dataset.sid = 'focus-refresh';
+              const trigger = document.createElement('button');
+              trigger.className = 'session-actions-trigger';
+              row.appendChild(trigger);
+              document.body.appendChild(row);
+              trigger.focus();
+              const menu = document.createElement('div');
+              menu.id = 'menu-focus-refresh';
+              menu.appendChild(_buildSessionAction('A', '', '', () => {}));
+              _mountSessionActionMenu(menu, {session_id: 'focus-refresh'}, trigger);
+              _sessionActionMenuRenderPending = true;
+              closeSessionActionMenu({restoreFocus:true});
+              const result = {
+                repaintCount: _sessionActionMenuRepaints,
+                replacementFocused: document.activeElement === _sessionActionMenuReplacementFocusTarget,
+              };
+              _sessionActionMenuReplaceRowsOnRender = false;
+              const replacementRow=document.querySelector('.session-item[data-sid=focus-refresh]');
+              if(replacementRow) replacementRow.remove();
+              return result;
+            };
             """,
         ]
     )
@@ -176,3 +285,80 @@ def test_session_action_menu_returns_to_prior_focus_for_nonfocusable_opener_in_b
         "menuRemovedOnEscape": True,
         "focusReturnedToPreviousControl": True,
     }
+
+
+def test_session_action_menu_close_flushes_deferred_sidebar_render_in_browser():
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run the session action menu browser test")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        page = browser.new_page()
+        page.set_content("<!doctype html><html><body></body></html>")
+        page.add_script_tag(content=_fixture_script())
+        result = page.evaluate("window.__sessionActionMenuPendingRenderResult()")
+        browser.close()
+
+    assert result == {
+        "menuRemoved": True,
+        "pendingCleared": True,
+        "repaintCount": 1,
+    }
+
+
+def test_render_guard_records_that_action_menu_suppressed_a_repaint():
+    source = _function_source("renderSessionListFromCache")
+    guard = source.index("if(_sessionActionMenu)")
+    assert "_sessionActionMenuRenderPending" in source[guard : guard + 180]
+
+
+def test_replacing_action_menu_carries_deferred_render_until_new_menu_closes():
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run the session action menu browser test")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        page = browser.new_page()
+        page.set_content("<!doctype html><html><body></body></html>")
+        page.add_script_tag(content=_fixture_script())
+        result = page.evaluate("window.__sessionActionMenuReplaceResult()")
+        browser.close()
+
+    assert result == {
+        "beforeB": {"repaintCount": 0, "pending": True, "anchorConnected": True},
+        "finalRepaintCount": 1,
+        "pendingCleared": True,
+    }
+
+    open_source = _function_source("_openSessionActionMenu")
+    assert "closeSessionActionMenu({flushPendingRender:false})" in open_source
+
+
+def test_deferred_repaint_restores_focus_to_the_replacement_trigger():
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run the session action menu browser test")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        page = browser.new_page()
+        page.set_content("<!doctype html><html><body></body></html>")
+        page.add_script_tag(content=_fixture_script())
+        result = page.evaluate("window.__sessionActionMenuRepaintFocusResult()")
+        browser.close()
+
+    assert result == {"repaintCount": 1, "replacementFocused": True}

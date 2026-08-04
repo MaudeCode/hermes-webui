@@ -20,7 +20,7 @@ def test_clear_composer_draft_suppresses_same_session_stale_restore():
     assert "function _suppressComposerDraftRestoreAfterSubmit(sid, text, files)" in SESSIONS_JS
     clear_body = _block(SESSIONS_JS, "function _clearComposerDraft(sid, text, files)", "const SESSION_VIEWED_COUNTS_KEY")
     suppress_idx = clear_body.index("_suppressComposerDraftRestoreAfterSubmit(sid, text, files);")
-    post_idx = clear_body.index("api('/api/session/draft'")
+    post_idx = clear_body.index("_postComposerDraft(sid, '', [])")
     assert suppress_idx < post_idx, "restore suppression must be local and immediate before async POST"
 
 
@@ -29,6 +29,128 @@ def test_non_empty_draft_save_clears_submit_restore_suppression():
     assert "_clearComposerDraftRestoreSuppression(sid);" in save_body
     now_body = _block(SESSIONS_JS, "function _saveComposerDraftNow(sid, text, files)", "// Restore composer draft")
     assert "_clearComposerDraftRestoreSuppression(sid);" in now_body
+
+
+def test_all_draft_mutations_share_persisted_monotonic_ordering():
+    """Autosave, switch-save, and submit-clear must use one revision allocator."""
+    save_body = _block(SESSIONS_JS, "function _saveComposerDraft(sid, text, files)", "function _composerDraftHasPayload")
+    now_body = _block(SESSIONS_JS, "function _saveComposerDraftNow(sid, text, files)", "// Restore composer draft")
+    clear_body = _block(SESSIONS_JS, "function _clearComposerDraft(sid, text, files)", "const SESSION_VIEWED_COUNTS_KEY")
+
+    assert "_postComposerDraft(sid, normalizedText, normalizedFiles)" in save_body
+    assert "_postComposerDraft(sid, normalizedText, normalizedFiles)" in now_body
+    assert "_postComposerDraft(sid, '', [])" in clear_body
+    assert "localStorage.getItem(_COMPOSER_DRAFT_VERSION_KEY)" in SESSIONS_JS
+    assert "draft_version: draftVersion" in SESSIONS_JS
+    assert "error.status === 409" in SESSIONS_JS
+    assert "Do not retry a stale mutation" in SESSIONS_JS
+
+
+def test_draft_revision_allocator_advances_across_reload_floor():
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+
+    version_fns = _block(
+        SESSIONS_JS,
+        "function _composerDraftVersionCeiling()",
+        "function _composerDraftFileSignature(file)",
+    )
+    persist_fn = _block(
+        SESSIONS_JS,
+        "function _composerDraftFilesForPersist(files)",
+        "function _composerDraftPayloadSignature(text, files)",
+    )
+    harness = textwrap.dedent(
+        """
+        const _COMPOSER_DRAFT_VERSION_KEY = 'test-version';
+        const _COMPOSER_DRAFT_MAX_FUTURE_MS = 300000;
+        let _composerDraftVersionFloor = 0;
+        let _composerDraftTrustedServerFloor = 0;
+        const values = new Map();
+        const localStorage = {
+          getItem: (key) => values.has(key) ? values.get(key) : null,
+          setItem: (key, value) => values.set(key, String(value)),
+          removeItem: (key) => values.delete(key),
+        };
+        Date.now = () => 1700000000000;
+        const posts = [];
+        async function api(_path, opts) {
+          const body = JSON.parse(opts.body);
+          posts.push(body);
+          return {draft_version: body.draft_version};
+        }
+        %(persist_fn)s
+        %(version_fns)s
+
+        (async () => {
+          const beforeReload = _nextComposerDraftVersion();
+          _composerDraftVersionFloor = 0; // new page process; localStorage survives
+          const afterReload = _nextComposerDraftVersion();
+          await _postComposerDraft('s', 'older save', []);
+          await _postComposerDraft('s', '', []);
+          console.log(JSON.stringify({beforeReload, afterReload, posts}));
+        })().catch((error) => { console.error(error); process.exit(1); });
+        """
+    ) % {"persist_fn": persist_fn, "version_fns": version_fns}
+
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    revisions = [int(out["beforeReload"]), int(out["afterReload"])] + [
+        int(post["draft_version"]) for post in out["posts"]
+    ]
+    assert revisions == sorted(set(revisions))
+    assert out["posts"][-1]["text"] == ""
+    assert out["posts"][-1]["files"] == []
+
+
+def test_draft_revision_allocator_recovers_from_poisoned_local_storage():
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+
+    version_fns = _block(
+        SESSIONS_JS,
+        "function _composerDraftVersionCeiling()",
+        "function _postComposerDraft(sid, text, files)",
+    )
+    harness = textwrap.dedent(
+        """
+        const _COMPOSER_DRAFT_VERSION_KEY = 'test-version';
+        const _COMPOSER_DRAFT_MAX_FUTURE_MS = 300000;
+        let _composerDraftVersionFloor = 0;
+        let _composerDraftTrustedServerFloor = 0;
+        const values = new Map([['test-version', String(Number.MAX_SAFE_INTEGER)]]);
+        const localStorage = {
+          getItem: (key) => values.has(key) ? values.get(key) : null,
+          setItem: (key, value) => values.set(key, String(value)),
+          removeItem: (key) => values.delete(key),
+        };
+        Date.now = () => 1700000000000;
+        %(version_fns)s
+        const revision = Number(_nextComposerDraftVersion());
+        console.log(JSON.stringify({revision, ceiling: _composerDraftVersionCeiling(), stored: values.get('test-version')}));
+        """
+    ) % {"version_fns": version_fns}
+
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert out["revision"] <= out["ceiling"]
+    assert int(out["stored"]) == out["revision"]
 
 
 def test_restore_skips_suppressed_non_empty_server_draft_only():

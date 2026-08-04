@@ -23,7 +23,8 @@ def _function_body(source: str, signature: str) -> str:
 def test_send_owner_switch_guard_saves_the_original_draft_without_touching_new_pane():
     helper = _function_body(MESSAGES, "function _abortSendAfterOwnerSwitch(")
 
-    assert "visibleSid===activeSid" in helper
+    assert "requestedSid" in helper
+    assert "visibleSid===activeSid&&requestedSid===activeSid" in helper
     assert "_restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, activeSid, clearPromise)" in helper
     assert "S.messages" not in helper
     assert "setBusy" not in helper
@@ -39,4 +40,3 @@ def test_send_rechecks_owner_after_each_prestart_await():
     second_guard = body.index("_abortSendAfterOwnerSwitch(", skill_wait)
     assert upload_wait < first_guard < skill_wait
     assert skill_wait < second_guard < optimistic_write
-

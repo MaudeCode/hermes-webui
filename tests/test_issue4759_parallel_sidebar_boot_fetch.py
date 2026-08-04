@@ -260,15 +260,19 @@ global.api = (url, opts) => {{
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_warm_refresh_parallelizes_projects_fetch_and_keeps_minimal_session_opts():
-    """Warm refresh uses minimal session opts, but still starts projects immediately."""
+def test_warm_refresh_reuses_bounded_project_cache_and_keeps_minimal_session_opts():
+    """Warm session polls do not re-fetch unchanged project metadata."""
     fetch_helper = _extract_function(SESSIONS_JS, "_loadSidebarSessionListPayload")
     script = f"""
 const calls = [];
 let resolveSessions;
 let resolveProjects;
 global._showAllProfiles = false;
-global._allProjects = [];
+global.S = {{activeProfile:'default'}};
+global.SESSION_PROJECT_REFRESH_INTERVAL_MS = 30000;
+global._sessionProjectsLastFetchedAt = Date.now();
+global._sessionProjectsLastFetchScope = 'default:active';
+global._allProjects = [{{name:'cached-demo'}}];
 global._sessionListHasLoadedOnce = true;
 global.api = (url, opts) => {{
   if (url.startsWith('/api/projects')) {{
@@ -295,7 +299,7 @@ global.api = (url, opts) => {{
   await Promise.resolve();
   const orderAtSettleBoundary = calls.map(call => call.endpoint);
   const sessionOpts = calls.find(call => call.endpoint === 'sessions').opts;
-  const projectOpts = calls.find(call => call.endpoint === 'projects').opts;
+  const projectCall = calls.find(call => call.endpoint === 'projects');
 
   resolveSessions({{
     sessions:[{{session_id:'warm-1'}}],
@@ -304,12 +308,11 @@ global.api = (url, opts) => {{
     archived_webui_count:0,
     archived_cli_count:0,
   }});
-  resolveProjects({{projects:[{{name:'demo'}}]}});
   const payload = await run;
   console.log(JSON.stringify({{
     orderAtSettleBoundary,
     sessionOpts,
-    projectOpts,
+    projectCall: projectCall || null,
     payload,
   }}));
 }})().catch(error => {{
@@ -319,8 +322,72 @@ global.api = (url, opts) => {{
 """
 
     body = _run_node(script)
-    assert body["orderAtSettleBoundary"] == ["projects", "sessions"]
+    assert body["orderAtSettleBoundary"] == ["sessions"]
     assert body["sessionOpts"] == {"timeoutToast": False}
-    assert body["projectOpts"] == {"timeoutToast": False}
+    assert body["projectCall"] is None
     assert body["payload"]["sessData"]["sessions"] == [{"session_id": "warm-1"}]
-    assert body["payload"]["projData"]["projects"] == [{"name": "demo"}]
+    assert body["payload"]["projData"]["projects"] == [{"name": "cached-demo"}]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_project_cache_has_a_hard_time_bound_and_scope_changes_bypass_it():
+    fetch_helper = _extract_function(SESSIONS_JS, "_loadSidebarSessionListPayload")
+    script = f"""
+let now = 100000;
+Date.now = () => now;
+global.S = {{activeProfile:'default'}};
+global._showAllProfiles = false;
+global._allProjects = [{{name:'cached'}}];
+global.SESSION_PROJECT_REFRESH_INTERVAL_MS = 30000;
+global._sessionProjectsLastFetchedAt = now;
+global._sessionProjectsLastFetchScope = 'default:active';
+const calls = [];
+global.api = (url) => {{
+  calls.push(url);
+  if(url.startsWith('/api/projects')) return Promise.resolve({{projects:[{{name:'fresh'}}]}});
+  return Promise.resolve({{sessions:[]}});
+}};
+{fetch_helper}
+
+(async () => {{
+  await _loadSidebarSessionListPayload('', {{}});
+  now += 30001;
+  await _loadSidebarSessionListPayload('', {{}});
+  global._showAllProfiles = true;
+  await _loadSidebarSessionListPayload('', {{}});
+  console.log(JSON.stringify(calls));
+}})().catch(error => {{ console.error(error); process.exit(1); }});
+"""
+
+    calls = _run_node(script)
+    assert calls == [
+        "/api/sessions",
+        "/api/projects",
+        "/api/sessions",
+        "/api/projects?all_profiles=1",
+        "/api/sessions",
+    ]
+
+
+def test_project_mutations_and_cross_tab_resume_invalidate_the_bounded_cache():
+    source = SESSIONS_JS
+    for endpoint in ("create", "rename", "delete"):
+        marker = f"api('/api/projects/{endpoint}'"
+        starts = [index for index in range(len(source)) if source.startswith(marker, index)]
+        assert starts, f"no project {endpoint} call found"
+        for start in starts:
+            assert "_invalidateSessionProjectsCache();" in source[start : start + 500]
+
+    resume = _extract_function(source, "_refreshSessionListAfterSidebarResume")
+    assert "_invalidateSessionProjectsCache();" in resume
+    event_handler = source[source.index("_sessionEventsSSE.addEventListener('sessions_changed'") :]
+    event_handler = event_handler[: event_handler.index("_sessionEventsSSE.onerror")]
+    assert "payload.reason.startsWith('project_')" in event_handler
+    assert "_invalidateSessionProjectsCache();" in event_handler
+
+
+def test_project_crud_publishes_profile_scoped_sidebar_invalidations():
+    routes_source = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
+    assert '_publish_session_list_changed("project_create", profile=proj.get("profile"))' in routes_source
+    assert '_publish_session_list_changed("project_rename", profile=active_profile)' in routes_source
+    assert '_publish_session_list_changed("project_delete", profile=active_profile)' in routes_source

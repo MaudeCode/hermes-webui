@@ -53,16 +53,21 @@ def test_helper_has_new_three_arg_signature_and_guards():
     assert "if(!restore&&!files.length) return false;" in body
     # Session-aware: never mutate a different session's visible composer.
     assert "const visibleSid=(S.session&&S.session.session_id)||null;" in body
-    assert "const belongsToVisible=!(sid&&visibleSid&&sid!==visibleSid);" in body
-    # Never clobber a message the user began typing during the async window.
-    assert "if(inp && !String(inp.value||'').trim()){" in body
+    assert "const belongsToVisible=visibleSid===sid" in body
+    assert "_loadingSessionId!==sid" in body
+    # Never clobber text or an attachment-only draft the user began typing
+    # during the async window.
+    assert "const hasNewerVisibleDraft=" in body
+    assert "S.pendingFiles" in body
+    assert "if(inp && !hasNewerVisibleDraft){" in body
     # Restores text and re-stages files.
     assert "inp.value=restore;" in body
     assert "S.pendingFiles=files;" in body
     # The deferred persist is stale-aware: re-reads the LIVE composer when the
     # failed session is still visible (Codex #5488 catch), rather than the
     # captured snapshot.
-    assert "const stillVisible=(S.session&&S.session.session_id)===sid;" in body
+    assert "const stillVisible=(S.session&&S.session.session_id)===sid" in body
+    assert "_loadingSessionId!==sid" in body
     assert "const liveText=inp?String(inp.value||''):restore;" in body
 
 
@@ -161,7 +166,9 @@ def test_restore_persist_chains_after_the_clear_promise():
 # Behavioral test — actually execute the helper in a JS sandbox
 # ---------------------------------------------------------------------------
 
-def _run_helper_in_node(draft_text, files_snapshot, initial_input, visible_sid, sid="sid-1"):
+def _run_helper_in_node(
+    draft_text, files_snapshot, initial_input, visible_sid, sid="sid-1", loading_sid=None,
+):
     """Execute _restoreComposerDraftAfterFailedSend in a node vm sandbox."""
     node = shutil.which("node")
     if not node:  # pragma: no cover
@@ -179,6 +186,7 @@ def _run_helper_in_node(draft_text, files_snapshot, initial_input, visible_sid, 
         };
         const $ = (id) => (id === 'msg' ? state.input : null);
         const S = {pendingFiles: state.pendingFiles, session: %(session)s};
+        let _loadingSessionId = %(loading_sid)s;
         function autoResize(){ state.input.resized = true; }
         function updateSendBtn(){ state.sendBtnUpdated = true; }
         function renderTray(){ state.trayRendered = true; }
@@ -200,6 +208,7 @@ def _run_helper_in_node(draft_text, files_snapshot, initial_input, visible_sid, 
     ) % {
         "initial_input": json.dumps(initial_input),
         "session": json.dumps({"session_id": visible_sid} if visible_sid else None),
+        "loading_sid": json.dumps(loading_sid),
         "helper": body,
         "draft_text": json.dumps(draft_text),
         "files": json.dumps(files_snapshot),
@@ -257,6 +266,68 @@ def test_does_not_pollute_a_different_visible_session():
     assert out["inputValue"] == ""
     assert out["pendingFiles"] == []
     assert out["saved"] == {"sid": "sid-1", "text": "failed on old session", "files": []}
+
+
+def test_navigation_requested_treats_still_installed_outgoing_pane_as_background():
+    """loadSession(B) sets _loadingSessionId before it awaits A's draft save,
+    while S.session still reports A. A failed send completing in that gap must
+    not put its payload back into the outgoing visible controls, but must retain
+    both text and persistable attachment references for A.
+    """
+    files = [{"name": "report.pdf", "path": "/uploads/report.pdf"}]
+    out = _run_helper_in_node(
+        "failed on A", files, "", visible_sid="sid-1", sid="sid-1", loading_sid="sid-2",
+    )
+    assert out["ret"] is False
+    assert out["inputValue"] == ""
+    assert out["pendingFiles"] == []
+    assert out["saved"] == {"sid": "sid-1", "text": "failed on A", "files": files}
+
+
+def test_navigation_requested_does_not_overwrite_newer_outgoing_draft():
+    """If A's controls contain a new draft when the failed send finishes, the
+    loadSession(A→B) save already owns that payload. Do not issue the older
+    failed-send snapshot later with a newer mutation revision."""
+    out = _run_helper_in_node(
+        "older failed send", [{"name": "older.txt"}], "newer draft",
+        visible_sid="sid-1", sid="sid-1", loading_sid="sid-2",
+    )
+    assert out["ret"] is False
+    assert out["inputValue"] == "newer draft"
+    assert out["saved"] is None
+
+
+def test_does_not_merge_failed_payload_into_newer_attachment_only_draft():
+    """An attachment-only draft created during the send await is non-empty and
+    must not be overwritten by the failed send's older file snapshot."""
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
+    body = _helper_body()
+    harness = textwrap.dedent(
+        """
+        let saved = null;
+        const newer = {name: 'newer.txt'};
+        const state = {input: {value: ''}};
+        const $ = (id) => (id === 'msg' ? state.input : null);
+        const S = {pendingFiles: [newer], session: {session_id: 'sid-1'}};
+        let _loadingSessionId = null;
+        function autoResize(){}
+        function updateSendBtn(){}
+        function renderTray(){}
+        function _saveComposerDraftNow(sid, text, files){ saved={sid,text,files}; }
+        %(helper)s
+        const ret=_restoreComposerDraftAfterFailedSend('older', [{name:'older.txt'}], 'sid-1', null);
+        console.log(JSON.stringify({ret,input:state.input.value,pending:S.pendingFiles,saved}));
+        """
+    ) % {"helper": body}
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert out["ret"] is False
+    assert out["input"] == ""
+    assert out["pending"] == [{"name": "newer.txt"}]
+    assert out["saved"] == {"sid": "sid-1", "text": "", "files": [{"name": "newer.txt"}]}
 
 
 def test_noop_when_nothing_to_restore():

@@ -5,6 +5,33 @@ settings.json reload that dominated /api/sessions response_write on large lists.
 import api.routes as routes
 
 
+def test_sidebar_payload_reuses_route_settings_without_a_second_disk_read(monkeypatch):
+    def _unexpected_load():
+        raise AssertionError("response serialization re-read settings.json")
+
+    monkeypatch.setattr(routes, "load_settings", _unexpected_load)
+    monkeypatch.setattr(routes, "_session_list_cache_overlay_runtime_rows", lambda rows: rows)
+
+    payload = {"sessions": [{"session_id": "s1", "title": "plain"}], "cli_count": 0}
+    response = routes._session_list_payload_to_response(
+        payload,
+        settings={"api_redact_enabled": False},
+    )
+
+    assert response["sessions"][0]["title"] == "plain"
+
+
+def test_sessions_route_threads_its_authoritative_settings_into_serializer():
+    import inspect
+
+    source = inspect.getsource(routes.handle_get)
+    route_start = source.index('if parsed.path == "/api/sessions":')
+    route_end = source.index('if parsed.path == "/api/projects":', route_start)
+    route = source[route_start:route_end]
+
+    assert "_session_list_payload_to_response(payload, settings=settings)" in route
+
+
 def test_sidebar_payload_reads_redaction_setting_once(monkeypatch):
     calls = {"n": 0}
 

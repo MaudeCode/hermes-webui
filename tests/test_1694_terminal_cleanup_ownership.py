@@ -197,11 +197,13 @@ def test_attach_live_stream_registers_one_source_per_session_stream():
     close_body = _function_body("closeLiveStream")
     attach_body = _function_body("attachLiveStream")
     wire_body = _function_body("_wireSSE")
+    install_body = _function_body("_installOwnedLiveStreamSource")
     error_body = _event_body("error")
 
     assert "const LIVE_STREAMS={};" in MESSAGES_JS
-    assert "LIVE_STREAMS[activeSid]={streamId,source};" in wire_body
-    assert "existingLive.source.close();" in wire_body
+    assert "_installOwnedLiveStreamSource(" in wire_body
+    assert "LIVE_STREAMS[sessionId]={streamId,source,ownerGeneration};" in install_body
+    assert "existing.source.close();" in install_body
     assert "if(source&&live.source!==source) return;" in close_body
     assert "existingLive&&existingLive.streamId===streamId" in attach_body
     assert "_closeSource(source);" in error_body

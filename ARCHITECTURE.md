@@ -445,6 +445,18 @@ Chat:
     appendThinking()      Adds three-dot animation to message list
     removeThinking()      Removes thinking dots (called on first token or on error)
 
+Chat/session durability invariants:
+    Composer draft mutations carry a monotonic browser revision. The server persists
+    that revision in the draft sidecar and rejects stale/conflicting writes, while
+    session deletion and draft persistence revalidate ownership under the same
+    per-session lock. A deleted session must never be recreated by a delayed autosave.
+    Live chat EventSources are owned by an in-memory session/stream generation and
+    reconnect replacement uses expected-source compare-and-swap semantics. A delayed
+    reconnect probe must not replace or close a newer transport after session switching.
+    Sidebar project metadata is cached for at most 30 seconds per profile scope and is
+    invalidated immediately by local CRUD, project session events, and focus/visibility
+    recovery; ordinary session polling does not reread projects on every refresh.
+
 Rendering:
     renderMessages()      Full rebuild of #msgInner from S.messages
     renderMd(raw)         Homegrown markdown renderer (see 5.4 for known gaps)

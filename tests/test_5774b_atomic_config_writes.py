@@ -100,11 +100,13 @@ def test_atomic_write_preserves_existing_user_xattr(tmp_path: Path) -> None:
         if exc.errno in {errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP}:
             pytest.skip("test filesystem does not support user extended attributes")
         raise
+    os.chmod(target, 0o2664)
 
     _atomic_write_text(target, "new: true\n")
 
     assert attribute in os.listxattr(target)
     assert os.getxattr(target, attribute) == value
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o2664
 
 
 @pytest.mark.skipif(not hasattr(os, "listxattr"), reason="xattr probe unavailable")
@@ -488,6 +490,7 @@ def test_atomic_write_preserves_hard_link_aliases(tmp_path: Path) -> None:
     alias = tmp_path / "shared-config.yaml"
     target.write_text("model:\n  default: old\n", encoding="utf-8")
     os.link(target, alias)
+    os.chmod(target, 0o2664)
     inode = os.stat(target).st_ino
 
     _atomic_write_text(target, "model:\n  default: new\n")
@@ -497,6 +500,29 @@ def test_atomic_write_preserves_hard_link_aliases(tmp_path: Path) -> None:
     assert os.stat(target).st_ino == inode
     assert os.stat(alias).st_ino == inode
     assert os.stat(target).st_nlink == 2
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o2664
+    assert stat.S_IMODE(os.stat(alias).st_mode) == 0o2664
+
+
+def test_temp_creation_denial_fallback_restores_mode_after_writing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Every in-place fallback must restore special bits cleared by a write."""
+    target = tmp_path / "config.yaml"
+    target.write_text("old: true\n", encoding="utf-8")
+    os.chmod(target, 0o2664)
+
+    from api import paths
+
+    def _deny_temp(*_args, **_kwargs):
+        raise PermissionError("simulated non-writable parent")
+
+    monkeypatch.setattr(paths, "_create_atomic_temp_file", _deny_temp)
+
+    _atomic_write_text(target, "new: true\n")
+
+    assert target.read_text(encoding="utf-8") == "new: true\n"
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o2664
 
 
 def test_symlink_retarget_during_write_aborts_without_touching_either_target(

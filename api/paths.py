@@ -185,6 +185,12 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
                 with fallback_file:
                     fallback_file.write(text)
                     fallback_file.flush()
+                    # Content changes clear setuid/setgid on macOS (and some
+                    # other POSIX filesystems). Every in-place compatibility
+                    # path funnels through here, so restore the inspected
+                    # inode's complete mode after writing and before syncing.
+                    if mode is not None and hasattr(os, "fchmod"):
+                        os.fchmod(fallback_file.fileno(), mode)
                     os.fsync(fallback_file.fileno())
             finally:
                 if owns_fallback_fd:

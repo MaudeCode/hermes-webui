@@ -81,7 +81,7 @@ def test_draft_validation_appears_before_persist():
     src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
     # Anchor on the unique POST-validation comment marker.
     marker_idx = src.find("Stage-326 hardening (per Opus advisor)")
-    persist_idx = src.find("current_draft = read_session_draft(", marker_idx)
+    persist_idx = src.find("current_draft, current_version = read_session_draft_state(", marker_idx)
     assert marker_idx != -1 and persist_idx != -1, (
         "could not locate validation marker or persist site"
     )
@@ -98,7 +98,7 @@ def test_draft_save_does_not_touch_session_updated_at():
     update and force-reloads the current chat a few seconds later.
     """
     src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
-    persist_idx = src.find("saved_draft = write_session_draft(sid, next_draft)")
+    persist_idx = src.find("saved_draft = write_session_draft(")
     assert persist_idx != -1, "changed drafts must persist through the atomic sidecar"
     shell_save_idx = src.find("s.save(touch_updated_at=False, skip_index=False)")
     assert shell_save_idx != -1, "a never-persisted session shell must preserve updated_at"
@@ -108,9 +108,9 @@ def test_draft_save_does_not_touch_session_updated_at():
 def test_draft_save_skips_unchanged_payload_before_persist():
     """Duplicate debounced draft POSTs should not rewrite the full session JSON."""
     src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
-    draft_idx = src.find("current_draft = read_session_draft(")
+    draft_idx = src.find("current_draft, current_version = read_session_draft_state(")
     unchanged_idx = src.find("if next_draft == current_draft", draft_idx)
-    save_idx = src.find("write_session_draft(sid, next_draft)", draft_idx)
+    save_idx = src.find("write_session_draft(", draft_idx)
 
     assert draft_idx != -1, "draft route should snapshot current composer_draft"
     assert unchanged_idx != -1, "draft route should no-op unchanged normalized payloads"

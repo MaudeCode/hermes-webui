@@ -2548,7 +2548,11 @@ def _build_session_list_cache_payload(
     }
 
 
-def _session_list_payload_to_response(payload: dict) -> dict:
+def _session_list_payload_to_response(
+    payload: dict,
+    *,
+    settings: dict | None = None,
+) -> dict:
     safe_merged = []
     runtime_rows = _session_list_cache_overlay_runtime_rows(payload.get("sessions", []) or [])
     # Read the redaction setting ONCE for the whole response and thread it through
@@ -2559,10 +2563,13 @@ def _session_list_payload_to_response(payload: dict) -> dict:
     # this was the multi-second response_write stage in /api/sessions diagnostics. (#4662 Phase 3)
     # load_settings is imported at module scope (below); this function only runs at
     # request time, well after module load, so no lazy import is needed.
-    try:
-        _redact_enabled = bool(load_settings().get("api_redact_enabled", True))
-    except Exception:
-        _redact_enabled = True  # fail safe: redact when settings are unreadable
+    if settings is None:
+        try:
+            settings = load_settings()
+        except Exception:
+            settings = None
+    # Fail safe: an absent/unreadable settings snapshot must redact.
+    _redact_enabled = bool(settings.get("api_redact_enabled", True)) if isinstance(settings, dict) else True
     for s in runtime_rows:
         item = _sidebar_session_response_item(s, redact_enabled=_redact_enabled) if isinstance(s, dict) else {}
         safe_merged.append(item)
@@ -13185,7 +13192,11 @@ def handle_get(handler, parsed) -> bool:
                 diag=diag,
             )
             diag.stage("response_write")
-            return j(handler, _session_list_payload_to_response(payload), pretty=False)
+            return j(
+                handler,
+                _session_list_payload_to_response(payload, settings=settings),
+                pretty=False,
+            )
         finally:
             diag.finish()
 
@@ -14730,7 +14741,7 @@ def handle_post(handler, parsed) -> bool:
             sid = query.get("session_id", [""])[0] if parsed.query else ""
             if not sid:
                 return bad(handler, "session_id is required", 400)
-            from api.session_drafts import draft_path, read_session_draft
+            from api.session_drafts import draft_path, read_session_draft_state
 
             try:
                 has_draft_sidecar = draft_path(sid).exists()
@@ -14741,7 +14752,7 @@ def handle_post(handler, parsed) -> bool:
                     cached_session = SESSIONS.get(sid)
                 if cached_session is None and not (SESSION_DIR / f"{sid}.json").exists():
                     return bad(handler, "Session not found", 404)
-                draft = read_session_draft(sid)
+                draft, draft_version = read_session_draft_state(sid)
                 if cached_session is not None:
                     cached_session.composer_draft = draft
             else:
@@ -14749,11 +14760,11 @@ def handle_post(handler, parsed) -> bool:
                     s = get_session(sid, metadata_only=True)
                 except KeyError:
                     return bad(handler, "Session not found", 404)
-                draft = read_session_draft(
+                draft, draft_version = read_session_draft_state(
                     sid,
                     fallback=getattr(s, "composer_draft", None),
                 )
-            return j(handler, {"draft": draft})
+            return j(handler, {"draft": draft, "draft_version": draft_version})
         # POST
         try:
             require(body, "session_id")
@@ -14764,6 +14775,7 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Subagent sessions are view-only and cannot store a draft from WebUI", 400)
         text = body.get("text")
         files = body.get("files")
+        draft_version_value = body.get("draft_version")
         # Stage-326 hardening (per Opus advisor): size + type validation on
         # the draft inputs. Without this, a misbehaving or malicious client
         # can persist multi-MB strings into the session JSON on every keystroke
@@ -14778,27 +14790,54 @@ def handle_post(handler, parsed) -> bool:
             files = []
         if isinstance(files, list) and len(files) > _MAX_DRAFT_FILES:
             files = files[:_MAX_DRAFT_FILES]
-        from api.session_drafts import draft_path, read_session_draft, write_session_draft
+        from api.session_drafts import (
+            DraftVersionConflict,
+            draft_path,
+            normalize_draft_version,
+            read_session_draft_state,
+            write_session_draft,
+        )
 
         try:
-            has_draft_sidecar = draft_path(sid).exists()
+            draft_path(sid)  # validate before acquiring the per-session lock
         except ValueError:
             return bad(handler, "Invalid session_id", 400)
-        if has_draft_sidecar:
-            with LOCK:
-                s = SESSIONS.get(sid)
-            if s is None and not (SESSION_DIR / f"{sid}.json").exists():
-                return bad(handler, "Session not found", 404)
-        else:
-            try:
-                s = get_session(sid, metadata_only=True)
-            except KeyError:
-                return bad(handler, "Session not found", 404)
-        _draft_mark("after_get_session")
+        session_path = SESSION_DIR / f"{sid}.json"
+        try:
+            draft_version = normalize_draft_version(draft_version_value)
+        except ValueError:
+            return bad(handler, "Invalid draft_version", 400)
+        # Do not let a hostile far-future revision pin this draft indefinitely.
+        # Five minutes tolerates ordinary device clock skew; a client that sees a
+        # conflict observes the current revision and its next edit advances it.
+        if draft_version is not None:
+            max_version = int((_draft_time.time() + 300) * 1_000_000) + 999
+            if int(draft_version) > max_version:
+                return bad(handler, "draft_version is too far in the future", 400)
         unchanged = False
         with _get_session_agent_lock(sid):
             _draft_mark("acquired_lock")
-            current_draft = read_session_draft(
+            # Delete uses this same lock. Resolve ownership only now, then
+            # revalidate it immediately before every write. A delete that won
+            # the lock must leave no stale Session object capable of recreating
+            # its transcript, sidecar, or index entry.
+            with LOCK:
+                s = SESSIONS.get(sid)
+            if s is not None and str(getattr(s, "session_id", "") or "") != sid:
+                s = None
+            if s is None:
+                if not session_path.exists():
+                    return bad(handler, "Session not found", 404)
+                # An existing sidecar is sufficient for the hot autosave path;
+                # avoid reparsing transcript metadata on every keystroke. A
+                # sidecar-less session still needs its transcript fallback.
+                if not draft_path(sid).exists():
+                    try:
+                        s = get_session(sid, metadata_only=True)
+                    except KeyError:
+                        return bad(handler, "Session not found", 404)
+            _draft_mark("after_get_session")
+            current_draft, current_version = read_session_draft_state(
                 sid,
                 fallback=getattr(s, "composer_draft", None),
             )
@@ -14807,7 +14846,23 @@ def handle_post(handler, parsed) -> bool:
                 next_draft["text"] = text
             if files is not None:
                 next_draft["files"] = files
-            if next_draft == current_draft:
+            version_cmp = None
+            if current_version is not None:
+                if draft_version is None:
+                    version_cmp = -1
+                else:
+                    version_cmp = int(draft_version) - int(current_version)
+                if version_cmp < 0 or (version_cmp == 0 and next_draft != current_draft):
+                    return j(
+                        handler,
+                        {
+                            "error": "Composer draft changed in another request",
+                            "draft": current_draft,
+                            "draft_version": current_version,
+                        },
+                        status=409,
+                    )
+            if next_draft == current_draft and (draft_version is None or version_cmp == 0):
                 unchanged = True
                 saved_draft = current_draft
             else:
@@ -14816,16 +14871,40 @@ def handle_post(handler, parsed) -> bool:
                 # the complete transcript. A never-persisted new-session shell
                 # is saved once so it remains discoverable after a restart.
                 _draft_mark("before_save")
-                if s is not None and not s.path.exists():
+                with LOCK:
+                    cached_owner_is_current = s is not None and SESSIONS.get(sid) is s
+                transcript_exists = session_path.exists()
+                if not transcript_exists and not cached_owner_is_current:
+                    return bad(handler, "Session not found", 404)
+                if not transcript_exists:
                     s.composer_draft = next_draft
                     s.save(touch_updated_at=False, skip_index=False)
                     _draft_mark("after_shell_save")
-                saved_draft = write_session_draft(sid, next_draft)
+                with LOCK:
+                    cached_owner_is_current = s is not None and SESSIONS.get(sid) is s
+                if not session_path.exists() and not cached_owner_is_current:
+                    return bad(handler, "Session not found", 404)
+                try:
+                    saved_draft = write_session_draft(
+                        sid,
+                        next_draft,
+                        version=draft_version,
+                    )
+                except DraftVersionConflict as exc:
+                    return j(
+                        handler,
+                        {
+                            "error": str(exc),
+                            "draft": exc.current_draft,
+                            "draft_version": exc.current_version,
+                        },
+                        status=409,
+                    )
                 if s is not None:
                     s.composer_draft = saved_draft
                 _draft_mark("after_save")
         _draft_mark("released_lock")
-        payload = {"ok": True, "draft": saved_draft}
+        payload = {"ok": True, "draft": saved_draft, "draft_version": draft_version or current_version}
         if unchanged:
             payload["unchanged"] = True
         _draft_mark("before_json")
@@ -16189,6 +16268,7 @@ def handle_post(handler, parsed) -> bool:
         }
         projects.append(proj)
         save_projects(projects)
+        _publish_session_list_changed("project_create", profile=proj.get("profile"))
         return j(handler, {"ok": True, "project": proj})
 
     if parsed.path == "/api/projects/rename":
@@ -16215,6 +16295,7 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, "Invalid color format")
             proj["color"] = color
         save_projects(projects)
+        _publish_session_list_changed("project_rename", profile=active_profile)
         return j(handler, {"ok": True, "project": proj})
 
     if parsed.path == "/api/projects/delete":
@@ -16283,6 +16364,7 @@ def handle_post(handler, parsed) -> bool:
                     )
             except Exception:
                 logger.debug("Failed to load session index for project unlink")
+        _publish_session_list_changed("project_delete", profile=active_profile)
         return j(handler, {"ok": True})
 
     # ── Session import from JSON (POST) ──

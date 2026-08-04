@@ -37,10 +37,82 @@ let _pendingCarryForwardSnapshot = null;
 // Debounced save — prevents hammering the server on every keystroke.
 let _draftSaveTimer = null;
 const _DRAFT_SAVE_DELAY_MS = 400;
+const _COMPOSER_DRAFT_VERSION_KEY = 'hermes-composer-draft-version';
+const _COMPOSER_DRAFT_MAX_FUTURE_MS = 300000;
+let _composerDraftVersionFloor = 0;
+let _composerDraftTrustedServerFloor = 0;
 const NEW_CHAT_DRAFT_SESSION_KEY = 'hermes-new-chat-draft-session';
 const _composerDraftKnownPayloadSessions = new Set();
 const _composerDraftRestoreSuppressedUntilBySid = new Map();
 const _COMPOSER_DRAFT_RESTORE_SUPPRESS_MS = 30000;
+
+function _composerDraftVersionCeiling() {
+  return Date.now() * 1000 + _COMPOSER_DRAFT_MAX_FUTURE_MS * 1000 + 999;
+}
+
+function _observeComposerDraftVersion(value, trustedServer=false) {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) return;
+  if (!trustedServer && parsed > _composerDraftVersionCeiling()) return;
+  if (trustedServer) _composerDraftTrustedServerFloor = Math.max(_composerDraftTrustedServerFloor, parsed);
+  _composerDraftVersionFloor = Math.max(_composerDraftVersionFloor, parsed);
+  try {
+    const stored = Number(localStorage.getItem(_COMPOSER_DRAFT_VERSION_KEY) || 0);
+    if (!Number.isSafeInteger(stored) || parsed > stored) {
+      localStorage.setItem(_COMPOSER_DRAFT_VERSION_KEY, String(parsed));
+    }
+  } catch (_) {}
+}
+
+function _nextComposerDraftVersion() {
+  let stored = 0;
+  try { stored = Number(localStorage.getItem(_COMPOSER_DRAFT_VERSION_KEY) || 0); } catch (_) {}
+  if (!Number.isSafeInteger(stored) || stored < 0) stored = 0;
+  const ceiling = _composerDraftVersionCeiling();
+  // localStorage is user-editable and can also be corrupted. Never let an
+  // untrusted far-future floor create an endless client-400 loop. A revision
+  // just observed in a server response remains trusted for this page lifetime.
+  if (stored > ceiling && stored !== _composerDraftTrustedServerFloor) {
+    stored = 0;
+    try { localStorage.removeItem(_COMPOSER_DRAFT_VERSION_KEY); } catch (_) {}
+  }
+  if (_composerDraftVersionFloor > ceiling
+      && _composerDraftVersionFloor !== _composerDraftTrustedServerFloor) {
+    _composerDraftVersionFloor = 0;
+  }
+  // Date.now()*1000 stays within JavaScript's exact integer range and leaves
+  // room for same-millisecond increments. localStorage carries the floor across
+  // reloads and lets tabs observe one another's issued mutations.
+  const next = Math.max(Date.now() * 1000, stored + 1, _composerDraftVersionFloor + 1);
+  _observeComposerDraftVersion(next, _composerDraftTrustedServerFloor > ceiling);
+  return String(next);
+}
+
+function _postComposerDraft(sid, text, files) {
+  const draftVersion = _nextComposerDraftVersion();
+  return api('/api/session/draft', {
+    method: 'POST',
+    body: JSON.stringify({
+      session_id: sid,
+      text: String(text || ''),
+      files: _composerDraftFilesForPersist(files),
+      draft_version: draftVersion,
+    }),
+  }).then((response) => {
+    if (response && response.draft_version) _observeComposerDraftVersion(response.draft_version, true);
+    return response;
+  }).catch((error) => {
+    // Do not retry a stale mutation: doing so would give old text a new revision
+    // and defeat ordering. Observe the winner so the user's NEXT edit can advance.
+    if (error && error.status === 409 && error.body) {
+      try {
+        const conflict = JSON.parse(error.body);
+        if (conflict && conflict.draft_version) _observeComposerDraftVersion(conflict.draft_version, true);
+      } catch (_) {}
+    }
+    throw error;
+  });
+}
 
 function _composerDraftFileSignature(file) {
   if (typeof file === 'string') return { value: file };
@@ -218,10 +290,7 @@ function _saveComposerDraft(sid, text, files) {
     _composerDraftKnownPayloadSessions.add(sid);
   }
   _draftSaveTimer = setTimeout(() => {
-    api('/api/session/draft', {
-      method: 'POST',
-      body: JSON.stringify({ session_id: sid, text: normalizedText, files: normalizedFiles }),
-    }).then(() => {
+    _postComposerDraft(sid, normalizedText, normalizedFiles).then(() => {
       _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
     }).catch(() => {});
   }, _DRAFT_SAVE_DELAY_MS);
@@ -268,10 +337,7 @@ function _saveComposerDraftNow(sid, text, files) {
       && !_composerDraftKnownPayloadSessions.has(sid)) {
     return Promise.resolve();
   }
-  return api('/api/session/draft', {
-    method: 'POST',
-    body: JSON.stringify({ session_id: sid, text: normalizedText, files: normalizedFiles }),
-  }).then(() => {
+  return _postComposerDraft(sid, normalizedText, normalizedFiles).then(() => {
     _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
   }).catch(() => {});
 }
@@ -328,10 +394,7 @@ function _clearComposerDraft(sid, text, files) {
   _clearRememberedNewChatDraftSession(sid);
   if (arguments.length >= 2) _suppressComposerDraftRestoreAfterSubmit(sid, text, files);
   else _suppressComposerDraftRestoreAfterSubmit(sid);
-  return api('/api/session/draft', {
-    method: 'POST',
-    body: JSON.stringify({ session_id: sid, text: '' }),
-  }).then(() => {
+  return _postComposerDraft(sid, '', []).then(() => {
     _rememberComposerDraftPayloadState(sid, '', []);
   }).catch(() => {});
 }
@@ -363,6 +426,13 @@ let _pendingSessionListApplyTimer = 0;
 let _sessionListLoadError = null;
 let _sessionListHasLoadedOnce = false;
 const _SESSION_LIST_BOOT_TIMEOUT_MS = 90000;
+// Projects change much less often than session runtime state. Cache their
+// independent endpoint for a bounded interval instead of re-reading
+// projects.json on every sidebar/session refresh. CRUD, scoped SSE events, and
+// focus/visibility catch-up explicitly invalidate this cache.
+const SESSION_PROJECT_REFRESH_INTERVAL_MS = 30000;
+let _sessionProjectsLastFetchedAt = 0;
+let _sessionProjectsLastFetchScope = '';
 const SESSION_LIST_INTERACTION_IDLE_MS = 700;
 const SESSION_SWIPE_DURATION_MS = 500;
 const SESSION_SWIPE_REFLOW_LEAD_MS = 220;
@@ -3932,6 +4002,10 @@ let _sessionActionAnchor = null;
 let _sessionActionSessionId = null;
 let _sessionActionMenuId = 0;
 let _sessionActionPreviousFocus = null;
+// A list payload may land while the portaled action menu is open.  Keep the
+// menu/anchor DOM stable until close, then flush exactly one repaint from the
+// already-updated caches so the sidebar cannot remain stale indefinitely.
+let _sessionActionMenuRenderPending = false;
 const _expandedChildSessionKeys = new Set();
 const _expandedLineageKeys = new Set();
 const _lineageReportCache = new Map();
@@ -4349,9 +4423,11 @@ function _focusSessionActionMenuRestoreTarget(target){
   return document.activeElement===target;
 }
 
-function closeSessionActionMenu({restoreFocus=false}={}){
+function closeSessionActionMenu({restoreFocus=false,flushPendingRender=true}={}){
   const focusTarget=restoreFocus?_sessionActionAnchor:null;
   const fallbackFocusTarget=restoreFocus?_sessionActionPreviousFocus:null;
+  const focusSessionId=restoreFocus?_sessionActionSessionId:null;
+  const focusWasTrigger=!!(focusTarget&&focusTarget.classList&&focusTarget.classList.contains('session-actions-trigger'));
   if(_sessionActionMenu){
     _sessionActionMenu.remove();
     _sessionActionMenu = null;
@@ -4368,7 +4444,19 @@ function closeSessionActionMenu({restoreFocus=false}={}){
   }
   _sessionActionSessionId = null;
   _sessionActionPreviousFocus = null;
-  if(!_focusSessionActionMenuRestoreTarget(focusTarget)) _focusSessionActionMenuRestoreTarget(fallbackFocusTarget);
+  if(flushPendingRender&&_sessionActionMenuRenderPending){
+    _sessionActionMenuRenderPending=false;
+    renderSessionListFromCache();
+  }
+  let resolvedFocusTarget=focusTarget;
+  // A deferred repaint replaces the original row/trigger. Resolve its new DOM
+  // instance by the authoritative session id so Escape still restores focus.
+  if(focusWasTrigger&&focusSessionId&&(!resolvedFocusTarget||!resolvedFocusTarget.isConnected)){
+    const rows=Array.from(document.querySelectorAll('.session-item[data-sid],.session-child-session[data-sid],.session-child-session-fork[data-sid]'));
+    const replacementRow=rows.find(row=>row.dataset&&row.dataset.sid===focusSessionId);
+    if(replacementRow) resolvedFocusTarget=replacementRow.querySelector('.session-actions-trigger');
+  }
+  if(!_focusSessionActionMenuRestoreTarget(resolvedFocusTarget)) _focusSessionActionMenuRestoreTarget(fallbackFocusTarget);
 }
 
 function _sessionActionMenuShouldIgnoreScrollTarget(target){
@@ -4826,7 +4914,10 @@ function _openSessionActionMenu(session, anchorEl){
     closeSessionActionMenu();
     return;
   }
-  closeSessionActionMenu();
+  // Switching directly from menu A to menu B must retain B's clicked anchor.
+  // A deferred list repaint would replace it before this function can mount
+  // and position the new menu; carry the pending repaint until B closes.
+  closeSessionActionMenu({flushPendingRender:false});
   const isMessagingSession = _isMessagingSession(session);
   const isCliSession = _isCliSession(session);
   const isExternalSession = isMessagingSession || isCliSession;
@@ -4911,7 +5002,9 @@ function _openSessionActionMenu(session, anchorEl){
     ICONS.folder,
     async()=>{
       closeSessionActionMenu();
-      _showProjectPicker(session, anchorEl);
+      const refreshedRow=_findSessionRenameRow(session.session_id);
+      const refreshedAnchor=refreshedRow&&refreshedRow.querySelector('.session-actions-trigger');
+      _showProjectPicker(session,refreshedAnchor||anchorEl);
     }
   ));
   menu.appendChild(_buildSessionAction(
@@ -5431,6 +5524,14 @@ function _applySessionListPayload(sessData, projData, opts){
   _syncSessionAttentionSoundState(_allSessions);
   _pruneLineageReportCacheToVisibleSessions(_allSessions);
   _allProjects = projData.projects||[];
+  // Advance project cache freshness only when the paired session payload is
+  // accepted and applied. A project request can finish while /api/sessions
+  // fails or its generation is discarded; marking that orphan response fresh
+  // would make the next refresh reuse the older _allProjects array.
+  if(projData&&typeof projData._sidebarProjectFetchedAt==='number'&&typeof projData._sidebarProjectFetchScope==='string'){
+    _sessionProjectsLastFetchedAt=projData._sidebarProjectFetchedAt;
+    _sessionProjectsLastFetchScope=projData._sidebarProjectFetchScope;
+  }
   // Capture the recovering-from-error state BEFORE clearing it: the error banner
   // DOM was rendered outside the signature path, so if this payload heals with
   // rows identical to the last render, the identical-signature skip below would
@@ -5664,20 +5765,39 @@ async function _runRenderSessionListRefresh(opts, _gen){
 }
 
 async function _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts){
-  const projectPromise = (async() => {
-    try{
-      const projectQS = _showAllProfiles ? '?all_profiles=1' : '';
-      return await api('/api/projects' + projectQS,{timeoutToast:false});
-    }catch(projectError){
-      console.warn('renderProjectsList',projectError);
-      return {projects:_allProjects||[]};
-    }
-  })();
+  const projectScope=`${(typeof S!=='undefined'&&S&&S.activeProfile)||'default'}:${_showAllProfiles?'all':'active'}`;
+  const now=Date.now();
+  const projectsAreFresh=typeof _sessionProjectsLastFetchedAt==='number'
+    && _sessionProjectsLastFetchedAt>0
+    && typeof _sessionProjectsLastFetchScope==='string'
+    && _sessionProjectsLastFetchScope===projectScope
+    && now-_sessionProjectsLastFetchedAt<(typeof SESSION_PROJECT_REFRESH_INTERVAL_MS==='number'?SESSION_PROJECT_REFRESH_INTERVAL_MS:30000);
+  const projectPromise = projectsAreFresh
+    ? Promise.resolve({projects:_allProjects||[]})
+    : (async() => {
+        try{
+          const projectQS = _showAllProfiles ? '?all_profiles=1' : '';
+          const projectData=await api('/api/projects' + projectQS,{timeoutToast:false});
+          return {
+            ...(projectData||{}),
+            _sidebarProjectFetchedAt:Date.now(),
+            _sidebarProjectFetchScope:projectScope,
+          };
+        }catch(projectError){
+          console.warn('renderProjectsList',projectError);
+          return {projects:_allProjects||[]};
+        }
+      })();
 
   const sessData = await api('/api/sessions' + sessionListQS,sessionRequestOpts);
   const projData = await projectPromise;
 
   return {sessData,projData};
+}
+
+function _invalidateSessionProjectsCache(){
+  _sessionProjectsLastFetchedAt=0;
+  _sessionProjectsLastFetchScope='';
 }
 
 async function _drainRenderSessionListQueue(initialRequest){
@@ -5761,6 +5881,10 @@ function _mergeSessionListRefreshOptions(prev, next){
 function _refreshSessionListAfterSidebarResume(reason){
   // A direct resume refresh satisfies any pending onopen catch-up from the same close.
   _sessionEventsNeedsRefreshOnOpen = false;
+  // The global SSE is deliberately closed while hidden/unfocused, so project
+  // changes from another tab may have been missed. Force the resume refresh to
+  // include projects instead of trusting the bounded warm cache.
+  _invalidateSessionProjectsCache();
   void refreshSessionList(reason, {force:true});
 }
 
@@ -6100,6 +6224,9 @@ function ensureSessionEventsSSE(){
         const eventProfile = payload && typeof payload.profile === 'string' ? payload.profile : '';
         if (!_sessionEventProfilesMatch(eventProfile, activeProfile)) {
           return;
+        }
+        if(typeof payload.reason==='string'&&payload.reason.startsWith('project_')){
+          _invalidateSessionProjectsCache();
         }
         eventTargetsActiveSession = _sessionEventTargetsActiveSession(payload);
       } catch (_err) {
@@ -7597,7 +7724,15 @@ function renderSessionListFromCache(){
   // click it. Sidebar syncs, stream/unread updates, and panel-resync repairs can
   // all call this while the fixed-position menu is open; rebuilding the row DOM
   // here removes the anchor and makes the menu feel unclickable.
-  if(_sessionActionMenu) return;
+  if(_sessionActionMenu){
+    _sessionActionMenuRenderPending=true;
+    return;
+  }
+  // This render itself satisfies a carried pending repaint (for example if a
+  // replacement menu failed to mount after closing the prior one). Clear it
+  // before the defensive close below so close cannot recurse into a second
+  // full list rebuild.
+  _sessionActionMenuRenderPending=false;
   closeSessionActionMenu();
   // Purge stale INFLIGHT entries for sessions the server confirms are NOT
   // streaming. This runs on every list refresh to prevent memory leaks from
@@ -9195,6 +9330,7 @@ function _showProjectPicker(session, anchorEl){
     const profile = session.profile || undefined;
     const res=await api('/api/projects/create',{method:'POST',body:JSON.stringify({name:name.trim(),color,profile})});
     if(res.project){
+      _invalidateSessionProjectsCache();
       _allProjects.push(res.project);
       // Guard the move so a 503 (session busy/streaming, #3746) shows a toast
       // instead of an unhandled rejection. Keep the authoritative refetch (#2551).
@@ -9267,6 +9403,7 @@ function _startProjectCreate(bar, addBtn){
       const color=PROJECT_COLORS[_allProjects.length%PROJECT_COLORS.length];
       try{
         await api('/api/projects/create',{method:'POST',body:JSON.stringify({name:inp.value.trim(),color})});
+        _invalidateSessionProjectsCache();
       }catch(e){
         _finishDone=false;
         showToast('Project create failed: '+(e.message||e));
@@ -9304,6 +9441,7 @@ function _startProjectRename(proj, chip){
     if(save&&inp.value.trim()&&inp.value.trim()!==proj.name){
       try {
         await api('/api/projects/rename',{method:'POST',body:JSON.stringify({project_id:proj.project_id,name:inp.value.trim()})});
+        _invalidateSessionProjectsCache();
         await renderSessionList();
         showToast('Project renamed');
       } catch(e) {
@@ -9362,6 +9500,7 @@ function _showProjectContextMenu(e, proj, chip){
       menu.remove();
       try {
         await api('/api/projects/rename',{method:'POST',body:JSON.stringify({project_id:proj.project_id,name:proj.name,color:hex})});
+        _invalidateSessionProjectsCache();
         await renderSessionList();
         showToast('Color updated');
       } catch(e) {
@@ -9398,6 +9537,7 @@ async function _confirmDeleteProject(proj){
   if(!ok){return;}
   try {
     await api('/api/projects/delete',{method:'POST',body:JSON.stringify({project_id:proj.project_id})});
+    _invalidateSessionProjectsCache();
     if(_activeProject===proj.project_id) _activeProject=null;
     await renderSessionList();
     showToast('Project deleted');

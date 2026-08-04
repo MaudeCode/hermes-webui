@@ -1245,12 +1245,20 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   // to the session the user is currently looking at — otherwise a background
   // send failure would pollute another session's composer. (Codex #5484 catch.)
   const visibleSid=(S.session&&S.session.session_id)||null;
-  const belongsToVisible=!(sid&&visibleSid&&sid!==visibleSid);
+  // S.session intentionally stays on the outgoing session while loadSession()
+  // awaits its draft save. _loadingSessionId is the authoritative requested
+  // destination during that window, so an outgoing failed send must be treated
+  // as a background restore even though the old pane object is still installed.
+  const belongsToVisible=visibleSid===sid
+    && !(typeof _loadingSessionId!=='undefined'&&_loadingSessionId&&_loadingSessionId!==sid);
   let restoredVisible=false;
   if(belongsToVisible){
     const inp=$('msg');
-    // Do not clobber a new message the user began typing during the async window.
-    if(inp && !String(inp.value||'').trim()){
+    // Do not merge the failed payload into a newer text OR attachment-only
+    // draft the user began during the async window.
+    const hasNewerVisibleDraft=!!String(inp&&inp.value||'').trim()
+      || !!(Array.isArray(S.pendingFiles)&&S.pendingFiles.filter(Boolean).length);
+    if(inp && !hasNewerVisibleDraft){
       inp.value=restore;
       if(typeof autoResize==='function') autoResize();
       if(typeof updateSendBtn==='function') updateSendBtn();
@@ -1275,15 +1283,30 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   if(sid&&typeof _saveComposerDraftNow==='function'){
     const _persist=()=>{
       try{
-        const stillVisible=(S.session&&S.session.session_id)===sid;
+        const stillVisible=(S.session&&S.session.session_id)===sid
+          && !(typeof _loadingSessionId!=='undefined'&&_loadingSessionId&&_loadingSessionId!==sid);
         if(stillVisible){
           const inp=$('msg');
           const liveText=inp?String(inp.value||''):restore;
           _saveComposerDraftNow(sid, liveText, S.pendingFiles?[...S.pendingFiles]:[]);
         } else if(!restoredVisible){
+          // During loadSession(B)'s outgoing-draft await, S.session can still be
+          // A even though A is no longer the requested pane. If A's controls now
+          // contain payload, that is a newer draft which the switch path already
+          // snapshotted; issuing the failed-send snapshot afterward would give
+          // the older payload a newer revision and clobber it.
+          const outgoingPaneStillInstalled=(S.session&&S.session.session_id)===sid;
+          const outgoingInput=outgoingPaneStillInstalled?$('msg'):null;
+          const outgoingText=String(outgoingInput&&outgoingInput.value||'');
+          const outgoingFiles=outgoingPaneStillInstalled&&Array.isArray(S.pendingFiles)
+            ? S.pendingFiles.filter(Boolean)
+            : [];
+          if(outgoingText||outgoingFiles.length) return;
           // Background failure (sid was never the visible session): no live
           // composer to read, so persist the captured snapshot — it's the only copy.
-          _saveComposerDraftNow(sid, restore, []);
+          // _saveComposerDraftNow canonicalizes browser File objects into the
+          // persistable attachment-reference shape before sending them.
+          _saveComposerDraftNow(sid, restore, files);
         }
         // else: restored the visible composer, then the user switched away — the
         // session-switch save path already saved sid's composer; skip stale write.
@@ -1298,7 +1321,8 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
 
 function _abortSendAfterOwnerSwitch(activeSid, draftText, filesSnapshot, clearPromise){
   const visibleSid=(S.session&&S.session.session_id)||null;
-  if(visibleSid===activeSid) return false;
+  const requestedSid=(typeof _loadingSessionId!=='undefined'&&_loadingSessionId)||visibleSid;
+  if(visibleSid===activeSid&&requestedSid===activeSid) return false;
   _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, activeSid, clearPromise);
   if(typeof showToast==='function'){
     showToast('Send paused after the session switch. Your message is saved in the original draft.',3200);
@@ -1915,6 +1939,46 @@ async function send(){
 }
 
 const LIVE_STREAMS={};
+let _liveStreamOwnerGeneration=0;
+const _LIVE_STREAM_OWNERS={};
+
+function _claimLiveStreamOwner(sessionId, streamId){
+  const owner={streamId:String(streamId||''),generation:++_liveStreamOwnerGeneration};
+  _LIVE_STREAM_OWNERS[sessionId]=owner;
+  return owner.generation;
+}
+
+function _liveStreamOwnerMatches(sessionId, streamId, generation){
+  const owner=_LIVE_STREAM_OWNERS[sessionId];
+  return !!(owner&&owner.streamId===String(streamId||'')&&owner.generation===generation);
+}
+
+function _releaseLiveStreamOwner(sessionId, streamId, generation){
+  const owner=_LIVE_STREAM_OWNERS[sessionId];
+  if(!owner) return;
+  if(streamId&&owner.streamId!==String(streamId)) return;
+  if(generation!==undefined&&generation!==null&&owner.generation!==generation) return;
+  delete _LIVE_STREAM_OWNERS[sessionId];
+}
+
+// Atomically installs a transport only while its attachLiveStream invocation
+// still owns the session+stream lifecycle. expectedSource makes reconnect
+// replacement compare-and-swap: a delayed probe cannot close a source that a
+// newer recovery probe (or a leave/return attach generation) already installed.
+function _installOwnedLiveStreamSource(sessionId, streamId, ownerGeneration, source, expectedSource=null){
+  const existing=LIVE_STREAMS[sessionId];
+  const ownsLifecycle=_liveStreamOwnerMatches(sessionId,streamId,ownerGeneration);
+  const ownsExpectedSource=!expectedSource||(existing&&existing.source===expectedSource);
+  if(!ownsLifecycle||!ownsExpectedSource){
+    try{if(source&&source.readyState!==2)source.close();}catch(_){ }
+    return false;
+  }
+  if(existing&&existing.source&&existing.source!==source){
+    try{if(existing.source.readyState!==2)existing.source.close();}catch(_){ }
+  }
+  LIVE_STREAMS[sessionId]={streamId,source,ownerGeneration};
+  return true;
+}
 const _STREAM_NOTIFICATION_BACKGROUND={};
 
 // #4416: track whether the tab was hidden at ANY point during a live stream, so
@@ -1964,7 +2028,14 @@ function _shouldForceCompletionNotification(sid, streamId){
 
 function closeLiveStream(sessionId, streamId, source){
   const live=LIVE_STREAMS[sessionId];
-  if(!live) return;
+  if(!live){
+    // A reconnect preflight can own a lifecycle before it has installed its
+    // first EventSource. Session teardown must invalidate that pending owner;
+    // a stale source-specific close must not invalidate a newer pending owner.
+    if(source) return;
+    _releaseLiveStreamOwner(sessionId,streamId);
+    return;
+  }
   if(streamId&&live.streamId!==streamId) return;
   if(source&&live.source!==source) return;
   // Snapshot the current live-turn DOM BEFORE tearing the stream down. The
@@ -1982,6 +2053,7 @@ function closeLiveStream(sessionId, streamId, source){
   if(typeof hideLiveRunStatus==='function') hideLiveRunStatus(sessionId);
   try{if(live.source&&live.source.readyState!==2)live.source.close();}catch(_){ }
   delete LIVE_STREAMS[sessionId];
+  _releaseLiveStreamOwner(sessionId,live.streamId,live.ownerGeneration);
   _resumeSessionStreamAfterLiveChat(sessionId);
   // closeLiveStream() is called during session-switch teardown for any session
   // the user is no longer viewing. The stream is still active on the server,
@@ -2022,7 +2094,8 @@ function closeOtherLiveStreams(activeSid){
   // is actually viewing. Background sessions still show running/finished state
   // through the session list and can reattach when selected, but they should not
   // keep one EventSource each and exhaust the browser connection pool (#2313).
-  for(const sid of Object.keys(LIVE_STREAMS)){
+  const ownedSids=new Set([...Object.keys(LIVE_STREAMS),...Object.keys(_LIVE_STREAM_OWNERS)]);
+  for(const sid of ownedSids){
     if(sid!==activeSid) closeLiveStream(sid);
   }
 }
@@ -2084,6 +2157,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   closeOtherLiveStreams(activeSid);
   closeLiveStream(activeSid);
+  const _streamOwnerGeneration=_claimLiveStreamOwner(activeSid,streamId);
+  const _ownsStreamLifecycle=()=>_liveStreamOwnerMatches(activeSid,streamId,_streamOwnerGeneration);
   if(!reconnecting&&typeof resetTurnWorkspaceMutations==='function') resetTurnWorkspaceMutations();
   if(!reconnecting&&typeof _resetStreamScrollFollow==='function') _resetStreamScrollFollow();
   // Phase D: restore bottom run status after closeLiveStream(); that helper
@@ -2166,7 +2241,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return !_isActiveSession() || S.activeStreamId===streamId;
   }
   function _bailOutOfTerminalEventsFromStaleStream(source){
-    if(_ownsActiveStreamOrBackground()) return false;
+    const live=LIVE_STREAMS[activeSid];
+    const ownsTransport=_ownsStreamLifecycle()&&live&&live.source===source
+      && live.ownerGeneration===_streamOwnerGeneration;
+    if(ownsTransport&&_ownsActiveStreamOrBackground()) return false;
     // This stale stream no longer owns the session — schedule cleanup of ITS own
     // anchor registry (identity-guarded, so it can't clobber the newer stream's
     // registry for the same session) before closing. (Codex leak catch.)
@@ -2552,20 +2630,27 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _reattachOrRestoreAfterDeferredStreamError(source){
     if(_terminalStateReached||_streamFinalized) return;
     if((S.session&&S.session.session_id)!==activeSid) return;
+    if(!_ownsStreamLifecycle()) return;
     (async()=>{
       try{
         if(streamId){
           const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+          const liveAfterStatus=LIVE_STREAMS[activeSid];
+          if(!_ownsStreamLifecycle()||!liveAfterStatus||liveAfterStatus.source!==source) return;
           if(st.active){
             setComposerStatus('Reconnected');
-            _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
+            _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}),source);
             return;
           }
         }
       }catch(_){
         if(_deferStreamErrorIfOffline()||_pageHiddenForStreamError()) return;
       }
+      const liveBeforeRestore=LIVE_STREAMS[activeSid];
+      if(!_ownsStreamLifecycle()||!liveBeforeRestore||liveBeforeRestore.source!==source) return;
       if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
+      const liveAfterRestore=LIVE_STREAMS[activeSid];
+      if(!_ownsStreamLifecycle()||!liveAfterRestore||liveAfterRestore.source!==source) return;
       if(_deferStreamErrorIfOffline()||_pageHiddenForStreamError()) return;
       _flushReasoningToAnchor();
       _scheduleAnchorRegistryCleanup(120000);
@@ -5446,11 +5531,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _wireSSE(source){
-    const existingLive=LIVE_STREAMS[activeSid];
-    if(existingLive&&existingLive.source&&existingLive.source!==source){
-      try{if(existingLive.source.readyState!==2)existingLive.source.close();}catch(_){ }
-    }
-    LIVE_STREAMS[activeSid]={streamId,source};
+    const expectedSource=arguments.length>1?arguments[1]:null;
+    if(!_installOwnedLiveStreamSource(
+      activeSid,streamId,_streamOwnerGeneration,source,expectedSource
+    )) return false;
 
     // Note on #631 Bug B: the original PR description stated the server
     // "replays buffered token events" on reconnect, and proposed resetting
@@ -6442,7 +6526,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{if(source&&source.readyState!==2)source.close();}catch(_){ }
       if(_deferStreamErrorIfOffline()) return;
       if(_deferStreamErrorIfPageHidden(source)) return;
-      _closeSource(source);
       // If the user has switched to a different session, don't attempt to
       // reconnect — the old stream's EventSource was closed intentionally
       // during session switch and reconnecting would leak a background stream.
@@ -6465,22 +6548,35 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const _probeReconnect=async(attempt=0)=>{
           if(_terminalStateReached || _streamFinalized) return;
           if(!_isSessionCurrentPane(activeSid)) return;
+          if(!_ownsStreamLifecycle()) return;
+          const liveBeforeProbe=LIVE_STREAMS[activeSid];
+          if(!liveBeforeProbe||liveBeforeProbe.source!==source) return;
           try{
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+            // The status request yielded. Re-prove BOTH lifecycle ownership and
+            // transport identity before constructing/replacing anything.
+            const liveAfterProbe=LIVE_STREAMS[activeSid];
+            if(!_ownsStreamLifecycle()||!liveAfterProbe||liveAfterProbe.source!==source) return;
             if(st&&st.active){
               setComposerStatus('Reconnected');
-              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
+              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}),source);
               return;
             }
             if(st&&st.replay_available){
               setComposerStatus('Restoring stream…');
-              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
+              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}),source);
               return;
             }
           }catch(_){
             if(_deferStreamErrorIfOffline()) return;
           }
+          if(!_ownsStreamLifecycle()) return;
+          const liveBeforeRestore=LIVE_STREAMS[activeSid];
+          if(!liveBeforeRestore||liveBeforeRestore.source!==source) return;
           if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
+          if(!_ownsStreamLifecycle()) return;
+          const liveAfterRestore=LIVE_STREAMS[activeSid];
+          if(!liveAfterRestore||liveAfterRestore.source!==source) return;
           if(_deferStreamErrorIfOffline()) return;
           if(_deferStreamErrorIfPageHidden(source)) return;
           const nextDelay=_retryDelays[attempt+1];
@@ -6868,6 +6964,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(reconnecting){
       try{
         const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+        if(!_ownsStreamLifecycle()) return;
         if(!st.active&&st.replay_available){
           replayOnly=true;
         }else if(!st.active){
@@ -6895,10 +6992,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             renderSessionList();
           }
           _scheduleAnchorRegistryCleanup(120000);
+          _releaseLiveStreamOwner(activeSid,streamId,_streamOwnerGeneration);
           return;
         }
       }catch(_){}
     }
+    if(!_ownsStreamLifecycle()) return;
     const replayParams=(reconnecting||replayOnly)?_runJournalReplayParams():'';
     _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}`,document.baseURI||location.href).href,{withCredentials:true}));
   })();

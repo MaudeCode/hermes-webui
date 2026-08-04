@@ -161,7 +161,7 @@ def test_clear_composer_draft_forgets_same_new_chat_candidate():
     assert "_clearRememberedNewChatDraftSession(sid);" in body, (
         "sending a draft must stop New Chat from restoring that now-cleared candidate"
     )
-    assert "return api('/api/session/draft'" in body, (
+    assert "return _postComposerDraft(sid, '', [])" in body, (
         "clear path should return its POST promise for callers/tests that need to await it"
     )
     assert "_rememberComposerDraftPayloadState(sid, '', []);" in body, (
