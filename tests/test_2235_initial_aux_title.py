@@ -10,35 +10,29 @@ Covers:
   3. Refresh path parity — configured aux routing still applies to the
      adaptive title refresh path.
 """
-import importlib
-import sys
 import threading
-import types
 import unittest
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests._aux_client_helpers import auxiliary_client_modules, patch_tg_config
+
 
 @pytest.fixture(autouse=True)
-def _optional_agent_auxiliary_module(monkeypatch):
-    try:
-        importlib.import_module('agent.auxiliary_client')
-        return
-    except ImportError:
-        pass
+def _install_auxiliary_client_modules():
+    """Scope the synthetic hermes-agent modules to each test (#6630).
 
-    # Standalone WebUI checkouts do not include the optional agent package.
-    _agent_stub = sys.modules.get('agent') or types.ModuleType('agent')
-    _aux_stub = types.ModuleType('agent.auxiliary_client')
-    monkeypatch.setitem(sys.modules, 'agent', _agent_stub)
-    monkeypatch.setitem(sys.modules, 'agent.auxiliary_client', _aux_stub)
-    monkeypatch.setattr(_agent_stub, 'auxiliary_client', _aux_stub, raising=False)
+    This file carried the same unscoped sys.modules.setdefault install as
+    test_title_aux_routing.py, so it leaked the stub the same way.
+    """
+    with auxiliary_client_modules():
+        yield
 
 
 def _patch_tg_config(config_dict):
     """Return a patch context manager that makes _get_auxiliary_task_config return config_dict."""
-    return patch('agent.auxiliary_client._get_auxiliary_task_config', return_value=config_dict, create=True)
+    return patch_tg_config(config_dict)
 
 
 def _make_provisional_session(user_text, assistant_text='Here is the answer.'):

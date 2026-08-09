@@ -163,7 +163,10 @@ def test_moa_config_is_per_turn_not_persisted():
     assert "MoA override is unavailable on gateway-backed sessions" in routes_source
     js_path = Path(__file__).resolve().parent.parent / "static" / "messages.js"
     js_source = js_path.read_text(encoding="utf-8")
-    assert "moa_config:_pendingMoaConfig?true:undefined" in js_source
+    assert re.search(
+        r"moa_config:\s*(?:_pendingMoaConfig|moaConfigForPostStart)\s*\?\s*true\s*:\s*undefined",
+        js_source,
+    )
     assert "_pendingMoaConfig=null" in js_source
 
 

@@ -6,36 +6,80 @@ Covers:
   - aux→agent fallback triggers on 'llm_invalid_aux' status
   - _aux_title_timeout rejects zero, negative, and non-numeric values
 """
-import importlib
 import os
+from pathlib import Path
 import sys
 import types
 import unittest
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests._aux_client_helpers import auxiliary_client_modules, patch_tg_config
+
 
 @pytest.fixture(autouse=True)
-def _optional_agent_auxiliary_module(monkeypatch):
-    try:
-        importlib.import_module('agent.auxiliary_client')
-        return
-    except ImportError:
-        pass
-
-    # Standalone WebUI checkouts do not include the optional agent package.
-    _agent_stub = sys.modules.get('agent') or types.ModuleType('agent')
-    _aux_stub = types.ModuleType('agent.auxiliary_client')
-    monkeypatch.setitem(sys.modules, 'agent', _agent_stub)
-    monkeypatch.setitem(sys.modules, 'agent.auxiliary_client', _aux_stub)
-    monkeypatch.setattr(_agent_stub, 'auxiliary_client', _aux_stub, raising=False)
+def _install_auxiliary_client_modules():
+    """Scope the synthetic hermes-agent modules to each test (#6630)."""
+    with auxiliary_client_modules():
+        yield
 
 
 def _patch_tg_config(config_dict):
     """Return a patch context manager that makes _get_auxiliary_task_config return config_dict."""
-    return patch('agent.auxiliary_client._get_auxiliary_task_config', return_value=config_dict, create=True)
+    return patch_tg_config(config_dict)
+
+
+class TestAuxiliaryClientModuleRestore(unittest.TestCase):
+    """Restoration properties the #6630 fix depends on.
+
+    These drive the helper directly. The fixture boundary itself is proved by
+    the cross-file run in the PR description: running this file before
+    tests/test_issue4685_post_compression_context_metering.py used to fail that
+    file's agent.context_compressor import and no longer does.
+    """
+
+    def test_prior_modules_restored_by_identity(self):
+        prior_agent = types.ModuleType("agent")
+        prior_aux = types.ModuleType("agent.auxiliary_client")
+        prior_agent.auxiliary_client = prior_aux
+        with patch.dict(sys.modules, {"agent": prior_agent, "agent.auxiliary_client": prior_aux}):
+            with auxiliary_client_modules():
+                self.assertIsNot(sys.modules["agent"], prior_agent)
+                self.assertIsNot(sys.modules["agent.auxiliary_client"], prior_aux)
+            self.assertIs(sys.modules["agent"], prior_agent)
+            self.assertIs(sys.modules["agent.auxiliary_client"], prior_aux)
+            self.assertIs(prior_agent.auxiliary_client, prior_aux)
+
+    def test_absent_keys_removed(self):
+        with patch.dict(sys.modules):
+            sys.modules.pop("agent", None)
+            sys.modules.pop("agent.auxiliary_client", None)
+            with auxiliary_client_modules():
+                self.assertIn("agent", sys.modules)
+                self.assertIn("agent.auxiliary_client", sys.modules)
+            self.assertNotIn("agent", sys.modules)
+            self.assertNotIn("agent.auxiliary_client", sys.modules)
+
+    def test_prior_none_value_preserved(self):
+        """A present-but-None entry is not an absent entry."""
+        with patch.dict(sys.modules, {"agent": None, "agent.auxiliary_client": None}):
+            with auxiliary_client_modules():
+                self.assertIsNotNone(sys.modules["agent"])
+            self.assertIn("agent", sys.modules)
+            self.assertIsNone(sys.modules["agent"])
+            self.assertIsNone(sys.modules["agent.auxiliary_client"])
+
+    def test_restored_after_exception(self):
+        prior_agent = types.ModuleType("agent")
+        prior_aux = types.ModuleType("agent.auxiliary_client")
+        prior_agent.auxiliary_client = prior_aux
+        with patch.dict(sys.modules, {"agent": prior_agent, "agent.auxiliary_client": prior_aux}):
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                with auxiliary_client_modules():
+                    raise RuntimeError("boom")
+            self.assertIs(sys.modules["agent"], prior_agent)
+            self.assertIs(sys.modules["agent.auxiliary_client"], prior_aux)
 
 
 class TestAuxTitleConfigured(unittest.TestCase):

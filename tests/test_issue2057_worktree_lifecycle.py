@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -137,6 +138,7 @@ def test_delete_refuses_live_worker_before_mutating_sidecar_or_index(tmp_path, m
         session_id=sid,
         started_at=1.0,
         phase="cancelling",
+        cancelled_at=time.time(),
     )
     try:
         assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True

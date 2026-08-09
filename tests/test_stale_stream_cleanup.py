@@ -341,13 +341,8 @@ def test_chat_start_allows_same_session_after_active_run_unregisters(monkeypatch
         routes.STREAMS.pop("new-stream", None)
 
 
-def test_chat_start_remains_blocked_while_aged_active_run_is_registered(monkeypatch, tmp_path):
-    """Age is not proof that a detached provider worker has terminated.
-
-    ACTIVE_RUNS is cleared by the worker's outer finally (or process restart).
-    Reusing the same mutable cached agent while an aged worker still owns it can
-    corrupt both turns, so the successor must remain fail-closed.
-    """
+def test_chat_start_reaps_aged_detached_active_run(monkeypatch, tmp_path):
+    """A stale ACTIVE_RUNS row without a live stream must not 409 forever."""
     config.STREAMS.clear()
     config.ACTIVE_RUNS.clear()
     config.SESSION_AGENT_LOCKS.clear()
@@ -374,12 +369,12 @@ def test_chat_start_remains_blocked_while_aged_active_run_is_registered(monkeypa
     monkeypatch.setattr(routes, "get_session", lambda sid: session)
     stale_stream_id = "wedged-old-stream"
     config.register_active_run(stale_stream_id, session_id=session.session_id, phase="running")
-    # Simulate a provider call that remains blocked long after cancellation.
+    # Simulate a detached lifecycle row that outlived its stream and worker.
     with config.ACTIVE_RUNS_LOCK:
         config.ACTIVE_RUNS[stale_stream_id]["started_at"] = time.time() - 600
 
-    assert routes._active_run_stream_for_session(session.session_id) == stale_stream_id
-    assert stale_stream_id in config.ACTIVE_RUNS
+    assert routes._active_run_stream_for_session(session.session_id) is None
+    assert stale_stream_id not in config.ACTIVE_RUNS
 
     class NoopThread:
         def __init__(self, *args, **kwargs):
@@ -403,11 +398,13 @@ def test_chat_start_remains_blocked_while_aged_active_run_is_registered(monkeypa
             model="test-model",
             model_provider=None,
         )
-        assert response["_status"] == 409
-        assert response["active_stream_id"] == stale_stream_id
-        assert session.active_stream_id is None
+        assert "error" not in response
+        assert response["stream_id"] == "new-stream"
+        assert session.active_stream_id == "new-stream"
+        assert session.pending_user_message == "successor prompt"
     finally:
         config.unregister_active_run(stale_stream_id)
+        config.unregister_active_run("new-stream")
         routes.STREAMS.pop("new-stream", None)
 
 

@@ -339,7 +339,12 @@ def test_reasoning_segment_accumulator_is_chunked_for_many_deltas():
     assert config.stream_text_value(segments, 0) == "x" * 50000
 
 
-def test_old_detached_active_run_still_blocks_successor():
+def test_old_detached_cancelled_run_is_released_after_unwind_ceiling():
+    """A stale detached cancel must not 409 the session forever.
+
+    Upstream's writeback-owner generation prevents the old worker from saving
+    over a successor after this bounded gate is released.
+    """
     from api import config, routes
 
     stream_id = "aged-detached-stream"
@@ -349,8 +354,10 @@ def test_old_detached_active_run_still_blocks_successor():
         session_id=session_id,
         started_at=1.0,
         phase="cancelling",
+        cancelled_at=1.0,
     )
     try:
-        assert routes._active_run_stream_for_session(session_id) == stream_id
+        assert routes._active_run_stream_for_session(session_id) is None
+        assert stream_id not in config.ACTIVE_RUNS
     finally:
         config.unregister_active_run(stream_id)

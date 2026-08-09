@@ -27,6 +27,8 @@ from api.config import (
     stream_text_value,
     set_stream_text_value,
     _get_session_agent_lock,
+    _parse_provider_qualified_model_id,
+    clear_session_writeback_owner_if_owned,
     coerce_reasoning_effort_for_model,
     gateway_approval_unavailable_reason,
     gateway_supports_approval,
@@ -153,6 +155,28 @@ _WEBUI_GATEWAY_BASE_URL_ENV = "HERMES_WEBUI_GATEWAY_BASE_URL"
 _WEBUI_GATEWAY_API_KEY_ENV = "HERMES_WEBUI_GATEWAY_API_KEY"
 _WEBUI_GATEWAY_USE_RUNS_API_ENV = "HERMES_WEBUI_GATEWAY_USE_RUNS_API"
 _GATEWAY_CHAT_BACKENDS = {"gateway", "api_server", "api-server"}
+
+
+def _gateway_model_field(model: str | None) -> str:
+    """Return the bare model name to put in a gateway request body.
+
+    The picker and ``_resolve_compatible_session_model_state`` intentionally
+    keep the full ``@provider:model`` string for internal routing (#1253), but
+    the gateway expects a bare model name and carries the provider separately.
+    Sent verbatim, ``@ollama-cloud:minimax-m2.7`` is forwarded to the upstream
+    provider API, which 404s on the ``@``-prefixed string (#6722).
+
+    Parsing is delegated to ``config._parse_provider_qualified_model_id()`` so
+    a multi-segment custom provider ID (``@custom:backup:model-a``) yields the
+    real model (``model-a``) instead of a positional-split fragment.
+    """
+    if not model:
+        return ""
+    value = str(model).strip()
+    parsed = _parse_provider_qualified_model_id(value)
+    if parsed:
+        return str(parsed[0] or "").strip()
+    return value
 
 
 # Total byte-silence budget (seconds) for the gateway SSE socket, applied via
@@ -532,7 +556,7 @@ def _run_gateway_runs_api_streaming(
         if isinstance(run_input, list):
             run_input = [{"role": "user", "content": run_input}]
         run_body = {
-            "model": model or "default",
+            "model": _gateway_model_field(model) or "default",
             "input": run_input,
             **body_extras,
             "session_id": session_id,
@@ -852,6 +876,10 @@ def _run_gateway_chat_streaming(
         # Cancelled before the worker started; release the owner entry the route
         # layer registered so STREAM_SESSION_OWNERS does not leak (no teardown finally runs).
         unregister_stream_owner(stream_id)
+        # Also release the writeback-owner entry the route layer registered, so
+        # SESSION_WRITEBACK_OWNERS does not leak on this pre-start cancellation
+        # path (the teardown finally below never runs when we early-return here).
+        clear_session_writeback_owner_if_owned(session_id, stream_id)
         return
     register_active_run(
         stream_id,
@@ -1063,7 +1091,7 @@ def _run_gateway_chat_streaming(
                     logger.debug("Failed to build gateway multimodal attachment payload", exc_info=True)
                     message_content = str(msg_text or "")
             body = {
-                "model": model or "default",
+                "model": _gateway_model_field(model) or "default",
                 "stream": True,
                 "messages": [*prefill_messages, {"role": "user", "content": message_content}],
             }
@@ -1492,3 +1520,8 @@ def _run_gateway_chat_streaming(
         _clear_gateway_run_starting(stream_id)
         unregister_stream_owner(stream_id)
         unregister_active_run(stream_id)
+        # Release the writeback-owner entry the route layer registered for this
+        # Gateway run so SESSION_WRITEBACK_OWNERS does not grow unbounded across
+        # the process lifetime (compare-and-clear: only clears if still owned by
+        # this stream, mirroring the local streaming teardown).
+        clear_session_writeback_owner_if_owned(session_id, stream_id)

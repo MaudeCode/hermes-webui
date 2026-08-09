@@ -910,8 +910,19 @@ def _requeue_async_delegation_event(
     )
 
 
-def _retry_unclaimed_async_delegation_event(process_registry, evt: dict) -> None:
-    """Retry from durable state, or make one bounded legacy routing pass."""
+def _retry_unclaimed_async_delegation_event(
+    process_registry,
+    evt: dict,
+    *,
+    keep_legacy_retrying: bool = False,
+) -> None:
+    """Retry from durable state, or make a bounded legacy routing pass.
+
+    ``keep_legacy_retrying`` is reserved for a completion whose target session
+    is known but currently busy. That wait state is neither an unroutable event
+    nor a failed delivery attempt, so compatibility-mode delivery must keep
+    backing off until the session becomes idle.
+    """
     completion_queue = getattr(process_registry, "completion_queue", None)
     if schedule_async_delegation_claim_retry(
         evt,
@@ -919,10 +930,11 @@ def _retry_unclaimed_async_delegation_event(process_registry, evt: dict) -> None
         delay=ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
     ):
         return
-    if evt.get("_webui_routing_retry_attempted"):
+    if not keep_legacy_retrying and evt.get("_webui_routing_retry_attempted"):
         return
     retry_evt = dict(evt)
-    retry_evt["_webui_routing_retry_attempted"] = True
+    if not keep_legacy_retrying:
+        retry_evt["_webui_routing_retry_attempted"] = True
     _requeue_async_delegation_event(
         process_registry,
         retry_evt,
@@ -990,7 +1002,9 @@ def _start_async_delegation_wakeup_turn(
                 return
 
             release_async_delegation_delivery(evt, claim)
-            _retry_unclaimed_async_delegation_event(process_registry, evt)
+            _retry_unclaimed_async_delegation_event(
+                process_registry, evt, keep_legacy_retrying=True
+            )
             if status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
                 logger.info(
                     "async delegation wakeup paused for session %s; delivery remains retryable",
@@ -1006,7 +1020,9 @@ def _start_async_delegation_wakeup_turn(
                 )
         except Exception:
             release_async_delegation_delivery(evt, claim)
-            _retry_unclaimed_async_delegation_event(process_registry, evt)
+            _retry_unclaimed_async_delegation_event(
+                process_registry, evt, keep_legacy_retrying=True
+            )
             logger.warning(
                 "async delegation wakeup turn failed for session %s; durable retry scheduled",
                 session_id,
@@ -1033,7 +1049,11 @@ def _process_async_delegation_event(
     # not a delivery attempt, so leave the record unclaimed and let the shared
     # restore sweep retry after the session can accept a wakeup.
     if _session_has_active_turn(session_id):
-        _retry_unclaimed_async_delegation_event(process_registry, evt)
+        _retry_unclaimed_async_delegation_event(
+            process_registry,
+            evt,
+            keep_legacy_retrying=True,
+        )
         return
 
     try:
@@ -1051,7 +1071,20 @@ def _process_async_delegation_event(
         wakeup_prompt = wakeup_prompt_raw.strip() if wakeup_prompt_raw else ""
         if not wakeup_prompt:
             raise RuntimeError("async delegation completion could not be formatted")
+    except Exception:
+        # A formatting failure is a permanent, non-retryable defect (a malformed
+        # event will never format correctly), so it must stay on the bounded
+        # one-shot path — never keep_legacy_retrying, or it would loop forever.
+        release_async_delegation_delivery(evt, claim)
+        _retry_unclaimed_async_delegation_event(process_registry, evt)
+        logger.warning(
+            "async delegation completion could not be formatted for session %s",
+            session_id,
+            exc_info=True,
+        )
+        return
 
+    try:
         _start_async_delegation_wakeup_turn(
             session_id,
             wakeup_prompt,
@@ -1061,8 +1094,13 @@ def _process_async_delegation_event(
             process_registry=process_registry,
         )
     except Exception:
+        # A post-format dispatch failure against a resolved target is transient
+        # (the target may accept on a later pass), so keep the legacy completion
+        # retrying rather than dropping it after one bounded attempt.
         release_async_delegation_delivery(evt, claim)
-        _retry_unclaimed_async_delegation_event(process_registry, evt)
+        _retry_unclaimed_async_delegation_event(
+            process_registry, evt, keep_legacy_retrying=True
+        )
         logger.warning(
             "server-side async delegation dispatch failed for session %s",
             session_id,
