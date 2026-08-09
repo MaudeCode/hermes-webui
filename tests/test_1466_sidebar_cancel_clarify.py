@@ -15,7 +15,17 @@ SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 def _function_body(src: str, name: str, window: int = 1800) -> str:
     idx = src.find(f"function {name}(")
     assert idx >= 0, f"{name} not found"
-    return src[idx : idx + window]
+    brace = src.find("{", idx)
+    assert brace >= 0, f"{name} opening brace not found"
+    depth = 0
+    for pos in range(brace, len(src)):
+        if src[pos] == "{":
+            depth += 1
+        elif src[pos] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[idx : pos + 1]
+    raise AssertionError(f"{name} closing brace not found")
 
 
 class TestSidebarCancelAction:
@@ -77,12 +87,9 @@ class TestSidebarCancelAction:
 
     def test_cli_sessions_hide_duplicate_and_delete_in_action_menu(self):
         """Session action menu should hide duplicate/delete for CLI-origin sessions."""
-        # Window bumped 3600 → 4800 in #1764 (Rename action prepended), then
-        # to 5200 in #2111 for response-aware archive toast handling, then
-        # to 6400 in #2294 for the "Hide from list" action on external sessions,
-        # then to 7200 in #3223 for the "Regenerate title" action (gated on
-        # !session.is_imported) added between Stop-response and the worktree/delete block,
-        # then to 8000 in #3199 for the manual status picker before the danger block.
+        # Extract the complete function so actions inserted earlier in the menu
+        # cannot silently push the destructive-action contract outside a fixed
+        # source window.
         body = _function_body(SESSIONS_JS, "_openSessionActionMenu", 8000)
         assert "const isCliSession = _isCliSession(session);" in body
         assert "const isExternalSession = isMessagingSession || isCliSession;" in body

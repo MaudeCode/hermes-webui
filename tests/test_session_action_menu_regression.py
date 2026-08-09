@@ -27,8 +27,9 @@ def test_session_list_refresh_does_not_close_open_conversation_actions():
     body = _function_block(SESSIONS_JS, "renderSessionListFromCache")
 
     assert "if(_renamingSid) return;" in body
-    assert "if(_sessionActionMenu) return;" in body
-    assert body.index("if(_sessionActionMenu) return;") < body.index("closeSessionActionMenu();")
+    assert "if(_sessionActionMenu){" in body
+    assert "_sessionActionMenuRenderPending=true;" in body
+    assert body.index("if(_sessionActionMenu){") < body.index("closeSessionActionMenu();")
 
 
 def test_archive_action_repaints_sidebar_before_full_refresh():

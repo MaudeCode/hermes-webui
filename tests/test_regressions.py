@@ -354,7 +354,7 @@ def test_server_delete_prunes_session_index(cleanup_test_sessions):
             text.find('if parsed.path == "/api/session/delete":'),
         )
         if delete_idx >= 0:
-            delete_block = text[delete_idx:delete_idx+2400]
+            delete_block = text[delete_idx:delete_idx+5000]
             assert "prune_session_from_index(sid)" in delete_block, \
                 f"{label} session/delete must prune SESSION_INDEX_FILE"
             return
@@ -369,7 +369,9 @@ def test_server_delete_removes_session_bak_snapshot(cleanup_test_sessions):
         routes_src.find('if parsed.path == "/api/session/delete":'),
     )
     assert delete_idx >= 0, "session/delete handler not found in api/routes.py"
-    delete_block = routes_src[delete_idx:delete_idx+2400]
+    delete_end = routes_src.find('if parsed.path == "/api/session/clear":', delete_idx)
+    assert delete_end > delete_idx, "session/delete handler boundary not found"
+    delete_block = routes_src[delete_idx:delete_end]
     assert "with_suffix('.json.bak').unlink" in delete_block or 'with_suffix(".json.bak").unlink' in delete_block, \
         "session/delete must unlink <sid>.json.bak to avoid later orphan-backup recovery"
 
@@ -947,12 +949,14 @@ def test_messages_js_supports_live_reasoning_and_tool_completion(cleanup_test_se
         "messages.js must listen for live reasoning SSE events"
     assert "liveReasoningText += text" in src, \
         "live reasoning SSE events must update the active Worklog Thinking Card text"
+    assert "_scheduleReasoningRender();" in src, \
+        "live reasoning SSE events must schedule the coalesced Worklog Thinking Card renderer"
     assert "const liveThinkingText=_liveThinkingText();" in src, \
-        "live reasoning SSE events must compute the current segment's Worklog Thinking Card text once"
+        "the coalesced renderer must compute the current segment's Worklog Thinking Card text once"
     assert "const anchorReasoningFallback={};" in src, \
-        "live reasoning SSE events must capture the active anchor id for fallback"
-    assert "if(!_upsertAnchorReasoning(liveThinkingText, anchorReasoningFallback))" in src, \
-        "live reasoning SSE events must prefer the anchor renderer before falling back"
+        "the coalesced renderer must capture the active anchor id for fallback"
+    assert "if(!_upsertAnchorReasoning(liveThinkingText,anchorReasoningFallback))" in src, \
+        "the coalesced renderer must prefer the anchor renderer before falling back"
     assert "_updateLiveThinkingCard(liveThinkingText,{" in src and "...anchorReasoningFallback" in src, \
         "live reasoning SSE events must carry anchor identity into the fallback renderer"
     assert "anchorRenderFallback:true" in src and "sessionId:activeSid" in src and "streamId" in src, \

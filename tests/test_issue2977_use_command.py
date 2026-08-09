@@ -22,7 +22,7 @@ def test_use_entry_precedes_stop_entry():
 
 def test_cmdUse_function_defined():
     src = read("static/commands.js")
-    assert "async function cmdUse(args)" in src, "cmdUse function must be defined"
+    assert "async function cmdUse(args,ownerCtx)" in src, "cmdUse function must be defined"
 
 
 def test_forced_skill_directive_declared():
@@ -92,7 +92,7 @@ def test_use_fetches_canonical_skill_content():
 def test_pending_promise_set_synchronously():
     """_forcedSkillDirectivePending must be set before the first await in cmdUse."""
     src = read("static/commands.js")
-    fn_start = src.index("async function cmdUse(args)")
+    fn_start = src.index("async function cmdUse(args,ownerCtx)")
     fn_body = src[fn_start:]
     pending_pos = fn_body.index("_forcedSkillDirectivePending = pending;")
     first_await = fn_body.index("await ")
@@ -113,8 +113,8 @@ def test_directive_pending_captures_session_id():
     src = read("static/commands.js")
     assert "const pending = {sessionId:S.session&&S.session.session_id||null,promise:null};" in src, \
         "cmdUse must capture the session where /use was issued"
-    assert "const isCurrentSession = () => !pending.sessionId || (S.session&&S.session.session_id)===pending.sessionId;" in src, \
-        "async /use completion must avoid writing status messages into a different session"
+    assert "const isCurrentSession = () => commandOwnerCurrent(ownerCtx);" in src, \
+        "async /use completion must reject both a different session and pending navigation"
 
 
 def test_directive_only_consumed_by_matching_session():

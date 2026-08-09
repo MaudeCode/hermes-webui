@@ -17,8 +17,8 @@ def _read(name):
     return open(os.path.join(_SRC, name), encoding="utf-8").read()
 
 
-def _inline_extractor_body(js):
-    start = js.index("function _extractInlineThinkingFromContent(")
+def _incremental_extractor_body(js):
+    start = js.index("function _createIncrementalInlineThinkingParser(")
     end = js.index("if(typeof window", start)
     return js[start:end]
 
@@ -44,10 +44,11 @@ class TestStreamDisplayStripsThinkBlocksAlways:
         m = re.search(r'function _streamDisplay\(\)\{.*?\n  \}', js, re.DOTALL)
         assert m
         fn = m.group(0)
-        assert "_extractInlineThinkingFromContent" in fn
-        helper = _inline_extractor_body(js)
+        assert "_parseInlineThinkingStream" in fn
+        assert "_createIncrementalInlineThinkingParser" in js
+        helper = _incremental_extractor_body(js)
         assert "_thinkPairs" in helper
-        assert "text.startsWith(candidate.open,index)" in helper
+        assert "text.startsWith(pair.open,index)" in helper
 
     def test_still_handles_incomplete_think_tag_partial_prefix(self):
         """Existing behaviour preserved: partial `<thi`, `<think` prefixes
@@ -56,6 +57,7 @@ class TestStreamDisplayStripsThinkBlocksAlways:
         m = re.search(r'function _streamDisplay\(\)\{.*?\n  \}', js, re.DOTALL)
         assert m
         fn = m.group(0)
-        assert "_extractInlineThinkingFromContent" in fn
-        helper = _inline_extractor_body(js)
-        assert "candidate.open.startsWith(rest)" in helper
+        assert "_parseInlineThinkingStream" in fn
+        helper = _incremental_extractor_body(js)
+        assert "suffixIsProperPrefix(text,index,pair.open)" in helper
+        assert "pendingOpener=true" in helper

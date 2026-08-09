@@ -56,7 +56,9 @@ def test_session_action_menu_exposes_popup_state_and_focus_contract():
     assert "_sessionActionAnchor.removeAttribute('aria-controls');" in close
     assert "restoreFocus" in close
     assert "fallbackFocusTarget=restoreFocus?_sessionActionPreviousFocus:null;" in close
-    assert "_focusSessionActionMenuRestoreTarget(focusTarget)" in close
+    assert "resolvedFocusTarget=focusTarget" in close
+    assert "replacementRow.querySelector('.session-actions-trigger')" in close
+    assert "_focusSessionActionMenuRestoreTarget(resolvedFocusTarget)" in close
     assert "_focusSessionActionMenuRestoreTarget(fallbackFocusTarget)" in close
 
     escape_handler = _sessions_block("document.addEventListener('keydown',e=>{", "window.addEventListener('resize'")

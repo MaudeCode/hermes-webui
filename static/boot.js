@@ -2204,6 +2204,8 @@ function _applySessionContextMetadataUpdate(data){
 
 $('modelSelect').onchange=async()=>{
   const selectedModel=$('modelSelect').value;
+  const ownerSession=S.session||null;
+  const ownerSid=ownerSession&&ownerSession.session_id||null;
   const modelState=(typeof _modelStateForSelect==='function')
     ? _modelStateForSelect($('modelSelect'),selectedModel)
     : {model:selectedModel,model_provider:null};
@@ -2211,15 +2213,15 @@ $('modelSelect').onchange=async()=>{
   if(typeof closeModelDropdown==='function') closeModelDropdown();
   if(typeof _writePersistedModelState==='function') _writePersistedModelState(modelState.model,modelState.model_provider);
   else try{localStorage.setItem('hermes-webui-model',modelState.model)}catch{}
-  if(!S.session){
+  if(!ownerSession){
     if(typeof _rememberEmptyComposerModelOverride==='function') _rememberEmptyComposerModelOverride(modelState.model,modelState.model_provider);
     if(typeof syncModelChip==='function') syncModelChip();
     if(typeof syncReasoningChip==='function') syncReasoningChip();
     return;
   }
-  if(typeof _rememberPendingSessionModel==='function') _rememberPendingSessionModel(S.session.session_id,modelState.model,modelState.model_provider);
-  S.session.model=modelState.model;
-  S.session.model_provider=modelState.model_provider||null;
+  if(typeof _rememberPendingSessionModel==='function') _rememberPendingSessionModel(ownerSid,modelState.model,modelState.model_provider);
+  ownerSession.model=modelState.model;
+  ownerSession.model_provider=modelState.model_provider||null;
   if(typeof syncModelChip==='function') syncModelChip();
   if(typeof syncReasoningChip==='function') syncReasoningChip();
   syncTopbar();
@@ -2228,11 +2230,15 @@ $('modelSelect').onchange=async()=>{
     showToast(t('model_scope_toast')||'Applies to this conversation from your next message.', 3000);
   }
   const data=await api('/api/session/update',{method:'POST',body:JSON.stringify({
-    session_id:S.session.session_id,
-    workspace:S.session.workspace,
+    session_id:ownerSid,
+    workspace:ownerSession.workspace,
     model:modelState.model,
     model_provider:modelState.model_provider||null,
   })});
+  if(
+    !S.session||S.session.session_id!==ownerSid||
+    (typeof _loadingSessionId!=='undefined'&&_loadingSessionId&&_loadingSessionId!==ownerSid)
+  )return;
   // NOTE: do NOT clear the pending explicit-pick marker here. It must survive until
   // the NEXT send() consumes it, otherwise the normal "pick → session-update → send"
   // flow loses the explicit-pick signal before /api/chat/start runs and the server

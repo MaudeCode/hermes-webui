@@ -119,8 +119,9 @@ def test_branch_handler_best_effort_saves_source_before_fork_slice():
 def test_fork_from_message_snapshots_session_id_across_async_load():
     body = _function_body(COMMANDS_JS, "forkFromMessage")
 
-    assert "const initialSid = S.session.session_id;" in body
-    assert "S.session.session_id !== initialSid" in body
+    assert "const ownerCtx=createCommandOwnerContext();" in body
+    assert "const initialSid = ownerCtx.sid||S.session.session_id;" in body
+    assert body.count("commandOwnerCurrent(ownerCtx)") >= 2
     assert "session_id:initialSid" in body
     assert "session_id:S.session.session_id" not in body
 
@@ -128,6 +129,7 @@ def test_fork_from_message_snapshots_session_id_across_async_load():
 def test_fork_loads_full_fork_transcript_after_branch():
     body = _function_body(COMMANDS_JS, "forkFromMessage")
 
-    load_idx = body.index("await loadSession(data.session_id)")
+    load_idx = body.index("await loadSession(branchSid)")
     after_load = body[load_idx:]
     assert "await _ensureAllMessagesLoaded()" in after_load
+    assert after_load.count("branchCurrent()") >= 3

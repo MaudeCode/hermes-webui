@@ -159,7 +159,9 @@ def test_session_list_external_refresh_uses_sse_invalidation_not_polling():
     assert "function _sessionEventTargetsActiveSession(payload)" in SESSIONS_JS
     assert "typeof payload.session_id === 'string'" in SESSIONS_JS
     assert "eventTargetsActiveSession?'event-active-session':'event'" in ensure_fn
-    assert "_scheduleSessionEventsRefresh(eventTargetsActiveSession?'event-active-session':'event', {force:true, refreshActive:true})" in ensure_fn
+    assert "function _sessionEventMustRefreshActiveSession(payload, parsedOk)" in SESSIONS_JS
+    assert "refreshActiveSession = _sessionEventMustRefreshActiveSession(payload, true)" in ensure_fn
+    assert "_scheduleSessionEventsRefresh(eventTargetsActiveSession?'event-active-session':'event', {force:true, refreshActive:refreshActiveSession})" in ensure_fn
 
 
 def test_session_events_refresh_forces_hidden_sidebar_render_from_event_path():

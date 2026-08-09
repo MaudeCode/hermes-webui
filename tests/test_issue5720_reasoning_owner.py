@@ -384,7 +384,21 @@ global.document={
 };
 global.location={href:'http://test.local/'};
 global.CSS={escape:value=>String(value)};
-global.requestAnimationFrame=fn=>{fn();return 1;};
+let nextAnimationFrameId=1;
+let pendingAnimationFrames=[];
+global.requestAnimationFrame=fn=>{
+  const id=nextAnimationFrameId++;
+  pendingAnimationFrames.push({id,fn});
+  return id;
+};
+global.cancelAnimationFrame=id=>{
+  pendingAnimationFrames=pendingAnimationFrames.filter(frame=>frame.id!==id);
+};
+function flushAnimationFrames(){
+  const frames=pendingAnimationFrames;
+  pendingAnimationFrames=[];
+  for(const frame of frames) frame.fn();
+}
 global.setTimeout=()=>1;
 global.clearTimeout=()=>{};
 
@@ -508,6 +522,7 @@ const LIVE_STREAMS=global.LIVE_STREAMS={};
 const _STREAM_WAS_HIDDEN=global._STREAM_WAS_HIDDEN={};
 const _STREAM_NOTIFICATION_BACKGROUND=global._STREAM_NOTIFICATION_BACKGROUND={};
 const _desktopBackgroundedForNotifications=false;
+global._isSessionCurrentPane=sid=>!!(global.S&&global.S.session&&global.S.session.session_id===sid);
 global._bindStreamHiddenTracker=()=>{};
 global.closeOtherLiveStreams=()=>{};
 global.closeLiveStream=()=>{};
@@ -516,6 +531,13 @@ global._resetStreamScrollFollow=()=>{};
 global._suspendSessionStreamForLiveChat=()=>{};
 global.ensureLiveWorklogShell=()=>null;
 global._extractInlineThinkingFromContent=(content,reasoning)=>({content:String(content||''),reasoning:String(reasoning||'')});
+global._createIncrementalInlineThinkingParser=()=>((content,reasoning)=>({
+  content:String(content||''),
+  displayText:String(content||''),
+  reasoning:String(reasoning||''),
+  thinkingText:String(reasoning||''),
+  inThinking:false,
+}));
 
 class FakeEventSource {
   static instances=[];
@@ -528,7 +550,9 @@ class FakeEventSource {
 }
 global.EventSource=FakeEventSource;
 
-const attachStart=messagesSrc.indexOf('function attachLiveStream(');
+// Include transport ownership/CAS helpers that attachLiveStream now depends on.
+// LIVE_STREAMS itself is supplied by this harness above.
+const attachStart=messagesSrc.indexOf('let _liveStreamOwnerGeneration=');
 const attachEnd=messagesSrc.indexOf('\nfunction transcript(){',attachStart);
 if(attachStart<0||attachEnd<0) throw new Error('attachLiveStream source boundary not found');
 eval(messagesSrc.slice(attachStart,attachEnd));
@@ -604,12 +628,14 @@ function appendUnkeyedLegacyReasonRow(text){
 }
 
 source.emit('reasoning',{text:'Plan '});
+flushAnimationFrames();
 const first=anchorReasoningRows()[0]||null;
 const firstText=reasoningText(first);
 const firstFallback=fallbackReasoningRows()[0]||null;
 const firstFallbackText=reasoningText(firstFallback);
 const passAfterFirst=transparentRenderPasses;
 source.emit('reasoning',{text:'step'});
+flushAnimationFrames();
 const second=anchorReasoningRows()[0]||null;
 const secondText=reasoningText(second);
 const anchorRowsAfterRecovery=anchorReasoningRows();

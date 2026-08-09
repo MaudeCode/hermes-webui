@@ -112,13 +112,15 @@ def test_message_reasoning_payload_detection_is_leading_only():
 # ── messages.js: streaming render path ───────────────────────────────────────
 
 def test_stream_display_uses_shared_inline_thinking_extractor():
-    """_streamDisplay in messages.js must share inline thinking extraction semantics."""
+    """_streamDisplay must use the stateful streaming thinking parser."""
     fn_idx = MSG_JS.find("function _streamDisplay()")
     assert fn_idx >= 0, "_streamDisplay function not found in messages.js"
     fn_end = MSG_JS.find("\n  }", fn_idx) + 4
     fn_body = MSG_JS[fn_idx:fn_end]
-    assert "_extractInlineThinkingFromContent(_stripXmlToolCalls(assistantText), liveReasoningText, {streaming:true}).content" in fn_body, \
-        "_streamDisplay must route through the shared inline thinking extractor"
+    assert "_parseInlineThinkingStream(_stripXmlToolCallsStream(assistantText), liveReasoningText, {streaming:true}).content" in fn_body, \
+        "_streamDisplay must route through the stateful incremental thinking parser"
+    assert "const _parseInlineThinkingStream=_createIncrementalInlineThinkingParser();" in MSG_JS, \
+        "the stream parser must retain cross-token state"
 
 
 def test_shared_extractor_scans_known_open_tags():

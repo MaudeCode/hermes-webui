@@ -108,6 +108,9 @@ function buildRuntime() {
   globalThis.clearLiveToolCards = () => calls.push('clearLiveToolCards');
   globalThis.removeThinking = () => calls.push('removeThinking');
   globalThis._flushReasoningToAnchor = () => calls.push('flushReasoning');
+  // Production keeps this closure-scoped to attachLiveStream; standalone
+  // extraction of _restoreSettledSession supplies the equivalent no-op flush.
+  globalThis._flushPendingReasoningRender = () => calls.push('flushPendingReasoning');
   globalThis._applyToAnchor = () => calls.push('applyToAnchor');
   globalThis._attachProjectedAnchorSceneToLastAssistant = () => calls.push('attachProjected');
   globalThis._hydrateTodosFromSession = () => calls.push('hydrateTodos');

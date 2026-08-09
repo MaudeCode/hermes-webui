@@ -6335,7 +6335,17 @@ async function promptWorkspacePath(){
   }
 }
 
-async function switchToWorkspace(path,name){
+async function switchToWorkspace(path,name,expectedOwnerSid){
+  let ownerSession=S.session||null;
+  let ownerSid=expectedOwnerSid||ownerSession&&ownerSession.session_id||null;
+  let createdSession=false;
+  const ownerCurrent=()=>{
+    if(ownerSid){
+      if(!S.session||S.session.session_id!==ownerSid)return false;
+      return !(typeof _loadingSessionId!=='undefined'&&_loadingSessionId&&_loadingSessionId!==ownerSid);
+    }
+    return !S.session&&!(typeof _loadingSessionId!=='undefined'&&_loadingSessionId);
+  };
   // Opus review Q6: if called from blank page, auto-create a session bound to
   // the requested workspace so the switch doesn't silently no-op.
   if(!S.session){
@@ -6345,7 +6355,16 @@ async function switchToWorkspace(path,name){
       // System-minted session (#6022): explicit worktree:false — a workspace
       // switch from a blank page is not deliberate New Chat intent.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
+      if(!ownerCurrent())return false;
+      if(r&&r.session){
+        S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];
+        ownerSession=r.session;ownerSid=r.session.session_id;
+        createdSession=true;
+        if(typeof syncTopbar==='function')syncTopbar();
+        if(typeof renderMessages==='function')renderMessages();
+        if(typeof renderSessionList==='function')await renderSessionList();
+        if(!ownerCurrent())return false;
+      }
     }catch(e){if(typeof setStatus==='function')setStatus(t('switch_failed')+e.message);return;}
     if(!S.session)return;
   }
@@ -6373,6 +6392,7 @@ async function switchToWorkspace(path,name){
         confirmLabel:t('discard'),
         danger:true
       });
+      if(!ownerCurrent())return false;
       if(!discard)return;
       if(typeof cancelEditMode==='function')cancelEditMode();
       if(typeof clearPreview==='function')clearPreview();
@@ -6380,9 +6400,12 @@ async function switchToWorkspace(path,name){
     closeWsDropdown();
     // Bind the new chat to the selected workspace via the one-shot flag newSession() reads.
     S._profileSwitchWorkspace=path;
-    if(typeof newSession==='function') await newSession(false);
+    const created=typeof newSession==='function'?await newSession(false):null;
+    const createdSid=created&&created.session_id;
+    if(!createdSid||!S.session||S.session.session_id!==createdSid)return false;
+    if(typeof _loadingSessionId!=='undefined'&&_loadingSessionId&&_loadingSessionId!==createdSid)return false;
     showToast(t('workspace_switched_new_chat',name||getWorkspaceFriendlyName(path)));
-    return;
+    return typeof commandSessionChanged==='function'?commandSessionChanged():{sessionChanged:true};
   }
   if(typeof _previewDirty!=='undefined'&&_previewDirty){
     const discard=await showConfirmDialog({
@@ -6391,6 +6414,7 @@ async function switchToWorkspace(path,name){
       confirmLabel:t('discard'),
       danger:true
     });
+    if(!ownerCurrent())return false;
     if(!discard)return;
     if(typeof cancelEditMode==='function')cancelEditMode();
     if(typeof clearPreview==='function')clearPreview();
@@ -6406,9 +6430,10 @@ async function switchToWorkspace(path,name){
     // overwrite the user's newer selection and reject this switch's fresh tree.
     if(typeof bumpWorkspaceTreeGen==='function')bumpWorkspaceTreeGen();
     await api('/api/session/update',{method:'POST',body:JSON.stringify({
-      session_id:S.session.session_id, workspace:path, model:S.session.model, model_provider:S.session.model_provider||null
+      session_id:ownerSid, workspace:path, model:ownerSession.model, model_provider:ownerSession.model_provider||null
     })});
-    S.session.workspace=path;
+    if(!ownerCurrent())return false;
+    ownerSession.workspace=path;
     // Explicit workspace switch = user overriding any pending profile-switch default.
     // Clear the one-shot flag so a subsequent newSession() inherits this choice instead.
     S._profileSwitchWorkspace=null;
@@ -6421,9 +6446,14 @@ async function switchToWorkspace(path,name){
       typeof _focusComposerWorkspaceTarget==='function'
     ) _focusComposerWorkspaceTarget(restoreComposerFocusTarget);
     await loadDir('.');
+    if(!ownerCurrent())return false;
     if (_currentPanel === 'memory') await loadMemory(true);
+    if(!ownerCurrent())return false;
     showToast(t('workspace_switched_to',name||getWorkspaceFriendlyName(path)));
-  }catch(e){setStatus(t('switch_failed')+e.message);}
+    return createdSession
+      ? (typeof commandSessionChanged==='function'?commandSessionChanged():{sessionChanged:true})
+      : false;
+  }catch(e){if(ownerCurrent())setStatus(t('switch_failed')+e.message);return false;}
 }
 
 // ── Profile panel + dropdown ──

@@ -134,15 +134,16 @@ def test_model_picker_persists_without_active_session():
     body = boot_js[boot_js.index("$('modelSelect').onchange=async()=>") : boot_js.index("$('msg').addEventListener", boot_js.index("$('modelSelect').onchange=async()=>"))]
     assert "_writePersistedModelState(modelState.model,modelState.model_provider)" in body
     assert "_rememberEmptyComposerModelOverride(modelState.model,modelState.model_provider)" in body
-    assert "if(!S.session){" in body
-    assert body.index("if(!S.session){") < body.index("await api('/api/session/update'")
+    assert "if(!ownerSession){" in body
+    assert body.index("if(!ownerSession){") < body.index("await api('/api/session/update'")
 
 
 def test_session_model_changes_do_not_write_empty_composer_override():
     boot_js = Path("static/boot.js").read_text(encoding="utf-8")
     body = boot_js[boot_js.index("$('modelSelect').onchange=async()=>") : boot_js.index("$('msg').addEventListener", boot_js.index("$('modelSelect').onchange=async()=>"))]
     session_branch = body[body.index("if(typeof _rememberPendingSessionModel==='function')"):]
-    assert "_rememberPendingSessionModel(S.session.session_id,modelState.model,modelState.model_provider)" in body
+    assert "_rememberPendingSessionModel(ownerSid,modelState.model,modelState.model_provider)" in body
+    assert "ownerSession.model=modelState.model" in body
     assert "_rememberEmptyComposerModelOverride(modelState.model,modelState.model_provider)" not in session_branch
 
 

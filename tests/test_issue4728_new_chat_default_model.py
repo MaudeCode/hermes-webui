@@ -139,6 +139,7 @@ for (const name of [
 }
 globalThis.loadDir = async () => null;
 globalThis._setNewSessionPending = () => {};
+globalThis._saveComposerDraftNow = async () => null;
 globalThis.api = async (url, opts) => {
   const body = JSON.parse(opts.body);
   captured.push({ url, body });

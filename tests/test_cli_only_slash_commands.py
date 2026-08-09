@@ -545,9 +545,11 @@ def test_builtin_command_opt_outs_do_not_hit_agent_metadata_lookup():
     intercept_idx = MESSAGES_JS.find("Slash command intercept")
     normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
     intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
-    optout_idx = intercept.find("if(_cmd.fn(_parsedCmd.args)===false)")
+    call_idx = intercept.find("const _commandResult=await _cmd.fn(_parsedCmd.args,_commandOwner)")
+    optout_idx = intercept.find("if(_commandResult===false)")
     metadata_idx = intercept.find("await getAgentCommandMetadata(_parsedCmd.name)")
 
-    assert optout_idx != -1
+    assert call_idx != -1
+    assert call_idx < optout_idx
     assert metadata_idx != -1
     assert "if(_parsedCmd&&!_cmd)" in intercept[optout_idx:metadata_idx + 120]

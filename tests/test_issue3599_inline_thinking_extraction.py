@@ -99,8 +99,9 @@ def test_messages_js_live_and_persist_paths_share_extractor():
     parse_state = _function_body(MESSAGES_JS, "function _parseStreamState")
     split_persist = _function_body(MESSAGES_JS, "function _splitThinkFromContent")
 
-    assert "_extractInlineThinkingFromContent(_stripXmlToolCalls(assistantText), liveReasoningText, {streaming:true}).content" in stream_display
-    assert "return _extractInlineThinkingFromContent(_stripXmlToolCalls(assistantText), liveReasoningText, {streaming:true});" in parse_state
+    assert "_parseInlineThinkingStream(_stripXmlToolCallsStream(assistantText), liveReasoningText, {streaming:true}).content" in stream_display
+    assert "return _parseInlineThinkingStream(_stripXmlToolCallsStream(assistantText), liveReasoningText, {streaming:true});" in parse_state
+    assert "const _parseInlineThinkingStream=_createIncrementalInlineThinkingParser();" in MESSAGES_JS
     assert "return _extractInlineThinkingFromContent(rawContent, existingReasoning, {streaming:false});" in split_persist
     assert "window._extractInlineThinkingFromContentForRender" in MESSAGES_JS
     assert "_thinkingFenceMarkerAt" in MESSAGES_JS

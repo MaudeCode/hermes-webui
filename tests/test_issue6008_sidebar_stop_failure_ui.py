@@ -57,14 +57,10 @@ def test_stop_callers_gate_success_toasts_on_cancel_result():
     compact_commands = "".join(COMMANDS_JS.split())
     compact_messages = "".join(MESSAGES_JS.split())
     compact_sessions = "".join(SESSIONS_JS.split())
-    assert (
-        "if(awaitcancelStream('slash-stop'))showToast(t('stream_stopped'));"
-        "elseshowToast(t('cancel_failed'),null,'error');"
-    ) in compact_commands
-    assert (
-        "if(awaitcancelStream('slash-interrupt'))showToast(t('cmd_interrupt_confirm'),2000);"
-        "elseshowToast(t('cancel_failed'),null,'error');"
-    ) in compact_commands
+    assert "conststopped=awaitcancelStream('slash-stop');" in compact_commands
+    assert "if(stopped)showToast(t('stream_stopped'));elseshowToast(t('cancel_failed'),null,'error');" in compact_commands
+    assert "constcancelled=awaitcancelStream('slash-interrupt');" in compact_commands
+    assert "if(cancelled)showToast(t('cmd_interrupt_confirm'),2000);elseshowToast(t('cancel_failed'),null,'error');" in compact_commands
     assert (
         "if(awaitcancelStream('busy-interrupt'))showToast(t('busy_interrupt_confirm'),2000);"
         "elseshowToast(t('cancel_failed'),null,'error');"

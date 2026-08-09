@@ -112,7 +112,7 @@ class TestSendSlashIntercept:
     def test_send_checks_noecho_flag(self):
         src = _read("static/messages.js")
         idx = src.find("Slash command intercept")
-        block = src[idx:idx + 1400]
+        block = src[idx:idx + 3000]
         assert "_cmd.noEcho" in block or "cmd.noEcho" in block, (
             "send() must check the command's noEcho flag before pushing user message (#840)"
         )
@@ -120,7 +120,7 @@ class TestSendSlashIntercept:
     def test_send_pushes_user_message_for_echo_commands(self):
         src = _read("static/messages.js")
         idx = src.find("Slash command intercept")
-        block = src[idx:idx + 1400]
+        block = src[idx:idx + 3000]
         assert "role:'user'" in block and "content:text" in block, (
             "send() must push {role:'user', content:text} for echo-worthy slash commands (#840)"
         )
@@ -132,7 +132,7 @@ class TestSendSlashIntercept:
         which would display in reverse chronological order."""
         src = _read("static/messages.js")
         idx = src.find("Slash command intercept")
-        block = src[idx:idx + 1400]
+        block = src[idx:idx + 3000]
         user_push_pos = block.find("role:'user'")
         handler_call_pos = block.find("_cmd.fn(")
         if handler_call_pos == -1:
@@ -151,7 +151,7 @@ class TestSendSlashIntercept:
         can add it cleanly for forwarding to the agent."""
         src = _read("static/messages.js")
         idx = src.find("Slash command intercept")
-        block = src[idx:idx + 1400]
+        block = src[idx:idx + 3000]
         assert "S.messages.pop()" in block, (
             "send() must S.messages.pop() the user message on handler opt-out "
             "to avoid duplicating the user turn when falling through to "

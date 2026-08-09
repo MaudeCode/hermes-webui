@@ -25,7 +25,7 @@ def test_model_selection_records_pending_state_before_async_session_update():
     body = _body_between(BOOT_JS, "$('modelSelect').onchange=async()=>", "$('msg').addEventListener")
 
     pending_idx = body.index("_rememberPendingSessionModel")
-    local_model_idx = body.index("S.session.model=modelState.model")
+    local_model_idx = body.index("ownerSession.model=modelState.model")
     update_idx = body.index("await api('/api/session/update'")
 
     assert pending_idx < update_idx

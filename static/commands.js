@@ -35,6 +35,28 @@ const COMMANDS=[
   {name:'branch', desc:t('cmd_branch'), fn:cmdBranch, arg:'[name]', noEcho:true},
 ];
 
+function createCommandOwnerContext(){
+  const session=(typeof S!=='undefined'&&S.session)||null;
+  const sid=session&&session.session_id||null;
+  return {
+    sid,
+    session,
+    isCurrent(){
+      if(sid){
+        if(!S.session||S.session.session_id!==sid)return false;
+        return !(typeof _loadingSessionId!=='undefined'&&_loadingSessionId&&_loadingSessionId!==sid);
+      }
+      return !S.session&&!(typeof _loadingSessionId!=='undefined'&&_loadingSessionId);
+    },
+  };
+}
+
+function commandOwnerCurrent(ctx){
+  return !ctx||typeof ctx.isCurrent!=='function'||ctx.isCurrent();
+}
+
+function commandSessionChanged(){return {sessionChanged:true};}
+
 const SLASH_SUBARG_SOURCES={
   model:{desc:t('cmd_model'), subArgs:'models'},
   personality:{desc:t('cmd_personality'), subArgs:'personalities'},
@@ -169,7 +191,7 @@ async function handlePetSlashCommand(rawCommandText,meta){
   return {handled:false,message:_desktopCompanionUnavailableMessage()};
 }
 
-function executeCommand(text){
+async function executeCommand(text){
   const parsed=parseCommand(text);
   if(!parsed)return null;
   const cmd=COMMANDS.find(c=>c.name===parsed.name);
@@ -177,7 +199,8 @@ function executeCommand(text){
   // A handler may return `false` to opt out of interception — e.g. /reasoning
   // with an effort level falls through so the agent's own handler sees it,
   // preserving the pre-existing pass-through behaviour for that subcommand.
-  if(cmd.fn(parsed.args)===false)return null;
+  const result=await cmd.fn(parsed.args,createCommandOwnerContext());
+  if(result===false)return null;
   // Return noEcho flag so send() knows whether to echo the command as a user message (#840).
   return {noEcho:!!cmd.noEcho};
 }
@@ -665,7 +688,8 @@ function _nearestModelSuggestion(options,query){
   return suggestion;
 }
 
-async function cmdModel(args){
+async function cmdModel(args,ownerCtx){
+  ownerCtx=ownerCtx||createCommandOwnerContext();
   if(!args){showToast(t('model_usage'));return;}
   const sel=$('modelSelect');
   if(!sel)return;
@@ -691,10 +715,11 @@ async function cmdModel(args){
       }
     }
   } catch(_){/* non-critical, fall through to fuzzy match */}
+  if(!commandOwnerCurrent(ownerCtx))return;
   const {options:candidates,providerMap}=_buildModelCandidates(sel,modelsData&&modelsData.groups);
   // First: try exact match within active provider's optgroup.
   // Use _findModelInDropdown (ui.js) which supports preferredProviderId.
-  const preferred=(S&&S.session&&S.session.model_provider)||window._activeProvider||null;
+  const preferred=(ownerCtx&&ownerCtx.session&&ownerCtx.session.model_provider)||window._activeProvider||null;
   let match=(typeof _findModelInDropdown==='function')?_findModelInDropdown(q,sel,preferred):null;
   // Fallback: fuzzy match across the FULL catalog (featured + extras), so an
   // exact bare model living in the extras tail (e.g. "mimo-v2.5" alongside the
@@ -716,21 +741,22 @@ async function cmdModel(args){
     const versionedNoSnap=_looksLikeVersionedModel(bare)&&nearSuggestion;
     // Cross-provider fallback: if still no match, the model is from a
     // different provider not in the dropdown. Call /api/session/update directly.
-    if(!match && !versionedNoSnap && S&&S.session&&S.session.session_id){
+    if(!match && !versionedNoSnap && ownerCtx&&ownerCtx.sid){
       const provider=q.slice(0,q.indexOf('/'));
       try{
         const resp=await fetch(new URL('api/session/update',document.baseURI||location.href).href,{
           method:'POST',
           headers:{'Content-Type':'application/json'},
           body:JSON.stringify({
-            session_id:S.session.session_id,
+            session_id:ownerCtx.sid,
             model:q,
             model_provider:provider,
           }),
         });
+        if(!commandOwnerCurrent(ownerCtx))return;
         if(resp.ok){
-          S.session.model=q;
-          S.session.model_provider=provider;
+          ownerCtx.session.model=q;
+          ownerCtx.session.model_provider=provider;
           if(typeof syncTopbar==='function') syncTopbar();
           showToast(t('switched_to')+q);
           return;
@@ -739,6 +765,7 @@ async function cmdModel(args){
     }
   }
   if(!match){
+    if(!commandOwnerCurrent(ownerCtx))return;
     // #3368: when a complete versioned name (e.g. "mimo-v2.5") doesn't match
     // because only a longer tier variant exists ("mimo-v2.5-pro"), don't snap
     // to it — say no-match and suggest the near variant so the user can opt in.
@@ -759,33 +786,45 @@ async function cmdModel(args){
   // end-to-end. _ensureModelOptionInDropdown reuses the existing option when one
   // is already rendered. (#3368)
   const hasOption=Array.from(sel.options||[]).some(o=>o.value===match);
+  if(!commandOwnerCurrent(ownerCtx))return;
   if(!hasOption && typeof _ensureModelOptionInDropdown==='function'){
     _ensureModelOptionInDropdown(match,sel,providerMap[match]||null);
   }else{
     sel.value=match;
   }
   await sel.onchange();
+  if(!commandOwnerCurrent(ownerCtx))return;
   showToast(t('switched_to')+match);
 }
 
-async function cmdWorkspace(args){
+async function cmdWorkspace(args,ownerCtx){
+  ownerCtx=ownerCtx||createCommandOwnerContext();
   if(!args){showToast(t('workspace_usage'));return;}
   try{
     const data=await api('/api/workspaces');
+    if(!commandOwnerCurrent(ownerCtx))return;
     const q=args.toLowerCase();
     const ws=(data.workspaces||[]).find(w=>
       (w.name||'').toLowerCase().includes(q)||w.path.toLowerCase().includes(q)
     );
     if(!ws){showToast(t('no_workspace_match')+`"${args}"`);return;}
-    if(typeof switchToWorkspace==='function') await switchToWorkspace(ws.path, ws.name||ws.path);
+    if(typeof switchToWorkspace==='function'){
+      const navigation=await switchToWorkspace(ws.path, ws.name||ws.path, ownerCtx.sid);
+      // `false` is reserved by the slash dispatcher for intentional agent
+      // fall-through (/reasoning <level>). A normal in-place workspace switch
+      // is handled even though switchToWorkspace returns false internally.
+      return navigation&&navigation.sessionChanged===true ? navigation : undefined;
+    }
     else showToast(t('switched_workspace')+(ws.name||ws.path));
-  }catch(e){showToast(t('workspace_switch_failed')+e.message);}
+  }catch(e){if(commandOwnerCurrent(ownerCtx))showToast(t('workspace_switch_failed')+e.message);}
 }
 
-async function cmdTerminal(){
+async function cmdTerminal(_args,ownerCtx){
+  ownerCtx=ownerCtx||createCommandOwnerContext();
   let data=null;
   try{
     data=await api('/api/workspaces');
+    if(!commandOwnerCurrent(ownerCtx))return;
     if(typeof syncTerminalBackendState==='function') syncTerminalBackendState(data);
     if(data&&data.terminal_remote_backend){
       const msg=typeof _terminalRemoteBackendUnsupportedMessage==='function'
@@ -796,6 +835,8 @@ async function cmdTerminal(){
       return;
     }
   }catch(_){}
+  if(!commandOwnerCurrent(ownerCtx))return;
+  let createdSession=false;
   if(!S.session&&typeof newSession==='function'){
     if(!S._profileSwitchWorkspace&&!S._profileDefaultWorkspace){
       const first=(data&&data.workspaces||[])[0];
@@ -803,8 +844,13 @@ async function cmdTerminal(){
     }
     // System-minted session (#6022): opening the terminal auto-creates a
     // session — explicit worktree:false so the config default can't leak.
-    await newSession(false, {worktree: false});
+    const created=await newSession(false, {worktree: false});
+    const createdSid=created&&created.session_id;
+    if(!createdSid||!S.session||S.session.session_id!==createdSid)return;
+    ownerCtx={sid:createdSid,session:created,isCurrent:createCommandOwnerContext().isCurrent};
+    createdSession=true;
     if(typeof renderSessionList==='function') await renderSessionList();
+    if(!commandOwnerCurrent(ownerCtx))return;
   }
   if(!S.session||!S.session.workspace){
     showToast(t('terminal_no_workspace_title'),2600,'warning');
@@ -812,14 +858,21 @@ async function cmdTerminal(){
     return;
   }
   if(typeof toggleComposerTerminal==='function') await toggleComposerTerminal(true);
+  if(!commandOwnerCurrent(ownerCtx))return;
+  if(createdSession)return commandSessionChanged();
 }
 
 async function cmdNew(){
   if(typeof clearCompressionUi==='function') clearCompressionUi();
-  await newSession();
+  const created=await newSession();
+  const createdSid=created&&created.session_id;
+  if(!createdSid||!S.session||S.session.session_id!==createdSid)return;
+  const createdOwner=createCommandOwnerContext();
   await renderSessionList();
+  if(!commandOwnerCurrent(createdOwner))return;
   $('msg').focus();
   showToast(t('new_session'));
+  return commandSessionChanged();
 }
 
 function _manualCompressionVisibleMessages(){
@@ -838,10 +891,11 @@ function _manualCompressionSleep(ms){
   return new Promise(resolve=>setTimeout(resolve, ms));
 }
 
-async function _pollManualCompressionResult(sid){
+async function _pollManualCompressionResult(sid,ownerCtx){
   let delay=700;
   while(true){
     const data=await api(`/api/session/compress/status?session_id=${encodeURIComponent(sid)}`);
+    if(ownerCtx&&!commandOwnerCurrent(ownerCtx))return null;
     if(data&&data.status==='done') return data;
     if(data&&data.status==='error'){
       const err=new Error(data.error||'Compression failed');
@@ -850,15 +904,24 @@ async function _pollManualCompressionResult(sid){
     }
     if(data&&data.status==='idle') throw new Error('Compression job is no longer available');
     await _manualCompressionSleep(delay);
+    if(ownerCtx&&!commandOwnerCurrent(ownerCtx))return null;
     delay=Math.min(2000, delay+300);
   }
 }
 
-async function _applyManualCompressionResult(data, focusTopic, visibleCount, commandText){
+async function _applyManualCompressionResult(data, focusTopic, visibleCount, commandText, expectedSid, ownerCtx){
+  const stillOwns=()=>ownerCtx
+    ? commandOwnerCurrent(ownerCtx)
+    : (!expectedSid||(
+      S.session&&S.session.session_id===expectedSid&&
+      !(typeof _loadingSessionId!=='undefined'&&_loadingSessionId&&_loadingSessionId!==expectedSid)
+    ));
+  if(!stillOwns())return;
   if(data&&data.session){
     const currentSid=S.session&&S.session.session_id;
     if(data.session.session_id&&data.session.session_id!==currentSid){
       await loadSession(data.session.session_id);
+      if(!stillOwns()||!S.session||S.session.session_id!==data.session.session_id)return;
     }else{
       S.session=data.session;
       S.messages=data.session.messages||[];
@@ -869,6 +932,7 @@ async function _applyManualCompressionResult(data, focusTopic, visibleCount, com
       syncTopbar();
       renderMessages();
       await renderSessionList();
+      if(!stillOwns())return;
       updateQueueBadge(S.session.session_id);
     }
   }
@@ -893,6 +957,7 @@ async function _applyManualCompressionResult(data, focusTopic, visibleCount, com
       anchorMessageKey: data?.session?.compression_anchor_message_key||null,
     });
   }
+  if(!stillOwns())return;
   if(typeof setComposerStatus==='function') setComposerStatus('');
   renderMessages();
   if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
@@ -950,15 +1015,17 @@ async function resumeManualCompressionForSession(sid){
   }
 }
 
-async function _runManualCompression(focusTopic){
+async function _runManualCompression(focusTopic,ownerCtx){
+  ownerCtx=ownerCtx||createCommandOwnerContext();
   if(!S.session){showToast(t('no_active_session'));return;}
+  const sid=ownerCtx.sid||S.session.session_id;
   let visibleCount=0;
   try{
-    const sid=S.session.session_id;
     // Preflight: verify the viewed session still exists before compressing.
     // This avoids a confusing "not found" toast when the UI is stale.
     try{
       const live=await api(`/api/session?session_id=${encodeURIComponent(sid)}`);
+      if(!commandOwnerCurrent(ownerCtx))return;
       if(!live||!live.session||live.session.session_id!==sid){
         throw new Error('session no longer available');
       }
@@ -967,6 +1034,7 @@ async function _runManualCompression(focusTopic){
       S.toolCalls=live.session.tool_calls||[];
       if(typeof _messagesTruncated!=='undefined') _messagesTruncated=false;
     }catch(preflightErr){
+      if(!commandOwnerCurrent(ownerCtx))return;
       if(typeof clearCompressionUi==='function') clearCompressionUi();
       if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
       if(typeof setBusy==='function') setBusy(false);
@@ -997,14 +1065,18 @@ async function _runManualCompression(focusTopic){
     if(typeof setComposerStatus==='function') setComposerStatus(t('compressing'));
     renderMessages();
     const started=await api('/api/session/compress/start',{method:'POST',body:JSON.stringify(body)});
+    if(!commandOwnerCurrent(ownerCtx))return;
     if(started&&started.status==='error'){
       const err=new Error(started.error||'Compression failed');
       err.status=started.error_status||400;
       throw err;
     }
-    const data=(started&&started.status==='done')?started:await _pollManualCompressionResult(sid);
-    await _applyManualCompressionResult(data, focusTopic, visibleCount, commandText);
+    const data=(started&&started.status==='done')?started:await _pollManualCompressionResult(sid,ownerCtx);
+    if(!commandOwnerCurrent(ownerCtx))return;
+    await _applyManualCompressionResult(data, focusTopic, visibleCount, commandText, sid, ownerCtx);
+    if(!commandOwnerCurrent(ownerCtx))return;
   }catch(e){
+    if(!commandOwnerCurrent(ownerCtx))return;
     if(typeof setCompressionUi==='function'){
       const currentSid=S.session&&S.session.session_id;
       setCompressionUi({
@@ -1025,15 +1097,15 @@ async function _runManualCompression(focusTopic){
     showToast('Compression failed: '+e.message);
     return;
   }
-  if(typeof setBusy==='function') setBusy(false);
+  if(commandOwnerCurrent(ownerCtx)&&typeof setBusy==='function') setBusy(false);
 }
 
-async function cmdCompress(args){
-  await _runManualCompression((args||'').trim());
+async function cmdCompress(args,ownerCtx){
+  await _runManualCompression((args||'').trim(),ownerCtx);
 }
 
-async function cmdCompact(args){
-  await _runManualCompression((args||'').trim());
+async function cmdCompact(args,ownerCtx){
+  await _runManualCompression((args||'').trim(),ownerCtx);
 }
 
 async function cmdUsage(){
@@ -1094,9 +1166,11 @@ async function cmdTheme(args){
   showToast(t('theme_usage')+themes.join('|')+' | '+skins.join('|')+' | legacy:'+legacyThemes.join('|'));
 }
 
-async function cmdSkills(args){
+async function cmdSkills(args,ownerCtx){
+  ownerCtx=ownerCtx||createCommandOwnerContext();
   try{
     const data = await api('/api/skills');
+    if(!commandOwnerCurrent(ownerCtx))return;
     let skills = data.skills || [];
     if(args){
       const q = args.toLowerCase();
@@ -1133,11 +1207,12 @@ async function cmdSkills(args){
     renderMessages();
     showToast(t('type_slash'));
   }catch(e){
-    showToast('Failed to load skills: '+e.message);
+    if(commandOwnerCurrent(ownerCtx))showToast('Failed to load skills: '+e.message);
   }
 }
 
-async function cmdUse(args){
+async function cmdUse(args,ownerCtx){
+  ownerCtx=ownerCtx||createCommandOwnerContext();
   if(!args){
     S.messages.push({role:'assistant',content:'Usage: `/use <skill-name>` — forces the agent to consult that skill before its next response.'});
     renderMessages();
@@ -1147,9 +1222,14 @@ async function cmdUse(args){
   const pending = {sessionId:S.session&&S.session.session_id||null,promise:null};
   pending.promise = new Promise(r => { resolve = r; });
   _forcedSkillDirectivePending = pending;
-  const isCurrentSession = () => !pending.sessionId || (S.session&&S.session.session_id)===pending.sessionId;
+  const isCurrentSession = () => commandOwnerCurrent(ownerCtx);
+  const abandon=()=>{
+    resolve(null);
+    if(_forcedSkillDirectivePending===pending)_forcedSkillDirectivePending=null;
+  };
   try{
     const data = await api('/api/skills');
+    if(!isCurrentSession()){abandon();return;}
     const skills = data.skills || [];
     const match = skills.find(s => (s.name||'').toLowerCase() === args.toLowerCase());
     if(!match){
@@ -1162,6 +1242,7 @@ async function cmdUse(args){
       return;
     }
     const detail = await api(`/api/skills/content?name=${encodeURIComponent(match.name)}`);
+    if(!isCurrentSession()){abandon();return;}
     const skillContent = detail&&typeof detail.content==='string' ? detail.content.trim() : '';
     if(!skillContent) throw new Error(`Skill \`${match.name}\` has no readable content.`);
     const directive = `[USER OVERRIDE] You MUST follow the skill '${match.name}' content provided below before responding to the next message.`;
@@ -1170,20 +1251,22 @@ async function cmdUse(args){
       S.messages.push({role:'assistant', content:`Next turn: skill \`${match.name}\` will be forced.`});
       renderMessages();
     }
-    showToast(`Skill \`${match.name}\` will be used for next turn.`);
+    if(isCurrentSession())showToast(`Skill \`${match.name}\` will be used for next turn.`);
   }catch(e){
-    resolve(null);
-    if(_forcedSkillDirectivePending===pending)_forcedSkillDirectivePending = null;
-    showToast('Failed to load skills: '+e.message);
+    abandon();
+    if(isCurrentSession())showToast('Failed to load skills: '+e.message);
   }
 }
 
-async function cmdPersonality(args){
+async function cmdPersonality(args,ownerCtx){
+  ownerCtx=ownerCtx||createCommandOwnerContext();
   if(!S.session){showToast(t('no_active_session'));return;}
+  const ownerSid=(ownerCtx&&ownerCtx.sid)||S.session.session_id;
   if(!args){
     // List available personalities
     try{
       const data=await api('/api/personalities');
+      if(!commandOwnerCurrent(ownerCtx))return;
       if(!data.personalities||!data.personalities.length){
         showToast(t('no_personalities'));
         return;
@@ -1191,48 +1274,66 @@ async function cmdPersonality(args){
       const list=data.personalities.map(p=>`  **${p.name}**${p.description?' — '+p.description:''}`).join('\n');
       S.messages.push({role:'assistant',content:t('available_personalities')+'\n\n'+list+t('personality_switch_hint')});
       renderMessages();
-    }catch(e){showToast(t('personalities_load_failed'));}
+    }catch(e){if(commandOwnerCurrent(ownerCtx))showToast(t('personalities_load_failed'));}
     return;
   }
   const name=args.trim();
   if(name.toLowerCase()==='none'||name.toLowerCase()==='default'||name.toLowerCase()==='clear'){
     try{
-      await api('/api/personality/set',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,name:''})});
+      await api('/api/personality/set',{method:'POST',body:JSON.stringify({session_id:ownerSid,name:''})});
+      if(!commandOwnerCurrent(ownerCtx))return;
       showToast(t('personality_cleared'));
-    }catch(e){showToast(t('failed_colon')+e.message);}
+    }catch(e){if(commandOwnerCurrent(ownerCtx))showToast(t('failed_colon')+e.message);}
     return;
   }
   try{
-    const res=await api('/api/personality/set',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,name})});
+    const res=await api('/api/personality/set',{method:'POST',body:JSON.stringify({session_id:ownerSid,name})});
+    if(!commandOwnerCurrent(ownerCtx))return;
     S.messages.push({role:'assistant',content:t('personality_set')+`**${name}**`});
     renderMessages();
     showToast(t('personality_set')+name);
-  }catch(e){showToast(t('failed_colon')+e.message);}
+  }catch(e){if(commandOwnerCurrent(ownerCtx))showToast(t('failed_colon')+e.message);}
 }
 
-async function cmdStop(){
+async function cmdStop(_args,ownerCtx){
+  ownerCtx=ownerCtx||createCommandOwnerContext();
   if(!S.session){showToast(t('no_active_session'));return;}
   if(!S.activeStreamId){showToast(t('no_active_task'));return;}
   if(typeof cancelStream==='function'){
-    if(await cancelStream('slash-stop')) showToast(t('stream_stopped'));
+    const stopped=await cancelStream('slash-stop');
+    if(!commandOwnerCurrent(ownerCtx))return;
+    if(stopped) showToast(t('stream_stopped'));
     else showToast(t('cancel_failed'),null,'error');
   }
   else showToast(t('cancel_unavailable'));
 }
 
-async function cmdGoal(args){
-  if(!S.session){await newSession();await renderSessionList();}
+async function cmdGoal(args,ownerCtx){
+  ownerCtx=ownerCtx||createCommandOwnerContext();
+  let createdSession=false;
+  if(!S.session){
+    if(!commandOwnerCurrent(ownerCtx))return;
+    const created=await newSession();
+    const createdSid=created&&created.session_id;
+    if(!createdSid||!S.session||S.session.session_id!==createdSid)return;
+    ownerCtx=createCommandOwnerContext();
+    createdSession=true;
+    await renderSessionList();
+    if(!commandOwnerCurrent(ownerCtx))return;
+  }
   if(!S.session||!S.session.session_id){showToast(t('no_active_session'));return;}
-  const activeSid=S.session.session_id;
+  const activeSid=ownerCtx.sid||S.session.session_id;
+  const ownerSession=ownerCtx.session||S.session;
   try{
     const r=await api('/api/goal',{method:'POST',body:JSON.stringify({
       session_id:activeSid,
       args:args||'',
-      workspace:S.session.workspace,
-      model:S.session.model||($('modelSelect')&&$('modelSelect').value)||'',
-      model_provider:S.session.model_provider||null,
-      profile:S.activeProfile||S.session.profile||'default',
+      workspace:ownerSession.workspace,
+      model:ownerSession.model||($('modelSelect')&&$('modelSelect').value)||'',
+      model_provider:ownerSession.model_provider||null,
+      profile:S.activeProfile||ownerSession.profile||'default',
     })});
+    if(!commandOwnerCurrent(ownerCtx))return;
     const msg = (() => {
       const raw = String((r && r.message) || '').trim();
       const key = String((r && r.message_key) || '').trim();
@@ -1249,7 +1350,7 @@ async function cmdGoal(args){
       renderMessages({preserveScroll:true});
       showToast(msg.split('\n')[0],2600);
     }
-    if(!r||!r.stream_id)return;
+    if(!r||!r.stream_id)return createdSession?commandSessionChanged():undefined;
     S.toolCalls=[];
     if(typeof clearLiveToolCards==='function')clearLiveToolCards();
     appendThinking();setBusy(true);
@@ -1269,11 +1370,14 @@ async function cmdGoal(args){
     if(typeof _fetchYoloState==='function')_fetchYoloState(activeSid);
     attachLiveStream(activeSid,r.stream_id,[]);
     if(typeof renderSessionList==='function')void renderSessionList();
+    if(createdSession)return commandSessionChanged();
   }catch(e){
+    if(!commandOwnerCurrent(ownerCtx))return;
     const err=String((e&&e.message)||e||'Goal command failed');
     S.messages.push({role:'assistant',content:`**Goal command failed:** ${err}`,_ts:Date.now()/1000,_error:true});
     renderMessages({preserveScroll:true});
     showToast(err,3000);
+    if(createdSession)return commandSessionChanged();
   }
 }
 
@@ -1285,7 +1389,8 @@ async function cmdGoal(args){
  * /queue <message> — Explicitly queue a message for the next turn.
  * Works regardless of the default message mode setting.
  */
-async function cmdQueue(args){
+async function cmdQueue(args,ownerCtx){
+  ownerCtx=ownerCtx||createCommandOwnerContext();
   const msg=(args||'').trim();
   if(!msg){showToast(t('cmd_queue_no_msg'));return;}
   // If nothing is running, /queue <msg> just sends like a normal message
@@ -1296,8 +1401,10 @@ async function cmdQueue(args){
     return;
   }
   if(!S.session){showToast(t('no_active_session'));return;}
-  queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
-  updateQueueBadge(S.session.session_id);
+  const ownerSid=ownerCtx.sid||S.session.session_id;
+  const ownerSession=ownerCtx.session||S.session;
+  queueSessionMessage(ownerSid,{text:msg,files:[...S.pendingFiles],model:ownerSession.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
+  updateQueueBadge(ownerSid);
   S.pendingFiles=[];renderTray();
   showToast(t('cmd_queue_confirm'),2000);
 }
@@ -1306,7 +1413,8 @@ async function cmdQueue(args){
  * /interrupt <message> — Cancel the current turn and send a new message.
  * Calls cancelStream() then queues the message so the drain picks it up.
  */
-async function cmdInterrupt(args){
+async function cmdInterrupt(args,ownerCtx){
+  ownerCtx=ownerCtx||createCommandOwnerContext();
   const msg=(args||'').trim();
   if(!msg){showToast(t('cmd_interrupt_no_msg'));return;}
   // If nothing is running, /interrupt <msg> just sends like a normal message
@@ -1317,13 +1425,17 @@ async function cmdInterrupt(args){
     return;
   }
   if(!S.session){showToast(t('no_active_session'));return;}
+  const ownerSid=ownerCtx.sid||S.session.session_id;
+  const ownerSession=ownerCtx.session||S.session;
   // Queue the message first (before cancel sets busy=false and drains)
-  queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
-  updateQueueBadge(S.session.session_id);
+  queueSessionMessage(ownerSid,{text:msg,files:[...S.pendingFiles],model:ownerSession.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
+  updateQueueBadge(ownerSid);
   S.pendingFiles=[];renderTray();
   // Cancel the active stream; setBusy(false) will drain the queue
   if(typeof cancelStream==='function'){
-    if(await cancelStream('slash-interrupt')) showToast(t('cmd_interrupt_confirm'),2000);
+    const cancelled=await cancelStream('slash-interrupt');
+    if(!commandOwnerCurrent(ownerCtx))return;
+    if(cancelled) showToast(t('cmd_interrupt_confirm'),2000);
     else showToast(t('cancel_failed'),null,'error');
   }
 }
@@ -1665,15 +1777,18 @@ async function _trySteer(msg, explicitSteer){
   return false;
 }
 
-async function cmdTitle(args){
+async function cmdTitle(args,ownerCtx){
+  ownerCtx=ownerCtx||createCommandOwnerContext();
   if(!S.session){showToast(t('no_active_session'));return;}
+  const ownerSid=ownerCtx.sid||S.session.session_id;
   const name=(args||'').trim();
   if(!name){
     S.messages.push({role:'assistant',content:`${t('title_current')}: **${S.session.title||t('untitled')}**\n\n${t('title_change_hint')}`});
     renderMessages();return;
   }
   try{
-    const r=await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,title:name})});
+    const r=await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:ownerSid,title:name})});
+    if(!commandOwnerCurrent(ownerCtx))return;
     if(r&&r.error){showToast(r.error);return;}
     S.session.title=(r&&r.session&&r.session.title)||name;
     if(typeof syncTopbar==='function')syncTopbar();
@@ -1681,12 +1796,13 @@ async function cmdTitle(args){
     showToast(`${t('title_set')} "${S.session.title}"`);
     S.messages.push({role:'assistant',content:`${t('title_set')} **${S.session.title}**`});
     renderMessages();
-  }catch(e){showToast(t('failed_colon')+e.message);}
+  }catch(e){if(commandOwnerCurrent(ownerCtx))showToast(t('failed_colon')+e.message);}
 }
-async function cmdRetry(){
+async function cmdRetry(_args,ownerCtx){
+  ownerCtx=ownerCtx||createCommandOwnerContext();
   if(!S.session){showToast(t('no_active_session'));return;}
   if(S.session.is_cli_session){showToast(t('cmd_webui_only_session'));return;}
-  const activeSid=S.session.session_id;
+  const activeSid=ownerCtx.sid||S.session.session_id;
   // #5924: honor a genuine deliberate model pick across a recovery /retry without
   // forcing explicit_model_pick when there is no real pick. The single-shot marker
   // is already consumed by the failed send (messages.js clears it before
@@ -1699,12 +1815,13 @@ async function cmdRetry(){
   const _recoveryPick=_deliberateSessionModelPick(activeSid);
   try{
     const r=await api('/api/session/retry',{method:'POST',body:JSON.stringify({session_id:activeSid})});
+    if(!commandOwnerCurrent(ownerCtx))return;
     if(r&&r.error){showToast(r.error);return;}
-    if(!S.session||S.session.session_id!==activeSid)return;
+    if(!commandOwnerCurrent(ownerCtx))return;
     const data=await api('/api/session?session_id='+encodeURIComponent(activeSid));
     // #5924 SILENT-race guard: a session switch during the GET await must not let
     // this recovery apply session A's intent to whatever session is now visible.
-    if(!S.session||S.session.session_id!==activeSid)return;
+    if(!commandOwnerCurrent(ownerCtx))return;
     if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=false;renderMessages();}
     $('msg').value=r.last_user_text||'';if(typeof autoResize==='function')autoResize();
     // Re-arm the single-shot explicit-pick marker from the captured non-default
@@ -1713,50 +1830,59 @@ async function cmdRetry(){
     // _reArmRecoveryPick. Scoped to activeSid so it can't leak to another session.
     _reArmRecoveryPick(activeSid, _recoveryPick);
     await send();
-  }catch(e){showToast(t('retry_failed')+e.message);}
+  }catch(e){if(commandOwnerCurrent(ownerCtx))showToast(t('retry_failed')+e.message);}
 }
-async function cmdUndo(){
+async function cmdUndo(_args,ownerCtx){
+  ownerCtx=ownerCtx||createCommandOwnerContext();
   if(!S.session){showToast(t('no_active_session'));return;}
   if(S.session.is_cli_session){showToast(t('cmd_webui_only_session'));return;}
-  const activeSid=S.session.session_id;
+  const activeSid=ownerCtx.sid||S.session.session_id;
   try{
     const r=await api('/api/session/undo',{method:'POST',body:JSON.stringify({session_id:activeSid})});
+    if(!commandOwnerCurrent(ownerCtx))return;
     if(r&&r.error){showToast(r.error);return;}
-    if(!S.session||S.session.session_id!==activeSid)return;
+    if(!commandOwnerCurrent(ownerCtx))return;
     const data=await api('/api/session?session_id='+encodeURIComponent(activeSid));
+    if(!commandOwnerCurrent(ownerCtx))return;
     if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=false;renderMessages();}
     showToast(`↩ ${t('undid_n_messages')} ${r.removed_count} ${t('undid_messages_suffix')}`);
-  }catch(e){showToast(t('undo_failed')+e.message);}
+  }catch(e){if(commandOwnerCurrent(ownerCtx))showToast(t('undo_failed')+e.message);}
 }
 async function undoLastExchange(){await cmdUndo();}
-async function cmdBtw(args){
+async function cmdBtw(args,ownerCtx){
+  ownerCtx=ownerCtx||createCommandOwnerContext();
   if(!S.session){showToast(t('no_active_session'));return;}
   const question=(args||'').trim();
   if(!question){showToast(t('cmd_btw_usage'));return;}
   showToast(t('btw_asking'));
-  const activeSid=S.session.session_id;
+  const activeSid=ownerCtx.sid||S.session.session_id;
   try{
     const r=await api('/api/btw',{method:'POST',body:JSON.stringify({session_id:activeSid,question})});
+    if(!commandOwnerCurrent(ownerCtx))return;
     if(r&&r.error){showToast(r.error);return;}
+    if(!commandOwnerCurrent(ownerCtx))return;
     // Connect to the ephemeral SSE stream
     const streamId=r.stream_id;
     const parentSid=r.parent_session_id;
     if(typeof attachBtwStream==='function') attachBtwStream(parentSid,streamId,question);
-  }catch(e){showToast(t('btw_failed')+e.message);}
+  }catch(e){if(commandOwnerCurrent(ownerCtx))showToast(t('btw_failed')+e.message);}
 }
-async function cmdBackground(args){
+async function cmdBackground(args,ownerCtx){
+  ownerCtx=ownerCtx||createCommandOwnerContext();
   if(!S.session){showToast(t('no_active_session'));return;}
   const prompt=(args||'').trim();
   if(!prompt){showToast(t('cmd_background_usage'));return;}
   showToast(t('bg_running'));
-  const activeSid=S.session.session_id;
+  const activeSid=ownerCtx.sid||S.session.session_id;
   try{
     const r=await api('/api/background',{method:'POST',body:JSON.stringify({session_id:activeSid,prompt})});
+    if(!commandOwnerCurrent(ownerCtx))return;
     if(r&&r.error){showToast(r.error);return;}
+    if(!commandOwnerCurrent(ownerCtx))return;
     // Show background badge and start polling
     if(typeof showBackgroundBadge==='function') showBackgroundBadge(r.task_id);
     if(typeof startBackgroundPolling==='function') startBackgroundPolling(activeSid,r.task_id,prompt);
-  }catch(e){showToast(t('bg_failed')+e.message);}
+  }catch(e){if(commandOwnerCurrent(ownerCtx))showToast(t('bg_failed')+e.message);}
 }
 function _formatStatusTimestamp(value){
   if(value===undefined||value===null||value==='') return t('status_unknown');
@@ -1891,17 +2017,20 @@ function cmdVoice(){
 // ── YOLO mode toggle ──
 // Session-scoped: skips all approval prompts for the current session.
 // Toggles on/off; state is not persisted across page reloads.
-async function cmdYolo(){
-  const sid=S.session&&S.session.session_id;
+async function cmdYolo(_args,ownerCtx){
+  ownerCtx=ownerCtx||createCommandOwnerContext();
+  const sid=ownerCtx.sid||(S.session&&S.session.session_id);
   if(!sid){showToast(t('yolo_no_session'));return;}
   try{
     // Check current state first to toggle
     const status=await api('/api/session/yolo?session_id='+encodeURIComponent(sid));
+    if(!commandOwnerCurrent(ownerCtx))return;
     const enable=!status.yolo_enabled;
     await api('/api/session/yolo',{
       method:'POST',
       body:JSON.stringify({session_id:sid,enabled:enable}),
     });
+    if(!commandOwnerCurrent(ownerCtx))return;
     _yoloEnabled=enable;
     _updateYoloPill();
     showToast(enable?t('yolo_enabled'):t('yolo_disabled'));
@@ -1909,15 +2038,17 @@ async function cmdYolo(){
       // Dismiss any visible approval card
       hideApprovalCard(true);
     }
-  }catch(e){showToast('YOLO: '+e.message);}
+  }catch(e){if(commandOwnerCurrent(ownerCtx))showToast('YOLO: '+e.message);}
 }
 
 // ── Branch / fork command ──
 // Forks the current conversation into a new session (#465).
 // /branch           → full history copy
 // /branch My Name   → full history copy with custom title
-async function cmdBranch(args){
+async function cmdBranch(args,ownerCtx){
+  ownerCtx=ownerCtx||createCommandOwnerContext();
   if(!S.session){showToast(t('no_active_session'));return;}
+  const ownerSid=ownerCtx.sid||S.session.session_id;
   const readOnlySession=typeof _isReadOnlySession==='function'
     ? _isReadOnlySession(S.session)
     : !!(S.session&&(S.session.read_only||S.session.is_read_only));
@@ -1930,16 +2061,28 @@ async function cmdBranch(args){
     const data=await api('/api/session/branch',{
       method:'POST',
       body:JSON.stringify({
-        session_id:S.session.session_id,
+        session_id:ownerSid,
         title:customTitle||undefined,
       }),
     });
+    if(!commandOwnerCurrent(ownerCtx))return;
     if(data&&data.session_id){
-      await loadSession(data.session_id);
+      const branchSid=data.session_id;
+      const loadGenerationBefore=typeof _loadSessionGeneration==='number'?_loadSessionGeneration:null;
+      await loadSession(branchSid);
+      const branchLoadGeneration=loadGenerationBefore===null?null:loadGenerationBefore+1;
+      const branchCurrent=()=>!!(
+        S.session&&S.session.session_id===branchSid&&
+        !(typeof _loadingSessionId!=='undefined'&&_loadingSessionId&&_loadingSessionId!==branchSid)&&
+        (branchLoadGeneration===null||_loadSessionGeneration===branchLoadGeneration)
+      );
+      if(!branchCurrent())return;
       if(typeof renderSessionList==='function') await renderSessionList();
+      if(!branchCurrent())return;
       showToast(t('branch_forked'));
+      return commandSessionChanged();
     }
-  }catch(e){showToast(t('branch_failed')+e.message);}
+  }catch(e){if(commandOwnerCurrent(ownerCtx))showToast(t('branch_failed')+e.message);}
 }
 
 // ── Fork from a specific message point ──
@@ -1952,6 +2095,7 @@ async function cmdBranch(args){
 // which resets _oldestIdx to 0 after its wholesale replace.  See #2184.
 async function forkFromMessage(msgIdx){
   if(!S.session)return;
+  const ownerCtx=createCommandOwnerContext();
   // During streaming, only block fork if the clicked message is the
   // currently-streaming (live) message itself.  Past messages that are
   // already committed server-side can be forked immediately without
@@ -1971,7 +2115,7 @@ async function forkFromMessage(msgIdx){
     ? _isBranchableReadOnlySession(S.session)
     : false;
   if(readOnlySession&&!branchableReadOnlySession){showToast('Read-only sessions cannot be forked.',3000);return;}
-  const initialSid = S.session.session_id;
+  const initialSid = ownerCtx.sid||S.session.session_id;
   // Capture the absolute keep_count before any async work that may
   // reset _oldestIdx.  _oldestIdx is 0 when the full transcript is
   // already loaded, so short/already-full sessions send msgIdx unchanged.
@@ -1983,7 +2127,7 @@ async function forkFromMessage(msgIdx){
   if(!S.busy && typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
   }
-  if(!S.session || S.session.session_id !== initialSid) return;
+  if(!commandOwnerCurrent(ownerCtx))return;
   try{
     const data=await api('/api/session/branch',{
       method:'POST',
@@ -1992,13 +2136,25 @@ async function forkFromMessage(msgIdx){
         keep_count:absoluteKeepCount,
       }),
     });
+    if(!commandOwnerCurrent(ownerCtx))return;
     if(data&&data.session_id){
-      await loadSession(data.session_id);
+      const branchSid=data.session_id;
+      const loadGenerationBefore=typeof _loadSessionGeneration==='number'?_loadSessionGeneration:null;
+      await loadSession(branchSid);
+      const branchLoadGeneration=loadGenerationBefore===null?null:loadGenerationBefore+1;
+      const branchCurrent=()=>!!(
+        S.session&&S.session.session_id===branchSid&&
+        !(typeof _loadingSessionId!=='undefined'&&_loadingSessionId&&_loadingSessionId!==branchSid)&&
+        (branchLoadGeneration===null||_loadSessionGeneration===branchLoadGeneration)
+      );
+      if(!branchCurrent())return;
       if(typeof _ensureAllMessagesLoaded==='function') await _ensureAllMessagesLoaded();
+      if(!branchCurrent())return;
       if(typeof renderSessionList==='function') await renderSessionList();
+      if(!branchCurrent())return;
       showToast(t('branch_forked'));
     }
-  }catch(e){showToast(t('branch_failed')+e.message);}
+  }catch(e){if(commandOwnerCurrent(ownerCtx))showToast(t('branch_failed')+e.message);}
 }
 
 let _skillCommandCache=[];

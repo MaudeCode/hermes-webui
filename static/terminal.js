@@ -463,6 +463,7 @@ function _connectTerminalOutput(){
 
 async function _startComposerTerminal(restart=false){
   const sid=_terminalSessionId();
+  const ownerWorkspace=S.session&&S.session.workspace||null;
   if(!sid||!(S.session&&S.session.workspace)){
     showToast(t('terminal_no_workspace_title'),2600,'warning');
     syncTerminalButton();
@@ -488,11 +489,22 @@ async function _startComposerTerminal(restart=false){
     e.message=_terminalStartErrorMessage(e);
     throw e;
   }
+  if(
+    !S.session||S.session.session_id!==sid||
+    (typeof _loadingSessionId!=='undefined'&&_loadingSessionId&&_loadingSessionId!==sid)
+  ){
+    // The backend terminal belongs to A, but the pane moved to B while start
+    // was in flight. Do not attach A's output/workspace to B; close the orphan
+    // backend session best-effort and let the destination pane remain untouched.
+    api('/api/terminal/close',{method:'POST',body:JSON.stringify({session_id:sid})}).catch(()=>{});
+    return false;
+  }
   TERMINAL_UI.sessionId=sid;
-  TERMINAL_UI.workspace=S.session&&S.session.workspace||null;
+  TERMINAL_UI.workspace=ownerWorkspace;
   TERMINAL_UI.typedLine='';
   _connectTerminalOutput();
   _resizeComposerTerminal();
+  return true;
 }
 
 async function toggleComposerTerminal(force){
@@ -528,7 +540,8 @@ async function toggleComposerTerminal(force){
       TERMINAL_UI.resizeObserver.observe(inner||panel);
     }
     try{
-      await _startComposerTerminal(false);
+      const started=await _startComposerTerminal(false);
+      if(!started){await closeComposerTerminal(null,{skipApi:true});return;}
       focusComposerTerminalInput();
     }catch(e){
       showToast(t('terminal_start_failed')+e.message,3200,'error');

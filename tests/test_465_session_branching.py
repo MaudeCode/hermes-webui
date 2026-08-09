@@ -99,7 +99,10 @@ def _commands_harness(body: str) -> str:
             "let ensureCalls = 0;",
             "let loadedSessions = [];",
             "let renderCalls = 0;",
+            "let apiBeforeResolve = null;",
             "let _oldestIdx = 0;",
+            "let _loadingSessionId = null;",
+            "let _loadSessionGeneration = 0;",
             "let S = { session: null, busy: false };",
             "const t = (key) => ({",
             "  no_active_session: 'No active session',",
@@ -109,11 +112,15 @@ def _commands_harness(body: str) -> str:
             "const showToast = (...args) => { toasts.push(args); };",
             "const api = async (url, opts) => {",
             "  calls.push({ url, body: JSON.parse(opts.body) });",
+            "  if (apiBeforeResolve) await apiBeforeResolve(url);",
             "  return { session_id: 'forked-session' };",
             "};",
-            "const loadSession = async (sid) => { loadedSessions.push(sid); };",
+            "const loadSession = async (sid) => { loadedSessions.push(sid); _loadingSessionId=sid; _loadSessionGeneration++; S.session={session_id:sid}; _loadingSessionId=null; };",
             "const renderSessionList = async () => { renderCalls += 1; };",
             "const _ensureAllMessagesLoaded = async () => { ensureCalls += 1; };",
+            "const createCommandOwnerContext = () => { const session=S.session; const sid=session&&session.session_id||null; return {sid,session,isCurrent:()=>!!(S.session&&S.session.session_id===sid&&!(_loadingSessionId&&_loadingSessionId!==sid))}; };",
+            "const commandOwnerCurrent = (ctx) => !!(ctx&&ctx.isCurrent());",
+            "const commandSessionChanged = () => ({sessionChanged:true});",
             is_read_only,
             is_branchable_read_only,
             cmd_branch,
@@ -647,6 +654,22 @@ def test_forkFromMessage_allows_read_only_cron_sessions_to_post():
     assert payload["ensureCalls"] == 2, "cron forkFromMessage should preserve the full-load flow"
     assert payload["loadedSessions"] == ["forked-session"], "cron forkFromMessage should load the fork"
     assert payload["renderCalls"] == 1, "cron forkFromMessage should refresh the session list"
+
+
+def test_forkFromMessage_does_not_load_branch_after_sidebar_navigation_starts():
+    """A branch POST started in A cannot navigate or toast after B owns the pane."""
+    result = _commands_harness(
+        "S.session = { session_id: 'A', read_only: false };\n"
+        "apiBeforeResolve = async () => { _loadingSessionId = 'B'; };\n"
+        "await forkFromMessage(1);\n"
+        "console.log(JSON.stringify({ calls, toasts, ensureCalls, loadedSessions, renderCalls }));"
+    )
+    payload = json.loads(result)
+    assert len(payload["calls"]) == 1
+    assert payload["calls"][0]["body"]["session_id"] == "A"
+    assert payload["loadedSessions"] == []
+    assert payload["renderCalls"] == 0
+    assert payload["toasts"] == []
 
 
 def test_cmdBranch_rejects_cron_prefixed_id_without_canonical_source():

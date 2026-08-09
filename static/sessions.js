@@ -1456,19 +1456,44 @@ async function newSession(flash, options={}){
   }
   _setNewSessionPending(true);
   _newSessionInFlight=(async()=>{
-    // Starting a brand-new chat must not carry named context blocks selected in
-    // the previous conversation (#2543). loadSession() clears these on a sidebar
-    // switch, but the New Chat path replaces S.session here without going through
-    // loadSession(), so clear them explicitly before the session is replaced.
-    if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();
-    updateQueueBadge();
-    S.toolCalls=[];
-    _messagesTruncated=false;
-    _oldestIdx=0;
-    clearLiveToolCards();
+    const departingSid=S.session&&S.session.session_id;
+    const departureLoadGeneration=typeof _loadSessionGeneration==='number'?_loadSessionGeneration:0;
+    const stillOwnsDepartingPane=()=>{
+      const activeSid=S.session&&S.session.session_id;
+      if((departingSid||null)!==(activeSid||null)) return false;
+      if(typeof _loadSessionGeneration==='number'&&_loadSessionGeneration!==departureLoadGeneration) return false;
+      return !(typeof _loadingSessionId!=='undefined'&&_loadingSessionId&&_loadingSessionId!==departingSid);
+    };
+    // New Chat is a real pane navigation, even though it creates its target
+    // instead of loading one. Preserve and detach the old live turn using the
+    // same recovery contract as loadSession(): one token SSE remains attached
+    // to the visible pane, and returning to the old session replays its durable
+    // journal from the beginning (including tool rows emitted while away).
+    if(departingSid){
+      if(
+        (S.busy||S.activeStreamId||(INFLIGHT&&INFLIGHT[departingSid]))&&
+        typeof snapshotLiveTurnHtmlForSession==='function'
+      ){
+        if(!INFLIGHT[departingSid]){
+          INFLIGHT[departingSid]={
+            messages:Array.isArray(S.messages)?[...S.messages]:[],
+            uploaded:[],
+            toolCalls:Array.isArray(S.toolCalls)?[...S.toolCalls]:[],
+          };
+        }
+        snapshotLiveTurnHtmlForSession(departingSid);
+      }
+      await _saveComposerDraftNow(
+        departingSid,
+        ($('msg')||{}).value||'',
+        S.pendingFiles?[...S.pendingFiles]:[]
+      );
+      // A sidebar navigation may have won while draft persistence yielded.
+      // Never build a new-session request from the destination pane's globals.
+      if(!stillOwnsDepartingPane()) return;
+    }
     // One-shot profile-switch workspace wins first; otherwise prefer the profile default.
     const switchWs=S._profileSwitchWorkspace;
-    S._profileSwitchWorkspace=null;
     const inheritWs=switchWs||(S._profileDefaultWorkspace||null)||(S.session?S.session.workspace:null);
     const reqBody={
       workspace:inheritWs,
@@ -1554,6 +1579,38 @@ async function newSession(flash, options={}){
         ||null;
     }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
+    if(!stillOwnsDepartingPane()){
+      // The server already created the requested session, but a newer explicit
+      // navigation owns the pane. Keep the creation discoverable in the sidebar
+      // without tearing down or overwriting that newer session's owners.
+      if(S._profileSwitchWorkspace===switchWs) S._profileSwitchWorkspace=null;
+      if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
+      if(typeof refreshSessionList==='function') Promise.resolve(refreshSessionList('new-session-background')).catch(()=>{});
+      return data.session;
+    }
+    if(departingSid){
+      // Keep the old pane fully live until creation succeeds. This second
+      // snapshot includes any token/tool events that arrived during the POST;
+      // detaching earlier would leave a failed New Chat click on a dead pane.
+      if(typeof snapshotLiveTurnHtmlForSession==='function') snapshotLiveTurnHtmlForSession(departingSid);
+      if(typeof closeLiveStream==='function') closeLiveStream(departingSid);
+      if(typeof stopSessionStream==='function') stopSessionStream();
+      if(typeof stopApprovalPolling==='function') stopApprovalPolling();
+      if(typeof hideApprovalCard==='function') hideApprovalCard(true);
+      if(typeof stopClarifyPolling==='function') stopClarifyPolling();
+      if(typeof hideClarifyCard==='function') hideClarifyCard(true,'session');
+    }
+    // Session-local UI state must remain owned by the departing pane until the
+    // POST succeeds. A failed New Chat request leaves that pane installed, so
+    // clearing its pagination coordinates, tool rows, or named selections
+    // before the await would corrupt later edit/fork/truncate actions.
+    if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();
+    updateQueueBadge();
+    S.toolCalls=[];
+    _messagesTruncated=false;
+    _oldestIdx=0;
+    clearLiveToolCards();
+    if(S._profileSwitchWorkspace===switchWs) S._profileSwitchWorkspace=null;
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
@@ -1632,6 +1689,10 @@ async function newSession(flash, options={}){
     }
     // Refresh sidebar to include the newly created session (#3874).
     if(typeof refreshSessionList==='function'){Promise.resolve(refreshSessionList('new-session')).catch(()=>{})}
+    // Callers that initiated session-producing commands must verify that this
+    // exact session still owns the pane after their next await. Returning the
+    // created object also lets them distinguish success from a sidebar winner.
+    return data.session;
   })();
   try{
     return await _newSessionInFlight;
@@ -1639,6 +1700,49 @@ async function newSession(flash, options={}){
     _newSessionInFlight=null;
     _setNewSessionPending(false);
   }
+}
+
+function _teardownDeletedSessionBrowserOwners(sid){
+  if(!sid) return;
+  const isActive=!!(S.session&&S.session.session_id===sid);
+  // closeLiveStream deliberately persists a reattach snapshot for ordinary
+  // navigation. Deletion is terminal, so clear both memory and durable recovery
+  // immediately after invalidating the stream owner.
+  if(typeof closeLiveStream==='function') closeLiveStream(sid);
+  if(typeof INFLIGHT==='object'&&INFLIGHT) delete INFLIGHT[sid];
+  if(typeof clearInflightState==='function') clearInflightState(sid);
+  if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
+  if(typeof SESSION_QUEUES==='object'&&SESSION_QUEUES) delete SESSION_QUEUES[sid];
+  if(typeof _clearHandoffStorageForSession==='function') _clearHandoffStorageForSession(sid);
+  if(typeof _clearStreamHidden==='function') _clearStreamHidden(sid);
+  if(typeof _clearStreamNotificationBackground==='function') _clearStreamNotificationBackground(sid);
+  if(typeof _approvalPendingBySession!=='undefined'&&_approvalPendingBySession) _approvalPendingBySession.delete(sid);
+  if(typeof _clarifyPendingBySession!=='undefined'&&_clarifyPendingBySession) _clarifyPendingBySession.delete(sid);
+  if((isActive||(typeof _approvalPollingSessionId!=='undefined'&&_approvalPollingSessionId===sid))&&typeof stopApprovalPolling==='function') stopApprovalPolling();
+  if((isActive||(typeof _clarifyPollingSessionId!=='undefined'&&_clarifyPollingSessionId===sid))&&typeof stopClarifyPolling==='function') stopClarifyPolling();
+  if(isActive||(typeof _approvalSessionId!=='undefined'&&_approvalSessionId===sid)){
+    if(typeof stopApprovalPolling==='function') stopApprovalPolling();
+    if(typeof hideApprovalCard==='function') hideApprovalCard(true);
+  }
+  if(isActive||(typeof _clarifySessionId!=='undefined'&&_clarifySessionId===sid)){
+    if(typeof stopClarifyPolling==='function') stopClarifyPolling();
+    if(typeof hideClarifyCard==='function') hideClarifyCard(true,'session');
+  }
+  if(isActive){
+    if(typeof stopSessionStream==='function') stopSessionStream();
+    S.activeStreamId=null;
+    S.busy=false;
+    S.toolCalls=[];
+    if(typeof clearLiveToolCards==='function') clearLiveToolCards();
+    if(typeof updateSendBtn==='function') updateSendBtn();
+  }
+}
+
+function _newerPendingNavigationSurvivesDelete(deletedIds){
+  const pendingSid=(typeof _loadingSessionId!=='undefined'&&_loadingSessionId)||null;
+  if(!pendingSid)return false;
+  const deleted=new Set(Array.isArray(deletedIds)?deletedIds:[deletedIds]);
+  return !deleted.has(pendingSid);
 }
 
 /**
@@ -4371,21 +4475,32 @@ function _renderBatchActionBar(){
     if(!ok)return;
     try{
       const results=await Promise.all(ids.map(async sid=>{
-        const response=await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
-        return {response,session:sessionsById.get(sid)||null};
+        try{
+          const response=await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
+          return {sid,response,session:sessionsById.get(sid)||null};
+        }catch(error){
+          return {sid,error,session:sessionsById.get(sid)||null};
+        }
       }));
-      const retainedCount=_worktreeResponseCount(results);
-      const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
-      ids.forEach(_clearHandoffStorageForSession);
-      if(S.session&&ids.includes(S.session.session_id)){
+      const deletedResults=results.filter(result=>result&&!result.error&&result.response);
+      const deletedIds=deletedResults.map(result=>result.sid);
+      const failedResults=results.filter(result=>result&&result.error);
+      const retainedCount=_worktreeResponseCount(deletedResults);
+      const cleanupFailedCount=deletedResults.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
+      deletedIds.forEach(_teardownDeletedSessionBrowserOwners);
+      if(S.session&&deletedIds.includes(S.session.session_id)){
+        const pendingNavigationSurvives=_newerPendingNavigationSurvivesDelete(deletedIds);
         S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
-        const remaining=await api('/api/sessions'+_sessionListQueryString());
-        if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
-        else{$('msgInner').innerHTML='';$('emptyState').style.display='';}
+        if(!pendingNavigationSurvives){
+          const remaining=await api('/api/sessions'+_sessionListQueryString());
+          if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
+          else{$('msgInner').innerHTML='';$('emptyState').style.display='';}
+        }
       }
       if(cleanupFailedCount) showToast(t('delete_failed')+' ('+cleanupFailedCount+'/'+ids.length+')',0,'error');
-      else showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');
+      else if(failedResults.length) showToast(t('delete_failed')+' ('+failedResults.length+'/'+ids.length+')',0,'error');
+      else showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+deletedIds.length+')');
       exitSessionSelectMode();await renderSessionList();
     }catch(e){showToast('Delete failed: '+(e.message||e));}
   };bar.appendChild(deleteBtn);
@@ -6120,6 +6235,17 @@ function _sessionEventTargetsActiveSession(payload){
   return !!(S.session && S.session.session_id && S.session.session_id === eventSessionId);
 }
 
+function _sessionEventMustRefreshActiveSession(payload, parsedOk){
+  // Scoped events can prove that another session changed, so avoid the active
+  // metadata round-trip in that common sidebar-only case. Malformed and legacy
+  // unscoped events cannot prove safety; fail closed and reconcile the active
+  // transcript just as older clients did.
+  if(!parsedOk||!payload||typeof payload!=='object') return true;
+  const eventSessionId=typeof payload.session_id==='string'?payload.session_id.trim():'';
+  if(!eventSessionId) return true;
+  return _sessionEventTargetsActiveSession(payload);
+}
+
 // ── #4151: focus-aware close for the two GLOBAL sidebar SSE streams ──────────
 // Each WebUI window holds up to three persistent SSE connections (session-events
 // + gateway + the per-session stream). #3992/#3996 close them on the Page
@@ -6219,6 +6345,7 @@ function ensureSessionEventsSSE(){
     _sessionEventsSSE.addEventListener('sessions_changed', (ev) => {
       const activeProfile = S.activeProfile || 'default';
       let eventTargetsActiveSession = false;
+      let refreshActiveSession = true;
       try {
         const payload = typeof ev?.data === 'string' ? JSON.parse(ev.data) : {};
         const eventProfile = payload && typeof payload.profile === 'string' ? payload.profile : '';
@@ -6229,11 +6356,13 @@ function ensureSessionEventsSSE(){
           _invalidateSessionProjectsCache();
         }
         eventTargetsActiveSession = _sessionEventTargetsActiveSession(payload);
+        refreshActiveSession = _sessionEventMustRefreshActiveSession(payload, true);
       } catch (_err) {
         // Non-JSON payload (or transient malformed event). Keep legacy behavior:
         // refresh once event was seen.
+        refreshActiveSession = _sessionEventMustRefreshActiveSession(null, false);
       }
-      _scheduleSessionEventsRefresh(eventTargetsActiveSession?'event-active-session':'event', {force:true, refreshActive:true});
+      _scheduleSessionEventsRefresh(eventTargetsActiveSession?'event-active-session':'event', {force:true, refreshActive:refreshActiveSession});
     });
     _sessionEventsSSE.onerror = () => {
       _sessionEventsNeedsRefreshOnOpen = true;
@@ -9086,15 +9215,19 @@ if(typeof window!=='undefined'){
   });
   window.addEventListener('popstate', () => {
     const sid=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
-    if(!sid || (S.session && S.session.session_id===sid)) return;
+    const currentSid=S.session&&S.session.session_id;
+    if(currentSid===sid) return;
     // Refuse to switch sessions mid-stream — same UX guard the storage-event
-    // handler had. A user mid-turn who hits browser Back should NOT lose the
-    // active stream. They can hit Back again once the turn ends.
+    // handler had. Restore the canonical URL when refusing: leaving URL B over
+    // pane A makes reload silently open a different conversation.
     if(S.busy){
+      if(currentSid) _setActiveSessionUrl(currentSid);
+      else history.replaceState(null,'',_appRootPath());
       if(typeof showToast==='function') showToast('Finish the current turn before switching sessions.',3000);
       return;
     }
-    void loadSession(sid);
+    if(sid) void loadSession(sid);
+    else if(currentSid) _setActiveSessionUrl(currentSid);
   });
 }
 
@@ -9186,7 +9319,7 @@ async function deleteSession(sid, beforeDelete=null){
   const previousSessions=_allSessions;
   let optimisticRendered=false;
   const deleteRequest=api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})}).then(response=>{
-    _clearHandoffStorageForSession(sid);
+    _teardownDeletedSessionBrowserOwners(sid);
     return {response};
   }, error=>({error}));
   if(beforeDeleteHold){
@@ -9216,21 +9349,26 @@ async function deleteSession(sid, beforeDelete=null){
     _optimisticallyRemoveSessionFromList(sid);
   }
   if(S.session&&S.session.session_id===sid){
+    const pendingNavigationSurvives=_newerPendingNavigationSurvivesDelete([sid]);
     S.session=null;S.messages=[];S.entries=[];
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
     localStorage.removeItem('hermes-webui-session');
-    // load the most recent remaining session, or show blank if none left
-    const remaining=await api('/api/sessions'+_sessionListQueryString());
-    if(remaining.sessions&&remaining.sessions.length){
-      await loadSession(remaining.sessions[0].session_id);
-    }else{
-      const _tt=$('topbarTitle');if(_tt)_tt.textContent=assistantDisplayName();
-      const _tm=$('topbarMeta');if(_tm)_tm.textContent='Start a new conversation';
-      $('msgInner').innerHTML='';
-      $('emptyState').style.display='';
-      $('fileTree').innerHTML='';
-      if(typeof S!=='undefined') S.session=null;
-      if(typeof syncAppTitlebar==='function') syncAppTitlebar();
+    // A newer sidebar load already owns destination selection. Do terminal
+    // cleanup for the deleted pane, but do not start a competing fallback load.
+    if(!pendingNavigationSurvives){
+      // load the most recent remaining session, or show blank if none left
+      const remaining=await api('/api/sessions'+_sessionListQueryString());
+      if(remaining.sessions&&remaining.sessions.length){
+        await loadSession(remaining.sessions[0].session_id);
+      }else{
+        const _tt=$('topbarTitle');if(_tt)_tt.textContent=assistantDisplayName();
+        const _tm=$('topbarMeta');if(_tm)_tm.textContent='Start a new conversation';
+        $('msgInner').innerHTML='';
+        $('emptyState').style.display='';
+        $('fileTree').innerHTML='';
+        if(typeof S!=='undefined') S.session=null;
+        if(typeof syncAppTitlebar==='function') syncAppTitlebar();
+      }
     }
   }
   if(cleanupFailed) showToast(t('delete_failed'),0,'error');

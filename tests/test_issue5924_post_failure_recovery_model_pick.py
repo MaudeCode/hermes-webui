@@ -245,12 +245,11 @@ def test_recovery_reguards_active_session_after_each_await():
     """
     retry = _function_body(COMMANDS_JS, "cmdRetry")
     # cmdRetry: guard after the session GET await, before the render/re-arm/send
-    assert retry.count("S.session.session_id!==activeSid") >= 2, (
-        "cmdRetry must re-guard activeSid after the session GET await (>=2 guards total)"
+    assert retry.count("commandOwnerCurrent(ownerCtx)") >= 3, (
+        "cmdRetry must use the pending-navigation-aware owner guard after each await"
     )
     edit = _function_body(UI_JS, "submitEdit")
     # submitEdit: guard after the truncate await, before slice/re-arm/send
     assert edit.count("S.session.session_id !== initialSid") >= 2, (
         "submitEdit must re-guard initialSid after the truncate await (>=2 guards total)"
     )
-

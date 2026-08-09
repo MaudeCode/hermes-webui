@@ -1561,12 +1561,14 @@ function _renderCacheKey(text, isUser){
 function _getCachedRender(text, isUser){
   const key = _renderCacheKey(text, isUser);
   const hit = _renderCache.get(key);
-  if(hit !== undefined) return hit;
+  // Long keys are intentionally compact, so treat the key as a bucket hint,
+  // not proof of identity. Full-content verification makes collisions safe.
+  if(hit !== undefined && hit.text === text) return hit.rendered;
   const rendered = isUser
     ? (window._renderUserMarkdown ? renderMd(text) : _renderUserFencedBlocks(text))
     : renderMd(_stripXmlToolCallsDisplay(String(text)));
   if(_renderCache.size > _renderCacheMax) _renderCache.clear();
-  _renderCache.set(key, rendered);
+  _renderCache.set(key, {text, rendered});
   return rendered;
 }
 function _currentMessageRenderWindowSize(){
@@ -18574,7 +18576,7 @@ async function submitEdit(msgIdx, newText) {
   if(typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
   }
-  if(!S.session || S.session.session_id !== initialSid) return;
+  if(!S.session || S.session.session_id !== initialSid || !_sessionStillOwnsAsyncChatAction(initialSid)) return;
   try {
     await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
       session_id: initialSid,
@@ -18583,7 +18585,7 @@ async function submitEdit(msgIdx, newText) {
     // #5924 SILENT-race guard: a session switch during the truncate await must not
     // let this recovery apply session A's intent (truncate/re-arm/send) to the
     // newly-visible session.
-    if(!S.session || S.session.session_id !== initialSid) return;
+    if(!S.session || S.session.session_id !== initialSid || !_sessionStillOwnsAsyncChatAction(initialSid)) return;
     S.messages = S.messages.slice(0, absoluteKeepCount);
     renderMessages();
     $('msg').value = newText;
@@ -18594,6 +18596,11 @@ async function submitEdit(msgIdx, newText) {
     _reArmRecoveryPick(initialSid, _recoveryPick);
     await send();
   } catch(e) { setStatus(t('edit_failed') + e.message); }
+}
+
+function _sessionStillOwnsAsyncChatAction(sid){
+  if(!sid||!S.session||S.session.session_id!==sid) return false;
+  return !(typeof _loadingSessionId!=='undefined'&&_loadingSessionId&&_loadingSessionId!==sid);
 }
 
 async function regenerateResponse(btn) {
@@ -18612,12 +18619,16 @@ async function regenerateResponse(btn) {
   if(typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
   }
-  if(!S.session || S.session.session_id !== initialSid) return;
+  if(!_sessionStillOwnsAsyncChatAction(initialSid)) return;
   try {
     await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
       session_id: initialSid,
       keep_count: absoluteKeepCount
     })});
+    // Navigation can begin while truncate is in flight. S.session remains the
+    // old object during draft persistence, so include _loadingSessionId in the
+    // post-await proof before slicing messages or calling send().
+    if(!_sessionStillOwnsAsyncChatAction(initialSid)) return;
     S.messages = S.messages.slice(0, absoluteKeepCount);
     renderMessages();
     $('msg').value = lastUserText;
@@ -20640,8 +20651,35 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
   }catch(e){setStatus(t('folder_create_failed')+e.message);}
 }
 
+const _attachmentPreviewUrls=new Map();
+function _releaseUnusedAttachmentPreviewUrls(activeFiles){
+  const keep=activeFiles instanceof Set?activeFiles:new Set(activeFiles||[]);
+  for(const [file,url] of _attachmentPreviewUrls){
+    if(keep.has(file)) continue;
+    try{URL.revokeObjectURL(url);}catch(_){}
+    _attachmentPreviewUrls.delete(file);
+  }
+}
+function _releaseAllAttachmentPreviewUrls(){
+  _releaseUnusedAttachmentPreviewUrls(new Set());
+}
+function _releaseAttachmentPreviewUrlsOnPageHide(event){
+  // A persisted pagehide freezes this document into BFCache; the restored DOM
+  // keeps its existing <img>/<audio>/<video> blob URLs and the same-session
+  // pageshow path intentionally does not rebuild the attachment tray. Revoke
+  // only for a real teardown, where this document will not be resumed.
+  if(event&&event.persisted) return;
+  _releaseAllAttachmentPreviewUrls();
+}
+if(typeof window!=='undefined') window.addEventListener('pagehide',_releaseAttachmentPreviewUrlsOnPageHide);
+
 function renderTray(){ // non-media files use paperclip chip
-  const tray=$('attachTray');tray.innerHTML='';
+  // URL.createObjectURL(...) creates attach-thumb previews once per File;
+  // URL.revokeObjectURL happens on removal and during the stale-entry sweep.
+  const tray=$('attachTray');
+  const activeFiles=new Set((S.pendingFiles||[]).filter(Boolean));
+  _releaseUnusedAttachmentPreviewUrls(activeFiles);
+  tray.innerHTML='';
   if(!S.pendingFiles.length){tray.classList.remove('has-files');updateSendBtn();return;}
   tray.classList.add('has-files');
   updateSendBtn();
@@ -20649,7 +20687,11 @@ function renderTray(){ // non-media files use paperclip chip
     const chip=document.createElement('div');chip.className='attach-chip';
     const mediaKind=_mediaKindForName(f.name);
     if(_IMAGE_EXTS.test(f.name)||mediaKind==='audio'||mediaKind==='video'){
-      const blobUrl=URL.createObjectURL(f);
+      let blobUrl=_attachmentPreviewUrls.get(f);
+      if(!blobUrl){
+        blobUrl=URL.createObjectURL(f);
+        _attachmentPreviewUrls.set(f,blobUrl);
+      }
       chip.className='attach-chip attach-chip--media attach-chip--'+mediaKind; // attach-chip--audio attach-chip--video
       chip.dataset.blobUrl=blobUrl;
       if(mediaKind==='image'){
@@ -20665,8 +20707,11 @@ function renderTray(){ // non-media files use paperclip chip
       chip.innerHTML=`${li('paperclip',12)} ${esc(f.name)} <button title="${t('remove_title')}">${li('x',12)}</button>`;
     }
     chip.querySelector('button').onclick=()=>{
-      // Revoke blob URL to avoid memory leak before removing
-      if(chip.dataset.blobUrl) URL.revokeObjectURL(chip.dataset.blobUrl);
+      const previewUrl=_attachmentPreviewUrls.get(f);
+      if(previewUrl){
+        try{URL.revokeObjectURL(previewUrl);}catch(_){}
+        _attachmentPreviewUrls.delete(f);
+      }
       S.pendingFiles.splice(i,1);renderTray();
     };
     tray.appendChild(chip);
@@ -20732,13 +20777,26 @@ function _uploadPendingFilesUpdateProgress(sessionId,percent){
   }
   _uploadPendingFilesShowProgressBar(owner,clamped);
 }
+async function _rollbackUploadedFiles(sessionId,uploaded){
+  const rollbackTokens=(uploaded||[]).map(item=>item&&item.rollback_token).filter(Boolean);
+  if(!rollbackTokens.length)return {ok:true,rolled_back:0,failed:0};
+  const result=await api('/api/upload/rollback',{
+    method:'POST',
+    body:JSON.stringify({session_id:sessionId,rollback_tokens:rollbackTokens}),
+    retries:0,
+  });
+  if(!result||result.ok!==true){
+    throw new Error(`server retained ${result&&Number.isFinite(result.failed)?result.failed:rollbackTokens.length} uploaded file(s)`);
+  }
+  return result;
+}
 async function uploadPendingFiles(options={}){
   const opts=options||{};
   const pendingFiles=Array.isArray(opts.files)?opts.files.filter(Boolean):[...(S.pendingFiles||[])];
   const sessionId=String(opts.sessionId||(S.session&&S.session.session_id)||'');
   if(!pendingFiles.length||!sessionId)return[];
   const clearPending=!(opts&&opts.clearPending===false);
-  const names=[];let failures=0;
+  const names=[];const failedFiles=[];const failureMessages=[];
   _uploadPendingFilesUpdateProgress(sessionId,0);
   const total=pendingFiles.length;
   for(let i=0;i<total;i++){
@@ -20755,18 +20813,38 @@ async function uploadPendingFiles(options={}){
       const data=await res.json();
       if(data.error)throw new Error(data.error);
       if(isArchive){
-        names.push({name: data.dest, path: data.dest, extracted: data.extracted});
+        names.push({name: data.dest, path: data.dest, extracted: data.extracted, rollback_token:data.rollback_token});
         if(typeof loadDir==='function'&&_uploadPendingFilesCurrentSession(sessionId))loadDir(S.currentDir||'.');
       }else{
-        names.push({name: data.filename, path: data.path, mime: data.mime, size: data.size, is_image: !!data.is_image});
+        names.push({name: data.filename, path: data.path, mime: data.mime, size: data.size, is_image: !!data.is_image, rollback_token:data.rollback_token});
       }
-    }catch(e){failures++;setStatus(`\u274c ${t('upload_failed')}${f.name} \u2014 ${e.message}`);}
+    }catch(e){
+      failedFiles.push(f);
+      failureMessages.push(`${f&&f.name?f.name:'file'}: ${e&&e.message?e.message:e}`);
+      setStatus(`\u274c ${t('upload_failed')}${f.name} \u2014 ${e.message}`);
+    }
     _uploadPendingFilesUpdateProgress(sessionId,Math.round((i+1)/total*100));
   }
   _uploadPendingFilesUpdateProgress(sessionId,null);
+  if(failedFiles.length){
+    let rollbackError=null;
+    if(names.length){
+      try{await _rollbackUploadedFiles(sessionId,names);}
+      catch(error){rollbackError=error;}
+    }
+    if(typeof renderTray==='function'&&_uploadPendingFilesCurrentSession(sessionId))renderTray();
+    let message=failedFiles.length===total
+      ? t('all_uploads_failed',total)
+      : `${failedFiles.length} of ${total} uploads failed (${failureMessages.join('; ')})`;
+    if(rollbackError)message+=`; uploaded-file cleanup failed: ${rollbackError.message||rollbackError}`;
+    const error=new Error(message);
+    error.failedFiles=failedFiles;
+    error.uploaded=names;
+    error.rollbackError=rollbackError;
+    throw error;
+  }
   if(clearPending&&_uploadPendingFilesCurrentSession(sessionId)){S.pendingFiles=[];renderTray();}
   else if(typeof renderTray==='function'&&_uploadPendingFilesCurrentSession(sessionId))renderTray();
-  if(failures===total&&total>0)throw new Error(t('all_uploads_failed',total));
   // Show extraction summary
   const extracted=names.filter(n=>n.extracted);
   if(extracted.length)showToast(t('archive_extracted',extracted.reduce((s,n)=>s+n.extracted,0),extracted.length));

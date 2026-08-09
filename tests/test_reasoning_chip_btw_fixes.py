@@ -269,7 +269,7 @@ class TestBtwStreamDoneGuard:
         assert done_block_m
         block = done_block_m.group(0)
         # The _ensureBtwRow call must be guarded by a session-match check
-        assert ("S.session" in block and "parentSid" in block), (
+        assert "ownerCurrent()" in block and "const ownerCurrent" in fn, (
             "_ensureBtwRow() in the done handler must be gated on "
             "S.session.session_id === parentSid — otherwise a user who "
             "switched sessions during the /btw stream gets the answer "

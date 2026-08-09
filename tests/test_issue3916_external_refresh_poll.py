@@ -35,4 +35,5 @@ def test_session_events_refresh_active_session():
     src = SESSIONS_JS.read_text(encoding="utf-8")
     body = _function_body(src, "_scheduleSessionEventsRefresh")
     assert "void refreshSessionList(request.reason||'event', request.opts)" in body
-    assert "_scheduleSessionEventsRefresh(eventTargetsActiveSession?'event-active-session':'event', {force:true, refreshActive:true})" in src
+    assert "refreshActiveSession = _sessionEventMustRefreshActiveSession(payload, true);" in src
+    assert "_scheduleSessionEventsRefresh(eventTargetsActiveSession?'event-active-session':'event', {force:true, refreshActive:refreshActiveSession})" in src

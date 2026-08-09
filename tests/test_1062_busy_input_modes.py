@@ -135,7 +135,7 @@ class TestSlashCommandHandlers:
         for fn_name in ("cmdQueue", "cmdInterrupt"):
             idx = COMMANDS_JS.find(f"function {fn_name}(")
             assert idx >= 0, f"{fn_name} not found"
-            body = COMMANDS_JS[idx:idx + 800]
+            body = COMMANDS_JS[idx:idx + 1400]
             assert "S.pendingFiles=[]" in body, (
                 f"{fn_name} must clear S.pendingFiles after queueSessionMessage"
             )
@@ -415,8 +415,8 @@ class TestSendBusyBranchDispatch:
         # Get the intercept block (up to the next busyMode assignment)
         busymode_idx = MESSAGES_JS.find("_defaultMessageMode||'steer'", busy_start)
         intercept_block = MESSAGES_JS[intercept_idx:busymode_idx]
-        assert "_bc.fn(_pc.args)" in intercept_block, (
-            "The intercept must call the command handler directly via _bc.fn(_pc.args)"
+        assert "_bc.fn(_pc.args,_busyCommandOwner)" in intercept_block, (
+            "The intercept must call the command handler directly with its captured owner"
         )
         assert "return;" in intercept_block, (
             "The intercept must return after dispatching so send() does not also queue"

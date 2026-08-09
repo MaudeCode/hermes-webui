@@ -181,6 +181,7 @@ def _run_send_js(*, command, status, adapter_status=None, hook_result=None, hook
           clearOptimisticSessionStreaming(){{}},
           newSession: async () => {{
             ctx.S.session = {{ session_id: 'sid-1', title: 'New Chat' }};
+            return ctx.S.session;
           }},
           $: id => {{
             if (id === 'msg') return msgInput;

@@ -426,8 +426,10 @@ def test_chat_start_forwards_goal_related_to_gateway_worker(monkeypatch, tmp_pat
     monkeypatch.setattr(routes.threading, "Thread", FakeThread)
     monkeypatch.setattr(routes.uuid, "uuid4", lambda: SimpleNamespace(hex="goal-stream-id"))
 
+    fake_session = FakeSession()
+    monkeypatch.setattr(routes, "get_session", lambda _sid: fake_session)
     response = routes._start_chat_stream_for_session(
-        FakeSession(),
+        fake_session,
         msg="continue the goal",
         attachments=[],
         workspace=str(tmp_path),

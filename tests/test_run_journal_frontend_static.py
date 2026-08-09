@@ -310,7 +310,8 @@ def test_error_reconnect_path_can_restore_from_journal():
     # `Reconnecting… (1/${_retryDelays.length})` (staged-probe counter), so the
     # old single-quoted "setComposerStatus('Reconnecting" anchor no longer exists.
     reconnect_pos = MESSAGES_SRC.index("_reconnectAttempted=true;")
-    block = MESSAGES_SRC[reconnect_pos : reconnect_pos + 1100]
+    reconnect_end = MESSAGES_SRC.index("source.addEventListener('cancel'", reconnect_pos)
+    block = MESSAGES_SRC[reconnect_pos:reconnect_end]
 
     assert "st.active" in block
     assert "st.replay_available" in block
@@ -361,7 +362,19 @@ def test_replayed_long_task_events_enter_the_same_live_timeline_handlers():
         MESSAGES_SRC.index("function _updateLiveThinkingCard") :
         MESSAGES_SRC.index("// Split a content string", MESSAGES_SRC.index("function _updateLiveThinkingCard"))
     ]
-    assert "_updateLiveThinkingCard(" in wire_block, "reasoning replay should use the live Thinking card path"
+    assert "_scheduleReasoningRender()" in wire_block, (
+        "reasoning replay should enter the coalesced live Thinking render path"
+    )
+    coalesced_helper = MESSAGES_SRC[
+        MESSAGES_SRC.index("function _paintPendingReasoning") :
+        MESSAGES_SRC.index("function _flushReasoningToAnchor")
+    ]
+    assert "_updateLiveThinkingCard(" in coalesced_helper, (
+        "the coalesced reasoning path should fall back to the live Thinking card"
+    )
+    assert "_flushPendingReasoningRender()" in wire_block, (
+        "terminal live/replay events must flush the final queued reasoning paint"
+    )
     assert "updateThinking(text, opts)" in thinking_helper and "appendThinking(text, opts)" in thinking_helper, (
         "the shared Thinking helper should still route replay/live reasoning into the Worklog Thinking card path"
     )

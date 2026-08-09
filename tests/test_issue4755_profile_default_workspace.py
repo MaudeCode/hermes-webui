@@ -90,12 +90,17 @@ def _new_session_driver(session_workspace: str, default_workspace: str, switch_w
         var _activeProject=null;
         var NO_PROJECT_FILTER='__all__';
         var _sessionSourceFilter='webui';
+        var _loadingSessionId=null;
+        var _loadSessionGeneration=0;
+        var INFLIGHT={{}};
         var S={{
           session:{{session_id:'previous-session',workspace:{json.dumps(session_workspace)}}},
           _profileDefaultWorkspace:{json.dumps(default_workspace)},
           _profileSwitchWorkspace:{json.dumps(switch_workspace)},
           activeProfile:'default',
           toolCalls:[],
+          messages:[],
+          pendingFiles:[],
         }};
         global.window={{}};
         global.document={{createElement:()=>({{dataset:{{}},appendChild:()=>{{}}}})}};
@@ -103,6 +108,7 @@ def _new_session_driver(session_workspace: str, default_workspace: str, switch_w
         function $(id){{return null;}}
         function _newSessionPendingText(){{return 'Creating';}}
         function _setNewSessionPending(){{}}
+        async function _saveComposerDraftNow(){{}}
         function updateQueueBadge(){{}}
         function clearLiveToolCards(){{}}
         function api(path,opts){{

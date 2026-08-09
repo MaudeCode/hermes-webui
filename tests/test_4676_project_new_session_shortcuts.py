@@ -139,6 +139,7 @@ globalThis._emptyComposerModelOverride = null;
 globalThis._readPersistedModelState = () => null;
 globalThis._readEmptyComposerModelOverride = () => null;
 globalThis._clearEmptyComposerModelOverride = () => {};
+globalThis._saveComposerDraftNow = async () => {};
 globalThis.$ = (id) => (id === 'modelSelect' ? { value: 'gpt-4', selectedOptions: [{ dataset: { provider: 'openai' } }] } : null);
 for (const name of [
   '_setNewSessionPending', 'updateQueueBadge', '_clearPendingSelections',
