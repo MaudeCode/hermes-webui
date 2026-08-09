@@ -61,6 +61,77 @@ def test_writer_and_free_function_share_one_gapless_sequence(tmp_path):
     assert file_seqs == [1, 2, 3, 4]
 
 
+def test_closed_writers_release_seq_cache_and_late_append_rescans_tail(tmp_path):
+    paths = []
+    for index in range(100):
+        sid = f"sess_closed_{index}"
+        rid = f"run_closed_{index}"
+        writer = run_journal.RunJournalWriter(sid, rid, session_dir=tmp_path)
+        first = writer.append_sse_event("token", {"text": "one"})
+        writer.close()
+        paths.append(str(writer._path))
+        assert first["seq"] == 1
+
+    assert not any(path in run_journal._SEQ_CACHE for path in paths)
+
+    # A defensive late append remains monotonic because the durable file tail,
+    # not the evicted hint, is authoritative after lifecycle teardown.
+    second = run_journal.append_run_event(
+        "sess_closed_0", "run_closed_0", "token", {"text": "two"}, session_dir=tmp_path
+    )
+    terminal = run_journal.append_run_event(
+        "sess_closed_0", "run_closed_0", "stream_end", {}, session_dir=tmp_path
+    )
+    assert [second["seq"], terminal["seq"]] == [2, 3]
+    assert paths[0] not in run_journal._SEQ_CACHE
+
+
+def test_writer_reservation_and_append_are_one_atomic_operation(tmp_path, monkeypatch):
+    """A writer may not expose its reserved seq before its line is appended."""
+    writer = run_journal.RunJournalWriter("sess_order", "run_order", session_dir=tmp_path)
+    first_reserved = threading.Event()
+    release_first = threading.Event()
+    real_reserve = run_journal._reserve_next_seq
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def pausing_reserve(path):
+        nonlocal calls
+        seq = real_reserve(path)
+        with calls_lock:
+            calls += 1
+            ordinal = calls
+        if ordinal == 1:
+            first_reserved.set()
+            assert release_first.wait(2)
+        return seq
+
+    monkeypatch.setattr(run_journal, "_reserve_next_seq", pausing_reserve)
+    results = []
+
+    first = threading.Thread(
+        target=lambda: results.append(writer.append_sse_event("token", {"text": "first"}))
+    )
+    second = threading.Thread(
+        target=lambda: results.append(
+            run_journal.append_run_event(
+                "sess_order", "run_order", "token", {"text": "second"}, session_dir=tmp_path
+            )
+        )
+    )
+    first.start()
+    assert first_reserved.wait(2)
+    second.start()
+    release_first.set()
+    first.join(2)
+    second.join(2)
+
+    assert not first.is_alive() and not second.is_alive()
+    journal = run_journal.read_run_events("sess_order", "run_order", session_dir=tmp_path)
+    assert [event["seq"] for event in journal["events"]] == [1, 2]
+    assert [event["payload"]["text"] for event in journal["events"]] == ["first", "second"]
+
+
 def test_explicit_seq_keeps_cache_from_reissuing(tmp_path):
     # A caller-supplied seq must push the cache forward so a later cache append
     # does not collide with it.

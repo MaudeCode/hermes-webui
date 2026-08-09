@@ -1706,6 +1706,7 @@ def test_start_chat_stream_marks_gateway_run_pending_before_thread_start(monkeyp
 
     monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_kwargs: None)
     monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(routes, "get_session", lambda _sid: session)
     monkeypatch.setattr(routes, "_get_session_agent_lock", lambda *_args, **_kwargs: _NoopLock())
     monkeypatch.setattr(routes, "_is_hidden_empty_session", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(routes, "_prepare_chat_start_session_for_stream", fake_prepare)
@@ -1732,13 +1733,21 @@ def test_start_chat_stream_clears_gateway_run_state_when_thread_start_fails(monk
     from api import gateway_chat, routes
 
     recorded = {}
+    save_calls = []
     session = SimpleNamespace(
         session_id="sess-route-start-fail",
         active_stream_id=None,
+        pending_user_message=None,
+        pending_attachments=[],
         pending_started_at=None,
+        pending_user_source=None,
         title="title",
         profile=None,
         process_wakeup_pause={},
+        messages=[],
+        context_messages=[],
+        truncation_watermark=None,
+        save=lambda: save_calls.append(True),
     )
 
     class _NoopLock:
@@ -1762,6 +1771,8 @@ def test_start_chat_stream_clears_gateway_run_state_when_thread_start_fails(monk
     def fake_prepare(session_obj, *, stream_id, **_kwargs):
         recorded["stream_id"] = stream_id
         session_obj.active_stream_id = stream_id
+        session_obj.pending_user_message = "hi"
+        session_obj.pending_attachments = []
         session_obj.pending_started_at = 123.0
 
     monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_kwargs: None)
@@ -1769,6 +1780,7 @@ def test_start_chat_stream_clears_gateway_run_state_when_thread_start_fails(monk
     monkeypatch.setattr(routes, "_get_session_agent_lock", lambda *_args, **_kwargs: _NoopLock())
     monkeypatch.setattr(routes, "_is_hidden_empty_session", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(routes, "_prepare_chat_start_session_for_stream", fake_prepare)
+    monkeypatch.setattr(routes, "get_session", lambda _sid: session)
     monkeypatch.setattr(routes, "create_stream_channel", lambda: SimpleNamespace())
     monkeypatch.setattr(routes, "register_stream_owner", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(routes, "set_last_workspace", lambda *_args, **_kwargs: None)
@@ -1787,6 +1799,12 @@ def test_start_chat_stream_clears_gateway_run_state_when_thread_start_fails(monk
 
     assert gateway_chat.gateway_run_id_pending(recorded["stream_id"]) is False
     assert recorded["stream_id"] not in getattr(gateway_chat, "_STREAM_RUN_LIFECYCLE", {})
+    assert recorded["stream_id"] not in routes.STREAMS
+    assert session.active_stream_id is None
+    assert session.pending_user_message is None
+    assert [message["role"] for message in session.messages[-2:]] == ["user", "assistant"]
+    assert session.messages[-1].get("_error") is True
+    assert save_calls
 
 
 @pytest.mark.parametrize(

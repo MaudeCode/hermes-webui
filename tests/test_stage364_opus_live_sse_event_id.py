@@ -68,7 +68,9 @@ def test_gateway_queue_item_carries_per_event_id_with_legacy_fallback():
     """Gateway-backed WebUI chat must preserve the same live cursor invariant."""
     put_def_idx = GATEWAY_CHAT_PY.find("def put_gateway_event(event, data):")
     assert put_def_idx != -1, "put_gateway_event(event, data) not found"
-    put_body = GATEWAY_CHAT_PY[put_def_idx:put_def_idx + 1800]
+    put_end_idx = GATEWAY_CHAT_PY.find("\n    s = None", put_def_idx)
+    assert put_end_idx > put_def_idx, "put_gateway_event boundary not found"
+    put_body = GATEWAY_CHAT_PY[put_def_idx:put_end_idx]
     assert 'queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)' in put_body, (
         "Gateway live events must carry their own event_id for StreamChannel "
         "subscribers while preserving legacy queue compatibility"

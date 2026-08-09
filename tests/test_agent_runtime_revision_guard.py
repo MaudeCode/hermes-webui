@@ -484,6 +484,7 @@ def test_stream_admission_uses_one_gateway_ownership_snapshot(monkeypatch, gatew
         lambda: revision_checks.append(True),
     )
     monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda _sid: None)
+    monkeypatch.setattr(routes, "get_session", lambda _sid: session)
     monkeypatch.setattr(routes, "_is_hidden_empty_session", lambda _session: False)
     monkeypatch.setattr(routes, "_prepare_chat_start_session_for_stream", prepare)
     monkeypatch.setattr(routes, "set_last_workspace", lambda _workspace: None)

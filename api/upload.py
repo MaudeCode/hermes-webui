@@ -4,11 +4,14 @@ Hermes Web UI -- File upload: multipart parser and upload handler.
 import mimetypes
 import os
 import re as _re
+import secrets
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 from api.config import MAX_UPLOAD_BYTES, STATE_DIR
-from api.helpers import j
+from api.helpers import j, read_body
 from api.models import get_session
 from api.profiles import _profiles_match, get_active_profile_name as _get_active_profile_name
 from api.workspace import (
@@ -149,6 +152,108 @@ def _session_attachment_dir(session_id: str, *, root: Path | None = None) -> Pat
     return dest_dir
 
 
+# Uploads are sent one request at a time, but a composer submission is atomic:
+# if any later file fails, the browser must be able to remove only the files
+# created by that batch. Receipts are deliberately process-local, short-lived,
+# and bound to the created inode so they cannot delete an older/replaced file.
+_UPLOAD_ROLLBACK_RECEIPTS: dict[str, dict] = {}
+_UPLOAD_ROLLBACK_RECEIPTS_LOCK = threading.Lock()
+_UPLOAD_ROLLBACK_RECEIPT_TTL_SECONDS = 60 * 60
+
+
+def _register_upload_rollback_receipt(session_id: str, target: Path, *, is_dir: bool = False) -> str:
+    stat = target.stat(follow_symlinks=False)
+    token = secrets.token_urlsafe(32)
+    now = time.monotonic()
+    with _UPLOAD_ROLLBACK_RECEIPTS_LOCK:
+        expired = [
+            key for key, value in _UPLOAD_ROLLBACK_RECEIPTS.items()
+            if now - float(value.get('created_at') or 0) > _UPLOAD_ROLLBACK_RECEIPT_TTL_SECONDS
+        ]
+        for key in expired:
+            _UPLOAD_ROLLBACK_RECEIPTS.pop(key, None)
+        _UPLOAD_ROLLBACK_RECEIPTS[token] = {
+            'session_id': str(session_id),
+            'path': str(target),
+            'is_dir': bool(is_dir),
+            'device': stat.st_dev,
+            'inode': stat.st_ino,
+            'created_at': now,
+        }
+    return token
+
+
+def _rollback_upload_receipts(session_id: str, tokens: list[str]) -> dict:
+    """Consume receipts and remove only their exact, still-owned targets."""
+    root = _session_attachment_dir(session_id)
+    rolled_back = 0
+    failed = 0
+    now = time.monotonic()
+    for token in tokens:
+        with _UPLOAD_ROLLBACK_RECEIPTS_LOCK:
+            receipt = _UPLOAD_ROLLBACK_RECEIPTS.get(token)
+            if (
+                not receipt
+                or receipt.get('session_id') != str(session_id)
+                or receipt.get('rolling_back')
+            ):
+                failed += 1
+                continue
+            if now - float(receipt.get('created_at') or 0) > _UPLOAD_ROLLBACK_RECEIPT_TTL_SECONDS:
+                _UPLOAD_ROLLBACK_RECEIPTS.pop(token, None)
+                failed += 1
+                continue
+            receipt['rolling_back'] = True
+            receipt = dict(receipt)
+        target = Path(str(receipt.get('path') or ''))
+        try:
+            resolved_target = target.resolve()
+            if not resolved_target.is_relative_to(root.resolve()):
+                raise ValueError('Invalid rollback target')
+            current = target.stat(follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != (receipt.get('device'), receipt.get('inode')):
+                raise ValueError('Upload target changed')
+            if receipt.get('is_dir'):
+                rmtree_anchored(root, target)
+            else:
+                unlink_anchored(root, target)
+        except Exception:
+            with _UPLOAD_ROLLBACK_RECEIPTS_LOCK:
+                current_receipt = _UPLOAD_ROLLBACK_RECEIPTS.get(token)
+                if current_receipt:
+                    current_receipt.pop('rolling_back', None)
+            failed += 1
+            continue
+        with _UPLOAD_ROLLBACK_RECEIPTS_LOCK:
+            _UPLOAD_ROLLBACK_RECEIPTS.pop(token, None)
+        rolled_back += 1
+    return {'ok': failed == 0, 'rolled_back': rolled_back, 'failed': failed}
+
+
+def handle_upload_rollback(handler):
+    """Rollback the successful prefix of one failed multi-file chat upload."""
+    try:
+        body = read_body(handler)
+        session_id = str(body.get('session_id') or '')
+        raw_tokens = body.get('rollback_tokens')
+        if not session_id or not isinstance(raw_tokens, list) or not raw_tokens or len(raw_tokens) > 20:
+            return j(handler, {'error': 'Invalid upload rollback request'}, status=400)
+        tokens = [str(token) for token in raw_tokens]
+        if any(not token or len(token) > 200 for token in tokens):
+            return j(handler, {'error': 'Invalid upload rollback receipt'}, status=400)
+        try:
+            session = get_session(session_id)
+        except KeyError:
+            return j(handler, {'error': 'Session not found'}, status=404)
+        if _reject_invisible_session(handler, session):
+            return True
+        return j(handler, _rollback_upload_receipts(session_id, tokens))
+    except ValueError as exc:
+        return j(handler, {'error': str(exc)}, status=400)
+    except Exception:
+        return j(handler, {'error': 'Upload rollback failed'}, status=500)
+
+
 def _session_visible_to_active_profile(session) -> bool:
     """Return whether an upload target session belongs to the active profile."""
     session_profile = getattr(session, 'profile', None)
@@ -226,6 +331,14 @@ def handle_upload(handler):
         safe_name = _sanitize_upload_name(filename)
         dest = _upload_destination(session_id, safe_name)
         dest.write_bytes(file_bytes)
+        try:
+            rollback_token = _register_upload_rollback_receipt(session_id, dest)
+        except Exception:
+            try:
+                unlink_anchored(_session_attachment_dir(session_id), dest)
+            except Exception:
+                pass
+            raise
         mime = mimetypes.guess_type(safe_name)[0] or 'application/octet-stream'
         return j(handler, {
             'filename': dest.name,
@@ -233,6 +346,7 @@ def handle_upload(handler):
             'size': dest.stat().st_size,
             'mime': mime,
             'is_image': mime.startswith('image/'),
+            'rollback_token': rollback_token,
         })
     except ValueError as e:
         return j(handler, {'error': str(e)}, status=400)
@@ -404,7 +518,19 @@ def handle_upload_extract(handler):
         session_dir = _session_attachment_dir(session_id)
         session_dir.mkdir(parents=True, exist_ok=True)
         result = extract_archive(file_bytes, filename, session_dir)
-        return j(handler, {'ok': True, **result})
+        try:
+            rollback_token = _register_upload_rollback_receipt(
+                session_id,
+                Path(result['dest']),
+                is_dir=True,
+            )
+        except Exception:
+            try:
+                rmtree_anchored(session_dir, Path(result['dest']))
+            except Exception:
+                pass
+            raise
+        return j(handler, {'ok': True, **result, 'rollback_token': rollback_token})
     except ValueError as e:
         return j(handler, {'error': str(e)}, status=400)
     except Exception:

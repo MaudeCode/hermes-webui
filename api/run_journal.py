@@ -11,6 +11,7 @@ import os
 import re
 import threading
 import time
+import weakref
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Iterable
@@ -19,8 +20,19 @@ logger = logging.getLogger(__name__)
 
 RUN_JOURNAL_DIR_NAME = "_run_journal"
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
-_WRITER_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
+# Weak values preserve same-path mutual exclusion while a writer/append call is
+# alive without retaining one lock forever per historical run. Stateful writers
+# hold their lock strongly; free-function appenders hold the local lock across
+# reserve+write. The guard still serializes dictionary structure access.
+_WRITER_LOCKS: "weakref.WeakValueDictionary[tuple[str, str, str], threading.Lock]" = weakref.WeakValueDictionary()
 _WRITER_LOCKS_GUARD = threading.Lock()
+# Retention must not unlink a journal while a stateful writer still owns an
+# open/reusable handle for it.  On Unix, later writes to that handle would
+# succeed against the unlinked inode and return event ids whose rows are no
+# longer discoverable for replay.  Counts support the defensive case where two
+# writer objects target the same run.
+_ACTIVE_WRITER_COUNTS: dict[str, int] = {}
+_ACTIVE_WRITER_COUNTS_LOCK = threading.Lock()
 # Next-seq to assign per run-journal file path, kept in memory so repeat appends
 # to the same run do not re-parse the whole file on every call. The per-path
 # ``_lock_for(path)`` serializes same-path reserve→append so seqs stay monotonic
@@ -100,6 +112,27 @@ def _lock_for(path: Path) -> threading.Lock:
             lock = threading.Lock()
             _WRITER_LOCKS[key] = lock
         return lock
+
+
+def _register_active_writer(path: Path) -> None:
+    key = str(path)
+    with _ACTIVE_WRITER_COUNTS_LOCK:
+        _ACTIVE_WRITER_COUNTS[key] = _ACTIVE_WRITER_COUNTS.get(key, 0) + 1
+
+
+def _unregister_active_writer(path: Path) -> None:
+    key = str(path)
+    with _ACTIVE_WRITER_COUNTS_LOCK:
+        remaining = _ACTIVE_WRITER_COUNTS.get(key, 0) - 1
+        if remaining > 0:
+            _ACTIVE_WRITER_COUNTS[key] = remaining
+        else:
+            _ACTIVE_WRITER_COUNTS.pop(key, None)
+
+
+def _has_active_writer(path: Path) -> bool:
+    with _ACTIVE_WRITER_COUNTS_LOCK:
+        return _ACTIVE_WRITER_COUNTS.get(str(path), 0) > 0
 
 
 def _summary_cache_signature(path: Path) -> tuple[int, int, int, int, int] | None:
@@ -383,6 +416,17 @@ def _note_assigned_seq(path: Path, seq: int) -> None:
             _SEQ_CACHE[key] = nxt
 
 
+def _discard_seq_cache(path: Path) -> None:
+    """Release the next-sequence hint after a writer lifecycle is finished.
+
+    The journal on disk remains authoritative. If an unusual late append occurs
+    after teardown, ``_reserve_next_seq`` safely seeds itself from that durable
+    tail again instead of retaining one process-global entry per historical run.
+    """
+    with _SEQ_CACHE_LOCK:
+        _SEQ_CACHE.pop(str(path), None)
+
+
 def _terminal_state_for_event(event_name: str, payload) -> str | None:
     name = str(event_name or "")
     if name == "done" or name == "stream_end":
@@ -521,6 +565,8 @@ def append_run_event(
         _discard_cached_summary(path)
         if created_file:
             _fsync_parent_dir(path)
+        if event_name in SSE_RELAY_CLOSE_EVENTS:
+            _discard_seq_cache(path)
     if terminal_state and session_dir is None:
         schedule_run_journal_prune()
     return event
@@ -535,21 +581,89 @@ class RunJournalWriter:
         self.session_dir = Path(session_dir) if session_dir is not None else None
         self._path = _run_path(self.session_id, self.run_id, session_dir=self.session_dir)
         self._lock = _lock_for(self._path)
+        self._fh = None
+        self._registered = True
+        _register_active_writer(self._path)
 
     def append_sse_event(self, event_name: str, payload=None) -> dict:
-        # Draw from the shared module-level seq cache under the per-path lock so
-        # this writer and any direct append_run_event() call on the same path
-        # agree on one monotonic, gapless sequence.
+        # Reservation and append must be one critical section.  Reserving here
+        # and then releasing the lock before ``append_run_event`` reacquired it
+        # allowed another writer to reserve+append seq N+1 first, leaving the
+        # physical journal in [N+1, N] order. Replay consumes file order, so the
+        # sequence assignment must be atomic with the durable append.
+        event_name = str(event_name or "").strip()
+        if not event_name:
+            raise ValueError("event_name is required")
+        payload = payload if payload is not None else {}
+        terminal_state = _terminal_state_for_event(event_name, payload)
         with self._lock:
+            if not self._registered:
+                raise RuntimeError("run journal writer is closed")
             seq = _reserve_next_seq(self._path)
-        return append_run_event(
-            self.session_id,
-            self.run_id,
-            event_name,
-            payload or {},
-            session_dir=self.session_dir,
-            seq=seq,
-        )
+            event = {
+                "version": 1,
+                "event_id": f"{self.run_id}:{seq}",
+                "seq": seq,
+                "run_id": self.run_id,
+                "session_id": self.session_id,
+                "event": event_name,
+                "type": event_name,
+                "created_at": float(time.time()),
+                "terminal": bool(terminal_state),
+                "terminal_state": terminal_state,
+                "payload": payload,
+            }
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            created_file = not self._path.exists()
+            try:
+                if self._fh is None or self._fh.closed:
+                    fd = os.open(self._path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+                    self._fh = os.fdopen(fd, "a", encoding="utf-8")
+                self._fh.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+                # Flush before returning: put_gateway_event/put emits to the SSE
+                # queue only after this method, preserving durable-before-visible
+                # replay semantics while avoiding open/close on every delta.
+                self._fh.flush()
+                if _should_fsync_event(terminal_state):
+                    os.fsync(self._fh.fileno())
+                _discard_cached_summary(self._path)
+                if created_file:
+                    _fsync_parent_dir(self._path)
+                if event_name in SSE_RELAY_CLOSE_EVENTS:
+                    self._fh.close()
+                    self._fh = None
+                    _discard_seq_cache(self._path)
+            except Exception:
+                self._close_locked()
+                raise
+        if terminal_state and self.session_dir is None:
+            schedule_run_journal_prune()
+        return event
+
+    def _close_locked(self) -> None:
+        fh = self._fh
+        self._fh = None
+        if fh is None:
+            return
+        try:
+            fh.flush()
+        finally:
+            fh.close()
+
+    def close(self) -> None:
+        """Flush and close this writer's reusable journal handle."""
+        with self._lock:
+            self._close_locked()
+            _discard_seq_cache(self._path)
+            if self._registered:
+                self._registered = False
+                _unregister_active_writer(self._path)
+
+    def __del__(self):  # pragma: no cover - deterministic callers use close().
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 def read_run_events(
@@ -890,6 +1004,13 @@ def prune_settled_run_journals(
                 continue
             lock = _lock_for(path)
             with lock:
+                # ``done`` is terminal for summary/status purposes but is not
+                # the relay-close event: title/title_status and stream_end can
+                # still follow.  A live RunJournalWriter therefore remains the
+                # lifecycle owner until its deterministic close and retention
+                # must leave its path in place.
+                if _has_active_writer(path):
+                    continue
                 try:
                     stat = path.stat()
                 except OSError:
@@ -929,6 +1050,16 @@ def prune_settled_run_journals(
                     _SEQ_CACHE.pop(str(path), None)
                 result["pruned"] += 1
                 result["bytes_reclaimed"] += int(stat.st_size)
+            # A terminal run cannot have a legitimate future writer. Release
+            # the per-path lock entry after pruning so retention, not only full
+            # session deletion, bounds this process-global cache. Do this after
+            # leaving ``with lock`` and only if the mapping still owns the same
+            # object; a replacement mapping must never be evicted accidentally.
+            if not dry_run and not path.exists():
+                key = (str(path.parent), path.name, str(os.getpid()))
+                with _WRITER_LOCKS_GUARD:
+                    if _WRITER_LOCKS.get(key) is lock:
+                        _WRITER_LOCKS.pop(key, None)
     return result
 
 

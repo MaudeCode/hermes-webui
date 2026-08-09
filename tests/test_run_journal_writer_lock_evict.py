@@ -29,13 +29,26 @@ def test_delete_run_journal_evicts_writer_locks(tmp_path):
 
 
 def test_delete_run_journal_keeps_other_sessions_locks(tmp_path):
-    RunJournalWriter("sid-keep", "run-k", session_dir=tmp_path).append_sse_event("token", {"text": "k"})
+    keep_writer = RunJournalWriter("sid-keep", "run-k", session_dir=tmp_path)
+    keep_writer.append_sse_event("token", {"text": "k"})
     RunJournalWriter("sid-del", "run-d", session_dir=tmp_path).append_sse_event("token", {"text": "d"})
 
     delete_run_journal("sid-del", session_dir=tmp_path)
 
     assert _keys_for(tmp_path, "sid-del") == []
     assert _keys_for(tmp_path, "sid-keep"), "unrelated session's lock must survive"
+
+
+def test_completed_ephemeral_writers_do_not_accumulate_locks(tmp_path):
+    import gc
+
+    for idx in range(100):
+        RunJournalWriter(
+            "sid-weak", f"run-{idx}", session_dir=tmp_path
+        ).append_sse_event("token", {"text": "x"})
+    gc.collect()
+
+    assert _keys_for(tmp_path, "sid-weak") == []
 
 
 def test_delete_run_journal_noop_leaves_cache_untouched(tmp_path):

@@ -2821,6 +2821,7 @@ from api.config import (
     register_stream_owner,
     stream_owner_session_id,
     unregister_stream_owner,
+    unregister_active_run,
     CHAT_LOCK,
     _get_session_agent_lock,
     CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS,
@@ -2990,6 +2991,15 @@ def _clear_stale_stream_state(session) -> bool:
     # registered a new stream after our STREAMS_LOCK check above; in that
     # case we must NOT clobber its session.active_stream_id.
     with _get_session_agent_lock(session.session_id):
+        try:
+            authoritative_session = get_session(session.session_id)
+        except KeyError:
+            # Delete won before this stale-repair path acquired the lock. Never
+            # save through the captured handle: Session.save() would resurrect
+            # the deleted sidecar/index and clear its tombstone.
+            return False
+        if authoritative_session is not session:
+            session = authoritative_session
         if getattr(session, "active_stream_id", None) != stream_id:
             return False
         if getattr(session, "pending_user_message", None):
@@ -9662,6 +9672,7 @@ from api.workspace import (
 )
 from api.upload import (
     handle_upload,
+    handle_upload_rollback,
     handle_upload_extract,
     handle_transcribe,
     handle_transcribe_capability,
@@ -13991,6 +14002,8 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/upload":
         return handle_upload(handler)
+    if parsed.path == "/api/upload/rollback":
+        return handle_upload_rollback(handler)
     if parsed.path == "/api/upload/extract":
         return handle_upload_extract(handler)
     if parsed.path == "/api/workspace/upload":
@@ -15014,32 +15027,72 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Subagent sessions are view-only and cannot be deleted from WebUI", 400)
         is_messaging_session = _is_messaging_session_id(sid)
         worktree_retained = _worktree_retained_payload_for_session_id(sid)
+        delete_session_snapshot = None
         try:
-            event_profile = getattr(get_session(sid, metadata_only=True), "profile", None)
+            delete_session_snapshot = get_session(sid, metadata_only=True)
+            event_profile = getattr(delete_session_snapshot, "profile", None)
         except KeyError:
             event_profile = None
         except Exception:
             logger.debug("Failed to resolve profile for deleted session %s", sid, exc_info=True)
             event_profile = None
+        # Deletion is terminal and cannot safely race a worker that still owns
+        # a mutable Session/agent handle: its eventual save would recreate the
+        # sidecar, sidebar index row, and clear the deletion tombstone. Refuse
+        # deletion until the authoritative worker lifecycle has fully exited.
+        # The browser can Stop first and retry after teardown.
+        blocking_delete_stream = _active_run_stream_for_session(sid)
+        if not blocking_delete_stream and delete_session_snapshot is not None:
+            candidate_stream = str(getattr(delete_session_snapshot, "active_stream_id", None) or "").strip()
+            if candidate_stream and _active_stream_blocks_chat_start(delete_session_snapshot, candidate_stream):
+                blocking_delete_stream = candidate_stream
+        if blocking_delete_stream:
+            return bad(handler, "Session has an active run; stop it before deleting", 409)
         # Serialize with recovery, but bound contention so a browser timeout
         # cannot be followed by a delayed server-side delete.
         session_lock = _get_session_agent_lock(sid)
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
         try:
-            with LOCK:
-                SESSIONS.pop(sid, None)
+            # The pre-lock check is only an optimistic fast path. Chat start can
+            # claim the session while delete waits, so prove liveness again at
+            # the mutation chokepoint before removing any durable state.
+            locked_delete_snapshot = None
+            try:
+                locked_delete_snapshot = get_session(sid, metadata_only=True)
+            except KeyError:
+                pass
+            blocking_delete_stream = _active_run_stream_for_session(sid)
+            if not blocking_delete_stream and locked_delete_snapshot is not None:
+                candidate_stream = str(getattr(locked_delete_snapshot, "active_stream_id", None) or "").strip()
+                if candidate_stream and _active_stream_blocks_chat_start(locked_delete_snapshot, candidate_stream):
+                    blocking_delete_stream = candidate_stream
+            if blocking_delete_stream:
+                return bad(handler, "Session has an active run; stop it before deleting", 409)
             try:
                 p = (SESSION_DIR / f"{sid}.json").resolve()
                 p.relative_to(SESSION_DIR.resolve())
             except Exception:
                 return bad(handler, "Invalid session_id", 400)
-            sidecar_deleted = False
             try:
                 p.unlink(missing_ok=True)
             except Exception:
-                logger.debug("Failed to unlink session file %s", p)
-            sidecar_deleted = not p.exists()
+                logger.warning("Failed to unlink session file %s", p, exc_info=True)
+                return bad(handler, "Failed to delete session data", 500)
+            try:
+                sidecar_deleted = not p.exists()
+            except OSError:
+                sidecar_deleted = False
+                logger.warning("Failed to verify session file deletion %s", p, exc_info=True)
+            if not sidecar_deleted:
+                # The sidecar is the authoritative WebUI transcript. Never
+                # prune its index row, backup, journals, drafts, or state.db
+                # while it still exists: doing so reports a false success and
+                # lets the surviving sidecar resurrect an apparently deleted
+                # conversation on the next sidebar reconciliation.
+                return bad(handler, "Failed to delete session data", 500)
+            with LOCK:
+                SESSIONS.pop(sid, None)
             try:
                 prune_session_from_index(sid)
             except Exception:
@@ -21197,61 +21250,28 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
     the same session must wait or it can reuse the cached agent while the old
     interrupt is still landing (#3808).
 
-    Bounded: the post-cancel unwind is short (dominated by the worker finally's
-    ``_ckpt_thread.join(timeout=15)``), and ``unregister_active_run`` runs in that
-    finally, so a healthy worker leaves ACTIVE_RUNS within seconds. A detached /
-    wedged worker that never reaches its finally (e.g. stuck in a provider call,
-    or leaked by SIGKILL without restart) must NOT 409 the session forever — so an
-    entry older than the unwind ceiling (180s) is treated as stale and ignored
-    here. A legitimately long-running turn keeps ``active_stream_id`` SET
-    and is handled by ``_active_stream_blocks_chat_start`` above; this guard only
-    covers the cleared-stream-id unwind window. (Codex brick-gate hardening, #3822.)
+    ACTIVE_RUNS is in-memory worker-lifecycle truth and is cleared by the
+    worker's outer finally. Age cannot prove termination: provider calls can
+    remain blocked after cancel for arbitrarily long, and reusing that worker's
+    mutable cached agent would race its eventual writeback. A process restart
+    naturally clears the registry, so retaining a live row is the fail-closed
+    behavior rather than a permanent cross-restart brick.
     """
     sid = str(session_id or "").strip()
     if not sid:
         return None
-    ceiling = 180.0  # generous vs the 15s checkpoint-join unwind; finite to avoid permanent-409
-    now = time.time()
     try:
         from api import config as _live_config
-        # Snapshot the live-worker set BEFORE taking ACTIVE_RUNS_LOCK (sequential,
-        # not nested, so no lock-ordering/deadlock risk). A long turn whose
-        # active_stream_id was already cleared during final writeback can still be
-        # mid-teardown — its STREAMS entry present — past the age ceiling, so age
-        # alone must NOT pop its lifecycle row (health / background-wakeup /
-        # active-agent-cache consumers read ACTIVE_RUNS as worker-lifecycle truth).
-        with _live_config.STREAMS_LOCK:
-            live_stream_ids = set(_live_config.STREAMS.keys())
-        stale_stream_ids = []
         with _live_config.ACTIVE_RUNS_LOCK:
-            for run_stream_id, raw in list((_live_config.ACTIVE_RUNS or {}).items()):
+            for run_stream_id, raw in (_live_config.ACTIVE_RUNS or {}).items():
                 stream_id = str((raw or {}).get("stream_id") or run_stream_id or "").strip()
                 run_sid = str((raw or {}).get("session_id") or "").strip()
                 if run_sid != sid or not stream_id:
                     continue
-                try:
-                    started_at = float((raw or {}).get("started_at") or 0)
-                except (TypeError, ValueError):
-                    started_at = 0.0
-                # Past the unwind ceiling: never block a successor on it (the
-                # anti-permanent-409 guarantee, #3822). Additionally reconcile the
-                # zombie out of ACTIVE_RUNS so health/recovery polling stops seeing a
-                # half-alive run — but ONLY when the worker is truly gone from
-                # STREAMS, so a still-live / still-tearing-down worker keeps its
-                # lifecycle row. Pop by the real dict key. (Codex gate, #4492)
-                if started_at and (now - started_at) > ceiling:
-                    if run_stream_id not in live_stream_ids and stream_id not in live_stream_ids:
-                        stale_stream_ids.append(run_stream_id)
-                    continue
                 return stream_id
-            for stale_stream_id in stale_stream_ids:
-                (_live_config.ACTIVE_RUNS or {}).pop(stale_stream_id, None)
-                # The zombie run is pruned directly here (not via the normal teardown
-                # finally / unregister_active_run), so release its stream-owner entry too
-                # or STREAM_SESSION_OWNERS leaks for every reconciled zombie. (#5198 gate)
-                unregister_stream_owner(stale_stream_id)
     except Exception:
-        return None
+        logger.exception("Failed to verify active worker ownership for session %s", sid)
+        return "unknown-active-run"
     return None
 
 
@@ -21306,42 +21326,24 @@ def _start_chat_stream_for_session(
         stale_response["_status"] = 409
         return stale_response
     attachments = attachments or []
-    # Prevent duplicate runs in the same session while a stream is still active.
-    # This commonly happens after page refresh/reconnect races and can produce
-    # duplicated clarify cards for what appears to be a single user request.
-    diag.stage("active_stream_check") if diag else None
-    current_stream_id = getattr(s, "active_stream_id", None)
-    if current_stream_id:
-        if _active_stream_blocks_chat_start(s, current_stream_id):
-            diag.stage("response_write") if diag else None
-            return {
-                "error": "session already has an active stream",
-                "active_stream_id": current_stream_id,
-                "_status": 409,
-            }
-        # Stale stream id from a previous run; clear and continue.
-        diag.stage("stale_stream_cleanup") if diag else None
-        _clear_stale_stream_state(s)
-
-    # #1932: check if this session has a pending goal continuation flag.
-    # The streaming hook sets PENDING_GOAL_CONTINUATION when goal_continue fires,
-    # so the next chat/start for this session is automatically treated as goal-related.
-    if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
-        goal_related = True
-        PENDING_GOAL_CONTINUATION.discard(s.session_id)
-
-    # process_complete wakeup (ours-original, Option B): if this session has a
-    # pending process_complete marker (set by api/background_process.py drain),
-    # discard it atomically here. Mirrors the goal_continue pattern (#1932).
-    # The marker is server-internal telemetry; the actual wakeup is delivered
-    # either server-side (Option Z) or via the PR #2279 next-turn drain.
-    if s.session_id in PENDING_BG_TASK_COMPLETIONS:
-        PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
-
     session_lock = _get_session_agent_lock(s.session_id)
     diag.stage("session_lock_wait") if diag else None
     while True:
         with session_lock:
+            # Re-resolve under the same lock used by delete/draft/recovery.
+            # A caller may hold a stale Session object captured before delete;
+            # saving through that handle would recreate the sidecar/index and
+            # clear the durable deletion tombstone.
+            try:
+                authoritative_session = get_session(s.session_id)
+            except KeyError:
+                return {
+                    "error": "session not found",
+                    "_status": 404,
+                }
+            if authoritative_session is not s:
+                s = authoritative_session
+            diag.stage("active_stream_check") if diag else None
             locked_stream_id = getattr(s, "active_stream_id", None)
             if locked_stream_id:
                 if _active_stream_blocks_chat_start(s, locked_stream_id):
@@ -21375,6 +21377,16 @@ def _start_chat_stream_for_session(
                     stream_id=stream_id,
                     source=source,
                 )
+                # Consume one-shot continuation/wakeup markers only after this
+                # request has passed authoritative admission and durably claimed
+                # the session. A duplicate start that returns 409 (or a stale
+                # deleted handle that returns 404) must leave them available for
+                # the next request that can actually start a turn.
+                if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
+                    goal_related = True
+                    PENDING_GOAL_CONTINUATION.discard(s.session_id)
+                if s.session_id in PENDING_BG_TASK_COMPLETIONS:
+                    PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
                 break
         if needs_stale_cleanup:
             diag.stage("stale_stream_cleanup") if diag else None
@@ -21438,7 +21450,7 @@ def _start_chat_stream_for_session(
     )
     try:
         thr.start()
-    except Exception:
+    except Exception as start_exc:
         if backend_is_gateway:
             try:
                 from api.gateway_chat import _finish_gateway_run_starting
@@ -21447,6 +21459,54 @@ def _start_chat_stream_for_session(
                 _clear_gateway_run_starting(stream_id)
             except Exception:
                 logger.debug("Failed to record gateway run-start failure for stream %s", stream_id, exc_info=True)
+        # No worker exists to run the ordinary finally block. Roll back every
+        # process-local registration here, then durably settle the pending turn
+        # while this stream still owns it. Leaving the eager pending sidecar or
+        # STREAMS/owner row installed makes every future send return 409 forever.
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+            CANCEL_FLAGS.pop(stream_id, None)
+            STREAM_LAST_EVENT_ID.pop(stream_id, None)
+            STREAM_GOAL_RELATED.pop(stream_id, None)
+        unregister_stream_owner(stream_id)
+        unregister_active_run(stream_id)
+        try:
+            with _get_session_agent_lock(s.session_id):
+                failed_session = get_session(s.session_id)
+                if getattr(failed_session, "active_stream_id", None) == stream_id:
+                    from api.streaming import _materialize_pending_user_turn_before_error
+
+                    _materialize_pending_user_turn_before_error(failed_session)
+                    failed_session.active_stream_id = None
+                    failed_session.pending_user_message = None
+                    failed_session.pending_attachments = []
+                    failed_session.pending_started_at = None
+                    failed_session.pending_user_source = None
+                    if not isinstance(getattr(failed_session, "messages", None), list):
+                        failed_session.messages = []
+                    failed_session.messages.append({
+                        "role": "assistant",
+                        "content": "**Agent start failed:** The chat worker could not be started. Please retry this message.",
+                        "timestamp": time.time(),
+                        "_error": True,
+                    })
+                    failed_session.save()
+        except Exception:
+            logger.exception(
+                "Failed to settle chat worker-start failure for session %s stream %s",
+                s.session_id,
+                stream_id,
+            )
+        try:
+            from api.turn_journal import append_turn_journal_event_for_stream
+
+            append_turn_journal_event_for_stream(
+                s.session_id,
+                stream_id,
+                {"event": "interrupted", "reason": "worker_start_failed"},
+            )
+        except Exception:
+            logger.warning("Failed to append worker-start failure turn journal event", exc_info=True)
         raise
     response = {
         "stream_id": stream_id,

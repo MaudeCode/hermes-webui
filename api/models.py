@@ -182,6 +182,42 @@ _INDEX_WRITE_LOCK = threading.RLock()
 _SESSION_INDEX_REBUILD_LOCK = threading.Lock()
 _SESSION_INDEX_REBUILD_THREAD = None
 _SESSION_INDEX_REBUILD_THREAD_TARGET: tuple[Path, Path] | None = None
+_PARSED_INDEX_CACHE_MAX = 8
+_PARSED_INDEX_CACHE: "collections.OrderedDict[str, tuple[tuple[int, int, int, int, int], list[dict]]]" = collections.OrderedDict()
+
+
+def _index_stat_signature(path: Path) -> tuple[int, int, int, int, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (int(st.st_dev), int(st.st_ino), int(st.st_size), int(st.st_mtime_ns), int(st.st_ctime_ns))
+
+
+def _cached_parsed_index(path: Path) -> list[dict] | None:
+    key = str(path)
+    cached = _PARSED_INDEX_CACHE.get(key)
+    if cached is None:
+        return None
+    signature, entries = cached
+    if signature != _index_stat_signature(path):
+        _PARSED_INDEX_CACHE.pop(key, None)
+        return None
+    _PARSED_INDEX_CACHE.move_to_end(key)
+    # The update path replaces rows and reorders only this new list; it never
+    # mutates untouched cached dicts, so a shallow list copy is sufficient.
+    return list(entries)
+
+
+def _cache_parsed_index(path: Path, entries: list[dict]) -> None:
+    signature = _index_stat_signature(path)
+    if signature is None:
+        return
+    key = str(path)
+    _PARSED_INDEX_CACHE[key] = (signature, list(entries))
+    _PARSED_INDEX_CACHE.move_to_end(key)
+    while len(_PARSED_INDEX_CACHE) > _PARSED_INDEX_CACHE_MAX:
+        _PARSED_INDEX_CACHE.popitem(last=False)
 
 # Serializes ``_record_webui_zero_message_orphan_tombstone`` /
 # ``_clear_webui_zero_message_orphan_tombstone`` so two concurrent sidebar
@@ -353,9 +389,12 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
     """Update the session index file.
 
     When *updates* is provided (a list of Session objects whose compact
-    entries should be refreshed), this does a targeted in-place update of
-    the existing index — O(1) for single-session changes.  When *updates*
-    is None, a full rebuild is performed (used on startup / first call).
+    entries should be refreshed), this patches only those logical rows. The
+    on-disk compatibility format remains one sorted JSON list, so serialization
+    is still O(number of sessions); a stat-validated parsed cache avoids paying
+    the full read+JSON-parse cost on every Session.save, and identical updates
+    avoid the rewrite entirely. When *updates* is None, a full rebuild is
+    performed (used on startup / first call).
 
     LOCK protects only in-memory session snapshots.  JSON parsing, payload
     construction, and disk I/O run outside LOCK so active-stream saves do not
@@ -411,6 +450,7 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                     f.flush()
                     os.fsync(f.fileno())
                 _safe_replace(_tmp, session_index_file)
+                _cache_parsed_index(session_index_file, entries)
             except Exception:
                 # Best-effort cleanup of stale tmp on failure
                 try:
@@ -427,29 +467,39 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
             # Avoid N filesystem exists() checks under LOCK by collecting
             # on-disk IDs once before entering the critical section.
             on_disk_ids = _persisted_session_ids_snapshot()
-            existing = json.loads(session_index_file.read_bytes())
+            existing = _cached_parsed_index(session_index_file)
+            if existing is None:
+                existing = json.loads(session_index_file.read_bytes())
             if not isinstance(existing, list):
                 raise ValueError("session index must be a list")
             with LOCK:
                 in_memory_ids = set(SESSIONS.keys())
                 updated_map = {s.session_id: s.compact() for s in updates}
 
-            existing = [
+            filtered = [
                 e for e in existing
                 if (e.get('session_id') in in_memory_ids or e.get('session_id') in on_disk_ids)
             ]
+            changed = len(filtered) != len(existing)
+            existing = filtered
 
-            existing_ids = {e.get('session_id') for e in existing}
-            # Add any updated entries not yet in the index.
+            positions = {e.get('session_id'): i for i, e in enumerate(existing)}
             for sid, entry in updated_map.items():
-                if sid not in existing_ids:
+                position = positions.get(sid)
+                if position is None:
                     existing.append(entry)
-            # Replace matching entries in-place.
-            for i, e in enumerate(existing):
-                sid = e.get('session_id')
-                if sid in updated_map:
-                    existing[i] = updated_map[sid]
+                    positions[sid] = len(existing) - 1
+                    changed = True
+                elif existing[position] != entry:
+                    existing[position] = entry
+                    changed = True
+            old_order = [e.get('session_id') for e in existing]
             existing.sort(key=lambda s: s.get('updated_at', 0), reverse=True)
+            if old_order != [e.get('session_id') for e in existing]:
+                changed = True
+            if not changed:
+                _cache_parsed_index(session_index_file, existing)
+                return
             _payload = json.dumps(existing, ensure_ascii=False, indent=2)
 
             try:
@@ -458,6 +508,7 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                     f.flush()
                     os.fsync(f.fileno())
                 _safe_replace(_tmp, session_index_file)
+                _cache_parsed_index(session_index_file, existing)
             except Exception:
                 try:
                     _tmp.unlink(missing_ok=True)
@@ -1111,6 +1162,21 @@ def _read_metadata_json_prefix(path, max_prefix_bytes=65536):
     return None
 
 
+def _read_persisted_message_count(path: Path) -> int | None:
+    """Return modern sidecar ``message_count`` without parsing the transcript."""
+    try:
+        prefix = _read_metadata_json_prefix(path)
+        if not prefix:
+            return None
+        value = json.loads(prefix).get('message_count')
+        if isinstance(value, bool):
+            return None
+        parsed = int(value)
+        return parsed if parsed >= 0 else None
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
 def _load_session_from_path(path: Path) -> "Session | None":
     """Load a session from an explicit JSON path without consulting SESSION_DIR."""
     try:
@@ -1434,13 +1500,19 @@ class Session:
         # their .bak get restored automatically.
         try:
             if self.path.exists():
-                existing_text = self.path.read_text(encoding='utf-8')
-                try:
-                    existing = json.loads(existing_text)
-                    existing_msg_count = len(existing.get('messages') or [])
-                except (json.JSONDecodeError, ValueError):
-                    existing_msg_count = -1  # corrupt → always back up
                 incoming_msg_count = len(self.messages or [])
+                existing_msg_count = _read_persisted_message_count(self.path)
+                existing_text = None
+                # Legacy sidecars have no metadata-prefix count. Preserve the
+                # old full-parse fallback for them and for malformed metadata;
+                # modern growing saves avoid reading/parsing the transcript.
+                if existing_msg_count is None:
+                    existing_text = self.path.read_text(encoding='utf-8')
+                    try:
+                        existing = json.loads(existing_text)
+                        existing_msg_count = len(existing.get('messages') or [])
+                    except (json.JSONDecodeError, ValueError):
+                        existing_msg_count = -1
                 if (
                     existing_msg_count > 0
                     and incoming_msg_count == 0
@@ -1456,6 +1528,8 @@ class Session:
                     )
                     return
                 if existing_msg_count > incoming_msg_count:
+                    if existing_text is None:
+                        existing_text = self.path.read_text(encoding='utf-8')
                     bak_path = self.path.with_suffix('.json.bak')
                     # SHOULD-FIX #2 (Opus): atomic write via tmp+replace,
                     # mirroring the main save() pattern below. Prevents a

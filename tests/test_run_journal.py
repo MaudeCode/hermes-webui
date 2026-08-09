@@ -30,6 +30,32 @@ def test_run_journal_appends_monotonic_seq_and_reads_after_cursor(tmp_path):
     assert [event["event"] for event in journal["events"]] == ["done"]
 
 
+def test_stateful_writer_reuses_handle_and_flushes_each_event_before_return(tmp_path, monkeypatch):
+    import api.run_journal as run_journal
+
+    journal_path = tmp_path / "_run_journal" / "session_handle" / "run_handle.jsonl"
+    real_open = run_journal.os.open
+    journal_opens = []
+
+    def tracking_open(path, *args, **kwargs):
+        if str(path) == str(journal_path):
+            journal_opens.append(str(path))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(run_journal.os, "open", tracking_open)
+    writer = RunJournalWriter("session_handle", "run_handle", session_dir=tmp_path)
+    writer.append_sse_event("token", {"text": "one"})
+    # A reconnect can read the line immediately; it is not waiting in Python's
+    # userspace buffer behind the SSE event that follows this return.
+    assert [event["payload"]["text"] for event in read_run_events(
+        "session_handle", "run_handle", session_dir=tmp_path
+    )["events"]] == ["one"]
+    writer.append_sse_event("token", {"text": "two"})
+    writer.append_sse_event("done", {"session": {}})
+
+    assert journal_opens == [str(journal_path)]
+
+
 def test_run_journal_reads_bounded_replay_window(tmp_path):
     writer = RunJournalWriter("session_1", "run_1", session_dir=tmp_path)
 
@@ -168,16 +194,20 @@ def test_summary_cache_does_not_store_result_when_journal_changes_during_read(tm
     import api.run_journal as run_journal
 
     original_read = run_journal._read_jsonl
+    appended = False
 
     def append_after_read(path):
+        nonlocal appended
         events, malformed = original_read(path)
-        append_run_event(
-            "session_1",
-            "run_1",
-            "cancel",
-            {"message": "Cancelled by user"},
-            session_dir=tmp_path,
-        )
+        if not appended:
+            appended = True
+            append_run_event(
+                "session_1",
+                "run_1",
+                "cancel",
+                {"message": "Cancelled by user"},
+                session_dir=tmp_path,
+            )
         return events, malformed
 
     monkeypatch.setattr(run_journal, "_read_jsonl", append_after_read)
@@ -369,6 +399,49 @@ def test_pruned_cursor_requests_transcript_reload_status(tmp_path):
 
     assert replay["status"] == "cursor_pruned"
     assert replay["events"] == []
+
+
+def test_retention_does_not_unlink_journal_owned_by_live_writer(tmp_path):
+    import api.run_journal as run_journal
+
+    writer = run_journal.RunJournalWriter(
+        "session_live_writer",
+        "run_live_writer",
+        session_dir=tmp_path,
+    )
+    writer.append_sse_event("done", {"session": {"session_id": "session_live_writer"}})
+    path = writer._path
+    old = time.time() - 100
+    os.utime(path, (old, old))
+
+    while_live = run_journal.prune_settled_run_journals(
+        session_dir=tmp_path,
+        now=time.time(),
+        retention_seconds=10,
+        keep_recent=0,
+    )
+
+    assert while_live["pruned"] == 0
+    assert path.exists()
+    title = writer.append_sse_event("title", {"title": "Still replayable"})
+    end = writer.append_sse_event("stream_end", {})
+    writer.close()
+    assert [title["seq"], end["seq"]] == [2, 3]
+    assert [
+        event["event"]
+        for event in run_journal.read_run_events(
+            "session_live_writer", "run_live_writer", session_dir=tmp_path
+        )["events"]
+    ] == ["done", "title", "stream_end"]
+
+    after_close = run_journal.prune_settled_run_journals(
+        session_dir=tmp_path,
+        now=time.time() + 100,
+        retention_seconds=10,
+        keep_recent=0,
+    )
+    assert after_close["pruned"] == 1
+    assert not path.exists()
 
 
 def test_stale_interrupted_event_skips_terminal_journal(tmp_path, monkeypatch):

@@ -224,6 +224,14 @@ Phase 1 uses the **durable run journal** as the replay source for replayable
 events. The live `STREAMS[stream_id]` queue (in `api/streaming.py`) is
 not a reliable replay source because it holds only recent in-memory state.
 
+There is one explicit availability exception: if the run-journal writer cannot
+initialize or append (for example, a transient filesystem failure), the active
+chat continues to receive the live event, but that frame has no `event_id` and
+is not claimed as replayable. The server logs the degraded journal once per run;
+reconnect recovery must use the session snapshot or settled transcript for the
+uncommitted gap. A journal failure must never attach a cursor to an event that
+was not flushed to the journal.
+
 A future implementation must replay from the run journal via the existing
 `_replay_run_journal()` path (in `api/routes.py`) and fall back to the
 snapshot mechanism when journal entries are unavailable for a given cursor.

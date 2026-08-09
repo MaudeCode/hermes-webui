@@ -108,6 +108,7 @@ def test_start_chat_stream_response_includes_provisional_title(tmp_path, monkeyp
     monkeypatch.setattr(routes.threading, "Thread", ImmediateThread)
 
     s = Session(session_id="test-start-response-title", title="Untitled")
+    monkeypatch.setattr(routes, "get_session", lambda _sid: s)
     response = routes._start_chat_stream_for_session(
         s,
         msg="Please design early session titles for Hermes WebUI",

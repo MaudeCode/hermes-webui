@@ -9,8 +9,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 import uuid
+from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable
@@ -23,6 +25,9 @@ except ImportError:  # pragma: no cover
 TURN_JOURNAL_DIR_NAME = "_turn_journal"
 _TERMINAL_EVENTS = {"completed", "interrupted"}
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_STREAM_TURN_CACHE_MAX = 4096
+_STREAM_TURN_CACHE: "OrderedDict[tuple[str, str], str]" = OrderedDict()
+_STREAM_TURN_CACHE_LOCK = threading.Lock()
 
 
 def _default_session_dir() -> Path:
@@ -89,6 +94,10 @@ def append_turn_journal_event(
 
     path = _journal_path(session_id, session_dir=session_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # A directory entry only needs to be made durable when this process creates
+    # its pid-scoped shard. Re-fsyncing the directory after every append adds no
+    # durability (the entry already exists) and was a measurable per-event tax.
+    created_shard = not path.exists()
     line = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
     fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
     with os.fdopen(fd, "a", encoding="utf-8") as fh:
@@ -97,7 +106,7 @@ def append_turn_journal_event(
             fh.flush()
             os.fsync(fh.fileno())
     o_directory = getattr(os, "O_DIRECTORY", None)
-    if o_directory is not None:
+    if created_shard and o_directory is not None:
         try:
             dir_fd = os.open(path.parent, o_directory)
             try:
@@ -106,6 +115,15 @@ def append_turn_journal_event(
                 os.close(dir_fd)
         except OSError:
             pass
+    stream_id = str(payload.get("stream_id") or "").strip()
+    turn_id = str(payload.get("turn_id") or "").strip()
+    if stream_id and turn_id:
+        key = (str(path.parent.parent.resolve()), f"{session_id}:{stream_id}")
+        with _STREAM_TURN_CACHE_LOCK:
+            _STREAM_TURN_CACHE[key] = turn_id
+            _STREAM_TURN_CACHE.move_to_end(key)
+            while len(_STREAM_TURN_CACHE) > _STREAM_TURN_CACHE_MAX:
+                _STREAM_TURN_CACHE.popitem(last=False)
     return payload
 
 
@@ -218,8 +236,17 @@ def append_turn_journal_event_for_stream(
     payload = dict(event)
     payload["stream_id"] = str(stream_id)
     if not payload.get("turn_id"):
-        journal = read_turn_journal(session_id, session_dir=session_dir)
-        turn_id = _latest_turn_id_for_stream(journal.get("events") or [], stream_id)
+        root = Path(session_dir) if session_dir is not None else _default_session_dir()
+        key = (str(root.resolve()), f"{session_id}:{stream_id}")
+        with _STREAM_TURN_CACHE_LOCK:
+            turn_id = _STREAM_TURN_CACHE.get(key)
+            if turn_id:
+                _STREAM_TURN_CACHE.move_to_end(key)
+        if not turn_id:
+            # Restart / cache-eviction fallback: scan durable history once, then
+            # append_turn_journal_event repopulates the bounded process cache.
+            journal = read_turn_journal(session_id, session_dir=session_dir)
+            turn_id = _latest_turn_id_for_stream(journal.get("events") or [], stream_id)
         if turn_id:
             payload["turn_id"] = turn_id
     return append_turn_journal_event(session_id, payload, session_dir=session_dir)
@@ -257,6 +284,13 @@ def delete_turn_journal(session_id: str, *, session_dir: Path | None = None) -> 
     if sid in (".", "..") or not sid or "/" in sid or "\\" in sid or not _SESSION_ID_RE.fullmatch(sid):
         return 0
     root = Path(session_dir) if session_dir is not None else _default_session_dir()
+    root_key = str(root.resolve())
+    with _STREAM_TURN_CACHE_LOCK:
+        for key in [
+            key for key in _STREAM_TURN_CACHE
+            if key[0] == root_key and key[1].startswith(f"{sid}:")
+        ]:
+            _STREAM_TURN_CACHE.pop(key, None)
     journal_dir = root / TURN_JOURNAL_DIR_NAME
     if not journal_dir.exists():
         return 0

@@ -23,6 +23,9 @@ from api.config import (
     STREAM_LIVE_TOOL_CALLS,
     STREAM_PARTIAL_TEXT,
     STREAM_REASONING_TEXT,
+    append_stream_text_chunk,
+    stream_text_value,
+    set_stream_text_value,
     _get_session_agent_lock,
     coerce_reasoning_effort_for_model,
     gateway_approval_unavailable_reason,
@@ -561,7 +564,7 @@ def _run_gateway_runs_api_streaming(
     headers_sse = dict(headers)
     headers_sse["Accept"] = "text/event-stream"
     req_events = urllib.request.Request(url_events, headers=headers_sse, method="GET")
-    final_text = ""
+    final_chunks: list[str] = []
     sse_event = "message"
     with urllib.request.urlopen(req_events, timeout=_gateway_read_timeout_secs()) as resp:
         for raw_line in _iter_sse_lines_cancellable(resp, cancel_event):
@@ -603,7 +606,7 @@ def _run_gateway_runs_api_streaming(
                     if event_name == "reasoning":
                         reason_delta = event_payload.get("text")
                         if reason_delta and stream_id in STREAM_REASONING_TEXT:
-                            STREAM_REASONING_TEXT[stream_id] += reason_delta
+                            append_stream_text_chunk(STREAM_REASONING_TEXT, stream_id, reason_delta)
                     elif stream_id in STREAM_LIVE_TOOL_CALLS:
                         if event_name == "tool":
                             STREAM_LIVE_TOOL_CALLS[stream_id].append({
@@ -630,9 +633,9 @@ def _run_gateway_runs_api_streaming(
             if payload_event == "message.delta":
                 delta = str(payload.get("delta") or "")
                 if delta:
-                    final_text += delta
+                    final_chunks.append(delta)
                     if stream_id in STREAM_PARTIAL_TEXT:
-                        STREAM_PARTIAL_TEXT[stream_id] += delta
+                        append_stream_text_chunk(STREAM_PARTIAL_TEXT, stream_id, delta)
                     put_gateway_event("token", {"text": delta})
                 sse_event = "message"
                 continue
@@ -642,10 +645,10 @@ def _run_gateway_runs_api_streaming(
                 if payload.get("error"):
                     raise RuntimeError(str(payload["error"]))
                 output = str(payload.get("output") or "")
-                if output and not final_text:
-                    final_text = output
+                if output and not final_chunks:
+                    final_chunks = [output]
                     if stream_id in STREAM_PARTIAL_TEXT:
-                        STREAM_PARTIAL_TEXT[stream_id] = output
+                        set_stream_text_value(STREAM_PARTIAL_TEXT, stream_id, output)
                 usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
                 sse_event = "message"
                 continue
@@ -661,16 +664,16 @@ def _run_gateway_runs_api_streaming(
             reasoning_delta = _gateway_sse_reasoning_delta(payload)
             if reasoning_delta:
                 if stream_id in STREAM_REASONING_TEXT:
-                    STREAM_REASONING_TEXT[stream_id] += reasoning_delta
+                    append_stream_text_chunk(STREAM_REASONING_TEXT, stream_id, reasoning_delta)
                 put_gateway_event("reasoning", {"text": reasoning_delta})
             delta = _gateway_sse_delta(payload)
             if delta:
-                final_text += delta
+                final_chunks.append(delta)
                 if stream_id in STREAM_PARTIAL_TEXT:
-                    STREAM_PARTIAL_TEXT[stream_id] += delta
+                    append_stream_text_chunk(STREAM_PARTIAL_TEXT, stream_id, delta)
                 put_gateway_event("token", {"text": delta})
             usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
-    return final_text, usage
+    return "".join(final_chunks), usage
 
 
 def stop_gateway_run(run_id: str) -> bool:
@@ -707,7 +710,16 @@ def stop_gateway_run(run_id: str) -> bool:
         return False
 
 
-def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, model_provider, terminal_error):
+def _settle_gateway_terminal_error(
+    session_id,
+    stream_id,
+    workspace,
+    model,
+    model_provider,
+    terminal_error,
+    *,
+    error_payload_override=None,
+):
     from api.streaming import (
         _classify_provider_error,
         _materialize_pending_user_turn_before_error,
@@ -722,11 +734,14 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
         if not _stream_writeback_is_current(session, stream_id):
             return None
         error_classification = _classify_provider_error(terminal_error)
-        error_payload = _provider_error_payload(
-            terminal_error,
-            error_classification["type"],
-            error_classification.get("hint", ""),
-        )
+        if isinstance(error_payload_override, dict):
+            error_payload = dict(error_payload_override)
+        else:
+            error_payload = _provider_error_payload(
+                terminal_error,
+                error_classification["type"],
+                error_classification.get("hint", ""),
+            )
         turn_duration = _terminal_turn_duration(session)
         _materialize_pending_user_turn_before_error(session)
         session.active_stream_id = None
@@ -738,11 +753,12 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             _snapshot_and_append_partial_on_error(session, stream_id)
         except Exception:
             logger.debug("Failed to snapshot gateway partials on terminal error", exc_info=True)
+        error_label = str(error_payload.get("label") or error_classification["label"])
         error_message = {
             "role": "assistant",
             "content": (
-                f"**{error_classification['label']}:** "
-                f"{error_payload.get('message') or error_classification['label']}"
+                f"**{error_label}:** "
+                f"{error_payload.get('message') or error_label}"
             ) + (f"\n\n*{error_payload['hint']}*" if error_payload.get("hint") else ""),
             "timestamp": int(time.time()),
             "_error": True,
@@ -763,13 +779,24 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             terminal_session_persisted = True
         except Exception:
             logger.debug("Failed to persist gateway terminal error settlement", exc_info=True)
-        error_payload["session"] = redact_session_data(
-            _session_payload_with_full_messages(session, tool_calls=[])
-        )
-        error_payload["session_id"] = session.session_id
+        try:
+            terminal_session_payload = _session_payload_with_full_messages(session, tool_calls=[])
+        except Exception:
+            # Settlement itself has already been persisted. A lightweight test
+            # double or future session implementation must not turn payload
+            # projection into an unhandled worker exception after that commit.
+            logger.debug("Failed to project full gateway terminal session payload", exc_info=True)
+            terminal_session_payload = {
+                "session_id": getattr(session, "session_id", session_id),
+                "messages": list(getattr(session, "messages", None) or []),
+                "active_stream_id": getattr(session, "active_stream_id", None),
+            }
+        error_payload["session"] = redact_session_data(terminal_session_payload)
+        settled_session_id = str(getattr(session, "session_id", None) or session_id)
+        error_payload["session_id"] = settled_session_id
         error_payload["terminal_session_persisted"] = terminal_session_persisted
         if terminal_session_persisted:
-            error_payload["terminal_session_persisted_session_id"] = session.session_id
+            error_payload["terminal_session_persisted_session_id"] = settled_session_id
         return error_payload
 
 
@@ -840,12 +867,17 @@ def _run_gateway_chat_streaming(
         run_journal = RunJournalWriter(session_id, stream_id)
     except Exception:
         run_journal = None
-        logger.debug("Failed to initialize gateway run journal for stream %s", stream_id, exc_info=True)
+        logger.warning(
+            "Gateway run journal degraded for stream %s: live events will continue without replay cursors",
+            stream_id,
+            exc_info=True,
+        )
+    run_journal_degradation_logged = [run_journal is None]
     cancel_event = threading.Event()
     with STREAMS_LOCK:
         CANCEL_FLAGS[stream_id] = cancel_event
-        STREAM_PARTIAL_TEXT[stream_id] = ""
-        STREAM_REASONING_TEXT[stream_id] = ""
+        STREAM_PARTIAL_TEXT[stream_id] = []
+        STREAM_REASONING_TEXT[stream_id] = []
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
 
     success_writeback_committed = False
@@ -865,7 +897,18 @@ def _run_gateway_chat_streaming(
                 if event_id:
                     STREAM_LAST_EVENT_ID[stream_id] = event_id
             except Exception:
-                logger.debug("Failed to append gateway event %s for stream %s", event, stream_id, exc_info=True)
+                # Preserve live availability without claiming durable replay:
+                # event_id stays None and the queue receives the legacy 2-tuple.
+                if not run_journal_degradation_logged[0]:
+                    logger.warning(
+                        "Gateway run journal degraded for stream %s while appending %s; delivering live event without replay cursor",
+                        stream_id,
+                        event,
+                        exc_info=True,
+                    )
+                    run_journal_degradation_logged[0] = True
+                else:
+                    logger.debug("Failed to append gateway event %s for stream %s", event, stream_id, exc_info=True)
         if event_id and hasattr(q, "note_last_event_id"):
             try:
                 q.note_last_event_id(event_id)
@@ -878,7 +921,7 @@ def _run_gateway_chat_streaming(
             logger.debug("Failed to put gateway event to queue")
 
     s = None
-    final_text = ""
+    final_chunks: list[str] = []
     terminal_error = ""
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
     try:
@@ -978,6 +1021,8 @@ def _run_gateway_chat_streaming(
                 return
             if final_text is None:
                 return
+            if final_text:
+                final_chunks = [final_text]
         else:
             # Legacy gateway path: emit unsupported approval notice once per session,
             # but only when the gateway genuinely lacks approval capability.
@@ -1088,7 +1133,7 @@ def _run_gateway_chat_streaming(
                             if event_name == "reasoning":
                                 reason_delta = event_payload.get("text")
                                 if reason_delta and stream_id in STREAM_REASONING_TEXT:
-                                    STREAM_REASONING_TEXT[stream_id] += reason_delta
+                                    append_stream_text_chunk(STREAM_REASONING_TEXT, stream_id, reason_delta)
                             elif stream_id in STREAM_LIVE_TOOL_CALLS:
                                 if event_name == "tool":
                                     STREAM_LIVE_TOOL_CALLS[stream_id].append({
@@ -1116,7 +1161,7 @@ def _run_gateway_chat_streaming(
                         reason_delta = _gateway_reasoning_delta(payload)
                         if reason_delta:
                             if stream_id in STREAM_REASONING_TEXT:
-                                STREAM_REASONING_TEXT[stream_id] += reason_delta
+                                append_stream_text_chunk(STREAM_REASONING_TEXT, stream_id, reason_delta)
                             put_gateway_event("reasoning", {"text": reason_delta})
                         sse_event = "message"
                         continue
@@ -1126,17 +1171,17 @@ def _run_gateway_chat_streaming(
                     reasoning_delta = _gateway_sse_reasoning_delta(payload)
                     if reasoning_delta:
                         if stream_id in STREAM_REASONING_TEXT:
-                            STREAM_REASONING_TEXT[stream_id] += reasoning_delta
+                            append_stream_text_chunk(STREAM_REASONING_TEXT, stream_id, reasoning_delta)
                         put_gateway_event("reasoning", {"text": reasoning_delta})
                     delta = _gateway_sse_delta(payload)
                     if delta:
-                        final_text += delta
+                        final_chunks.append(delta)
                         if stream_id in STREAM_PARTIAL_TEXT:
-                            STREAM_PARTIAL_TEXT[stream_id] += delta
+                            append_stream_text_chunk(STREAM_PARTIAL_TEXT, stream_id, delta)
                         put_gateway_event("token", {"text": delta})
                     usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
             usage.update({k: v for k, v in _gateway_stream_usage(last_payload).items() if v})
-        assistant_text = final_text.strip()
+        assistant_text = "".join(final_chunks).strip()
         if terminal_error:
             error_payload = _settle_gateway_terminal_error(
                 session_id,
@@ -1151,12 +1196,23 @@ def _run_gateway_chat_streaming(
             put_gateway_event("apperror", error_payload)
             return
         if not assistant_text:
-            put_gateway_event("apperror", {
+            empty_payload = {
                 "label": "Gateway returned no response",
                 "type": "gateway_empty_response",
                 "message": "Gateway returned no assistant message for this turn.",
                 "hint": "Check that Hermes Gateway API server is running and reachable.",
-            })
+            }
+            error_payload = _settle_gateway_terminal_error(
+                session_id,
+                stream_id,
+                workspace,
+                model,
+                model_provider,
+                empty_payload["message"],
+                error_payload_override=empty_payload,
+            )
+            if error_payload is not None:
+                put_gateway_event("apperror", error_payload)
             return
         with _get_session_agent_lock(session_id):
             s = get_session(session_id)
@@ -1181,12 +1237,19 @@ def _run_gateway_chat_streaming(
             if attachments:
                 user_msg["attachments"] = list(attachments)
             assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
-            saved_reasoning = STREAM_REASONING_TEXT.get(stream_id, "")
+            saved_reasoning = stream_text_value(STREAM_REASONING_TEXT, stream_id)
             if saved_reasoning:
                 assistant_msg["reasoning"] = saved_reasoning
             previous_messages = list(getattr(s, "messages", None) or [])
             previous_context = list(getattr(s, "context_messages", None) or getattr(s, "messages", None) or [])
             previous_process_wakeup_pause = dict(getattr(s, "process_wakeup_pause", {}) or {})
+            previous_pending_state = {
+                "active_stream_id": getattr(s, "active_stream_id", None),
+                "pending_user_message": getattr(s, "pending_user_message", None),
+                "pending_attachments": getattr(s, "pending_attachments", None),
+                "pending_started_at": getattr(s, "pending_started_at", None),
+                "pending_user_source": getattr(s, "pending_user_source", None),
+            }
             # Stamp stable ids on the two new rows (shared with the display merge
             # below) so display and model-context copies share an id for the
             # fork/truncate aligner (#context-message-stable-id).
@@ -1267,7 +1330,20 @@ def _run_gateway_chat_streaming(
             if cancel_event.is_set():
                 _restore_cancelled_success_writeback()
                 return
-            s.save()
+            try:
+                s.save()
+            except Exception:
+                # The success projection clears stream ownership before its
+                # atomic save. Restore the pre-writeback owner and transcript so
+                # the outer error path can durably settle this same turn instead
+                # of treating it as a stale worker and silently dropping every
+                # terminal SSE event.
+                s.messages = previous_messages
+                s.context_messages = previous_context
+                s.process_wakeup_pause = dict(previous_process_wakeup_pause)
+                for field, value in previous_pending_state.items():
+                    setattr(s, field, value)
+                raise
             if cancel_event.is_set():
                 _restore_cancelled_success_writeback()
                 return
@@ -1330,19 +1406,64 @@ def _run_gateway_chat_streaming(
             err_body = exc.read(2048).decode("utf-8", errors="replace")
         except Exception:
             err_body = ""
-        put_gateway_event(
-            "apperror",
-            _gateway_http_error_event(exc, err_body, api_key_configured=bool(_gateway_api_key())),
+        http_payload = _gateway_http_error_event(
+            exc,
+            err_body,
+            api_key_configured=bool(_gateway_api_key()),
         )
+        error_payload = _settle_gateway_terminal_error(
+            session_id,
+            stream_id,
+            workspace,
+            model,
+            model_provider,
+            http_payload.get("message") or str(exc),
+            error_payload_override=http_payload,
+        )
+        if error_payload is not None:
+            put_gateway_event("apperror", error_payload)
     except Exception as exc:
         safe = _redact_text(str(exc))[:500]
-        put_gateway_event("apperror", {
+        gateway_payload = {
             "label": "Gateway request failed",
             "type": "gateway_error",
             "message": safe or "Gateway request failed.",
             "hint": "Check HERMES_WEBUI_GATEWAY_BASE_URL and Gateway API server health.",
-        })
+        }
+        try:
+            error_payload = _settle_gateway_terminal_error(
+                session_id,
+                stream_id,
+                workspace,
+                model,
+                model_provider,
+                gateway_payload["message"],
+                error_payload_override=gateway_payload,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to settle gateway exception for session %s stream %s",
+                session_id,
+                stream_id,
+            )
+            error_payload = None
+        if error_payload is None:
+            # Ownership may already be clear because the success sidecar save
+            # committed before a later payload-projection failure.  The old
+            # behavior still emitted an apperror in this case; preserve that
+            # terminal fence without mutating a possible successor stream.
+            error_payload = dict(gateway_payload)
+            error_payload["session_id"] = session_id
+            error_payload["terminal_session_persisted"] = bool(success_writeback_committed)
+        if error_payload is not None:
+            put_gateway_event("apperror", error_payload)
     finally:
+        try:
+            close_run_journal = getattr(run_journal, "close", None)
+            if callable(close_run_journal):
+                close_run_journal()
+        except Exception:
+            logger.debug("Failed to close gateway run journal for stream %s", stream_id, exc_info=True)
         mapped_run_id = str(_STREAM_RUN_IDS.get(stream_id) or "").strip()
         if mapped_run_id:
             try:

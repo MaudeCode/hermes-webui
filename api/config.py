@@ -8849,6 +8849,40 @@ STREAM_LAST_EVENT_ID: dict = {}  # stream_id -> latest journal event_id for `id:
 PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuation turn (#1932)
 
 
+def append_stream_text_chunk(store: dict, stream_id: str, text) -> None:
+    """Append one delta without repeatedly copying the full accumulated text."""
+    chunk = str(text or "")
+    if not chunk or stream_id not in store:
+        return
+    current = store.get(stream_id)
+    if isinstance(current, list):
+        current.append(chunk)
+    elif current:
+        # Accept legacy/test writers that seeded a plain string and migrate on
+        # first append. A list append is GIL-atomic for the documented single
+        # writer / best-effort snapshot-reader stream-buffer contract.
+        store[stream_id] = [str(current), chunk]
+    else:
+        store[stream_id] = [chunk]
+
+
+def stream_text_value(store: dict, stream_id: str, default: str = "") -> str:
+    """Materialize a shared stream's chunk buffer at snapshot boundaries."""
+    current = store.get(stream_id)
+    if isinstance(current, list):
+        return "".join(current)
+    if current is None:
+        return default
+    return str(current)
+
+
+def set_stream_text_value(store: dict, stream_id: str, text) -> None:
+    """Replace a stream buffer while preserving its chunked representation."""
+    if stream_id in store:
+        value = str(text or "")
+        store[stream_id] = [value] if value else []
+
+
 def register_stream_owner(stream_id: str, session_id: str) -> None:
     """Record the session that owns a stream before worker startup."""
     stream_id = str(stream_id or "").strip()

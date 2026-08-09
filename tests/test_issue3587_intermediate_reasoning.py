@@ -171,9 +171,9 @@ class TestSettlementLoopForward:
 
     def test_settlement_reads_from_segments_dict(self):
         block = self._settlement_block()
-        assert '_reasoning_segments.get' in block, (
-            "Settlement loop must read from _reasoning_segments.get(idx) "
-            "to retrieve the per-message reasoning trace"
+        assert 'stream_text_value(' in block and '_reasoning_segments' in block, (
+            "Settlement loop must materialize the chunked _reasoning_segments entry "
+            "for the matching assistant message"
         )
 
 

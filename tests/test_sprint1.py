@@ -209,6 +209,31 @@ def test_session_delete_removes_attachment_inbox(cleanup_test_sessions):
     assert not attachment_dir.exists()
 
 
+def test_failed_batch_receipt_rollback_allows_same_name_retry(cleanup_test_sessions):
+    """The rollback endpoint removes only the upload named by its receipt."""
+    sid, _ = make_session_tracked(cleanup_test_sessions)
+    uploaded, status = post_multipart("/api/upload", {"session_id": sid}, {
+        "file": ("retry.txt", b"first attempt")
+    })
+    assert status == 200
+    uploaded_path = pathlib.Path(uploaded["path"])
+    assert uploaded_path.exists()
+
+    result, rollback_status = post("/api/upload/rollback", {
+        "session_id": sid,
+        "rollback_tokens": [uploaded["rollback_token"]],
+    })
+    assert rollback_status == 200
+    assert result == {"ok": True, "rolled_back": 1, "failed": 0}
+    assert not uploaded_path.exists()
+
+    retried, retry_status = post_multipart("/api/upload", {"session_id": sid}, {
+        "file": ("retry.txt", b"second attempt")
+    })
+    assert retry_status == 200
+    assert retried["filename"] == "retry.txt"
+
+
 def test_session_delete_nonexistent():
     """Deleting a nonexistent session should return ok:True (idempotent)."""
     result, status = post("/api/session/delete", {"session_id": "doesnotexist"})

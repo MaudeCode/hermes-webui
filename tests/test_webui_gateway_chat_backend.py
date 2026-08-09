@@ -497,6 +497,12 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     empty_errors = [item[1] for item in empty_events if item[0] == "apperror"]
     assert empty_errors[-1]["type"] == "gateway_empty_response"
     assert empty_errors[-1]["session_id"] == s.session_id
+    saved_empty = models.get_session(s.session_id)
+    assert [message.get("role") for message in saved_empty.messages[-2:]] == ["user", "assistant"]
+    assert saved_empty.messages[-2]["content"] == "Say hello"
+    assert saved_empty.messages[-1].get("_error") is True
+    assert saved_empty.active_stream_id is None
+    assert saved_empty.pending_user_message is None
 
     response_error[0] = "Gateway provider failed without a known classification"
     unknown_stream_id = "stream-gateway-unknown-terminal-error-test"
@@ -587,6 +593,172 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     assert payload_messages[-2]["content"] == "partial"
     assert payload_messages[-1]["_error"] is True
     assert "_turnDuration" not in payload_messages[-1]
+
+
+def test_gateway_network_failure_persists_prompt_and_terminal_error(tmp_path, monkeypatch):
+    """Transport failures must settle the same durable turn as provider errors."""
+    from unittest.mock import MagicMock
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(
+        streaming,
+        "_load_webui_prefill_context",
+        lambda cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []},
+    )
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+    monkeypatch.setattr(
+        gateway_chat.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(urllib.error.URLError("connection refused")),
+    )
+
+    session = new_session()
+    stream_id = "stream-gateway-network-failure"
+    session.active_stream_id = stream_id
+    session.pending_user_message = "Keep this prompt"
+    session.pending_attachments = []
+    session.pending_started_at = 321
+    session.save()
+    events = []
+    channel = MagicMock()
+    channel.put_nowait = lambda item: events.append(item)
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(
+        session.session_id,
+        "Keep this prompt",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    errors = [item[1] for item in events if item[0] == "apperror"]
+    assert errors and errors[-1]["type"] == "gateway_error"
+    assert errors[-1]["terminal_session_persisted"] is True
+    saved = models.get_session(session.session_id)
+    assert [message.get("role") for message in saved.messages[-2:]] == ["user", "assistant"]
+    assert saved.messages[-2]["content"] == "Keep this prompt"
+    assert saved.messages[-1].get("_error") is True
+    assert saved.active_stream_id is None
+    assert saved.pending_user_message is None
+
+
+def test_gateway_success_save_and_projection_failures_emit_terminal_errors(tmp_path, monkeypatch):
+    """Success-path failures must not end the SSE stream without a terminal event."""
+    from unittest.mock import MagicMock
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(
+        streaming,
+        "_load_webui_prefill_context",
+        lambda cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []},
+    )
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"answer"}}]}\n\n'
+            yield b"data: [DONE]\n\n"
+
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda *_args, **_kwargs: FakeResponse())
+
+    session = new_session()
+    stream_id = "stream-gateway-success-save-failure"
+    session.active_stream_id = stream_id
+    session.pending_user_message = "Preserve this prompt"
+    session.pending_attachments = []
+    session.pending_started_at = 456
+    session.save()
+    real_save = models.Session.save
+    failed_once = False
+
+    def fail_first_terminal_save(self, *args, **kwargs):
+        nonlocal failed_once
+        if self is session and not failed_once and session.active_stream_id is None:
+            failed_once = True
+            raise OSError("simulated writeback failure")
+        return real_save(self, *args, **kwargs)
+
+    monkeypatch.setattr(models.Session, "save", fail_first_terminal_save)
+    events = []
+    channel = MagicMock()
+    channel.put_nowait = lambda item: events.append(item)
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(
+        session.session_id,
+        "Preserve this prompt",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    assert failed_once is True
+    assert "done" not in [item[0] for item in events]
+    errors = [item[1] for item in events if item[0] == "apperror"]
+    assert errors and errors[-1]["type"] == "gateway_error"
+    assert errors[-1]["terminal_session_persisted"] is True
+    saved = models.get_session(session.session_id)
+    assert [message.get("role") for message in saved.messages[-3:]] == ["user", "assistant", "assistant"]
+    assert saved.messages[-3]["content"] == "Preserve this prompt"
+    assert saved.messages[-2].get("_partial") is True
+    assert saved.messages[-2]["content"] == "answer"
+    assert saved.messages[-1].get("_error") is True
+    assert saved.active_stream_id is None
+    assert saved.pending_user_message is None
+
+    projection_session = new_session()
+    projection_stream_id = "stream-gateway-success-projection-failure"
+    projection_session.active_stream_id = projection_stream_id
+    projection_session.pending_user_message = "Persist before projection"
+    projection_session.pending_attachments = []
+    projection_session.pending_started_at = 789
+    projection_session.save()
+    projection_events = []
+    projection_channel = MagicMock()
+    projection_channel.put_nowait = lambda item: projection_events.append(item)
+    STREAMS[projection_stream_id] = projection_channel
+    monkeypatch.setattr(
+        streaming,
+        "_session_payload_with_full_messages",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("projection failed")),
+    )
+
+    gateway_chat._run_gateway_chat_streaming(
+        projection_session.session_id,
+        "Persist before projection",
+        "test-model",
+        str(tmp_path),
+        projection_stream_id,
+        [],
+    )
+
+    assert "done" not in [item[0] for item in projection_events]
+    projection_errors = [item[1] for item in projection_events if item[0] == "apperror"]
+    assert projection_errors and projection_errors[-1]["type"] == "gateway_error"
+    assert projection_errors[-1]["terminal_session_persisted"] is True
+    projection_saved = models.get_session(projection_session.session_id)
+    assert [message.get("role") for message in projection_saved.messages[-2:]] == ["user", "assistant"]
+    assert projection_saved.messages[-1]["content"] == "answer"
+    assert projection_saved.active_stream_id is None
 
 
 def test_gateway_chat_worker_persists_reasoning_and_tool_state_on_terminal_error(tmp_path, monkeypatch):

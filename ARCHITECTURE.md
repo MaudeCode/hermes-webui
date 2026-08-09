@@ -453,6 +453,23 @@ Chat/session durability invariants:
     Live chat EventSources are owned by an in-memory session/stream generation and
     reconnect replacement uses expected-source compare-and-swap semantics. A delayed
     reconnect probe must not replace or close a newer transport after session switching.
+    New Chat is a pane navigation: it snapshots the departing live turn, persists its
+    composer draft, and only detaches the old EventSource after the new session is
+    created successfully. Successful deletion is terminal browser cleanup (live SSE,
+    polling cards, INFLIGHT state, and persisted handoff state); the server rejects a
+    delete while ACTIVE_RUNS or an authoritative active stream still owns the session.
+    Worker age is never treated as proof that a cancelled worker has exited.
+    Async composer actions (slash preprocessing, edit, and regenerate) capture a session
+    owner before awaiting and revalidate both the visible session and pending navigation
+    before mutating the transcript or sending.
+    Run-journal sequence reservation and physical append share one per-path critical
+    section. When the run journal is available, stateful writers keep their append
+    handle open and flush each event before it can enter the live SSE queue; they close
+    deterministically at teardown and fsync according to the configured durability
+    mode. Journal initialization/append failure is an explicit degraded path: it is
+    logged and live delivery continues without claiming an event id or replay guarantee.
+    Turn-journal stream-to-turn lookup uses a bounded in-process cache with durable-
+    history fallback after restart.
     Sidebar project metadata is cached for at most 30 seconds per profile scope and is
     invalidated immediately by local CRUD, project session events, and focus/visibility
     recovery; ordinary session polling does not reread projects on every refresh.

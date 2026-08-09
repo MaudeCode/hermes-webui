@@ -30,6 +30,7 @@ from api.config import (
     get_config,
     STREAMS, STREAMS_LOCK, CANCEL_FLAGS, AGENT_INSTANCES, STREAM_PARTIAL_TEXT,
     STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS,
+    append_stream_text_chunk, stream_text_value, set_stream_text_value,
     STREAM_GOAL_RELATED, PENDING_GOAL_CONTINUATION,
     STREAM_LAST_EVENT_ID,
     LOCK, SESSIONS, SESSIONS_MAX, SESSION_DIR,
@@ -7173,17 +7174,17 @@ def _snapshot_and_append_partial_on_error(session, stream_id) -> dict | None:
     # points in time. That is acceptable: each individual read is complete (never
     # torn) and a slightly-stale partial is reconciled by later journal/SSE events.
     with streams_lock:
-        _snap_partial_text = partial_texts.get(stream_id, '')
+        _snap_partial_text = stream_text_value(partial_texts, stream_id)
         if not _snap_partial_text:
             _live_partials = getattr(_live_config, 'STREAM_PARTIAL_TEXT', partial_texts)
             if _live_partials is not partial_texts:
-                _snap_partial_text = _live_partials.get(stream_id, '')
+                _snap_partial_text = stream_text_value(_live_partials, stream_id)
 
-        _snap_reasoning = reasoning_texts.get(stream_id, '')
+        _snap_reasoning = stream_text_value(reasoning_texts, stream_id)
         if not _snap_reasoning:
             _live_reasoning = getattr(_live_config, 'STREAM_REASONING_TEXT', reasoning_texts)
             if _live_reasoning is not reasoning_texts:
-                _snap_reasoning = _live_reasoning.get(stream_id, '')
+                _snap_reasoning = stream_text_value(_live_reasoning, stream_id)
 
         _snap_tool_calls = list(live_tool_calls.get(stream_id, []) or [])
         if not _snap_tool_calls:
@@ -7748,7 +7749,12 @@ def _run_agent_streaming(
         run_journal = RunJournalWriter(session_id, stream_id)
     except Exception:
         run_journal = None
-        logger.debug("Failed to initialize run journal for stream %s", stream_id, exc_info=True)
+        logger.warning(
+            "Run journal degraded for stream %s: live events will continue without replay cursors",
+            stream_id,
+            exc_info=True,
+        )
+    _run_journal_degradation_logged = [run_journal is None]
     if not ephemeral:
         try:
             append_turn_journal_event_for_stream(
@@ -7777,8 +7783,8 @@ def _run_agent_streaming(
     cancel_event = threading.Event()
     with STREAMS_LOCK:
         CANCEL_FLAGS[stream_id] = cancel_event
-        STREAM_PARTIAL_TEXT[stream_id] = ''  # start accumulating partial text (#893)
-        STREAM_REASONING_TEXT[stream_id] = ''  # start accumulating reasoning trace (#1361 §A)
+        STREAM_PARTIAL_TEXT[stream_id] = []  # chunked partial text accumulator (#893)
+        STREAM_REASONING_TEXT[stream_id] = []  # chunked reasoning accumulator (#1361 §A)
         STREAM_LIVE_TOOL_CALLS[stream_id] = []  # start accumulating tool calls (#1361 §B)
 
     agent = None
@@ -8100,7 +8106,19 @@ def _run_agent_streaming(
                 if event_id:
                     STREAM_LAST_EVENT_ID[stream_id] = event_id
             except Exception:
-                logger.debug("Failed to append run journal event %s for stream %s", event, stream_id, exc_info=True)
+                # Availability exception: keep the live chat usable, but never
+                # mint an event_id for a row that was not durably appended.
+                # Reconnect must use snapshot/transcript recovery for this gap.
+                if not _run_journal_degradation_logged[0]:
+                    logger.warning(
+                        "Run journal degraded for stream %s while appending %s; delivering live event without replay cursor",
+                        stream_id,
+                        event,
+                        exc_info=True,
+                    )
+                    _run_journal_degradation_logged[0] = True
+                else:
+                    logger.debug("Failed to append run journal event %s for stream %s", event, stream_id, exc_info=True)
         if event_id and hasattr(q, "note_last_event_id"):
             try:
                 q.note_last_event_id(event_id)
@@ -8512,9 +8530,11 @@ def _run_agent_streaming(
         try:
             _token_sent = False  # tracks whether any streamed tokens were sent
             _self_healed = False  # (#1401) prevents infinite self-heal retries
-            # Per-message reasoning: dict maps assistant-message index → accumulated text
+            # Per-message reasoning: dict maps assistant-message index → chunk list.
             # (#3587) replaces the flat _reasoning_text string so each intermediate
             # assistant turn (before tool calls) keeps its own reasoning segment.
+            # Chunk storage avoids repeatedly copying a growing segment for every
+            # provider delta; materialize only for rare echo repair and settlement.
             _reasoning_segments: dict = {}
             _current_reasoning_idx = 0
             _tool_boundary_advanced = False
@@ -8556,7 +8576,7 @@ def _run_agent_streaming(
                 candidate = _compact_for_echo_compare(text)
                 if not candidate:
                     return False
-                visible_output = STREAM_PARTIAL_TEXT.get(stream_id, '')
+                visible_output = stream_text_value(STREAM_PARTIAL_TEXT, stream_id)
                 visible_tail = _compact_for_echo_compare(
                     visible_output[-max(len(str(text)) * 2, 512):]
                 )
@@ -8578,11 +8598,11 @@ def _run_agent_streaming(
                 removed = False
                 if stream_id in STREAM_REASONING_TEXT:
                     next_text, did_remove = _strip_compact_echo_suffix(
-                        STREAM_REASONING_TEXT.get(stream_id, ''),
+                        stream_text_value(STREAM_REASONING_TEXT, stream_id),
                         text,
                     )
                     if did_remove:
-                        STREAM_REASONING_TEXT[stream_id] = next_text
+                        set_stream_text_value(STREAM_REASONING_TEXT, stream_id, next_text)
                         removed = True
                 next_buffer, did_remove_buffer = _strip_compact_echo_suffix(_reasoning_buffer[0], text)
                 if did_remove_buffer:
@@ -8592,13 +8612,13 @@ def _run_agent_streaming(
                     if idx not in _reasoning_segments:
                         continue
                     next_segment, did_remove_segment = _strip_compact_echo_suffix(
-                        _reasoning_segments.get(idx, ''),
+                        stream_text_value(_reasoning_segments, idx),
                         text,
                     )
                     if not did_remove_segment:
                         continue
                     if next_segment:
-                        _reasoning_segments[idx] = next_segment
+                        set_stream_text_value(_reasoning_segments, idx, next_segment)
                     else:
                         _reasoning_segments.pop(idx, None)
                     removed = True
@@ -8636,7 +8656,7 @@ def _run_agent_streaming(
                 # and would entangle the documented LOCK -> STREAMS_LOCK ordering — not
                 # worth it for a recoverable staleness window.
                 if stream_id in STREAM_PARTIAL_TEXT:
-                    STREAM_PARTIAL_TEXT[stream_id] += str(text)
+                    append_stream_text_chunk(STREAM_PARTIAL_TEXT, stream_id, text)
                 put('token', {'text': text})
                 # Update live throughput from stream delta callbacks, not from
                 # byte/character length. If a backend cannot provide live deltas,
@@ -8661,15 +8681,19 @@ def _run_agent_streaming(
                 if _is_visible_output_echo(reasoning_delta):
                     return
                 # Accumulate into the current message's segment (#3587)
-                _reasoning_segments[_current_reasoning_idx] = (
-                    _reasoning_segments.get(_current_reasoning_idx, '') + reasoning_delta
+                if _current_reasoning_idx not in _reasoning_segments:
+                    _reasoning_segments[_current_reasoning_idx] = []
+                append_stream_text_chunk(
+                    _reasoning_segments,
+                    _current_reasoning_idx,
+                    reasoning_delta,
                 )
                 # Mirror full concatenation to shared dict so cancel_stream() can persist
                 # it (#1361 §A). Cancel only creates one partial message, so the flat
                 # concatenation is correct there.
                 # Lock-free GIL-atomic mirror — see the STREAMS_LOCK contract in on_token.
                 if stream_id in STREAM_REASONING_TEXT:
-                    STREAM_REASONING_TEXT[stream_id] += reasoning_delta
+                    append_stream_text_chunk(STREAM_REASONING_TEXT, stream_id, reasoning_delta)
                 # Accumulate into a coalescing buffer so every delta reaches the
                 # browser — reasoning deltas are incremental, not idempotent.
                 _reasoning_buffer[0] += reasoning_delta
@@ -8788,13 +8812,17 @@ def _run_agent_streaming(
                         if _is_visible_output_echo(reason_delta):
                             return
                         # Accumulate into the current message's segment (#3587)
-                        _reasoning_segments[_current_reasoning_idx] = (
-                            _reasoning_segments.get(_current_reasoning_idx, '') + reason_delta
+                        if _current_reasoning_idx not in _reasoning_segments:
+                            _reasoning_segments[_current_reasoning_idx] = []
+                        append_stream_text_chunk(
+                            _reasoning_segments,
+                            _current_reasoning_idx,
+                            reason_delta,
                         )
                         # Mirror full concatenation to shared dict (#1361 §A)
                         # Lock-free GIL-atomic mirror — see STREAMS_LOCK contract in on_token.
                         if stream_id in STREAM_REASONING_TEXT:
-                            STREAM_REASONING_TEXT[stream_id] += reason_delta
+                            append_stream_text_chunk(STREAM_REASONING_TEXT, stream_id, reason_delta)
                         put('reasoning', {'text': reason_delta})
                         _metering_reasoning_deltas[0] += 1
                         meter().record_reasoning(stream_id, _metering_reasoning_deltas[0])
@@ -10515,7 +10543,10 @@ def _run_agent_streaming(
                         _asst_count += 1
                         if _turn_idx < _prev_asst:
                             continue  # prior-turn message — never touch its reasoning
-                        _seg_reasoning = _reasoning_segments.get(_turn_idx - _prev_asst, '')
+                        _seg_reasoning = stream_text_value(
+                            _reasoning_segments,
+                            _turn_idx - _prev_asst,
+                        )
                         _existing_reasoning = _seg_reasoning or _rm.get('reasoning') or ''
                         _content = _rm.get('content')
                         if isinstance(_content, str) and _content:
@@ -11609,6 +11640,12 @@ def _run_agent_streaming(
         # CLI/cron env fallback resumes — same lifecycle slot as the env
         # restore above.
         _reset_turn_session_identity(_turn_session_identity_tokens)
+        try:
+            close_run_journal = getattr(run_journal, 'close', None)
+            if callable(close_run_journal):
+                close_run_journal()
+        except Exception:
+            logger.debug("Failed to close run journal for stream %s", stream_id, exc_info=True)
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
             CANCEL_FLAGS.pop(stream_id, None)
@@ -11842,16 +11879,16 @@ def cancel_stream(stream_id: str) -> bool:
         # cancel must snapshot them too or it loses the already-streamed text.
         _snap_flag = cancel_flags.get(stream_id)
         _snap_agent = agent_instances.get(stream_id)
-        _snap_partial_text = partial_texts.get(stream_id, '')
+        _snap_partial_text = stream_text_value(partial_texts, stream_id)
         if not _snap_partial_text:
             _live_partials = getattr(_live_config, 'STREAM_PARTIAL_TEXT', partial_texts)
             if _live_partials is not partial_texts:
-                _snap_partial_text = _live_partials.get(stream_id, '')
-        _snap_reasoning = STREAM_REASONING_TEXT.get(stream_id, '')
+                _snap_partial_text = stream_text_value(_live_partials, stream_id)
+        _snap_reasoning = stream_text_value(STREAM_REASONING_TEXT, stream_id)
         if not _snap_reasoning:
             _live_reasoning = getattr(_live_config, 'STREAM_REASONING_TEXT', STREAM_REASONING_TEXT)
             if _live_reasoning is not STREAM_REASONING_TEXT:
-                _snap_reasoning = _live_reasoning.get(stream_id, '')
+                _snap_reasoning = stream_text_value(_live_reasoning, stream_id)
         _snap_tool_calls = list(STREAM_LIVE_TOOL_CALLS.get(stream_id, []) or [])
         if not _snap_tool_calls:
             _live_tools = getattr(_live_config, 'STREAM_LIVE_TOOL_CALLS', STREAM_LIVE_TOOL_CALLS)
@@ -11961,17 +11998,17 @@ def cancel_stream(stream_id: str) -> bool:
     # may have popped the live buffers by now via agent.interrupt()). For the
     # ACTIVE_RUNS-only path (stream absent) the snapshots are None → fall back to
     # a best-effort live read.
-    _cancel_partial_text = _snap_partial_text if _snap_partial_text is not None else partial_texts.get(stream_id, '')
+    _cancel_partial_text = _snap_partial_text if _snap_partial_text is not None else stream_text_value(partial_texts, stream_id)
     if not _cancel_partial_text:
         live_partials = getattr(_live_config, 'STREAM_PARTIAL_TEXT', partial_texts)
         if live_partials is not partial_texts:
-            _cancel_partial_text = live_partials.get(stream_id, '')
+            _cancel_partial_text = stream_text_value(live_partials, stream_id)
     # Capture reasoning trace and live tool calls (#1361 §A + §B)
-    _cancel_reasoning = _snap_reasoning if _snap_reasoning is not None else STREAM_REASONING_TEXT.get(stream_id, '')
+    _cancel_reasoning = _snap_reasoning if _snap_reasoning is not None else stream_text_value(STREAM_REASONING_TEXT, stream_id)
     if not _cancel_reasoning:
         live_reasoning = getattr(_live_config, 'STREAM_REASONING_TEXT', STREAM_REASONING_TEXT)
         if live_reasoning is not STREAM_REASONING_TEXT:
-            _cancel_reasoning = live_reasoning.get(stream_id, '')
+            _cancel_reasoning = stream_text_value(live_reasoning, stream_id)
     _cancel_tool_calls = _snap_tool_calls if _snap_tool_calls is not None else STREAM_LIVE_TOOL_CALLS.get(stream_id, [])
     if not _cancel_tool_calls:
         live_tools = getattr(_live_config, 'STREAM_LIVE_TOOL_CALLS', STREAM_LIVE_TOOL_CALLS)

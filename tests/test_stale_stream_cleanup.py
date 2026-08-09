@@ -57,10 +57,11 @@ def test_stale_stream_cleanup_helper_exists():
     assert "session.save(touch_updated_at=False)" in ROUTES_SRC
 
 
-def test_stale_stream_cleanup_does_not_refresh_sidebar_timestamp():
+def test_stale_stream_cleanup_does_not_refresh_sidebar_timestamp(monkeypatch):
     config.STREAMS.clear()
     config.SESSION_AGENT_LOCKS.clear()
     session = _FakeSession()
+    monkeypatch.setattr(routes, "get_session", lambda sid: session)
 
     assert routes._clear_stale_stream_state(session) is True
 
@@ -76,10 +77,9 @@ def test_session_load_clears_stale_stream_before_response():
 
 
 def test_chat_start_clears_stale_pending_state_not_only_active_id():
-    stale_comment_pos = ROUTES_SRC.index("# Stale stream id from a previous run; clear and continue.")
+    stale_comment_pos = ROUTES_SRC.index("needs_stale_cleanup = True")
     cleanup_pos = ROUTES_SRC.index("_clear_stale_stream_state(s)", stale_comment_pos)
-    stream_id_pos = ROUTES_SRC.index("stream_id = uuid.uuid4().hex", cleanup_pos)
-    assert stale_comment_pos < cleanup_pos < stream_id_pos
+    assert stale_comment_pos < cleanup_pos
 
 
 def test_chat_start_rechecks_active_stream_under_session_lock(monkeypatch, tmp_path):
@@ -112,6 +112,9 @@ def test_chat_start_rechecks_active_stream_under_session_lock(monkeypatch, tmp_p
             return None
 
     session = ChatStartSession()
+    monkeypatch.setattr(routes, "get_session", lambda sid: session)
+    routes.PENDING_GOAL_CONTINUATION.add(session.session_id)
+    routes.PENDING_BG_TASK_COMPLETIONS.add(session.session_id)
 
     class MutatingSessionLock:
         def __enter__(self):
@@ -152,8 +155,65 @@ def test_chat_start_rechecks_active_stream_under_session_lock(monkeypatch, tmp_p
         assert response["active_stream_id"] == existing_stream_id
         assert session.active_stream_id == existing_stream_id
         assert "new-stream" not in routes.STREAMS
+        assert session.session_id in routes.PENDING_GOAL_CONTINUATION
+        assert session.session_id in routes.PENDING_BG_TASK_COMPLETIONS
     finally:
         routes.STREAMS.pop(existing_stream_id, None)
+        routes.PENDING_GOAL_CONTINUATION.discard(session.session_id)
+        routes.PENDING_BG_TASK_COMPLETIONS.discard(session.session_id)
+
+
+def test_chat_start_stale_deleted_handle_cannot_resurrect_session(monkeypatch, tmp_path):
+    """Delete can win after the route captured ``s`` but before start claims it."""
+    config.STREAMS.clear()
+    config.ACTIVE_RUNS.clear()
+    config.SESSION_AGENT_LOCKS.clear()
+
+    class DeletedSessionHandle:
+        session_id = "deleted-before-chat-lock"
+        active_stream_id = None
+        pending_user_message = None
+        pending_attachments = []
+        pending_started_at = None
+        messages = []
+        title = "Deleted"
+        worktree_path = None
+        workspace = None
+        model = None
+        model_provider = None
+
+        def __init__(self):
+            self.save_calls = 0
+
+        def save(self, *args, **kwargs):
+            self.save_calls += 1
+
+    stale = DeletedSessionHandle()
+    routes.PENDING_GOAL_CONTINUATION.add(stale.session_id)
+    routes.PENDING_BG_TASK_COMPLETIONS.add(stale.session_id)
+
+    def missing(_sid, *args, **kwargs):
+        raise KeyError(_sid)
+
+    monkeypatch.setattr(routes, "get_session", missing)
+    try:
+        response = routes._start_chat_stream_for_session(
+            stale,
+            msg="must not resurrect",
+            attachments=[],
+            workspace=str(tmp_path),
+            model="test-model",
+            model_provider=None,
+        )
+
+        assert response["_status"] == 404
+        assert stale.save_calls == 0
+        assert not routes.STREAMS
+        assert stale.session_id in routes.PENDING_GOAL_CONTINUATION
+        assert stale.session_id in routes.PENDING_BG_TASK_COMPLETIONS
+    finally:
+        routes.PENDING_GOAL_CONTINUATION.discard(stale.session_id)
+        routes.PENDING_BG_TASK_COMPLETIONS.discard(stale.session_id)
 
 
 def test_chat_start_blocks_same_session_active_run_after_cancel_clears_stream_id(monkeypatch, tmp_path):
@@ -187,6 +247,7 @@ def test_chat_start_blocks_same_session_active_run_after_cancel_clears_stream_id
             return None
 
     session = ChatStartSession()
+    monkeypatch.setattr(routes, "get_session", lambda sid: session)
     old_stream_id = "old-cancelling-stream"
     config.register_active_run(old_stream_id, session_id=session.session_id, phase="cancelling")
 
@@ -247,6 +308,7 @@ def test_chat_start_allows_same_session_after_active_run_unregisters(monkeypatch
             return None
 
     session = ChatStartSession()
+    monkeypatch.setattr(routes, "get_session", lambda sid: session)
 
     class NoopThread:
         def __init__(self, *args, **kwargs):
@@ -279,14 +341,12 @@ def test_chat_start_allows_same_session_after_active_run_unregisters(monkeypatch
         routes.STREAMS.pop("new-stream", None)
 
 
-def test_chat_start_not_permanently_blocked_by_stale_active_run(monkeypatch, tmp_path):
-    """A wedged/detached ACTIVE_RUNS entry past the unwind ceiling must NOT 409 forever.
+def test_chat_start_remains_blocked_while_aged_active_run_is_registered(monkeypatch, tmp_path):
+    """Age is not proof that a detached provider worker has terminated.
 
-    The #3808 successor guard waits on a same-session ACTIVE_RUNS entry during the
-    short post-cancel unwind. But unregister only runs in the worker finally, so a
-    worker stuck in a provider call (or leaked by SIGKILL without restart) would
-    block the session permanently. The guard ignores entries older than the 180s
-    ceiling so the user can recover. (Codex brick-gate hardening, #3822.)
+    ACTIVE_RUNS is cleared by the worker's outer finally (or process restart).
+    Reusing the same mutable cached agent while an aged worker still owns it can
+    corrupt both turns, so the successor must remain fail-closed.
     """
     config.STREAMS.clear()
     config.ACTIVE_RUNS.clear()
@@ -311,17 +371,15 @@ def test_chat_start_not_permanently_blocked_by_stale_active_run(monkeypatch, tmp
             return None
 
     session = ChatStartSession()
+    monkeypatch.setattr(routes, "get_session", lambda sid: session)
     stale_stream_id = "wedged-old-stream"
     config.register_active_run(stale_stream_id, session_id=session.session_id, phase="running")
-    # Age the entry well past the 180s unwind ceiling.
+    # Simulate a provider call that remains blocked long after cancellation.
     with config.ACTIVE_RUNS_LOCK:
         config.ACTIVE_RUNS[stale_stream_id]["started_at"] = time.time() - 600
 
-    # The bounded guard should treat it as stale and NOT report it as blocking.
-    assert routes._active_run_stream_for_session(session.session_id) is None
-    # It must also reconcile the zombie registry entry immediately so health /
-    # recovery polling does not keep advertising a half-alive run forever.
-    assert stale_stream_id not in config.ACTIVE_RUNS
+    assert routes._active_run_stream_for_session(session.session_id) == stale_stream_id
+    assert stale_stream_id in config.ACTIVE_RUNS
 
     class NoopThread:
         def __init__(self, *args, **kwargs):
@@ -345,23 +403,16 @@ def test_chat_start_not_permanently_blocked_by_stale_active_run(monkeypatch, tmp
             model="test-model",
             model_provider=None,
         )
-        assert "error" not in response
-        assert response["stream_id"] == "new-stream"
-        assert session.active_stream_id == "new-stream"
+        assert response["_status"] == 409
+        assert response["active_stream_id"] == stale_stream_id
+        assert session.active_stream_id is None
     finally:
         config.unregister_active_run(stale_stream_id)
         routes.STREAMS.pop("new-stream", None)
 
 
-def test_live_worker_past_ceiling_is_not_reaped_from_active_runs():
-    """A still-live worker (present in STREAMS) past the age ceiling must NOT be
-    popped from ACTIVE_RUNS — only genuinely-gone workers are reconciled (#4492).
-
-    A long turn whose active_stream_id was cleared during final writeback can be
-    mid-teardown past the 180s ceiling while its STREAMS entry is still present;
-    reaping its lifecycle row then would lie to health / background-wakeup /
-    active-agent-cache consumers that read ACTIVE_RUNS as worker-lifecycle truth.
-    """
+def test_live_worker_age_never_disables_active_run_guard():
+    """An aged worker remains both registered and reported as blocking."""
     config.STREAMS.clear()
     config.ACTIVE_RUNS.clear()
     sid = "live-teardown-session"
@@ -372,9 +423,7 @@ def test_live_worker_past_ceiling_is_not_reaped_from_active_runs():
         config.ACTIVE_RUNS[live_stream_id]["started_at"] = time.time() - 600
     config.STREAMS[live_stream_id] = object()
     try:
-        # Not reported as blocking (past the ceiling) ...
-        assert routes._active_run_stream_for_session(sid) is None
-        # ... but the lifecycle row is preserved because the worker is still live.
+        assert routes._active_run_stream_for_session(sid) == live_stream_id
         assert live_stream_id in config.ACTIVE_RUNS
     finally:
         config.STREAMS.pop(live_stream_id, None)

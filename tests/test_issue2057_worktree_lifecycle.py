@@ -1,3 +1,4 @@
+import os
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
@@ -107,6 +108,217 @@ def test_delete_worktree_session_reports_retained_worktree_without_cleanup(tmp_p
     assert captured["payload"]["worktree_branch"] == "hermes/wtdelete1"
     assert not (session_dir / "wtdelete1.json").exists()
     assert worktree.exists(), "session delete must not remove the git worktree directory"
+
+
+def test_delete_refuses_live_worker_before_mutating_sidecar_or_index(tmp_path, monkeypatch):
+    from api import config
+
+    session_dir = _isolate_session_store(tmp_path, monkeypatch)
+    sid = "activedelete1"
+    session = Session(
+        session_id=sid,
+        title="Active delete",
+        messages=[{"role": "user", "content": "still running"}],
+    )
+    session.save()
+    captured = _capture_post(monkeypatch, {"session_id": sid})
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda handler, message, status=400: captured.update(
+            payload={"error": message}, status=status
+        )
+        or True,
+    )
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda value: {})
+    monkeypatch.setattr(routes, "_is_messaging_session_id", lambda value: False)
+    config.register_active_run(
+        "active-delete-stream",
+        session_id=sid,
+        started_at=1.0,
+        phase="cancelling",
+    )
+    try:
+        assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
+    finally:
+        config.unregister_active_run("active-delete-stream")
+
+    assert captured["status"] == 409
+    assert "active run" in captured["payload"]["error"].lower()
+    assert (session_dir / f"{sid}.json").exists()
+    assert sid in (session_dir / "_index.json").read_text(encoding="utf-8")
+
+    # Once the paused worker has definitively exited (unregistered above), the
+    # same request can delete. No stale worker remains that can save afterward.
+    captured.clear()
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
+    assert captured["status"] == 200
+    assert not (session_dir / f"{sid}.json").exists()
+    assert sid not in (session_dir / "_index.json").read_text(encoding="utf-8")
+
+
+def test_delete_rechecks_worker_ownership_after_waiting_for_session_lock(tmp_path, monkeypatch):
+    from api import config
+
+    session_dir = _isolate_session_store(tmp_path, monkeypatch)
+    sid = "delete-lock-race"
+    Session(
+        session_id=sid,
+        title="Delete lock race",
+        messages=[{"role": "user", "content": "claimed concurrently"}],
+    ).save()
+    captured = _capture_post(monkeypatch, {"session_id": sid})
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda handler, message, status=400: captured.update(
+            payload={"error": message}, status=status
+        )
+        or True,
+    )
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda value: {})
+    monkeypatch.setattr(routes, "_is_messaging_session_id", lambda value: False)
+
+    class ClaimingLock:
+        def acquire(self, timeout=None):
+            config.register_active_run(
+                "delete-lock-race-stream",
+                session_id=sid,
+                phase="running",
+            )
+            return True
+
+        def release(self):
+            return None
+
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda value: ClaimingLock())
+    try:
+        assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
+    finally:
+        config.unregister_active_run("delete-lock-race-stream")
+
+    assert captured["status"] == 409
+    assert (session_dir / f"{sid}.json").exists()
+    assert sid in (session_dir / "_index.json").read_text(encoding="utf-8")
+
+
+def test_delete_sidecar_unlink_failure_is_non_destructive_and_non_success(
+    tmp_path, monkeypatch
+):
+    from api import background_process, config, run_journal, session_drafts, terminal, turn_journal, upload
+
+    session_dir = _isolate_session_store(tmp_path, monkeypatch)
+    sid = "unlinkfaildelete1"
+    session = Session(
+        session_id=sid,
+        title="Unlink failure",
+        messages=[{"role": "user", "content": "must remain recoverable"}],
+    )
+    session.save()
+    sidecar = session_dir / f"{sid}.json"
+    backup = session_dir / f"{sid}.json.bak"
+    backup.write_text("backup must remain", encoding="utf-8")
+    turn_journal.append_turn_journal_event(
+        sid,
+        {"event": "submitted", "stream_id": "unlink-stream", "content": "keep"},
+        session_dir=session_dir,
+    )
+    run_writer = run_journal.RunJournalWriter(
+        sid, "unlink-stream", session_dir=session_dir
+    )
+    run_writer.append_sse_event("token", {"text": "keep"})
+    run_writer.close()
+    turn_path = session_dir / "_turn_journal" / f"{sid}~{os.getpid()}.jsonl"
+    run_path = session_dir / "_run_journal" / sid / "unlink-stream.jsonl"
+    attachment_dir = tmp_path / "attachments" / sid
+    attachment_dir.mkdir(parents=True)
+    (attachment_dir / "keep.txt").write_text("keep", encoding="utf-8")
+
+    captured = _capture_post(monkeypatch, {"session_id": sid})
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda handler, message, status=400: captured.update(
+            payload={"error": message}, status=status
+        )
+        or True,
+    )
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda value: {})
+    monkeypatch.setattr(routes, "_is_messaging_session_id", lambda value: False)
+    cleanup_calls = []
+    monkeypatch.setattr(
+        routes,
+        "prune_session_from_index",
+        lambda value: cleanup_calls.append(("index", value)),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_record_webui_deleted_session_tombstone",
+        lambda value: cleanup_calls.append(("tombstone", value)),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_publish_session_list_changed",
+        lambda *args, **kwargs: cleanup_calls.append(("publish", sid)),
+    )
+    monkeypatch.setattr(
+        config,
+        "_evict_session_agent",
+        lambda value: cleanup_calls.append(("agent", value)),
+    )
+    monkeypatch.setattr(
+        models,
+        "delete_cli_session",
+        lambda value: cleanup_calls.append(("state-db", value)) or True,
+    )
+    monkeypatch.setattr(
+        session_drafts,
+        "delete_session_draft",
+        lambda value: cleanup_calls.append(("draft", value)),
+    )
+    monkeypatch.setattr(
+        turn_journal,
+        "delete_turn_journal",
+        lambda value: cleanup_calls.append(("turn-journal", value)),
+    )
+    monkeypatch.setattr(
+        run_journal,
+        "delete_run_journal",
+        lambda value: cleanup_calls.append(("run-journal", value)),
+    )
+    monkeypatch.setattr(
+        background_process,
+        "forget_bg_task_completion_dedup",
+        lambda value: cleanup_calls.append(("background", value)),
+    )
+    monkeypatch.setattr(
+        terminal,
+        "close_terminal",
+        lambda value: cleanup_calls.append(("terminal", value)),
+    )
+    monkeypatch.setattr(upload, "_session_attachment_dir", lambda value: attachment_dir)
+
+    real_unlink = Path.unlink
+
+    def fail_sidecar_unlink(path, *args, **kwargs):
+        if path == sidecar:
+            raise PermissionError("sidecar locked")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_sidecar_unlink)
+
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
+
+    assert captured["status"] == 500
+    assert captured["payload"] == {"error": "Failed to delete session data"}
+    assert cleanup_calls == []
+    assert sidecar.exists()
+    assert backup.exists()
+    assert turn_path.exists()
+    assert run_path.exists()
+    assert attachment_dir.exists()
+    assert sid in SESSIONS
+    assert sid in (session_dir / "_index.json").read_text(encoding="utf-8")
 
 
 def test_delete_session_records_tombstone_when_state_db_delete_fails(tmp_path, monkeypatch):
