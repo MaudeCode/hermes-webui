@@ -355,7 +355,10 @@ def test_cancelled_stale_process_wakeup_credential_failure_records_pause(tmp_pat
         )
 
     events = [(item[0], item[1]) for item in list(fake_queue.queue)]
-    assert any(event == "cancel" for event, _data in events)
+    # The provider-unavailable pause belongs on the current session, but the
+    # retired stream must not publish a terminal cancel after a newer stream
+    # has taken ownership.
+    assert not any(event == "cancel" for event, _data in events)
     assert not any(event == "apperror" and data["type"] == "credential_pool_empty" for event, data in events)
     saved = Session.load(session.session_id)
     assert saved is not None

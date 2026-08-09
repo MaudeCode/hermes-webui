@@ -2863,6 +2863,7 @@ from api.config import (
     ACTIVE_RUNS_LOCK,
     register_stream_owner,
     register_session_writeback_owner,
+    clear_session_writeback_owner_if_owned,
     stream_owner_session_id,
     unregister_stream_owner,
     unregister_active_run,
@@ -21449,7 +21450,6 @@ def _prepare_chat_start_session_for_stream(
     s.model = model
     s.model_provider = model_provider
     s.active_stream_id = stream_id
-    register_session_writeback_owner(s.session_id, stream_id)
     s.post_compression_context_tokens_estimate = None
     s.pending_user_message = msg
     s.pending_attachments = attachments
@@ -21469,6 +21469,10 @@ def _prepare_chat_start_session_for_stream(
             source=source,
         )
     s.save()
+    # Claim process-local writeback ownership only after the durable pending
+    # state exists. A failed save must not leave a phantom owner that can
+    # authorize later cancellation writeback.
+    register_session_writeback_owner(s.session_id, stream_id)
 
 
 def _is_hidden_empty_session(s) -> bool:
@@ -21807,6 +21811,7 @@ def _start_chat_stream_for_session(
             STREAM_GOAL_RELATED.pop(stream_id, None)
         unregister_stream_owner(stream_id)
         unregister_active_run(stream_id)
+        clear_session_writeback_owner_if_owned(s.session_id, stream_id)
         try:
             with _get_session_agent_lock(s.session_id):
                 failed_session = get_session(s.session_id)

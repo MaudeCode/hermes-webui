@@ -1730,7 +1730,7 @@ def test_start_chat_stream_marks_gateway_run_pending_before_thread_start(monkeyp
 
 
 def test_start_chat_stream_clears_gateway_run_state_when_thread_start_fails(monkeypatch):
-    from api import gateway_chat, routes
+    from api import config, gateway_chat, routes
 
     recorded = {}
     save_calls = []
@@ -1774,6 +1774,7 @@ def test_start_chat_stream_clears_gateway_run_state_when_thread_start_fails(monk
         session_obj.pending_user_message = "hi"
         session_obj.pending_attachments = []
         session_obj.pending_started_at = 123.0
+        config.register_session_writeback_owner(session_obj.session_id, stream_id)
 
     monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_kwargs: None)
     monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda *_args, **_kwargs: None)
@@ -1800,6 +1801,7 @@ def test_start_chat_stream_clears_gateway_run_state_when_thread_start_fails(monk
     assert gateway_chat.gateway_run_id_pending(recorded["stream_id"]) is False
     assert recorded["stream_id"] not in getattr(gateway_chat, "_STREAM_RUN_LIFECYCLE", {})
     assert recorded["stream_id"] not in routes.STREAMS
+    assert config.session_writeback_owner(session.session_id) is None
     assert session.active_stream_id is None
     assert session.pending_user_message is None
     assert [message["role"] for message in session.messages[-2:]] == ["user", "assistant"]

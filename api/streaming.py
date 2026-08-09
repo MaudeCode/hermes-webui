@@ -11433,6 +11433,7 @@ def _run_agent_streaming(
         _classification = _classify_provider_error(err_str, e)
         _exc_is_credential_pool_empty = _classification['type'] == 'credential_pool_empty'
         if cancel_event.is_set():
+            _cancel_finalized = False
             if s is not None:
                 if _checkpoint_stop is not None:
                     _checkpoint_stop.set()
@@ -11457,7 +11458,7 @@ def _run_agent_streaming(
                         ephemeral=ephemeral,
                         stream_id=stream_id,
                     )
-                    if not ephemeral:
+                    if not ephemeral and _cancel_finalized:
                         try:
                             append_turn_journal_event_for_stream(
                                 s.session_id,
@@ -11470,7 +11471,10 @@ def _run_agent_streaming(
                             )
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-            put('cancel', _cancel_event_payload('Cancelled by user'))
+            # An obsolete worker whose writeback generation was replaced must
+            # not publish a stale terminal event on its retired stream.
+            if _cancel_finalized:
+                put('cancel', _cancel_event_payload('Cancelled by user'))
             return
         _exc_is_quota = _classification['type'] == 'quota_exhausted'
         # Exception quota text still includes: 'more credits' in _exc_lower, 'can only afford' in _exc_lower, 'fewer max_tokens' in _exc_lower.

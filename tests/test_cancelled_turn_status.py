@@ -275,3 +275,13 @@ class TestCancelledTurnPersistenceGuards:
         assert "_cancel_event_payload('Cancelled by user', session=" not in worker_block
         assert "None if ephemeral else s" not in worker_block
         assert "_cancel_event_payload('Cancelled by user', session=_cancel_session_payload)" in cancel_stream_block
+
+    def test_obsolete_cancel_finalizer_does_not_emit_terminal_stream_event(self):
+        src = _read("api/streaming.py")
+        handler_start = src.find("if cancel_event.is_set():", src.find("print('[webui] stream error:"))
+        handler_end = src.find("_exc_is_quota =", handler_start)
+        assert handler_start != -1 and handler_end != -1
+        block = src[handler_start:handler_end]
+        assert "_cancel_finalized = False" in block
+        assert "if _cancel_finalized:\n                put('cancel'" in block
+        assert "if not ephemeral and _cancel_finalized:" in block
