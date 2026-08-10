@@ -233,12 +233,13 @@ def test_in_place_settled_worklog_collapse_defers_rows_without_full_rebuild():
     body = _function_body(UI_JS, "_collapseJustSettledWorklogInPlace")
     assert "_assistantTurnHasVisibleRenderedSegment(ownerTurn)" in body
     assert "if(ownerHasVisibleSegment===null) return false" in body
-    assert "const keepOpen=!ownerHasVisibleSegment" in body
+    assert "const keepOpen=!ownerHasVisibleSegment;" in body
     assert "[data-anchor-settled-scene-owner=\"1\"]" in body
     assert "data-anchor-stream-id" in body
     assert "_deferredWorklogRowsFromGroup(group)" in body
     assert "_captureWorklogDetailDisclosureState(group)" in body
-    assert "_worklogDetailsExpandedDefault()&&savedDisclosure!=='closed'" in body
+    assert "savedDisclosure==='open'" not in body
+    assert "_worklogDetailsExpandedDefault()" not in body
     assert "group._deferredWorklogRows=rows" in body
     assert "group._deferredWorklogDisclosure=detailDisclosure&&detailDisclosure.size" in body
     assert "data-worklog-rows-deferred" in body
@@ -392,6 +393,7 @@ def test_in_place_collapse_preserves_detail_disclosure_for_deferred_materialize(
           renderedRows = materializedRows;
           return true;
         }}
+        function _syncCompactEarlierActivityAffordance() {{}}
         function _postProcessWithAnchorSuppression() {{}}
         function _restoreWorklogDetailDisclosureState(group, state) {{
           assert.strictEqual(group, activeGroup);
@@ -442,13 +444,14 @@ def test_in_place_collapse_preserves_detail_disclosure_for_deferred_materialize(
         defaultExpanded = true;
         ownerHasVisibleSegment = true;
         assert.strictEqual(_collapseJustSettledWorklogInPlace('stream-1'), true);
-        assert.strictEqual(activeGroup._deferredWorklogRows, null);
-        assert.strictEqual(activeGroup.classList.contains('open'), true);
-        assert.strictEqual(activeGroup.classList.contains('tool-call-group-collapsed'), false);
-        assert.strictEqual(removedRows, false);
+        assert.strictEqual(activeGroup._deferredWorklogRows, rows);
+        assert.strictEqual(activeGroup.classList.contains('open'), false);
+        assert.strictEqual(activeGroup.classList.contains('tool-call-group-collapsed'), true);
+        assert.strictEqual(removedRows, true);
 
+        removedRows = false;
         activeGroup = makeGroup();
-        detailState = 'closed';
+        detailState = 'open';
         ownerHasVisibleSegment = true;
         assert.strictEqual(_collapseJustSettledWorklogInPlace('stream-1'), true);
         assert.strictEqual(activeGroup._deferredWorklogRows, rows);

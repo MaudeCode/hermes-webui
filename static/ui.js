@@ -13303,7 +13303,14 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   }
   if(typeof _restoreWorklogDetailDisclosureState==='function') _restoreWorklogDetailDisclosureState(blocks, liveDisclosureState);
   if(typeof _startActivityElapsedTimer==='function') _startActivityElapsedTimer(group);
-  _dedupeLiveProcessedWorklogAnchors(turn);
+  const visibleGroup=_dedupeLiveProcessedWorklogAnchors(turn)||group;
+  // Deduplication can retain a different pre-existing Processed group than the
+  // one ensureActivityGroup just reconciled. Apply live disclosure intent to
+  // the group that is actually left on screen, after ownership is resolved.
+  if(visibleGroup&&typeof _applyLiveActivityDisclosureIntent==='function'){
+    const visibleKey=visibleGroup.getAttribute('data-activity-disclosure-key')||`live:${streamId||S.activeStreamId||'anchor'}`;
+    _applyLiveActivityDisclosureIntent(visibleGroup,{live:true,collapsed:false},_readActivityDisclosureState(visibleKey));
+  }
   if(typeof _moveLiveRunStatusToTurnEnd==='function') _moveLiveRunStatusToTurnEnd();
   // Read scroll geometry on the next animation frame, after this mutation batch
   // has settled but before paint. Reading it here forces layout over the entire
@@ -14047,18 +14054,12 @@ function _collapseJustSettledWorklogInPlace(streamId){
   const ownerTurn=typeof group.closest==='function'?group.closest('.assistant-turn'):null;
   const ownerHasVisibleSegment=_assistantTurnHasVisibleRenderedSegment(ownerTurn);
   if(ownerHasVisibleSegment===null) return false;
-  const disclosureKey=group.getAttribute('data-activity-disclosure-key')||'';
-  const savedDisclosure=_readActivityDisclosureState(disclosureKey);
   const rows=_deferredWorklogRowsFromGroup(group);
   if(!rows||!rows.length) return false;
-  const match=/^anchor-scene:(\d+)$/.exec(disclosureKey);
-  const message=match&&S.messages&&S.messages[Number(match[1])];
-  const errored=!!(message&&message._anchor_activity_scene&&
-    _anchorSceneHasErroredTerminalState(message._anchor_activity_scene));
-  const keepOpen=!ownerHasVisibleSegment
-    || savedDisclosure==='open'
-    || (errored&&savedDisclosure!=='closed')
-    || (_worklogDetailsExpandedDefault()&&savedDisclosure!=='closed');
+  // A normal completed turn always folds Processed once its visible final
+  // answer arrives. Keep it open only when there is no final answer to replace
+  // the live activity (including error/no-response diagnostics).
+  const keepOpen=!ownerHasVisibleSegment;
   if(!keepOpen){
     const detailDisclosure=typeof _captureWorklogDetailDisclosureState==='function'
       ? _captureWorklogDetailDisclosureState(group)

@@ -198,11 +198,12 @@ def test_compact_scene_keeps_its_existing_owned_group_for_reconciliation():
 const fs=require('fs');
 const src=fs.readFileSync({json.dumps(str(ROOT / 'static' / 'ui.js'))},'utf8');
 {_EXTRACT_FUNC_JS}
-let groupRemoves=0,rowRemoves=0;
+let groupRemoves=0,rowRemoves=0,disclosureApplies=0;
 const row={{remove(){{rowRemoves++;}}}};
 const group={{
   remove(){{groupRemoves++;}},
   contains(node){{return node===row;}},
+  getAttribute(name){{return name==='data-activity-disclosure-key'?'live:stream-1':'';}},
 }};
 const blocks={{
   querySelectorAll(selector){{
@@ -226,15 +227,19 @@ global._anchorSceneWorklogGroup=()=>group;
 global._renderAnchorSceneRowsIntoWorklog=()=>true;
 global._restoreWorklogDetailDisclosureState=()=>{{}};
 global._startActivityElapsedTimer=()=>{{}};
-global._dedupeLiveProcessedWorklogAnchors=()=>{{}};
+global._dedupeLiveProcessedWorklogAnchors=()=>group;
+global._readActivityDisclosureState=()=>null;
+global._applyLiveActivityDisclosureIntent=(candidate,opts,saved)=>{{
+  if(candidate===group&&opts.live===true&&opts.collapsed===false&&saved===null) disclosureApplies++;
+}};
 global._moveLiveRunStatusToTurnEnd=()=>{{}};
 global._restoreLiveAnchorScrollSnapshotAfterRebuild=()=>{{}};
 eval(extractFunc('renderLiveAnchorActivityScene'));
 renderLiveAnchorActivityScene('stream-1',{{activity_rows:[{{row_id:'x',role:'thinking',text:'work'}}]}},{{sessionId:'sid-1'}});
-process.stdout.write(JSON.stringify({{groupRemoves,rowRemoves}}));
+process.stdout.write(JSON.stringify({{groupRemoves,rowRemoves,disclosureApplies}}));
 """
     result = _run_node(script)
-    assert result == {"groupRemoves": 0, "rowRemoves": 0}
+    assert result == {"groupRemoves": 0, "rowRemoves": 0, "disclosureApplies": 1}
 
 
 def test_closed_workspace_panel_skips_hidden_subtree_rendering():
