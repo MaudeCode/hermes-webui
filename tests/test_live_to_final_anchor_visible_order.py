@@ -876,7 +876,8 @@ let persisted=[];
 let deferredRetry=null;
 function _projectLiveAnchorActivityScene(){{ return scene; }}
 function _completeSettledAnchorSceneForTurn(messages,index,projected){{ return projected; }}
-function _boundedSettledAnchorScene(projected){{ return projected; }}
+function _prepareSettledAnchorScene(projected){{ return projected; }}
+function _settledAnchorScenePreview(projected){{ return projected; }}
 function _anchorSceneHasOwnedOutcomes(){{ return false; }}
 function _anchorSceneHasWorklogWorthyRows(){{ return true; }}
 function _persistSettledAnchorScene(message,nextScene,index){{ persisted.push({{message,index,nextScene}}); }}
@@ -1062,7 +1063,7 @@ def test_settled_anchor_scene_is_persisted_as_ui_metadata():
     persist = _function_body(MESSAGES_JS, "_persistSettledAnchorScene")
     msg_ref = _function_body(MESSAGES_JS, "_anchorSceneMessageRef")
 
-    assert "_persistSettledAnchorScene(lastAsst, scene, lastAsstIndex);" in attach
+    assert "_persistSettledAnchorScene(lastAsst, fullScene, lastAsstIndex);" in attach
     assert "api('/api/session/anchor-scene'" in persist
     assert "session_id:activeSid" in persist
     assert "stream_id:streamId" in persist
@@ -1082,7 +1083,8 @@ def test_settled_anchor_scene_persists_the_full_assistant_turn_not_only_tail():
     rows_by_message = _function_body(MESSAGES_JS, "_anchorSceneRowsByMessageIndex")
     reasoning_text = _function_body(MESSAGES_JS, "_anchorSceneMessageReasoningText")
 
-    assert "const scene=_boundedSettledAnchorScene(" in attach
+    assert "const fullScene=_prepareSettledAnchorScene(" in attach
+    assert "const scene=_settledAnchorScenePreview(fullScene);" in attach
     assert "_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene)" in attach
     assert "for(let idx=lastAsstIndex-1;idx>=0;idx-=1)" in complete
     assert "messages.slice(turnStart+1,lastAsstIndex+1)" in complete

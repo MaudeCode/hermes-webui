@@ -4,6 +4,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +18,8 @@ COMMANDS_JS = (ROOT / "static" / "commands.js").read_text(encoding="utf-8")
 def _function_source(src: str, name: str) -> str:
     marker = f"function {name}"
     start = src.index(marker)
+    if src[max(0, start - 6) : start] == "async ":
+        start -= 6
     brace = src.index("{", src.index(")", start))
     depth = 0
     for idx in range(brace, len(src)):
@@ -75,23 +78,21 @@ def test_terminal_anchor_registry_releases_heavy_payloads_promptly():
     assert "_scheduleAnchorRegistryCleanup(600000);" in MESSAGES_JS
 
 
-def test_settled_anchor_scene_is_bounded_below_transport_limit():
+def test_settled_anchor_scene_preserves_full_rows_behind_bounded_preview():
     node = shutil.which("node")
     if not node:
         pytest.skip("node is required")
-    row_budget = int(MESSAGES_JS.split("_SETTLED_ANCHOR_SCENE_ROW_BUDGET=")[1].split(";")[0])
-    byte_budget = int(MESSAGES_JS.split("_SETTLED_ANCHOR_SCENE_BYTE_BUDGET=")[1].split(";")[0])
+    preview_rows = int(MESSAGES_JS.split("_SETTLED_ANCHOR_SCENE_PREVIEW_ROWS=")[1].split(";")[0])
     identity_fn = _function_source(MESSAGES_JS, "_settledAnchorToolRowIdentity")
     fold_fn = _function_source(MESSAGES_JS, "_foldSettledAnchorToolRows")
-    byte_length_fn = _function_source(MESSAGES_JS, "_settledAnchorSceneByteLength")
-    bound_fn = _function_source(MESSAGES_JS, "_boundedSettledAnchorScene")
+    prepare_fn = _function_source(MESSAGES_JS, "_prepareSettledAnchorScene")
+    preview_fn = _function_source(MESSAGES_JS, "_settledAnchorScenePreview")
     script = f"""
-const _SETTLED_ANCHOR_SCENE_ROW_BUDGET={row_budget};
-const _SETTLED_ANCHOR_SCENE_BYTE_BUDGET={byte_budget};
+const _SETTLED_ANCHOR_SCENE_PREVIEW_ROWS={preview_rows};
 {identity_fn}
 {fold_fn}
-{byte_length_fn}
-{bound_fn}
+{prepare_fn}
+{preview_fn}
 const rows=[];
 for(let i=0;i<500;i++){{
   const id='tool-'+i;
@@ -106,37 +107,140 @@ for(let i=0;i<500;i++){{
     tool:{{id,name:'terminal',snippet:'y'.repeat(900),done:true}}
   }});
 }}
-const out=_boundedSettledAnchorScene({{
-  version:'activity_scene_v1', activity_rows:rows,
-  final_answer:'z'.repeat(300000),
-  artifacts:[{{source_event_type:'workspace_file',payload:{{kind:'file',path:'p'.repeat(300000)}}}}],
-}});
-const bytes=new TextEncoder().encode(JSON.stringify(out)).length;
+const full=_prepareSettledAnchorScene({{version:'activity_scene_v1',activity_rows:rows,final_answer:'done'}});
+const preview=_settledAnchorScenePreview(full);
 console.log(JSON.stringify({{
-  rows:out.activity_rows.length,
-  total:out.activity_rows_total,
-  toolTotal:out.tool_rows_total,
-  omitted:out.activity_rows_omitted,
-  bytes,
-  allDone:out.activity_rows.every(row=>row.tool&&row.tool.done===true),
-  hasPayload:out.activity_rows.some(row=>Object.prototype.hasOwnProperty.call(row,'payload')),
-  scene:out,
+  fullRows:full.activity_rows.length,
+  previewRows:preview.activity_rows.length,
+  total:preview.activity_rows_total,
+  toolTotal:preview.tool_rows_total,
+  offset:preview.activity_rows_offset,
+  omitted:preview.activity_rows_omitted,
+  allDone:full.activity_rows.every(row=>row.tool&&row.tool.done===true),
+  hasPayload:full.activity_rows.some(row=>Object.prototype.hasOwnProperty.call(row,'payload')),
+  localFullRows:preview._full_activity_rows.length,
+  fullRowsSerialized:JSON.stringify(preview).includes('_full_activity_rows'),
+  scene:full,
 }}));
 """
     proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout)
-    assert out["rows"] <= row_budget
-    assert out["total"] == 1000
+    assert out["fullRows"] == 500
+    assert out["previewRows"] == preview_rows
+    assert out["total"] == 500
     assert out["toolTotal"] == 500
-    assert out["omitted"] == 1000 - out["rows"]
-    assert out["bytes"] <= byte_budget
+    assert out["offset"] == 500 - preview_rows
+    assert out["omitted"] == 500 - preview_rows
     assert out["allDone"] is True
     assert out["hasPayload"] is False
+    assert out["localFullRows"] == 500
+    assert out["fullRowsSerialized"] is False
 
     from api import routes
 
     assert routes._sanitize_anchor_activity_scene(out["scene"]) == out["scene"]
+    server_preview = routes._anchor_activity_scene_transport_preview(
+        out["scene"], scene_ref="scene-ref"
+    )
+    assert len(server_preview["activity_rows"]) == routes._ANCHOR_ACTIVITY_SCENE_PREVIEW_ROWS
+    assert server_preview["activity_rows_total"] == 500
+    assert server_preview["activity_rows_offset"] == 500 - routes._ANCHOR_ACTIVITY_SCENE_PREVIEW_ROWS
+    assert server_preview["activity_scene_ref"] == "scene-ref"
+
+
+def test_earlier_activity_is_loaded_from_durable_scene_in_chunks():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required")
+    count_fn = _function_source(UI_JS, "_anchorSceneEarlierRowCount")
+    loader = _function_source(UI_JS, "_loadEarlierAnchorActivityRows")
+    compact = _function_source(UI_JS, "_syncCompactEarlierActivityAffordance")
+    transparent = _function_source(UI_JS, "_revealTransparentEarlierSteps")
+    assert "/api/session/anchor-scene?session_id=" in loader
+    assert "scene.activity_rows=earlierRows.concat(currentRows);" in loader
+    assert "scene.activity_rows_offset=start;" in loader
+    assert "_loadEarlierAnchorActivityRows(owner.message,owner.rawIdx,80)" in compact
+    assert "await _loadEarlierAnchorActivityRows(message,rawIdx,80);" in transparent
+    script = f"""
+const all=Array.from({{length:250}},(_,i)=>({{row_id:'row-'+i}}));
+const scene={{activity_rows:all.slice(170),activity_rows_offset:170,activity_rows_total:250}};
+Object.defineProperty(scene,'_full_activity_rows',{{value:all,enumerable:false}});
+const message={{_anchor_activity_scene:scene}};
+const S={{session:{{session_id:'sid'}},messages:[message]}};
+const _oldestIdx=0;
+async function api(){{ throw new Error('durable fetch should not run with local full rows'); }}
+{count_fn}
+{loader}
+(async()=>{{
+  const loaded=await _loadEarlierAnchorActivityRows(message,0,80);
+  console.log(JSON.stringify({{loaded,offset:scene.activity_rows_offset,first:scene.activity_rows[0].row_id,count:scene.activity_rows.length}}));
+}})().catch(err=>{{console.error(err);process.exit(1);}});
+"""
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {
+        "loaded": 80,
+        "offset": 90,
+        "first": "row-90",
+        "count": 160,
+    }
+
+
+def test_anchor_scene_chunk_endpoint_returns_earlier_rows_without_mutating_storage(monkeypatch):
+    from api import routes
+
+    rows = [{"role": "thinking", "row_id": f"row-{idx}", "text": str(idx)} for idx in range(250)]
+    scene = {"version": "activity_scene_v1", "activity_rows": rows}
+    record = {"message_ref": "a" * 64, "message_index": 7, "scene": scene}
+    session = SimpleNamespace(
+        profile=None,
+        anchor_activity_scenes={"a" * 64: record},
+        _loaded_metadata_only=False,
+    )
+    monkeypatch.setattr(routes, "get_session", lambda _sid: session)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args: True)
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: payload)
+    parsed = SimpleNamespace(
+        query=f"session_id=sid&message_ref={'a' * 64}&before=170&limit=80"
+    )
+
+    result = routes._handle_get_session_anchor_scene(object(), parsed)
+
+    assert result["start"] == 90
+    assert result["end"] == 170
+    assert result["total"] == 250
+    assert [row["row_id"] for row in result["rows"]] == [f"row-{idx}" for idx in range(90, 170)]
+    assert len(scene["activity_rows"]) == 250
+
+
+def test_session_hydration_sends_preview_while_durable_record_keeps_all_rows():
+    from api import routes
+
+    messages = [{"role": "assistant", "content": "done"}]
+    ref = routes._assistant_anchor_scene_message_ref(messages[0])
+    rows = [
+        {"role": "thinking", "row_id": f"row-{idx}", "text": f"step {idx}"}
+        for idx in range(250)
+    ]
+    records = {
+        ref: {
+            "message_index": 0,
+            "message_ref": ref,
+            "stream_id": "stream",
+            "scene": {"version": "activity_scene_v1", "activity_rows": rows},
+        }
+    }
+
+    hydrated = routes._hydrate_anchor_activity_scenes(messages, records)
+    preview = hydrated[0]["_anchor_activity_scene"]
+
+    assert len(preview["activity_rows"]) == routes._ANCHOR_ACTIVITY_SCENE_PREVIEW_ROWS
+    assert preview["activity_rows"][0]["row_id"] == "row-170"
+    assert preview["activity_rows_offset"] == 170
+    assert preview["activity_rows_total"] == 250
+    assert preview["activity_scene_ref"] == ref
+    assert len(records[ref]["scene"]["activity_rows"]) == 250
 
 
 def test_manual_compression_keeps_display_transcript_client_side():

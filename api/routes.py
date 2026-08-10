@@ -4019,8 +4019,13 @@ def _ensure_full_session_before_mutation(sid: str, session):
     return full_session
 
 
-_ANCHOR_ACTIVITY_SCENE_MAX_BYTES = 256_000
-_ANCHOR_ACTIVITY_SCENE_MAX_ROWS = 1_000
+# Durable scenes retain the complete compacted worklog. Session responses use a
+# bounded transport preview and older rows are fetched explicitly, so storage
+# limits no longer need to double as a destructive UI/rendering limit. Keep the
+# byte ceiling below helpers.MAX_BODY_BYTES (20 MiB).
+_ANCHOR_ACTIVITY_SCENE_MAX_BYTES = 18 * 1024 * 1024
+_ANCHOR_ACTIVITY_SCENE_MAX_ROWS = 20_000
+_ANCHOR_ACTIVITY_SCENE_PREVIEW_ROWS = 80
 
 
 def _assistant_anchor_scene_message_ref(message) -> str:
@@ -4071,6 +4076,30 @@ def _sanitize_anchor_activity_scene(scene):
     if len(encoded) > _ANCHOR_ACTIVITY_SCENE_MAX_BYTES:
         raise ValueError("scene payload is too large")
     return json.loads(encoded.decode("utf-8"))
+
+
+def _anchor_activity_scene_transport_preview(scene, *, scene_ref=""):
+    """Return a tail-only session payload without mutating durable scene data."""
+    if not isinstance(scene, dict):
+        return scene
+    preview = {
+        key: copy.deepcopy(value)
+        for key, value in scene.items()
+        if key != "activity_rows"
+    }
+    rows = scene.get("activity_rows")
+    if not isinstance(rows, list):
+        rows = []
+    total = len(rows)
+    offset = max(0, total - _ANCHOR_ACTIVITY_SCENE_PREVIEW_ROWS)
+    preview["activity_rows"] = copy.deepcopy(rows[offset:])
+    preview["activity_rows_total"] = total
+    preview["activity_rows_offset"] = offset
+    preview["activity_rows_complete"] = offset == 0
+    preview["activity_rows_omitted"] = offset
+    if scene_ref:
+        preview["activity_scene_ref"] = str(scene_ref)
+    return preview
 
 
 def _anchor_scene_int_or_none(value):
@@ -5196,7 +5225,7 @@ def _hydrate_anchor_activity_scenes(messages, records, *, message_offset=0, tool
             continue
         next_message = dict(message)
         stream_id = record.get("stream_id")
-        next_message["_anchor_activity_scene"] = _complete_hydrated_anchor_scene(
+        completed_scene = _complete_hydrated_anchor_scene(
             messages,
             scene,
             absolute_idx,
@@ -5204,10 +5233,74 @@ def _hydrate_anchor_activity_scenes(messages, records, *, message_offset=0, tool
             tool_calls=tool_calls,
             stream_id=str(stream_id or ""),
         )
+        next_message["_anchor_activity_scene"] = _anchor_activity_scene_transport_preview(
+            completed_scene,
+            scene_ref=str(record.get("message_ref") or _msg_ref or ""),
+        )
         if stream_id:
             next_message["_anchor_stream_id"] = str(stream_id)
         out[local_idx] = next_message
     return out
+
+
+def _handle_get_session_anchor_scene(handler, parsed):
+    query = parse_qs(parsed.query or "")
+    sid = str(query.get("session_id", [""])[0] or "").strip()
+    message_ref = _normalize_anchor_scene_message_ref(
+        query.get("message_ref", [""])[0]
+    )
+    message_index = _anchor_scene_int_or_none(query.get("message_index", [None])[0])
+    if not sid or (not message_ref and message_index is None):
+        return bad(handler, "session_id and message_ref or message_index are required", 400)
+    try:
+        session = get_session(sid)
+        if getattr(session, "_loaded_metadata_only", False):
+            session = Session.load(sid)
+        if session is None:
+            raise KeyError(sid)
+    except (KeyError, FileNotFoundError):
+        return bad(handler, "Session not found", 404)
+    if not _session_visible_to_active_profile(getattr(session, "profile", None) or None, handler):
+        return bad(handler, "Session not found", 404)
+    record = None
+    records = _anchor_scene_records(session)
+    if message_ref:
+        record = records.get(message_ref)
+        if not isinstance(record, dict):
+            for key, candidate in records.items():
+                if not isinstance(candidate, dict):
+                    continue
+                candidate_ref = _normalize_anchor_scene_message_ref(
+                    candidate.get("message_ref") or key
+                )
+                if candidate_ref == message_ref:
+                    record = candidate
+                    break
+    if not isinstance(record, dict) and message_index is not None:
+        for candidate in records.values():
+            if not isinstance(candidate, dict):
+                continue
+            if _anchor_scene_int_or_none(candidate.get("message_index")) == message_index:
+                record = candidate
+                break
+    scene = record.get("scene") if isinstance(record, dict) else None
+    rows = scene.get("activity_rows") if isinstance(scene, dict) else None
+    if not isinstance(rows, list):
+        return bad(handler, "Anchor activity scene not found", 404)
+    total = len(rows)
+    before = _anchor_scene_int_or_none(query.get("before", [total])[0])
+    limit = _anchor_scene_int_or_none(query.get("limit", [80])[0])
+    before = max(0, min(total, total if before is None else before))
+    limit = max(1, min(200, 80 if limit is None else limit))
+    start = max(0, before - limit)
+    return j(handler, {
+        "scene_ref": str(record.get("message_ref") or message_ref or ""),
+        "rows": copy.deepcopy(rows[start:before]),
+        "start": start,
+        "end": before,
+        "total": total,
+        "complete": start == 0,
+    })
 
 
 def _handle_session_anchor_scene(handler, body):
@@ -12695,6 +12788,9 @@ def handle_get(handler, parsed) -> bool:
         query = parse_qs(parsed.query)
         _handle_session_compress_status(handler, query.get("session_id", [""])[0])
         return True
+
+    if parsed.path == "/api/session/anchor-scene":
+        return _handle_get_session_anchor_scene(handler, parsed)
 
     if parsed.path == "/api/session":
         import time as _time

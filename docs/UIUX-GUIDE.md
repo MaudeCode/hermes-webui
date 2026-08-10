@@ -94,6 +94,12 @@ settled history can collapse while the final answer reads as the calm
 conclusion. Treat that page as an existing proposal, not as shipped behavior
 unless the code and tests prove it is implemented.
 
+Long-turn performance budgets apply to transport and mounted DOM, never to the
+durable worklog history. A normal session load may return only a recent activity
+preview, but the UI must expose an in-flow “Show earlier steps” affordance that
+loads the omitted prefix from durable state in bounded chunks. Collapsing,
+windowing, or switching sessions must not make earlier activity irretrievable.
+
 ## Typography and content
 
 Use three explicit font tokens:

@@ -4101,16 +4101,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       || (Array.isArray(scene&&scene.side_effects)&&scene.side_effects.length)
     );
   }
-  const _SETTLED_ANCHOR_SCENE_ROW_BUDGET=80;
-  const _SETTLED_ANCHOR_SCENE_BYTE_BUDGET=220000;
-  function _settledAnchorSceneByteLength(scene){
-    let encoded='';
-    try{ encoded=JSON.stringify(scene); }catch(_){ return Infinity; }
-    if(!encoded) return Infinity;
-    return typeof TextEncoder==='function'
-      ? new TextEncoder().encode(encoded).length
-      : encoded.length*3;
-  }
+  const _SETTLED_ANCHOR_SCENE_PREVIEW_ROWS=80;
   function _settledAnchorToolRowIdentity(row){
     if(!row||row.role!=='tool') return '';
     const tool=row.tool&&typeof row.tool==='object'?row.tool:{};
@@ -4147,130 +4138,58 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return folded;
   }
-  function _boundedSettledAnchorScene(scene){
+  function _prepareSettledAnchorScene(scene){
     if(!scene||!Array.isArray(scene.activity_rows)) return scene;
     const originalRows=scene.activity_rows;
     const foldedRows=_foldSettledAnchorToolRows(originalRows);
     const toolRowsTotal=foldedRows.filter(row=>row&&row.role==='tool').length;
-    let rows=foldedRows.length>_SETTLED_ANCHOR_SCENE_ROW_BUDGET
-      ? foldedRows.slice(-_SETTLED_ANCHOR_SCENE_ROW_BUDGET)
-      : foldedRows.slice();
     // Tool rows already carry the canonical display object in `tool`; retaining
     // the raw source-event payload duplicates args/output in the persisted JSON.
-    rows=rows.map(row=>{
+    const rows=foldedRows.map(row=>{
       if(!row||row.role!=='tool'||!row.payload) return row;
       const compact={...row};
       delete compact.payload;
       return compact;
     });
-    let bounded={
+    const worklogRowsTotal=rows.filter(row=>{
+      if(!row) return false;
+      if(row.role==='tool'||row.role==='thinking') return true;
+      return row.role==='lifecycle'&&(row.source_event_type==='compressing'||row.source_event_type==='compressed');
+    }).length;
+    return {
       ...scene,
       activity_rows:rows,
-      activity_rows_total:originalRows.length,
+      activity_rows_total:rows.length,
       tool_rows_total:toolRowsTotal,
-      activity_rows_omitted:Math.max(0,originalRows.length-rows.length),
+      worklog_rows_total:worklogRowsTotal,
+      activity_rows_offset:0,
+      activity_rows_complete:true,
+      activity_rows_omitted:0,
     };
-    // The persistence endpoint rejects scenes above 256 KB. Leave headroom for
-    // the request envelope and mixed-version serializers, dropping the oldest
-    // retained activity first while preserving final answer/outcome metadata.
-    while(rows.length){
-      if(_settledAnchorSceneByteLength(bounded)<=_SETTLED_ANCHOR_SCENE_BYTE_BUDGET) break;
-      rows=rows.slice(1);
-      bounded={
-        ...bounded,
-        activity_rows:rows,
-        activity_rows_omitted:Math.max(0,originalRows.length-rows.length),
-      };
-    }
-    // A single hostile/accidentally enormous row must not turn the bounded
-    // scene into an empty non-worklog that then skips persistence altogether.
-    if(!rows.length&&toolRowsTotal){
-      const source=[...foldedRows].reverse().find(row=>row&&row.role==='tool')||{};
-      const tool=source.tool&&typeof source.tool==='object'?source.tool:{};
-      rows=[{
-        role:'tool',
-        kind:source.kind||'tool_call',
-        row_id:source.row_id||source.local_id||'bounded-tool-summary',
-        local_id:source.local_id||source.row_id||'bounded-tool-summary',
-        source_event_type:source.source_event_type||'tool_complete',
-        status:source.status||'completed',
-        text:String(source.text||tool.name||'Tool activity').slice(0,512),
-        tool:{
-          name:String(tool.name||'tool').slice(0,128),
-          tid:String(tool.tid||tool.id||'').slice(0,256),
-          done:tool.done!==false,
-          is_error:!!tool.is_error,
-        },
-      }];
-      bounded={...bounded,activity_rows:rows,activity_rows_omitted:Math.max(0,originalRows.length-1)};
-    }
-    // Rows are not the only potentially large fields: final-answer text and
-    // artifact/side-effect payloads are also copied into the projection. The
-    // canonical message/session state already owns those full values, so if the
-    // optional UI scene is still over budget, persist a small navigational
-    // summary instead of sending a payload the server must reject.
-    if(_settledAnchorSceneByteLength(bounded)>_SETTLED_ANCHOR_SCENE_BYTE_BUDGET){
-      const clean=(value,limit)=>String(value||'').slice(0,limit);
-      const compactOutcome=(event)=>{
-        const item=event&&typeof event==='object'?event:{};
-        const payload=item.payload&&typeof item.payload==='object'?item.payload:{};
-        return {
-          source_event_type:clean(item.source_event_type,128),
-          status:clean(item.status,64),
-          created_at:item.created_at||null,
-          payload:{
-            kind:clean(payload.kind,128),
-            path:clean(payload.path,1024),
-            name:clean(payload.name,256),
-          },
-        };
-      };
-      const identity=scene.identity&&typeof scene.identity==='object'?scene.identity:{};
-      const lifecycle=scene.lifecycle&&typeof scene.lifecycle==='object'?scene.lifecycle:{};
-      const latestRow=rows.length?rows[rows.length-1]:null;
-      const latestTool=latestRow&&latestRow.tool&&typeof latestRow.tool==='object'?latestRow.tool:{};
-      const summaryRows=latestRow?[{
-        role:clean(latestRow.role,32)||'activity',
-        kind:clean(latestRow.kind,64)||'activity',
-        row_id:clean(latestRow.row_id||latestRow.local_id,256)||'bounded-activity-summary',
-        local_id:clean(latestRow.local_id||latestRow.row_id,256)||'bounded-activity-summary',
-        source_event_type:clean(latestRow.source_event_type,128),
-        status:clean(latestRow.status,64),
-        text:clean(latestRow.text||latestTool.name,512),
-        ...(latestRow.role==='tool'?{tool:{
-          name:clean(latestTool.name,128)||'tool',
-          id:clean(latestTool.id||latestTool.tid,256),
-          done:latestTool.done!==false,
-          is_error:!!latestTool.is_error,
-        }}:{}),
-      }]:[];
-      bounded={
-        version:'activity_scene_v1',
-        mode:clean(scene.mode,64),
-        identity:{
-          source_message_refs:Array.isArray(identity.source_message_refs)
-            ? identity.source_message_refs.slice(-16).map(value=>clean(value,256))
-            : [],
-        },
-        lifecycle:{
-          status:clean(lifecycle.status,64),
-          terminal_state:clean(lifecycle.terminal_state,64),
-          started_at:clean(lifecycle.started_at,128)||null,
-          completed_at:clean(lifecycle.completed_at,128)||null,
-        },
-        final_answer:'',
-        final_message_ref:clean(scene.final_message_ref,256)||null,
-        terminal_state:clean(scene.terminal_state,64)||null,
-        turn_duration:Number.isFinite(Number(scene.turn_duration))?Number(scene.turn_duration):null,
-        activity_rows:summaryRows,
-        activity_rows_total:originalRows.length,
-        tool_rows_total:toolRowsTotal,
-        activity_rows_omitted:Math.max(0,originalRows.length-summaryRows.length),
-        artifacts:(Array.isArray(scene.artifacts)?scene.artifacts:[]).slice(-8).map(compactOutcome),
-        side_effects:(Array.isArray(scene.side_effects)?scene.side_effects:[]).slice(-8).map(compactOutcome),
-      };
-    }
-    return bounded;
+  }
+  function _settledAnchorScenePreview(scene){
+    if(!scene||!Array.isArray(scene.activity_rows)) return scene;
+    const fullRows=scene.activity_rows;
+    const offset=Math.max(0,fullRows.length-_SETTLED_ANCHOR_SCENE_PREVIEW_ROWS);
+    const preview={
+      ...scene,
+      activity_rows:fullRows.slice(offset),
+      activity_rows_total:fullRows.length,
+      activity_rows_offset:offset,
+      activity_rows_complete:offset===0,
+      activity_rows_omitted:offset,
+    };
+    // Keep the complete compacted rows available for this page lifetime without
+    // letting JSON.stringify/session HTML caches transport them. A reopened
+    // session loads earlier chunks from the durable anchor-scene endpoint.
+    try{
+      Object.defineProperty(preview,'_full_activity_rows',{
+        value:fullRows,
+        enumerable:false,
+        configurable:true,
+      });
+    }catch(_){ /* durable endpoint remains the fallback */ }
+    return preview;
   }
   function _attachProjectedAnchorSceneToLastAssistant(messages, targetMessage=null, targetIndex=null){
     if(!_anchorRegistry||!Array.isArray(messages)) return false;
@@ -4290,9 +4209,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     if(!lastAsst) return false;
     const projectedScene=_projectLiveAnchorActivityScene();
-    const scene=_boundedSettledAnchorScene(
+    const fullScene=_prepareSettledAnchorScene(
       _completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene)
     );
+    const scene=_settledAnchorScenePreview(fullScene);
     const hasOwnedOutcomes=_anchorSceneHasOwnedOutcomes(scene);
     if(scene&&Array.isArray(scene.activity_rows)&&(scene.activity_rows.length||hasOwnedOutcomes)){
       const hasWorklogRows=_anchorSceneHasWorklogWorthyRows(scene);
@@ -4308,7 +4228,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       lastAsst._anchor_stream_id=streamId;
       lastAsst._anchor_activity_scene=scene;
       lastAsst._anchor_scene_persist_key=sceneKey;
-      _persistSettledAnchorScene(lastAsst, scene, lastAsstIndex);
+      _persistSettledAnchorScene(lastAsst, fullScene, lastAsstIndex);
       return hasWorklogRows;
     }
     return false;

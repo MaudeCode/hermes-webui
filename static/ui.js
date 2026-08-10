@@ -12163,6 +12163,7 @@ function _materializeDeferredWorklogRows(group){
   if(!rows||!rows.length) return false;
   const ok=_renderAnchorSceneRowsIntoWorklog(group,rows,{settled:true});
   if(!ok) return false;
+  _syncCompactEarlierActivityAffordance(group);
   // #5839 fix: the eager render path post-processes its rows (syntax highlight,
   // copy buttons, mermaid, katex, structured trees) and restores detail-disclosure
   // state; a lazily-materialized group must do the same or expanded rows render
@@ -12239,6 +12240,9 @@ function _rehydrateDeferredWorklogsFromCache(root){
     const rows=_deferredWorklogRowsFromGroup(group);
     if(rows&&rows.length) group._deferredWorklogRows=rows;
     else group.removeAttribute('data-worklog-rows-deferred'); // nothing to defer
+  });
+  root.querySelectorAll('[data-anchor-settled-scene-owner="1"]:not([data-worklog-rows-deferred="1"])').forEach(group=>{
+    _syncCompactEarlierActivityAffordance(group);
   });
 }
 function _toggleActivityGroup(summary){
@@ -13667,6 +13671,7 @@ function _anchorSceneSceneHasWorklogWorthyRows(scene){
   // promoted to a collapsed worklog at render time (it would hide the whole answer
   // and shrink the transcript at settle → bottom-pinned jump-back). Require at least
   // one tool/thinking/compression row. (defense-in-depth for already-persisted scenes)
+  if(Number(scene&&scene.worklog_rows_total)>0) return true;
   const rows=Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[];
   for(const row of rows){
     if(!row||typeof row!=='object') continue;
@@ -13746,15 +13751,17 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
     || !!(turnEl&&turnEl.getAttribute('data-transparent-earlier-revealed')==='1');
   const cap=_TRANSPARENT_SETTLED_ROW_CAP;
   const slack=_TRANSPARENT_SETTLED_ROW_CAP_SLACK;
+  const durableEarlier=_anchorSceneEarlierRowCount(scene);
   let startIdx=0;
   if(!justSettled&&!alreadyRevealed&&rows.length>cap+slack){
     startIdx=rows.length-cap;
   }
+  const hiddenCount=durableEarlier+startIdx;
   // Stash the TRUE tool-row count so "Trace: N tools" reflects the whole run even
   // while the prefix is capped; cleared on full reveal. (uncapped → remove it.)
   if(turnEl){
-    if(startIdx>0){
-      const totalTools=rows.filter(r=>String(r.role||'')==='tool').length;
+    if(hiddenCount>0){
+      const totalTools=Number(scene.tool_rows_total)||rows.filter(r=>String(r.role||'')==='tool').length;
       turnEl.setAttribute('data-transparent-total-tool-count',String(totalTools));
     }else{
       turnEl.removeAttribute('data-transparent-total-tool-count');
@@ -13776,8 +13783,8 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
   // The "Show earlier steps" affordance sits ABOVE the retained rows (chronology:
   // the hidden steps came first). Insert it before rendering the retained tail so
   // it lands at the top of this turn's activity run.
-  if(startIdx>0){
-    const earlier=_buildTransparentEarlierStepsAffordance(startIdx);
+  if(hiddenCount>0){
+    const earlier=_buildTransparentEarlierStepsAffordance(hiddenCount);
     earlier.setAttribute('data-anchor-owner-idx',String(rawIdx));
     if(segment.parentElement===blocks) blocks.insertBefore(earlier,segment);
     else blocks.appendChild(earlier);
@@ -13841,14 +13848,89 @@ function _buildTransparentEarlierStepsAffordance(hiddenCount){
   });
   return el;
 }
+function _anchorSceneEarlierRowCount(scene){
+  const offset=Number(scene&&scene.activity_rows_offset);
+  return Number.isFinite(offset)&&offset>0?Math.floor(offset):0;
+}
+async function _loadEarlierAnchorActivityRows(message, rawIdx, limit=80){
+  const scene=message&&message._anchor_activity_scene;
+  const before=_anchorSceneEarlierRowCount(scene);
+  if(!scene||before<=0) return 0;
+  const boundedLimit=Math.max(1,Math.min(200,Number(limit)||80));
+  let start=Math.max(0,before-boundedLimit);
+  let earlierRows=null;
+  const fullRows=Array.isArray(scene._full_activity_rows)?scene._full_activity_rows:null;
+  if(fullRows){
+    earlierRows=fullRows.slice(start,before);
+  }else{
+    const sid=String(S.session&&S.session.session_id||'');
+    const sceneRef=String(scene.activity_scene_ref||scene.final_message_ref||'');
+    if(!sid||(!sceneRef&&!Number.isFinite(Number(rawIdx)))) return 0;
+    const absoluteIdx=Math.max(0,Number(typeof _oldestIdx!=='undefined'?_oldestIdx:0)||0)+Math.max(0,Number(rawIdx)||0);
+    const locator=sceneRef
+      ? `&message_ref=${encodeURIComponent(sceneRef)}`
+      : `&message_index=${encodeURIComponent(absoluteIdx)}`;
+    const data=await api(`/api/session/anchor-scene?session_id=${encodeURIComponent(sid)}${locator}&before=${encodeURIComponent(before)}&limit=${encodeURIComponent(boundedLimit)}`);
+    if(!S.session||S.session.session_id!==sid||!S.messages||S.messages[rawIdx]!==message) return 0;
+    earlierRows=Array.isArray(data&&data.rows)?data.rows:[];
+    start=Number.isFinite(Number(data&&data.start))?Math.max(0,Number(data.start)):Math.max(0,before-earlierRows.length);
+    if(data&&data.scene_ref) scene.activity_scene_ref=String(data.scene_ref);
+    if(Number.isFinite(Number(data&&data.total))) scene.activity_rows_total=Math.max(0,Number(data.total));
+  }
+  if(!earlierRows.length) return 0;
+  const currentRows=Array.isArray(scene.activity_rows)?scene.activity_rows:[];
+  scene.activity_rows=earlierRows.concat(currentRows);
+  scene.activity_rows_offset=start;
+  scene.activity_rows_omitted=start;
+  scene.activity_rows_complete=start===0;
+  return earlierRows.length;
+}
+function _compactWorklogOwner(group){
+  const key=group&&group.getAttribute&&group.getAttribute('data-activity-disclosure-key');
+  const match=key&&/^anchor-scene:(\d+)$/.exec(key);
+  const rawIdx=match?Number(match[1]):NaN;
+  const message=Number.isFinite(rawIdx)&&S.messages?S.messages[rawIdx]:null;
+  return message&&message._anchor_activity_scene?{message,rawIdx}:null;
+}
+function _syncCompactEarlierActivityAffordance(group){
+  const list=_toolWorklogListEl(group);
+  const owner=_compactWorklogOwner(group);
+  if(!list||!owner) return;
+  list.querySelectorAll('.transparent-earlier-steps[data-anchor-earlier-steps="1"]').forEach(el=>el.remove());
+  const hidden=_anchorSceneEarlierRowCount(owner.message._anchor_activity_scene);
+  if(hidden<=0) return;
+  const earlier=_buildTransparentEarlierStepsAffordance(hidden);
+  earlier.setAttribute('data-anchor-owner-idx',String(owner.rawIdx));
+  earlier.addEventListener('click',async()=>{
+    if(earlier.getAttribute('aria-busy')==='true') return;
+    earlier.setAttribute('aria-busy','true');
+    const messagesEl=$('messages');
+    const previousTop=messagesEl?messagesEl.scrollTop:0;
+    const previousHeight=messagesEl?messagesEl.scrollHeight:0;
+    try{
+      const loaded=await _loadEarlierAnchorActivityRows(owner.message,owner.rawIdx,80);
+      if(!loaded){ earlier.removeAttribute('aria-busy'); return; }
+      const rows=_anchorSceneRowsForRendering(owner.message._anchor_activity_scene,{settled:true});
+      _renderAnchorSceneRowsIntoWorklog(group,rows,{settled:true});
+      _syncCompactEarlierActivityAffordance(group);
+      if(typeof _postProcessWithAnchorSuppression==='function') requestAnimationFrame(()=>_postProcessWithAnchorSuppression(group));
+      if(messagesEl) messagesEl.scrollTop=previousTop+(messagesEl.scrollHeight-previousHeight);
+    }catch(err){
+      if(typeof showToast==='function') showToast((err&&err.message)||'Failed to load earlier activity');
+      earlier.removeAttribute('aria-busy');
+    }
+  });
+  list.insertBefore(earlier,list.firstChild||null);
+}
 // Materialize the omitted prefix rows for a capped settled transparent turn,
 // preserving the reader's viewport position (rows are inserted ABOVE the clicked
 // affordance, so without compensation the content below would jump down).
-function _revealTransparentEarlierSteps(message, segment, rawIdx, affordanceEl){
+async function _revealTransparentEarlierSteps(message, segment, rawIdx, affordanceEl){
   const turnEl=segment.closest('.assistant-turn');
-  // #5966 (Codex F3): record the reveal in the PERSISTENT set (survives rebuild /
-  // switch-away / cache round-trip) and invalidate this session's cached HTML so
-  // the stored markup isn't re-served stale-capped.
+  // #5966 (Codex F3): record that the loaded preview prefix is visible (survives
+  // rebuild / switch-away / cache round-trip) and invalidate this session's
+  // cached HTML so the stored markup isn't re-served stale-capped. Durable rows
+  // can still precede this preview and remain available through the affordance.
   const revealKey=_transparentRevealKey(S.session&&S.session.session_id, rawIdx);
   _transparentRevealedTurns.add(revealKey);
   try{
@@ -13857,8 +13939,8 @@ function _revealTransparentEarlierSteps(message, segment, rawIdx, affordanceEl){
   }catch(_){ }
   if(turnEl){
     turnEl.setAttribute('data-transparent-earlier-revealed','1');
-    // Full run now mounted → drop the capped-count stash so the Trace label
-    // recomputes from the (now complete) DOM.
+    // Drop the old capped-count stash; the next turn-local render restores the
+    // durable total while earlier rows remain available.
     turnEl.removeAttribute('data-transparent-total-tool-count');
   }
   const msgsEl=$('messages');
@@ -13867,36 +13949,27 @@ function _revealTransparentEarlierSteps(message, segment, rawIdx, affordanceEl){
   const scene=message&&message._anchor_activity_scene;
   const blocks=_assistantTurnBlocks(turnEl);
   if(!scene||!blocks){ if(affordanceEl) affordanceEl.remove(); return; }
-  const rows=_anchorSceneRowsForRendering(scene,{settled:true})||[];
-  const lastNonTerminalWorkRowIndex=_anchorSceneLastNonTerminalWorkRowIndex(rows);
-  const finalAnswer=String(
-    (scene&&typeof scene.final_answer==='string'&&scene.final_answer)
-    || _assistantAnchorSceneFinalAnswerText(message)
-    || (typeof msgContent==='function'?msgContent(message):'')
-    || ''
-  );
-  // The affordance's data-count tells us how many prefix rows to build (the rows
-  // rendered on the initial pass are the tail after that index).
-  const hidden=Number(affordanceEl&&affordanceEl.getAttribute('data-earlier-count'))||0;
-  const stopIdx=hidden>0?hidden:_computeTransparentHiddenPrefixCount(rows);
-  const frag=document.createDocumentFragment();
-  for(let idx=0;idx<stopIdx;idx+=1){
-    const node=_anchorSceneTransparentNodeForRow(rows[idx],{settled:true,finalAnswer,liveTokenFinalPrefixEligible:idx>lastNonTerminalWorkRowIndex});
-    if(node){ node.setAttribute('data-earlier-revealed','1'); frag.appendChild(node); }
-  }
-  // Insert the prefix where the affordance sits, then drop the affordance.
-  if(affordanceEl&&affordanceEl.parentElement===blocks){
-    blocks.insertBefore(frag,affordanceEl);
-    affordanceEl.remove();
-  }else{
-    blocks.appendChild(frag);
-  }
-  if(turnEl) _syncTransparentEventControls(turnEl);
-  // Hold the reader's position: rows landed above the old affordance point, so
-  // add the height delta to scrollTop (the app's own load-earlier idiom).
-  if(msgsEl){
-    const delta=msgsEl.scrollHeight-prevScrollHeight;
-    msgsEl.scrollTop=prevScrollTop+delta;
+  if(affordanceEl) affordanceEl.setAttribute('aria-busy','true');
+  try{
+    // Reveal the already-loaded preview prefix and, when durable rows precede
+    // it, fetch one earlier chunk. Re-render only this turn and preserve the
+    // reader's viewport as the new rows land above the affordance.
+    if(_anchorSceneEarlierRowCount(scene)>0){
+      await _loadEarlierAnchorActivityRows(message,rawIdx,80);
+    }
+    _renderSettledAnchorSceneTransparentForMessage(message,segment,rawIdx);
+    if(msgsEl){
+      const delta=msgsEl.scrollHeight-prevScrollHeight;
+      msgsEl.scrollTop=prevScrollTop+delta;
+    }
+  }catch(err){
+    _transparentRevealedTurns.delete(revealKey);
+    if(turnEl) turnEl.removeAttribute('data-transparent-earlier-revealed');
+    if(affordanceEl){
+      affordanceEl.removeAttribute('aria-busy');
+      affordanceEl.removeAttribute('data-earlier-rewired');
+    }
+    if(typeof showToast==='function') showToast((err&&err.message)||'Failed to load earlier activity');
   }
 }
 // The initial capped render omits rows[0 .. rows.length-cap-1]; recompute that
@@ -14103,7 +14176,9 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   }
   group._deferredWorklogRows=null;
   group.removeAttribute('data-worklog-rows-deferred');
-  return _renderAnchorSceneRowsIntoWorklog(group,rows,{settled:true});
+  const rendered=_renderAnchorSceneRowsIntoWorklog(group,rows,{settled:true});
+  if(rendered) _syncCompactEarlierActivityAffordance(group);
+  return rendered;
 }
 function _syncLiveWorklogReasonsForAnchor(anchor, displayTextOverride){
   if(S.activeStreamId&&isLiveAnchorActivitySceneOwner(S.activeStreamId)) return;
