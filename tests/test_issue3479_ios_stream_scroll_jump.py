@@ -53,18 +53,20 @@ def test_handoff_rebuilds_use_same_frame_scroll_snapshot_restore():
     assert "renderMessages();" not in set_body
 
 
-def test_live_compression_card_replacement_restores_snapshot_before_follow_settle():
+def test_live_compression_card_replacement_defers_snapshot_restore_until_after_mutation():
     body = _function_body(UI_JS, "appendLiveCompressionCard")
 
     capture_idx = body.index("const scrollSnapshot=_captureMessageScrollSnapshot();")
+    guard_idx = body.index("const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(scrollSnapshot);")
     replace_idx = body.index("if(existing) existing.replaceWith(node);")
-    restore_idx = body.index("_restoreMessageScrollSnapshotSameFrame(scrollSnapshot);")
-    settle_idx = body.index("if(typeof scrollIfPinned==='function') scrollIfPinned();")
+    restore_idx = body.index("_restoreLiveAnchorScrollSnapshotAfterRebuild(scrollSnapshot,scrollRebuildGuard);")
 
-    assert capture_idx < replace_idx < restore_idx < settle_idx
+    assert capture_idx < guard_idx < replace_idx < restore_idx
+    assert "_restoreMessageScrollSnapshotSameFrame(scrollSnapshot);" not in body
+    assert "scrollIfPinned();" not in body
 
 
-def test_live_anchor_worklog_rebuild_restores_snapshot_before_follow_settle():
+def test_live_anchor_worklog_rebuild_defers_snapshot_restore_until_after_mutation():
     body = _function_body(UI_JS, "renderLiveAnchorActivityScene")
 
     capture_idx = body.index("const scrollSnapshot=_captureMessageScrollSnapshot();")
@@ -73,11 +75,11 @@ def test_live_anchor_worklog_rebuild_restores_snapshot_before_follow_settle():
     restore_detail_idx = body.index("_restoreWorklogDetailDisclosureState(blocks, liveDisclosureState);")
     dedupe_idx = body.index("_dedupeLiveProcessedWorklogAnchors(turn);")
     move_status_idx = body.index("_moveLiveRunStatusToTurnEnd();")
-    restore_idx = body.index("_restoreMessageScrollSnapshotSameFrame(scrollSnapshot);")
     release_idx = body.index("_restoreLiveAnchorScrollSnapshotAfterRebuild(scrollSnapshot,scrollRebuildGuard);")
-    settle_idx = body.index("if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();")
 
-    assert capture_idx < guard_idx < remove_idx < restore_detail_idx < dedupe_idx < move_status_idx < restore_idx < release_idx < settle_idx
+    assert capture_idx < guard_idx < remove_idx < restore_detail_idx < dedupe_idx < move_status_idx < release_idx
+    assert "_restoreMessageScrollSnapshotSameFrame(scrollSnapshot);" not in body
+    assert "scrollIfPinned();" not in body
 
 
 def test_live_anchor_worklog_rebuild_guards_height_for_unpinned_reader():

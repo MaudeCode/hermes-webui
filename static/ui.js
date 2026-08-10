@@ -23,6 +23,14 @@ const MAX_UPLOAD_MB=Math.round(MAX_UPLOAD_BYTES/1024/1024);
 // single-threaded so only one done event fires at a time in practice.
 let _queueDrainSid=null;
 const $=id=>document.getElementById(id);
+function showConversationEmptyState(){
+  // A direct/returning session boot suppresses the static welcome screen so it
+  // cannot shift out from underneath the transcript. Once the app genuinely
+  // chooses the empty state, release that boot-only suppression permanently.
+  try{ delete document.documentElement.dataset.sessionBoot; }catch(_){}
+  const empty=$('emptyState');
+  if(empty) empty.style.display='';
+}
 const OFFLINE_RECHECK_MS=2500;
 const OFFLINE_HEALTH_TIMEOUT_MS=10000;
 const OFFLINE_FETCH_FAILURES_BEFORE_BANNER=2;
@@ -12687,6 +12695,10 @@ function _anchorSceneNodeForRow(row, opts){
   if(row.local_id) node.setAttribute('data-anchor-local-id',String(row.local_id));
   node.setAttribute('data-anchor-row-role',String(row.role||'activity'));
   node.setAttribute('data-anchor-source-event-type',String(row.source_event_type||''));
+  // Keep the exact projected-row payload off-DOM. Compact Worklog reconciliation
+  // uses this value to preserve unchanged live rows without relying on a hash or
+  // on serialized DOM that can differ solely because the reader expanded a card.
+  try{ node._anchorSceneRenderSignature=JSON.stringify(row); }catch(_){ node._anchorSceneRenderSignature=''; }
   return node;
 }
 function _anchorSceneTransparentNodeForRow(row, opts){
@@ -12821,10 +12833,71 @@ function _anchorSceneWorklogGroup(blocks, opts){
   if(opts&&opts.turnStartedAt!==undefined&&opts.turnStartedAt!==null) group.setAttribute('data-turn-started-at',String(opts.turnStartedAt));
   return group;
 }
+function _anchorSceneCompactRowKey(node, index){
+  if(!node||!node.getAttribute) return `row:${Number(index)||0}`;
+  const role=String(node.getAttribute('data-anchor-row-role')||'activity');
+  const source=String(node.getAttribute('data-anchor-source-event-type')||'');
+  // Compressing and compressed are two states of one visible divider. Their
+  // projected row ids can differ, so identity belongs to the lifecycle slot.
+  if(role==='lifecycle'&&(source==='compressing'||source==='compressed')) return 'lifecycle:compression';
+  const rowId=String(node.getAttribute('data-anchor-row-id')||'');
+  if(rowId) return `${role}:${rowId}`;
+  return `${role}:${source||'row'}:${Number(index)||0}`;
+}
+function _anchorSceneCompactTopLevelKey(node, index){
+  if(!node||!node.getAttribute) return `section:${Number(index)||0}`;
+  if(node.getAttribute('data-worklog-tools')==='1'){
+    const first=node.firstElementChild;
+    return `tools:${_anchorSceneCompactRowKey(first,index)}`;
+  }
+  return `row:${_anchorSceneCompactRowKey(node,index)}`;
+}
+function _anchorSceneCompactNodesEqual(existing, candidate){
+  if(existing===candidate) return true;
+  if(!existing||!candidate) return false;
+  const before=existing._anchorSceneRenderSignature;
+  const after=candidate._anchorSceneRenderSignature;
+  return typeof before==='string'&&typeof after==='string'&&before===after;
+}
+function _reconcileAnchorSceneCompactChildren(parent, desiredNodes, topLevel){
+  if(!parent) return;
+  const existingChildren=Array.from(parent.children||[]);
+  const desired=Array.from(desiredNodes||[]);
+  const keyFor=topLevel?_anchorSceneCompactTopLevelKey:_anchorSceneCompactRowKey;
+  const buckets=new Map();
+  existingChildren.forEach((node,index)=>{
+    const key=keyFor(node,index);
+    if(!buckets.has(key)) buckets.set(key,[]);
+    buckets.get(key).push(node);
+  });
+  const reused=new Set();
+  let reference=parent.firstChild;
+  desired.forEach((candidate,index)=>{
+    const key=keyFor(candidate,index);
+    const bucket=buckets.get(key);
+    const existing=bucket&&bucket.length?bucket.shift():null;
+    let actual=candidate;
+    const toolSection=!!(
+      topLevel&&existing&&candidate&&existing.getAttribute&&candidate.getAttribute&&
+      existing.getAttribute('data-worklog-tools')==='1'&&candidate.getAttribute('data-worklog-tools')==='1'
+    );
+    if(toolSection){
+      _reconcileAnchorSceneCompactChildren(existing,Array.from(candidate.children||[]),false);
+      actual=existing;
+      reused.add(existing);
+    }else if(existing&&_anchorSceneCompactNodesEqual(existing,candidate)){
+      actual=existing;
+      reused.add(existing);
+    }
+    if(actual!==reference) parent.insertBefore(actual,reference||null);
+    reference=actual.nextSibling;
+  });
+  existingChildren.forEach(node=>{ if(!reused.has(node)&&node.parentNode===parent) node.remove(); });
+}
 function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   const list=_toolWorklogListEl(group);
   if(!group||!list) return false;
-  list.innerHTML='';
+  const desired=[];
   let wrote=false;
   let currentTools=null;
   for(const row of rows){
@@ -12835,15 +12908,16 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
         currentTools=document.createElement('div');
         currentTools.className='wl-step-tools tool-worklog-tools';
         currentTools.setAttribute('data-worklog-tools','1');
-        list.appendChild(currentTools);
+        desired.push(currentTools);
       }
       currentTools.appendChild(node);
     }else{
       currentTools=null;
-      list.appendChild(node);
+      desired.push(node);
     }
     wrote=true;
   }
+  _reconcileAnchorSceneCompactChildren(list,desired,true);
   if(wrote){
     _syncToolCallGroupSummary(group);
   }
@@ -13087,19 +13161,29 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
     : null;
   const scrollSnapshot=_captureMessageScrollSnapshot();
   const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(scrollSnapshot);
-  blocks.querySelectorAll('[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
-  blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-card-row[data-live-tid]:not(.transparent-event-row),.agent-activity-thinking[data-live-thinking="1"],.interim-collapse-toggle').forEach(el=>el.remove());
-  blocks.querySelectorAll('[data-live-assistant="1"]').forEach(el=>{
-    el.classList.add('assistant-segment-worklog-source');
-    el.setAttribute('aria-hidden','true');
-    el.hidden=true;
-  });
   const group=_anchorSceneWorklogGroup(blocks,{
     live:true,
     collapsed:false,
     activityKey:`live:${streamId||S.activeStreamId||'anchor'}`,
     streamId:streamId||S.activeStreamId||'',
     turnStartedAt:S.session&&S.session.pending_started_at,
+  });
+  if(!group){ if(scrollRebuildGuard.release) scrollRebuildGuard.release(); return false; }
+  const ownedByCurrentGroup=el=>!!(el&&(el===group||(group.contains&&group.contains(el))));
+  // Remove competing/legacy activity surfaces, but keep this stream's owned
+  // group and rows mounted so the keyed reconciler below can update only the
+  // changed row. Stale owned rows are removed by that reconciler.
+  blocks.querySelectorAll('[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>{
+    if(!ownedByCurrentGroup(el)) el.remove();
+  });
+  blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-card-row[data-live-tid]:not(.transparent-event-row),.agent-activity-thinking[data-live-thinking="1"],.interim-collapse-toggle').forEach(el=>{
+    const ownedAnchorRow=ownedByCurrentGroup(el)&&el!==group&&el.getAttribute&&el.getAttribute('data-anchor-scene-row')==='1';
+    if(el!==group&&!ownedAnchorRow) el.remove();
+  });
+  blocks.querySelectorAll('[data-live-assistant="1"]').forEach(el=>{
+    el.classList.add('assistant-segment-worklog-source');
+    el.setAttribute('aria-hidden','true');
+    el.hidden=true;
   });
   const ok=_renderAnchorSceneRowsIntoWorklog(group,rows,{live:true,settled:false});
   if(!ok){
@@ -13111,9 +13195,10 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   if(typeof _startActivityElapsedTimer==='function') _startActivityElapsedTimer(group);
   _dedupeLiveProcessedWorklogAnchors(turn);
   if(typeof _moveLiveRunStatusToTurnEnd==='function') _moveLiveRunStatusToTurnEnd();
-  _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
+  // Read scroll geometry on the next animation frame, after this mutation batch
+  // has settled but before paint. Reading it here forces layout over the entire
+  // long transcript and hidden shell subtrees.
   _restoreLiveAnchorScrollSnapshotAfterRebuild(scrollSnapshot,scrollRebuildGuard);
-  if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
   return true;
 }
 function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
@@ -13217,9 +13302,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   preserveByKey.forEach(stale=>stale.remove());
   if(renderedRows.length) _syncTransparentEventControls(turn);
   if(typeof _moveLiveRunStatusToTurnEnd==='function') _moveLiveRunStatusToTurnEnd();
-  _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
   _restoreLiveAnchorScrollSnapshotAfterRebuild(scrollSnapshot,scrollRebuildGuard);
-  if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
   return !!renderedRows.length;
 }
 
@@ -14413,9 +14496,12 @@ function _compressionCardsNode(state){
 function appendLiveCompressionCard(state){
   if(!S.session||!S.activeStreamId||!state) return false;
   if(isLiveAnchorActivitySceneOwner(S.activeStreamId)){
-    return _renderLiveAnchorActivitySceneForStream(S.activeStreamId, S.session.session_id);
+    // Anchor source-event application already projected and painted this state.
+    // Repainting here rebuilt the same long Worklog twice per compression event.
+    return true;
   }
   const scrollSnapshot=_captureMessageScrollSnapshot();
+  const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(scrollSnapshot);
   let turn=$('liveAssistantTurn');
   if(!turn){
     turn=_createAssistantTurn();
@@ -14424,12 +14510,12 @@ function appendLiveCompressionCard(state){
     $('msgInner').appendChild(turn);
   }
   const inner=_assistantTurnBlocks(turn);
-  if(!inner) return false;
+  if(!inner){ if(scrollRebuildGuard.release) scrollRebuildGuard.release(); return false; }
   closeCurrentLiveActivityGroup();
   if(state.automatic){
     const group=ensureLiveWorklogContainer(inner,{activityKey:_activityKeyForLiveTurn()});
     const list=_toolWorklogListEl(group);
-    if(!group||!list) return false;
+    if(!group||!list){ if(scrollRebuildGuard.release) scrollRebuildGuard.release(); return false; }
     const node=_autoCompressionWorklogNode(state);
     node.setAttribute('data-live-compression-card','1');
     node.setAttribute('data-compression-phase',String(state.phase||''));
@@ -14453,8 +14539,7 @@ function appendLiveCompressionCard(state){
     else list.appendChild(node);
     _syncToolCallGroupSummary(group);
     _moveLiveRunStatusToTurnEnd();
-    _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
-    if(typeof scrollIfPinned==='function') scrollIfPinned();
+    _restoreLiveAnchorScrollSnapshotAfterRebuild(scrollSnapshot,scrollRebuildGuard);
     return true;
   }
   const node=_compressionCardsNode(state);
@@ -14482,8 +14567,7 @@ function appendLiveCompressionCard(state){
   const existing=inner.querySelector('[data-live-compression-card="1"]');
   if(existing) existing.replaceWith(node);
   else inner.appendChild(node);
-  _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
-  if(typeof scrollIfPinned==='function') scrollIfPinned();
+  _restoreLiveAnchorScrollSnapshotAfterRebuild(scrollSnapshot,scrollRebuildGuard);
   return true;
 }
 function _isHandoffSummaryToolPayload(value){
@@ -16045,7 +16129,8 @@ function renderMessages(options){
 
   const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);
   const visWithIdx=_getVisibleMessagesWithIdx();
-  $('emptyState').style.display=(visWithIdx.length||preservedCompressionTaskMessages.length)?'none':'';
+  if(visWithIdx.length||preservedCompressionTaskMessages.length) $('emptyState').style.display='none';
+  else showConversationEmptyState();
   const virtualWindow=virtualFallback
     ? {virtualized:false,start:0,end:visWithIdx.length,topPad:0,bottomPad:0,total:visWithIdx.length,tailStart:visWithIdx.length}
     : _currentMessageVirtualWindow(visWithIdx,_messageVirtualKeepTailCount());
@@ -18436,7 +18521,8 @@ function appendLiveToolCard(tc){
   if(opts.streamId&&S.activeStreamId!==opts.streamId) return;
   if(typeof isFinalAnswerOnlyMode==='function'&&isFinalAnswerOnlyMode()) return;
   if(isLiveAnchorActivitySceneOwner(opts.streamId||S.activeStreamId)){
-    _renderLiveAnchorActivitySceneForStream(opts.streamId||S.activeStreamId, opts.sessionId||S.session.session_id);
+    // The Anchor source-event apply is the sole owner of projection + paint.
+    // Compatibility appenders run after it and must not repaint the same scene.
     return;
   }
   let turn=$('liveAssistantTurn');

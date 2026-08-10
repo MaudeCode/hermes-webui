@@ -8,7 +8,7 @@ which:
 3. The render rebuilds the list DOM via list.innerHTML='' / appendChild loop
 4. After the rebuild, scrollTop was only restored when virtualWindow.virtualized
    was true (i.e. total > 80 rows)
-5. For lists ≤ 80 rows, the scrollTop reset to 0 on every scroll event,
+5. For lists below the virtualization threshold, the scrollTop reset to 0 on every scroll event,
    producing a "scroll keeps jumping back" feel.
 
 This test pins:
@@ -29,7 +29,7 @@ def test_render_restores_scroll_top_for_non_virtualized_lists():
     """The bug: virtualWindow.virtualized=false skipped the scrollTop restore.
 
     The fix: restore scrollTop whenever listScrollTopBeforeRender > 0,
-    regardless of virtualized flag. Otherwise small lists (≤80 rows) reset
+    regardless of virtualized flag. Otherwise small non-virtualized lists reset
     to scrollTop=0 on every render.
     """
     src = _read_source()
@@ -44,7 +44,7 @@ def test_render_restores_scroll_top_for_non_virtualized_lists():
 
 def test_scroll_handler_short_circuits_below_virtualization_threshold():
     """The bug: the rAF re-render fired on every scroll event regardless of
-    whether virtualization was actually needed. For ≤80-row lists this caused
+    whether virtualization was actually needed. For below-threshold lists this caused
     full DOM rebuild on every scroll tick.
 
     The fix: _scheduleSessionVirtualizedRender skips the rebuild when
@@ -78,8 +78,8 @@ def test_virtualization_still_active_for_large_lists():
     for large lists. The fix must not break the original virtualization path.
     """
     src = _read_source()
-    assert "SESSION_VIRTUAL_THRESHOLD_ROWS = 80" in src, (
-        "Threshold constant must remain at 80 rows."
+    assert "SESSION_VIRTUAL_THRESHOLD_ROWS = 40" in src, (
+        "The measured 70-row sidebar must stay on the bounded DOM path."
     )
     # _sessionVirtualWindow function still defined
     assert "function _sessionVirtualWindow" in src

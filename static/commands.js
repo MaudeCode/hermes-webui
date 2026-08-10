@@ -594,7 +594,7 @@ function cmdClear(){
   clearLiveToolCards();
   if(typeof clearCompressionUi==='function') clearCompressionUi();
   renderMessages();
-  $('emptyState').style.display='';
+  showConversationEmptyState();
   showToast(t('conversation_cleared'));
 }
 

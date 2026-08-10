@@ -1,0 +1,258 @@
+"""Browser-side regression gates for long live-turn rendering performance."""
+
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+NODE = shutil.which("node")
+
+
+def _run_node(script: str) -> dict:
+    assert NODE, "node is required for DOM-executed live-render tests"
+    result = subprocess.run(
+        [NODE, "-e", script],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+_EXTRACT_FUNC_JS = r"""
+function extractFunc(name){
+  const start=src.indexOf('function '+name);
+  if(start<0) throw new Error(name+' not found');
+  const params=src.indexOf('(',start);
+  let depth=0,close=-1;
+  for(let i=params;i<src.length;i++){
+    if(src[i]==='(') depth++;
+    else if(src[i]===')'&&--depth===0){close=i;break;}
+  }
+  const brace=src.indexOf('{',close);
+  depth=0;
+  for(let i=brace;i<src.length;i++){
+    if(src[i]==='{') depth++;
+    else if(src[i]==='}'&&--depth===0) return src.slice(start,i+1);
+  }
+  throw new Error(name+' body did not close');
+}
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for DOM-executed live-render tests")
+def test_compact_worklog_reconcile_preserves_unchanged_rows_without_clearing_list():
+    """A new live event must not tear down every earlier Compact Worklog row."""
+    script = f"""
+const fs=require('fs');
+const src=fs.readFileSync({json.dumps(str(ROOT / 'static' / 'ui.js'))},'utf8');
+{_EXTRACT_FUNC_JS}
+class FakeNode{{
+  constructor(tag='div'){{this.tagName=tag.toUpperCase();this.children=[];this.parentNode=null;this.attributes={{}};this.className='';this.clearCount=0;this._text='';}}
+  get firstChild(){{return this.children[0]||null;}}
+  get nextSibling(){{if(!this.parentNode)return null;const i=this.parentNode.children.indexOf(this);return this.parentNode.children[i+1]||null;}}
+  get firstElementChild(){{return this.firstChild;}}
+  get lastElementChild(){{return this.children[this.children.length-1]||null;}}
+  get innerHTML(){{return this.children.map(x=>x._text).join('');}}
+  set innerHTML(value){{if(value===''){{this.clearCount++;for(const child of this.children)child.parentNode=null;this.children=[];}}}}
+  setAttribute(name,value){{this.attributes[name]=String(value);}}
+  getAttribute(name){{return Object.prototype.hasOwnProperty.call(this.attributes,name)?this.attributes[name]:null;}}
+  appendChild(child){{return this.insertBefore(child,null);}}
+  insertBefore(child,ref){{
+    if(child.parentNode){{const old=child.parentNode.children.indexOf(child);if(old>=0)child.parentNode.children.splice(old,1);}}
+    child.parentNode=this;
+    const idx=ref?this.children.indexOf(ref):-1;
+    if(idx<0)this.children.push(child);else this.children.splice(idx,0,child);
+    return child;
+  }}
+  remove(){{if(!this.parentNode)return;const i=this.parentNode.children.indexOf(this);if(i>=0)this.parentNode.children.splice(i,1);this.parentNode=null;}}
+  replaceWith(node){{if(!this.parentNode)return;this.parentNode.insertBefore(node,this);this.remove();}}
+}}
+global.document={{createElement:tag=>new FakeNode(tag)}};
+global._toolWorklogListEl=group=>group.list;
+global._anchorSceneNodeForRow=row=>{{
+  const node=new FakeNode('div');
+  node._text=String(row.text||'');
+  node.setAttribute('data-anchor-scene-row','1');
+  node.setAttribute('data-anchor-row-id',row.row_id||'');
+  node.setAttribute('data-anchor-row-role',row.role||'activity');
+  node.setAttribute('data-anchor-source-event-type',row.source_event_type||'');
+  node._anchorSceneRenderSignature=JSON.stringify(row);
+  return node;
+}};
+global._syncToolCallGroupSummary=()=>{{}};
+for(const name of [
+  '_anchorSceneCompactRowKey','_anchorSceneCompactTopLevelKey',
+  '_anchorSceneCompactNodesEqual','_reconcileAnchorSceneCompactChildren',
+  '_renderAnchorSceneRowsIntoWorklog'
+]){{if(src.includes('function '+name))eval(extractFunc(name));}}
+const list=new FakeNode('div');
+const group={{list}};
+_renderAnchorSceneRowsIntoWorklog(group,[
+  {{row_id:'reason-1',role:'thinking',source_event_type:'reasoning',text:'unchanged'}},
+  {{row_id:'status-1',role:'control',source_event_type:'status',text:'running'}},
+],{{live:true}});
+const firstBefore=list.children[0];
+const secondBefore=list.children[1];
+_renderAnchorSceneRowsIntoWorklog(group,[
+  {{row_id:'reason-1',role:'thinking',source_event_type:'reasoning',text:'unchanged'}},
+  {{row_id:'status-1',role:'control',source_event_type:'status',text:'complete'}},
+],{{live:true}});
+process.stdout.write(JSON.stringify({{
+  firstPreserved:list.children[0]===firstBefore,
+  changedReplaced:list.children[1]!==secondBefore,
+  clearCount:list.clearCount,
+  order:list.children.map(x=>x.getAttribute('data-anchor-row-id')),
+}}));
+"""
+    result = _run_node(script)
+    assert result == {
+        "firstPreserved": True,
+        "changedReplaced": True,
+        "clearCount": 0,
+        "order": ["reason-1", "status-1"],
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for DOM-executed live-render tests")
+def test_anchor_owned_helpers_do_not_render_the_same_scene_twice():
+    """The source-event apply owns painting; compatibility appenders must no-op."""
+    script = f"""
+const fs=require('fs');
+const src=fs.readFileSync({json.dumps(str(ROOT / 'static' / 'ui.js'))},'utf8');
+{_EXTRACT_FUNC_JS}
+global.S={{session:{{session_id:'sid-1'}},activeStreamId:'stream-1'}};
+global.isFinalAnswerOnlyMode=()=>false;
+global.isLiveAnchorActivitySceneOwner=()=>true;
+let renders=0;
+global._renderLiveAnchorActivitySceneForStream=()=>{{renders++;return true;}};
+eval(extractFunc('appendLiveToolCard'));
+eval(extractFunc('appendLiveCompressionCard'));
+appendLiveToolCard({{tid:'tool-1',name:'read_file'}},{{sessionId:'sid-1',streamId:'stream-1'}});
+appendLiveCompressionCard({{sessionId:'sid-1',phase:'running',automatic:true}});
+process.stdout.write(JSON.stringify({{renders}}));
+"""
+    assert _run_node(script)["renders"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for DOM-executed live-render tests")
+def test_compact_scene_defers_scroll_restore_until_animation_frame():
+    """DOM mutation and scroll geometry reads must not share the same JS stack."""
+    script = f"""
+const fs=require('fs');
+const src=fs.readFileSync({json.dumps(str(ROOT / 'static' / 'ui.js'))},'utf8');
+{_EXTRACT_FUNC_JS}
+const turn={{
+  dataset:{{sessionId:'sid-1'}},attributes:{{}},
+  setAttribute(name,value){{this.attributes[name]=String(value);}},
+}};
+const blocks={{querySelectorAll:()=>[]}};
+const emptyState={{style:{{}}}};
+global.window={{}};
+global.S={{session:{{session_id:'sid-1',pending_started_at:1}},activeStreamId:'stream-1'}};
+global.chatActivityMode=()=> 'compact_worklog';
+global.isSimplifiedToolCalling=()=>true;
+global.$=id=>id==='liveAssistantTurn'?turn:id==='emptyState'?emptyState:null;
+global._anchorSceneRowsForRendering=scene=>scene.activity_rows;
+global._assistantTurnBlocks=()=>blocks;
+global._captureWorklogDetailDisclosureState=()=>null;
+global._captureMessageScrollSnapshot=()=>({{pinned:true,userUnpinned:false}});
+global._prepareLiveAnchorScrollRebuildGuard=()=>({{readerAwayFromBottom:false,release:null}});
+global._anchorSceneWorklogGroup=()=>({{}});
+global._renderAnchorSceneRowsIntoWorklog=()=>true;
+global._restoreWorklogDetailDisclosureState=()=>{{}};
+global._startActivityElapsedTimer=()=>{{}};
+global._dedupeLiveProcessedWorklogAnchors=()=>{{}};
+global._moveLiveRunStatusToTurnEnd=()=>{{}};
+global._messageUserUnpinned=false;
+let restores=0,scrolls=0;
+global._restoreMessageScrollSnapshotSameFrame=()=>{{restores++;}};
+global.scrollIfPinned=()=>{{scrolls++;}};
+const frames=[];
+global.requestAnimationFrame=fn=>{{frames.push(fn);return frames.length;}};
+eval(extractFunc('_restoreLiveAnchorScrollSnapshotAfterRebuild'));
+eval(extractFunc('renderLiveAnchorActivityScene'));
+const rendered=renderLiveAnchorActivityScene('stream-1',{{activity_rows:[{{row_id:'x',role:'thinking',text:'work'}}]}},{{sessionId:'sid-1'}});
+const beforeFrame={{restores,scrolls,frames:frames.length}};
+while(frames.length)frames.shift()();
+process.stdout.write(JSON.stringify({{rendered,beforeFrame,afterFrame:{{restores,scrolls}}}}));
+"""
+    result = _run_node(script)
+    assert result["rendered"] is True
+    assert result["beforeFrame"] == {"restores": 0, "scrolls": 0, "frames": 1}
+    assert result["afterFrame"] == {"restores": 1, "scrolls": 0}
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for DOM-executed live-render tests")
+def test_compact_scene_keeps_its_existing_owned_group_for_reconciliation():
+    """The outer renderer must not remove the group the keyed reconciler owns."""
+    script = f"""
+const fs=require('fs');
+const src=fs.readFileSync({json.dumps(str(ROOT / 'static' / 'ui.js'))},'utf8');
+{_EXTRACT_FUNC_JS}
+let groupRemoves=0,rowRemoves=0;
+const row={{remove(){{rowRemoves++;}}}};
+const group={{
+  remove(){{groupRemoves++;}},
+  contains(node){{return node===row;}},
+}};
+const blocks={{
+  querySelectorAll(selector){{
+    if(selector.includes('[data-anchor-scene-owner="1"]'))return [group,row];
+    if(selector.includes('.live-worklog'))return [group];
+    return [];
+  }},
+}};
+const turn={{dataset:{{sessionId:'sid-1'}},setAttribute(){{}}}};
+global.window={{}};
+global.S={{session:{{session_id:'sid-1'}},activeStreamId:'stream-1'}};
+global.chatActivityMode=()=> 'compact_worklog';
+global.isSimplifiedToolCalling=()=>true;
+global.$=id=>id==='liveAssistantTurn'?turn:id==='emptyState'?{{style:{{}}}}:null;
+global._anchorSceneRowsForRendering=scene=>scene.activity_rows;
+global._assistantTurnBlocks=()=>blocks;
+global._captureWorklogDetailDisclosureState=()=>null;
+global._captureMessageScrollSnapshot=()=>({{pinned:true}});
+global._prepareLiveAnchorScrollRebuildGuard=()=>({{readerAwayFromBottom:false,release:null}});
+global._anchorSceneWorklogGroup=()=>group;
+global._renderAnchorSceneRowsIntoWorklog=()=>true;
+global._restoreWorklogDetailDisclosureState=()=>{{}};
+global._startActivityElapsedTimer=()=>{{}};
+global._dedupeLiveProcessedWorklogAnchors=()=>{{}};
+global._moveLiveRunStatusToTurnEnd=()=>{{}};
+global._restoreLiveAnchorScrollSnapshotAfterRebuild=()=>{{}};
+eval(extractFunc('renderLiveAnchorActivityScene'));
+renderLiveAnchorActivityScene('stream-1',{{activity_rows:[{{row_id:'x',role:'thinking',text:'work'}}]}},{{sessionId:'sid-1'}});
+process.stdout.write(JSON.stringify({{groupRemoves,rowRemoves}}));
+"""
+    result = _run_node(script)
+    assert result == {"groupRemoves": 0, "rowRemoves": 0}
+
+
+def test_closed_workspace_panel_skips_hidden_subtree_rendering():
+    css = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    closed = "html[data-workspace-panel=\"closed\"] .rightpanel"
+    assert closed in css
+    rule = css.split(closed, 1)[1].split("}", 1)[0]
+    assert "content-visibility:hidden" in rule
+
+
+def test_returning_session_boot_does_not_animate_transient_empty_logo():
+    html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    css = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    ui = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+    assert "document.documentElement.dataset.sessionBoot='1'" in html
+    assert "location.pathname.indexOf('/session/')===0" in html
+    assert "localStorage.getItem('hermes-webui-session')" in html
+    assert 'html:not([data-session-boot="1"]) .empty-logo svg' in css
+    assert 'html[data-session-boot="1"] .empty-state{display:none}' in css
+    assert "function showConversationEmptyState()" in ui
+    assert "delete document.documentElement.dataset.sessionBoot" in ui

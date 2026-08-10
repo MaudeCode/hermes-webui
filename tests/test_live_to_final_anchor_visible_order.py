@@ -344,7 +344,10 @@ def test_live_ui_legacy_paths_exit_when_anchor_scene_owns_the_turn():
     ]:
         body = _function_body(UI_JS, fn_name)
         assert "isLiveAnchorActivitySceneOwner" in body
-        assert "_renderLiveAnchorActivitySceneForStream" in body or fn_name == "_syncLiveWorklogReasonsForAnchor"
+        if fn_name in {"appendLiveToolCard", "appendLiveCompressionCard"}:
+            assert "_renderLiveAnchorActivitySceneForStream" not in body
+        else:
+            assert "_renderLiveAnchorActivitySceneForStream" in body or fn_name == "_syncLiveWorklogReasonsForAnchor"
 
     remove = _function_body(UI_JS, "removeThinking")
     assert '.agent-activity-thinking:not([data-anchor-scene-row="1"])' in remove
@@ -620,7 +623,7 @@ def test_live_anchor_scene_removes_legacy_interim_collapse_toggle():
     cleanup_idx = live.index(".interim-collapse-toggle")
     hide_idx = live.index("blocks.querySelectorAll('[data-live-assistant=\"1\"]')")
     group_idx = live.index("const group=_anchorSceneWorklogGroup")
-    assert cleanup_idx < hide_idx < group_idx
+    assert group_idx < cleanup_idx < hide_idx
 
     guard_idx = interim.index("data-anchor-scene-live-owner")
     remove_idx = interim.index("blocks.querySelectorAll('.interim-collapse-toggle').forEach(el=>el.remove())")
@@ -673,7 +676,8 @@ def test_scene_renderer_allows_prose_tool_prose_tool_interleaving():
 
     assert "currentTools=null;" in render
     assert render.index("if(row.role==='tool')") < render.index("}else{")
-    assert render.index("currentTools=null;") < render.index("list.appendChild(node);")
+    assert render.index("currentTools=null;") < render.index("desired.push(node);")
+    assert "_reconcileAnchorSceneCompactChildren(list,desired,true);" in render
 
 
 def test_anchor_tool_preview_slot_stays_empty_for_result_text():

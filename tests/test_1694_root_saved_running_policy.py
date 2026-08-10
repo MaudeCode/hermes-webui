@@ -91,7 +91,7 @@ def test_root_saved_running_sidebar_only_path_renders_empty_state_and_sidebar():
     block = _boot_saved_session_block()
     helper_pos = block.find("_savedSessionSidebarOnlyState")
     render_pos = block.find("await renderSessionList()", helper_pos)
-    empty_pos = block.find("$('emptyState').style.display=''", helper_pos)
+    empty_pos = block.find("showConversationEmptyState()", helper_pos)
     return_pos = block.find("return;", helper_pos)
     assert helper_pos >= 0, "saved-running helper call not found"
     assert empty_pos > helper_pos, "sidebar-only path must show the empty state"

@@ -4204,7 +4204,10 @@ function _makeSessionSwipeAffordance(side, icon, label){
 }
 const SESSION_VIRTUAL_ROW_HEIGHT = 52;
 const SESSION_VIRTUAL_BUFFER_ROWS = 12;
-const SESSION_VIRTUAL_THRESHOLD_ROWS = 80;
+// A measured 70-row sidebar mounted ~2,400 descendants and materially enlarged
+// every transcript layout pass. Keep the existing bounded renderer active well
+// before that point while retaining a generous non-virtualized small-list path.
+const SESSION_VIRTUAL_THRESHOLD_ROWS = 40;
 let _sessionVirtualScrollList = null;
 let _sessionVirtualScrollRaf = 0;
 
@@ -4498,7 +4501,7 @@ function _renderBatchActionBar(){
         if(!pendingNavigationSurvives){
           const remaining=await api('/api/sessions'+_sessionListQueryString());
           if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
-          else{$('msgInner').innerHTML='';$('emptyState').style.display='';}
+          else{$('msgInner').innerHTML='';showConversationEmptyState();}
         }
       }
       if(cleanupFailedCount) showToast(t('delete_failed')+' ('+cleanupFailedCount+'/'+ids.length+')',0,'error');
@@ -9367,7 +9370,7 @@ async function deleteSession(sid, beforeDelete=null){
         const _tt=$('topbarTitle');if(_tt)_tt.textContent=assistantDisplayName();
         const _tm=$('topbarMeta');if(_tm)_tm.textContent='Start a new conversation';
         $('msgInner').innerHTML='';
-        $('emptyState').style.display='';
+        showConversationEmptyState();
         $('fileTree').innerHTML='';
         if(typeof S!=='undefined') S.session=null;
         if(typeof syncAppTitlebar==='function') syncAppTitlebar();

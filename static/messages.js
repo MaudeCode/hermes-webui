@@ -2092,7 +2092,7 @@ async function send(){
       setBusy(false);setComposerStatus('');
       if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
       if(typeof renderMessages==='function') renderMessages();
-      if($('emptyState')) $('emptyState').style.display='';
+      if($('emptyState')) showConversationEmptyState();
       if($('msgInner')) $('msgInner').innerHTML='';
       if(typeof renderSessionList==='function') void renderSessionList();
       return;

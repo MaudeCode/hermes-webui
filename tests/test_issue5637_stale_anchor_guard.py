@@ -209,7 +209,7 @@ def test_live_render_queue_preserves_real_upward_input_from_pinned_capture():
     assert result == {
         "rendered": True,
         "guardQueued": True,
-        "initialWrites": [90026],
+        "initialWrites": [],
         "writes": [],
         "finalScrollTop": 89000,
         "messageUserUnpinned": True,
@@ -224,7 +224,7 @@ def test_live_render_queue_repins_real_downward_input_at_bottom():
     assert result == {
         "rendered": True,
         "guardQueued": True,
-        "initialWrites": [89577],
+        "initialWrites": [],
         "writes": [],
         "finalScrollTop": 90026,
         "messageUserUnpinned": False,

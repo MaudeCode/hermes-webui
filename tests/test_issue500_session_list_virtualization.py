@@ -78,6 +78,27 @@ console.log(JSON.stringify(metrics));
     assert metrics["bottomPad"] > 0
 
 
+def test_session_virtual_window_bounds_a_measured_seventy_row_sidebar():
+    """The 70-row production reproduction must not mount every sidebar row."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+eval(extractFunc('_sessionVirtualWindow'));
+const metrics = _sessionVirtualWindow({
+  total: 70,
+  scrollTop: 0,
+  viewportHeight: 646,
+  itemHeight: 52,
+  buffer: 12,
+  threshold: 40,
+});
+console.log(JSON.stringify(metrics));
+"""
+    metrics = json.loads(_run_node(source))
+    assert metrics["virtualized"] is True
+    assert metrics["end"] - metrics["start"] <= 40
+    assert metrics["bottomPad"] > 0
+
+
 def test_session_virtual_window_keeps_active_session_rendered():
     """The active sidebar row must remain in the DOM when we anchor a new active session."""
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")

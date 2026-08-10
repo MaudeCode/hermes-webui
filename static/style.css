@@ -2543,6 +2543,7 @@
   .dot:nth-child(2){animation-delay:.22s;}.dot:nth-child(3){animation-delay:.44s;}
   @keyframes pulse{0%,80%,100%{opacity:.2;transform:scale(.8)}40%{opacity:.8;transform:scale(1)}}
   .empty-state{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:40px;color:var(--muted);}
+  html[data-session-boot="1"] .empty-state{display:none}
   .empty-state.no-suggestions .suggestion-grid{display:none}
   .empty-state.no-welcome{display:none}
   /* Empty-state brand mark: a free-breathing winged caduceus with a soft
@@ -2561,7 +2562,7 @@
   :root.dark .empty-logo .hm-g1{stop-color:#3889FD;}
   :root.dark{--logo-glow:radial-gradient(circle,rgba(8,235,241,0.20) 0%,rgba(56,137,253,0.15) 38%,transparent 72%);}
   @media (prefers-reduced-motion: no-preference){
-    .empty-logo svg{animation:emptyLogoRise .5s ease-out both;}
+    html:not([data-session-boot="1"]) .empty-logo svg{animation:emptyLogoRise .5s ease-out both;}
     @keyframes emptyLogoRise{from{opacity:0;transform:translateY(6px) scale(.96);}to{opacity:1;transform:none;}}
   }
   .empty-state h2{font-size:20px;color:var(--text);font-weight:700;letter-spacing:-.02em;}
@@ -2963,7 +2964,7 @@
   .pwa-sidebar-edge-guard{display:none;}
 
   @media(min-width:901px){
-    html[data-workspace-panel="closed"] .rightpanel{width:0 !important;min-width:0 !important;opacity:0;transform:translateX(14px);border-left-color:transparent;pointer-events:none;}
+    html[data-workspace-panel="closed"] .rightpanel{width:0 !important;min-width:0 !important;opacity:0;transform:translateX(14px);border-left-color:transparent;pointer-events:none;content-visibility:hidden;}
     .layout.workspace-panel-collapsed .rightpanel{width:0 !important;min-width:0 !important;opacity:0;transform:translateX(14px);border-left-color:transparent;pointer-events:none;}
     html[data-workspace-panel="closed"] .workspace-panel-edge-toggle{display:inline-flex;opacity:1;pointer-events:auto;transform:translateY(-50%);}
     html[data-workspace-panel="open"] .workspace-panel-edge-toggle{display:none;}
