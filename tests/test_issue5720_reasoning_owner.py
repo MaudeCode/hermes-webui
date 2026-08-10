@@ -67,10 +67,24 @@ def test_deepseek_reasoning_deltas_keep_one_live_row_owner():
     assert result["second_text"] == "Plan step"
     assert result["same_node"] is True
     assert result["live_reasoning_rows"] == 1
-    assert result["render_passes"] == [1, 2]
+    assert result["render_passes"] == [1, 1]
     assert result["anchor_reasoning_events"] == 1
     assert result["anchor_reasoning_text"] == "Plan step"
     assert result["inflight_reasoning_text"] == "Plan step"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_compact_worklog_reasoning_is_visible_on_first_delta():
+    """The Processed disclosure must not stay empty until session reattach."""
+    result = _run_reasoning_scene(activity_mode="compact_worklog")
+
+    assert result["first_text"] == "Plan"
+    assert result["second_text"] == "Plan step"
+    assert result["same_node"] is True
+    assert result["live_reasoning_rows"] == 1
+    assert result["fallback_rows_after_recovery"] == 0
+    assert result["anchor_reasoning_events"] == 1
+    assert result["anchor_reasoning_text"] == "Plan step"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -143,7 +157,7 @@ def test_reasoning_fallback_rebuilds_from_another_sessions_live_turn():
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 @pytest.mark.parametrize("activity_mode", ["transparent_stream", "compact_worklog"])
-def test_later_deferred_anchor_paint_updates_existing_reasoning_owner(activity_mode):
+def test_reasoning_delta_updates_existing_owner_without_full_scene_repaint(activity_mode):
     result = _run_reasoning_scene(
         activity_mode=activity_mode,
         fail_anchor_render_on=2,
@@ -155,7 +169,7 @@ def test_later_deferred_anchor_paint_updates_existing_reasoning_owner(activity_m
     assert result["live_reasoning_rows"] == 1
     assert result["fallback_rows_after_recovery"] == 0
     assert result["visible_reasoning_owners"] == 1
-    assert result["anchor_render_attempts"] == 2
+    assert result["anchor_render_attempts"] == 1
     assert result["anchor_reasoning_events"] == 1
     assert result["anchor_reasoning_text"] == "Plan step"
     assert result["inflight_reasoning_text"] == "Plan step"
@@ -488,12 +502,18 @@ for(const name of [
   '_thinkingMarkup','_renderThinkingInto',
   '_resetMismatchedLiveAssistantTurnForSession',
   '_liveAnchorReasoningRowForFallback','_updateLiveAnchorReasoningRowForFallback',
-  '_anchorSceneNodeForRow','_anchorSceneWorklogGroup','_renderAnchorSceneRowsIntoWorklog',
+  '_anchorSceneNodeForRow','_anchorSceneWorklogGroup',
+  '_anchorSceneCompactRowKey','_anchorSceneCompactTopLevelKey',
+  '_anchorSceneCompactNodesEqual','_reconcileAnchorSceneCompactChildren',
+  '_renderAnchorSceneRowsIntoWorklog',
   'isLiveAnchorActivitySceneOwner','_projectLiveAnchorActivitySceneForStream',
   '_restoreLiveAnchorScrollSnapshotAfterRebuild',
   '_renderLiveAnchorActivitySceneTransparent','renderLiveAnchorActivityScene',
   '_renderLiveAnchorActivitySceneForStream','appendThinking','updateThinking',
 ]) eval(extractFunc(uiSrc,name));
+// Classic browser scripts expose these declarations on `window`; Node's eval
+// does not, so mirror the production binding before exercising messages.js.
+window._updateLiveAnchorReasoningRowForFallback=_updateLiveAnchorReasoningRowForFallback;
 
 let transparentRenderPasses=0;
 const realTransparentRender=_renderLiveAnchorActivitySceneTransparent;
