@@ -86,7 +86,8 @@ def test_live_anchor_worklog_rebuild_guards_height_for_unpinned_reader():
     guard = _function_body(UI_JS, "_prepareLiveAnchorScrollRebuildGuard")
     compact = _compact(guard)
 
-    assert "constbeforeBottomDistance=Math.max(0,messagesEl.scrollHeight-messagesEl.scrollTop-messagesEl.clientHeight);" in compact
+    assert "letbeforeBottomDistance=Math.max(0,Number(scrollSnapshot.bottom)||0);" in compact
+    assert "if(beforeBottomDistance<=0&&(scrollSnapshot.userUnpinned===true||_messageUserUnpinned||_scrollPinned===false))" in compact
     assert "beforeBottomDistance>250&&(_messageUserUnpinned||_scrollPinned===false)" in compact
     assert "scrollSnapshot.pinned=false;" in compact
     assert "scrollSnapshot.userUnpinned=true;" in compact

@@ -31,9 +31,7 @@ def test_scroll_to_bottom_retries_after_next_layout_frame():
     assert fn.count("_lastScrollTop=el.scrollTop;") >= 2
 
 
-def test_scroll_if_pinned_recovers_when_far_from_bottom():
+def test_scroll_if_pinned_coalesces_tail_recovery():
     fn = _extract_fn(UI_JS, "scrollIfPinned")
-    assert "_messageBottomDistance()>500" in fn
-    assert "_setMessageScrollToBottom();" in fn
-    assert fn.index("_messageBottomDistance()>500") < fn.index("_settleMessageScrollToBottom(false)")
-
+    assert "_queueLiveTailFollowFrame()" in fn
+    assert "else _settleMessageScrollToBottom(false);" in fn

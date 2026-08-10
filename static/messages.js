@@ -2658,20 +2658,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function snapshotLiveTurn(){
     if(typeof snapshotLiveTurnHtmlForSession==='function') snapshotLiveTurnHtmlForSession(activeSid);
   }
-  // Throttled per-frame variant. snapshotLiveTurnHtmlForSession serializes the
-  // whole (growing) live turn via turn.outerHTML — O(n)/frame -> O(n^2) over a
-  // long answer, and a real GC-pressure source. The snapshot only backs
-  // mid-stream session-switch restore, and the switch path (sessions.js) plus
-  // the stream event boundaries (tool/done) already capture synchronously, so a
-  // coarse trailing snapshot during streaming is sufficient. (#5455 WS2.2)
-  let _snapshotLiveTurnTimer=null;
-  function _throttledSnapshotLiveTurn(){
-    if(_snapshotLiveTurnTimer) return;
-    _snapshotLiveTurnTimer=setTimeout(()=>{_snapshotLiveTurnTimer=null;snapshotLiveTurn();},700);
-  }
-  function _cancelThrottledSnapshotTimer(){
-    if(_snapshotLiveTurnTimer){clearTimeout(_snapshotLiveTurnTimer);_snapshotLiveTurnTimer=null;}
-  }
+  // Live-turn HTML is memory-only switch-away recovery. Session navigation and
+  // closeLiveStream snapshot synchronously, so token/tool paints must not
+  // serialize the entire growing DOM via outerHTML. Keep the cleanup hook for
+  // terminal call sites; there is no periodic timer to cancel anymore.
+  function _cancelThrottledSnapshotTimer(){}
   // Throttled variant for token-by-token updates. persistInflightState()
   // calls saveInflightState() which does JSON.parse + JSON.stringify + write
   // on the entire inflight map every call. On a fast model at 60 tok/s with
@@ -3030,7 +3021,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _anchorReasoningFlushed=false;
   let _anchorLocalSeq=0;
   if(_anchorRegistryMap&&_anchorRegistry) _anchorRegistryMap.set(streamId,_anchorRegistry);
-  function _scheduleAnchorRegistryCleanup(delayMs=600000){
+  function _scheduleAnchorRegistryCleanup(delayMs=30000){
     if(!_anchorRegistryMap||!_anchorRegistry) return;
     setTimeout(()=>{
       if(_anchorRegistryMap.get(streamId)===_anchorRegistry) _anchorRegistryMap.delete(streamId);
@@ -3040,7 +3031,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // registry self-expires no matter which teardown path the stream takes
   // (incl. external ones like sidebar cancelSessionStream() that bypass the
   // in-closure SSE handlers). Explicit terminal-path calls above just expire it
-  // sooner; this guarantees window._liveAnchorRegistries can't grow unbounded.
+  // sooner (30s by default, leaving headroom for deferred settlement retries);
+  // this guarantees window._liveAnchorRegistries can't grow unbounded.
   _scheduleAnchorRegistryCleanup(600000);
   // Applying an event and painting it are separate outcomes. Reasoning uses the
   // optional holder to decide whether a temporary visible fallback is needed.
@@ -4109,6 +4101,177 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       || (Array.isArray(scene&&scene.side_effects)&&scene.side_effects.length)
     );
   }
+  const _SETTLED_ANCHOR_SCENE_ROW_BUDGET=80;
+  const _SETTLED_ANCHOR_SCENE_BYTE_BUDGET=220000;
+  function _settledAnchorSceneByteLength(scene){
+    let encoded='';
+    try{ encoded=JSON.stringify(scene); }catch(_){ return Infinity; }
+    if(!encoded) return Infinity;
+    return typeof TextEncoder==='function'
+      ? new TextEncoder().encode(encoded).length
+      : encoded.length*3;
+  }
+  function _settledAnchorToolRowIdentity(row){
+    if(!row||row.role!=='tool') return '';
+    const tool=row.tool&&typeof row.tool==='object'?row.tool:{};
+    const payload=row.payload&&typeof row.payload==='object'?row.payload:{};
+    return String(
+      tool.tid||tool.id||tool.tool_call_id||tool.tool_use_id||tool.call_id||
+      payload.tid||payload.id||payload.tool_call_id||payload.tool_use_id||payload.call_id||
+      row.local_id||row.row_id||''
+    ).trim();
+  }
+  function _foldSettledAnchorToolRows(rows){
+    const folded=[];
+    const toolIndexById=new Map();
+    for(const sourceRow of (rows||[])){
+      if(!sourceRow||typeof sourceRow!=='object') continue;
+      const toolId=_settledAnchorToolRowIdentity(sourceRow);
+      if(!toolId){ folded.push(sourceRow); continue; }
+      const previousIdx=toolIndexById.get(toolId);
+      if(previousIdx===undefined){
+        toolIndexById.set(toolId,folded.length);
+        folded.push(sourceRow);
+        continue;
+      }
+      const previous=folded[previousIdx]||{};
+      const previousTool=previous.tool&&typeof previous.tool==='object'?previous.tool:{};
+      const nextTool=sourceRow.tool&&typeof sourceRow.tool==='object'?sourceRow.tool:{};
+      folded[previousIdx]={
+        ...previous,
+        ...sourceRow,
+        created_at:previous.created_at||sourceRow.created_at,
+        started_at:previous.started_at||sourceRow.started_at,
+        tool:{...previousTool,...nextTool},
+      };
+    }
+    return folded;
+  }
+  function _boundedSettledAnchorScene(scene){
+    if(!scene||!Array.isArray(scene.activity_rows)) return scene;
+    const originalRows=scene.activity_rows;
+    const foldedRows=_foldSettledAnchorToolRows(originalRows);
+    const toolRowsTotal=foldedRows.filter(row=>row&&row.role==='tool').length;
+    let rows=foldedRows.length>_SETTLED_ANCHOR_SCENE_ROW_BUDGET
+      ? foldedRows.slice(-_SETTLED_ANCHOR_SCENE_ROW_BUDGET)
+      : foldedRows.slice();
+    // Tool rows already carry the canonical display object in `tool`; retaining
+    // the raw source-event payload duplicates args/output in the persisted JSON.
+    rows=rows.map(row=>{
+      if(!row||row.role!=='tool'||!row.payload) return row;
+      const compact={...row};
+      delete compact.payload;
+      return compact;
+    });
+    let bounded={
+      ...scene,
+      activity_rows:rows,
+      activity_rows_total:originalRows.length,
+      tool_rows_total:toolRowsTotal,
+      activity_rows_omitted:Math.max(0,originalRows.length-rows.length),
+    };
+    // The persistence endpoint rejects scenes above 256 KB. Leave headroom for
+    // the request envelope and mixed-version serializers, dropping the oldest
+    // retained activity first while preserving final answer/outcome metadata.
+    while(rows.length){
+      if(_settledAnchorSceneByteLength(bounded)<=_SETTLED_ANCHOR_SCENE_BYTE_BUDGET) break;
+      rows=rows.slice(1);
+      bounded={
+        ...bounded,
+        activity_rows:rows,
+        activity_rows_omitted:Math.max(0,originalRows.length-rows.length),
+      };
+    }
+    // A single hostile/accidentally enormous row must not turn the bounded
+    // scene into an empty non-worklog that then skips persistence altogether.
+    if(!rows.length&&toolRowsTotal){
+      const source=[...foldedRows].reverse().find(row=>row&&row.role==='tool')||{};
+      const tool=source.tool&&typeof source.tool==='object'?source.tool:{};
+      rows=[{
+        role:'tool',
+        kind:source.kind||'tool_call',
+        row_id:source.row_id||source.local_id||'bounded-tool-summary',
+        local_id:source.local_id||source.row_id||'bounded-tool-summary',
+        source_event_type:source.source_event_type||'tool_complete',
+        status:source.status||'completed',
+        text:String(source.text||tool.name||'Tool activity').slice(0,512),
+        tool:{
+          name:String(tool.name||'tool').slice(0,128),
+          tid:String(tool.tid||tool.id||'').slice(0,256),
+          done:tool.done!==false,
+          is_error:!!tool.is_error,
+        },
+      }];
+      bounded={...bounded,activity_rows:rows,activity_rows_omitted:Math.max(0,originalRows.length-1)};
+    }
+    // Rows are not the only potentially large fields: final-answer text and
+    // artifact/side-effect payloads are also copied into the projection. The
+    // canonical message/session state already owns those full values, so if the
+    // optional UI scene is still over budget, persist a small navigational
+    // summary instead of sending a payload the server must reject.
+    if(_settledAnchorSceneByteLength(bounded)>_SETTLED_ANCHOR_SCENE_BYTE_BUDGET){
+      const clean=(value,limit)=>String(value||'').slice(0,limit);
+      const compactOutcome=(event)=>{
+        const item=event&&typeof event==='object'?event:{};
+        const payload=item.payload&&typeof item.payload==='object'?item.payload:{};
+        return {
+          source_event_type:clean(item.source_event_type,128),
+          status:clean(item.status,64),
+          created_at:item.created_at||null,
+          payload:{
+            kind:clean(payload.kind,128),
+            path:clean(payload.path,1024),
+            name:clean(payload.name,256),
+          },
+        };
+      };
+      const identity=scene.identity&&typeof scene.identity==='object'?scene.identity:{};
+      const lifecycle=scene.lifecycle&&typeof scene.lifecycle==='object'?scene.lifecycle:{};
+      const latestRow=rows.length?rows[rows.length-1]:null;
+      const latestTool=latestRow&&latestRow.tool&&typeof latestRow.tool==='object'?latestRow.tool:{};
+      const summaryRows=latestRow?[{
+        role:clean(latestRow.role,32)||'activity',
+        kind:clean(latestRow.kind,64)||'activity',
+        row_id:clean(latestRow.row_id||latestRow.local_id,256)||'bounded-activity-summary',
+        local_id:clean(latestRow.local_id||latestRow.row_id,256)||'bounded-activity-summary',
+        source_event_type:clean(latestRow.source_event_type,128),
+        status:clean(latestRow.status,64),
+        text:clean(latestRow.text||latestTool.name,512),
+        ...(latestRow.role==='tool'?{tool:{
+          name:clean(latestTool.name,128)||'tool',
+          id:clean(latestTool.id||latestTool.tid,256),
+          done:latestTool.done!==false,
+          is_error:!!latestTool.is_error,
+        }}:{}),
+      }]:[];
+      bounded={
+        version:'activity_scene_v1',
+        mode:clean(scene.mode,64),
+        identity:{
+          source_message_refs:Array.isArray(identity.source_message_refs)
+            ? identity.source_message_refs.slice(-16).map(value=>clean(value,256))
+            : [],
+        },
+        lifecycle:{
+          status:clean(lifecycle.status,64),
+          terminal_state:clean(lifecycle.terminal_state,64),
+          started_at:clean(lifecycle.started_at,128)||null,
+          completed_at:clean(lifecycle.completed_at,128)||null,
+        },
+        final_answer:'',
+        final_message_ref:clean(scene.final_message_ref,256)||null,
+        terminal_state:clean(scene.terminal_state,64)||null,
+        turn_duration:Number.isFinite(Number(scene.turn_duration))?Number(scene.turn_duration):null,
+        activity_rows:summaryRows,
+        activity_rows_total:originalRows.length,
+        tool_rows_total:toolRowsTotal,
+        activity_rows_omitted:Math.max(0,originalRows.length-summaryRows.length),
+        artifacts:(Array.isArray(scene.artifacts)?scene.artifacts:[]).slice(-8).map(compactOutcome),
+        side_effects:(Array.isArray(scene.side_effects)?scene.side_effects:[]).slice(-8).map(compactOutcome),
+      };
+    }
+    return bounded;
+  }
   function _attachProjectedAnchorSceneToLastAssistant(messages, targetMessage=null, targetIndex=null){
     if(!_anchorRegistry||!Array.isArray(messages)) return false;
     let lastAsst=targetMessage;
@@ -4127,7 +4290,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     if(!lastAsst) return false;
     const projectedScene=_projectLiveAnchorActivityScene();
-    const scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene);
+    const scene=_boundedSettledAnchorScene(
+      _completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene)
+    );
     const hasOwnedOutcomes=_anchorSceneHasOwnedOutcomes(scene);
     if(scene&&Array.isArray(scene.activity_rows)&&(scene.activity_rows.length||hasOwnedOutcomes)){
       const hasWorklogRows=_anchorSceneHasWorklogWorthyRows(scene);
@@ -4231,6 +4396,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         status:options.sealed?'completed':'running',
         payload:{text,activitySegmentSeq:segmentSeq,activityBurstId:_currentActivityBurstId},
       });
+      const turn=$('liveAssistantTurn');
+      if(turn&&typeof window._updateLiveAnchorProseRowForPatch==='function'&&window._updateLiveAnchorProseRowForPatch(turn,text,{
+        localId,
+        sealed:!!options.sealed,
+        streamId,
+        sessionId:activeSid,
+      })) return replaced;
       _renderAnchorLiveScene();
       return replaced;
     }
@@ -4393,6 +4565,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         status:options.sealed?'completed':'running',
         payload:{text:clean,activitySegmentSeq:segmentSeq,activityBurstId:_currentActivityBurstId},
       });
+      const turn=$('liveAssistantTurn');
+      if(turn&&typeof window._updateLiveAnchorReasoningRowForFallback==='function'&&window._updateLiveAnchorReasoningRowForFallback(turn,clean,{
+        ...options,
+        anchorReasoningLocalId:localId,
+        localId,
+        segmentSeq,
+        burstId:_currentActivityBurstId,
+        streamId,
+        sessionId:activeSid,
+      })) return replaced;
       return _renderAnchorLiveScene()?replaced:null;
     }
     const renderOutcome={rendered:false};
@@ -5998,7 +6180,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       if(anchorProcessText) _upsertAnchorProcessProse(anchorProcessText);
       scrollIfPinned();
-      _throttledSnapshotLiveTurn();
     };
     const frameIntervalMs=_shouldUseLiveProseFade()?33:66;
     if(sinceLastMs>=frameIntervalMs){
@@ -6196,7 +6377,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       _flushPendingSegmentRender({force:true});
       appendLiveToolCard(tc,{sessionId:activeSid,streamId});
-      snapshotLiveTurn();
       _freshSegment=true;
       _smdEndParser();
       _resetAssistantSegment();
@@ -6238,7 +6418,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       } else {
         appendLiveToolCard(tc,{sessionId:activeSid,streamId});
       }
-      snapshotLiveTurn();
       scrollIfPinned();
     });
 

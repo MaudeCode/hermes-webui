@@ -211,6 +211,10 @@ function createEnvironment() {
   globalThis._oldestIdx = 0;
   globalThis._messageRenderWindowSize = 0;
   globalThis._messageReloadLimitForSession = () => 2;
+  // Keep the extracted reload function's module-scope budget dependencies
+  // aligned with this harness's intentionally tiny two-message fixture.
+  globalThis._INITIAL_MSG_LIMIT = 2;
+  globalThis._FORCE_RELOAD_MSG_LIMIT = 80;
   // sessions.js module-level const, referenced by _ensureMessagesLoaded's
   // boundedReloadLimit ceiling check (#6152/#6154). Not one of the extracted
   // functions, so define it in the harness (matching the real value) or the

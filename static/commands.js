@@ -923,14 +923,13 @@ async function _applyManualCompressionResult(data, focusTopic, visibleCount, com
       await loadSession(data.session.session_id);
       if(!stillOwns()||!S.session||S.session.session_id!==data.session.session_id)return;
     }else{
-      S.session=data.session;
-      S.messages=data.session.messages||[];
-      S.toolCalls=data.session.tool_calls||[];
-      clearLiveToolCards();
+      // Compression mutates context metadata, not the display transcript. Merge
+      // the compact response in place so a large paginated chat is neither
+      // retransferred nor synchronously rebuilt twice.
+      S.session={...(S.session||{}),...data.session};
       try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
       if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
       syncTopbar();
-      renderMessages();
       await renderSessionList();
       if(!stillOwns())return;
       updateQueueBadge(S.session.session_id);
@@ -1024,15 +1023,12 @@ async function _runManualCompression(focusTopic,ownerCtx){
     // Preflight: verify the viewed session still exists before compressing.
     // This avoids a confusing "not found" toast when the UI is stale.
     try{
-      const live=await api(`/api/session?session_id=${encodeURIComponent(sid)}`);
+      const live=await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
       if(!commandOwnerCurrent(ownerCtx))return;
       if(!live||!live.session||live.session.session_id!==sid){
         throw new Error('session no longer available');
       }
-      S.session=live.session;
-      S.messages=live.session.messages||[];
-      S.toolCalls=live.session.tool_calls||[];
-      if(typeof _messagesTruncated!=='undefined') _messagesTruncated=false;
+      S.session={...(S.session||{}),...live.session};
     }catch(preflightErr){
       if(!commandOwnerCurrent(ownerCtx))return;
       if(typeof clearCompressionUi==='function') clearCompressionUi();

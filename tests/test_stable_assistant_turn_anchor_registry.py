@@ -865,6 +865,7 @@ function _projectLiveAnchorActivityScene(){{
   }};
 }}
 function _completeSettledAnchorSceneForTurn(messages,index,scene){{ return scene; }}
+function _boundedSettledAnchorScene(scene){{ return scene; }}
 function _persistSettledAnchorScene(){{ persisted+=1; }}
 function _attachProjectedAnchorSceneToLastAssistant(messages,targetMessage=null,targetIndex=null){{{attach_scene}}}
 const messages=[{{role:'assistant',content:'final answer'}}];

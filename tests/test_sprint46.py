@@ -333,8 +333,8 @@ def test_session_compress_roundtrip(monkeypatch, cleanup_test_sessions):
     assert payload["focus_topic"] == "database schema"
     assert payload["summary"]["headline"] == "Compressed: 4 → 2 messages"
     assert payload["session"]["session_id"] == sid
-    assert payload["session"]["messages"] == original_messages
-    assert payload["session"]["tool_calls"] == settled_tool_calls
+    assert "messages" not in payload["session"]
+    assert "tool_calls" not in payload["session"]
     assert payload["session"]["message_count"] == len(original_messages)
     assert payload["session"]["compression_anchor_summary"] is not None
     assert payload["session"]["compression_anchor_visible_idx"] == 3
@@ -442,13 +442,8 @@ def test_session_compress_start_is_async_and_reuses_running_job(monkeypatch, cle
         time.sleep(0.02)
     assert done_payload is not None
     assert done_payload["summary"]["headline"] == "Compressed: 4 → 2 messages"
-    assert done_payload["session"]["messages"] == [
-        {"role": "user", "content": "one"},
-        {"role": "assistant", "content": "two"},
-        {"role": "user", "content": "three"},
-        {"role": "assistant", "content": "four"},
-    ]
-    assert done_payload["session"]["tool_calls"] == settled_tool_calls
+    assert "messages" not in done_payload["session"]
+    assert "tool_calls" not in done_payload["session"]
     persisted = Session.load(sid)
     assert persisted.tool_calls == settled_tool_calls
     # /compress now stamps missing message timestamps, so compare role/content

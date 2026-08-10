@@ -3191,6 +3191,7 @@ const _INITIAL_MSG_LIMIT = 30;
 // longer drift. Keep this fallback value roughly in sync with the backend
 // _MAX_MSG_LIMIT for the mixed-version case where the server omits the field.
 const _MSG_LIMIT_MAX = 500;
+const _FORCE_RELOAD_MSG_LIMIT = 80;
 // Live server-advertised msg_limit ceiling. Declared at module scope with the
 // static fallback so the reload-width paths (_ensureMessagesLoaded /
 // _loadOlderMessages) always read a defined value even before the first
@@ -3238,11 +3239,13 @@ function _messageReloadLimitForSession(sid){
     const loadedRenderableCount=Math.max(0,Number(hint.loaded_renderable_count)||0);
     const loadedMessageCount=Math.max(0,Number(hint.loaded_message_count)||0);
     if(loadedRenderableCount>0 || loadedMessageCount>0){
-      if(!hint.truncated) return null;
       const previousMessageCount=Math.max(0,Number(hint.message_count)||0);
       const currentMessageCount=Math.max(0,Number(S.session&&S.session.session_id===sid&&S.session.message_count)||0);
       const appendedMessageCount=Math.max(0,currentMessageCount-previousMessageCount);
-      return Math.max(_INITIAL_MSG_LIMIT,loadedRenderableCount,loadedMessageCount+appendedMessageCount);
+      return Math.min(
+        _FORCE_RELOAD_MSG_LIMIT,
+        Math.max(_INITIAL_MSG_LIMIT,loadedRenderableCount,loadedMessageCount+appendedMessageCount)
+      );
     }
   }
   return _INITIAL_MSG_LIMIT;
@@ -3300,19 +3303,20 @@ async function _ensureMessagesLoaded(sid, opts) {
   }
   // Fetch session messages with a tail window for fast initial load.
   const reloadLimit = _messageReloadLimitForSession(sid); // defaults to _INITIAL_MSG_LIMIT
-  // A reload window above the server's msg_limit ceiling would be clamped by
-  // the backend (returning only the last _MSG_LIMIT_MAX rows), which can
-  // silently SHRINK an already-loaded transcript that had more than the ceiling
-  // of rows visible (rows 400–999 replaced by 500–999). When the requested
-  // window exceeds the ceiling, fall back to the bare full-transcript request
-  // (no msg_limit / no expand_renderable) so a same-session refresh never drops
-  // already-loaded older rows (Codex gate #6154, silent row-loss).
-  const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : null;
-  const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';
+  // A focus/recovery refresh must never turn into a bare full-transcript fetch.
+  // Once enough history had been loaded, the old fallback omitted msg_limit and
+  // rebuilt thousands of rows synchronously — the same tab-freeze class as an
+  // oversized terminal payload. Refresh the authoritative recent tail instead;
+  // older history remains explicitly pageable.
+  const boundedReloadLimit = Math.max(
+    _INITIAL_MSG_LIMIT,
+    Math.min(Number(reloadLimit)||_INITIAL_MSG_LIMIT, _msgLimitMax, _FORCE_RELOAD_MSG_LIMIT)
+  );
+  const reloadLimitParam = `&msg_limit=${boundedReloadLimit}`;
   // Older frontends used expand_renderable=1 to request visible-row expansion.
   // The server now counts msg_limit by visible transcript rows by default; keep
   // the flag for compatibility with mixed-version deployments.
-  const expandParam = boundedReloadLimit ? '&expand_renderable=1' : '';
+  const expandParam = '&expand_renderable=1';
   let data;
   try {
     data = await api(

@@ -5772,6 +5772,10 @@ let _settleRAF=0;
 let _settleRO=null;
 let _settleTimer=0;
 let _settleFinalTimer=0;
+let _liveTailFollowRaf=0;
+let _liveTailFollowRO=null;
+let _liveTailFollowStopTimer=0;
+let _liveTailFollowLastRequest=-Infinity;
 const NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS=350;
 let _touchStartY=null;
 let _messageTouchScrollActive=false;
@@ -5797,7 +5801,14 @@ let _lastMessageRenderAt=-Infinity;
 function _recentMessageRenderArtifactWindow(ms){
   return performance.now()-_lastMessageRenderAt<(ms||1400);
 }
-function _cancelBottomSettle(){ _bottomSettleToken++; if(_settleRO){ _settleRO.disconnect(); _settleRO=null; } clearTimeout(_settleTimer); clearTimeout(_settleFinalTimer); cancelAnimationFrame(_settleRAF); }
+function _cancelBottomSettle(){
+  _bottomSettleToken++;
+  if(_settleRO){ _settleRO.disconnect(); _settleRO=null; }
+  clearTimeout(_settleTimer);
+  clearTimeout(_settleFinalTimer);
+  cancelAnimationFrame(_settleRAF);
+  if(typeof _stopLiveTailFollowScheduler==='function') _stopLiveTailFollowScheduler();
+}
 function _markMessageTouchScrollIntent(active=true){
   _messageTouchScrollActive=!!active;
   _lastMessageTouchScrollIntentMs=performance.now();
@@ -6832,6 +6843,51 @@ function _setMessageScrollToBottom(){
     _deferClearProgrammaticScroll();
   });
 }
+function _stopLiveTailFollowScheduler(){
+  if(_liveTailFollowRaf){ cancelAnimationFrame(_liveTailFollowRaf); _liveTailFollowRaf=0; }
+  if(_liveTailFollowRO){ _liveTailFollowRO.disconnect(); _liveTailFollowRO=null; }
+  if(_liveTailFollowStopTimer){ clearTimeout(_liveTailFollowStopTimer); _liveTailFollowStopTimer=0; }
+  _liveTailFollowLastRequest=-Infinity;
+}
+function _writeLiveTailFollowFrame(){
+  _liveTailFollowRaf=0;
+  if(!window._autoScrollFollow||!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()){
+    _stopLiveTailFollowScheduler();
+    return;
+  }
+  const el=$('messages');
+  if(!el) return;
+  _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
+  el.scrollTop=el.scrollHeight;
+  _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
+  _nearBottomCount=2;
+  _deferClearProgrammaticScroll();
+}
+function _queueLiveTailFollowFrame(){
+  _liveTailFollowLastRequest=performance.now();
+  if(!_liveTailFollowRaf) _liveTailFollowRaf=requestAnimationFrame(_writeLiveTailFollowFrame);
+  // Reuse one observer for the active burst. The old path constructed and
+  // discarded a ResizeObserver plus several timers on every 15/30fps paint.
+  if(!_liveTailFollowRO&&typeof ResizeObserver==='function'){
+    const observed=$('msgInner')||$('messages');
+    if(observed){
+      _liveTailFollowRO=new ResizeObserver(()=>{
+        _liveTailFollowLastRequest=performance.now();
+        if(!_liveTailFollowRaf) _liveTailFollowRaf=requestAnimationFrame(_writeLiveTailFollowFrame);
+      });
+      _liveTailFollowRO.observe(observed);
+    }
+  }
+  if(!_liveTailFollowStopTimer){
+    const checkIdle=()=>{
+      const remaining=2000-(performance.now()-_liveTailFollowLastRequest);
+      if(remaining>0){ _liveTailFollowStopTimer=setTimeout(checkIdle,remaining); return; }
+      _liveTailFollowStopTimer=0;
+      _stopLiveTailFollowScheduler();
+    };
+    _liveTailFollowStopTimer=setTimeout(checkIdle,2000);
+  }
+}
 function _isMessagePaneNearBottom(threshold=250){
   const el=$('messages');
   if(!el) return false;
@@ -6876,7 +6932,7 @@ function _followMessagesAfterDomReplace(){
   }
   return false;
 }
-function _settleMessageScrollToBottom(force, explicit){
+function _settleMessageScrollToBottom(force, explicit, alreadyAnchored){
   // `explicit` = a user-invoked scroll-to-bottom (End button / scrollToBottom()).
   // When explicit, late-layout settling runs even if Auto-follow is OFF — the
   // setting only suppresses AUTOMATIC streaming follow, not a deliberate jump
@@ -6893,6 +6949,7 @@ function _settleMessageScrollToBottom(force, explicit){
   // resizes (no scrollHeight polling needed). On each notification we write
   // scrollTop once via rAF (batches multiple resize callbacks per frame into
   // a single write). After 300ms of no resize events, the observer disconnects.
+  _stopLiveTailFollowScheduler();
   const token=++_bottomSettleToken;
   cancelAnimationFrame(_settleRAF);
   if(_settleRO){ _settleRO.disconnect(); _settleRO=null; }
@@ -6900,7 +6957,7 @@ function _settleMessageScrollToBottom(force, explicit){
   clearTimeout(_settleFinalTimer);
 
   // Sync write anchors the viewport immediately.
-  _setMessageScrollToBottom();
+  if(!alreadyAnchored) _setMessageScrollToBottom();
 
   if(force) return;
 
@@ -6998,8 +7055,8 @@ function scrollIfPinned(){
   }
   if(!_scrollPinned) return;
   if(_recentNonMessageScrollIntent()) return;
-  if(_messageBottomDistance()>500) _setMessageScrollToBottom();
-  _settleMessageScrollToBottom(false);
+  if(typeof _queueLiveTailFollowFrame==='function') _queueLiveTailFollowFrame();
+  else _settleMessageScrollToBottom(false);
 }
 function scrollToBottom(){
   _clearNewMessageScrollCue();
@@ -7011,7 +7068,7 @@ function scrollToBottom(){
   // was skipping the observer and causing Firefox paint jumps when
   // renderMessages({preserveScroll:true}) + scrollToBottom() fired back-to-back.
   _setMessageScrollToBottom();
-  _settleMessageScrollToBottom(false, true);
+  _settleMessageScrollToBottom(false, true, true);
   _syncScrollToBottomCue(false,{newMessage:false});
   if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
   if(typeof _flushDeferredActiveSessionExternalRefresh==='function') _flushDeferredActiveSessionExternalRefresh();
@@ -12985,7 +13042,17 @@ function _projectLiveAnchorActivitySceneForStream(streamId, mode){
 function _prepareLiveAnchorScrollRebuildGuard(scrollSnapshot){
   const messagesEl=$('messages');
   if(!messagesEl||!scrollSnapshot) return {readerAwayFromBottom:false,release:null};
-  const beforeBottomDistance=Math.max(0,messagesEl.scrollHeight-messagesEl.scrollTop-messagesEl.clientHeight);
+  // The snapshot already captured pre-mutation geometry. Re-reading here
+  // forces a second synchronous layout flush in each live scene refresh.
+  let beforeBottomDistance=Math.max(0,Number(scrollSnapshot.bottom)||0);
+  // Compatibility for restored/older snapshots without a usable bottom
+  // distance. This runs only for an already-unpinned reader; the common pinned
+  // paint still performs no second geometry read.
+  if(beforeBottomDistance<=0&&(
+    scrollSnapshot.userUnpinned===true||_messageUserUnpinned||_scrollPinned===false
+  )){
+    beforeBottomDistance=Math.max(0,messagesEl.scrollHeight-messagesEl.scrollTop-messagesEl.clientHeight);
+  }
   // Only treat the reader as away if they were ALREADY in a non-follow state.
   // A pinned follower can transiently have bottomDistance>250 mid-render (the
   // assistant body grows before the anchor scene re-renders), so keying on a
@@ -13111,6 +13178,48 @@ function _updateLiveAnchorReasoningRowForFallback(turn, text, opts){
   if(turn&&typeof _syncTransparentEventControls==='function') _syncTransparentEventControls(turn);
   if(typeof scrollIfPinned==='function') scrollIfPinned();
   return true;
+}
+function _liveAnchorProseRowForPatch(turn, opts){
+  opts=opts||{};
+  const blocks=typeof _assistantTurnBlocks==='function' ? _assistantTurnBlocks(turn) : turn;
+  if(!turn||!blocks||!blocks.querySelectorAll) return null;
+  const localId=String(opts.localId||'').trim();
+  if(!localId) return null;
+  const streamId=String(opts.streamId||S.activeStreamId||'');
+  const sessionId=String(opts.sessionId||(S.session&&S.session.session_id)||'');
+  const rows=blocks.querySelectorAll('[data-anchor-scene-row="1"][data-anchor-local-id]');
+  for(const row of Array.from(rows)){
+    if(String(row.getAttribute('data-anchor-local-id')||'')!==localId) continue;
+    if(String(row.getAttribute('data-anchor-row-role')||'')!=='prose') continue;
+    const rowStreamId=String(row.getAttribute('data-anchor-stream-id')||'');
+    if(rowStreamId&&streamId&&rowStreamId!==streamId) continue;
+    const rowSessionId=String(row.getAttribute('data-session-id')||'');
+    if(rowSessionId&&sessionId&&rowSessionId!==sessionId) continue;
+    return row;
+  }
+  return null;
+}
+// The live prose row is a persistent streaming-markdown node. Feed its delta
+// in place instead of re-projecting and reconciling the complete activity
+// scene on every token frame.
+function _updateLiveAnchorProseRowForPatch(turn, text, opts){
+  opts=opts||{};
+  const clean=String(text||'').trim();
+  const row=_liveAnchorProseRowForPatch(turn,opts);
+  if(!clean||!row||typeof window.__anchorProseIncrementalNode!=='function') return false;
+  const patched=window.__anchorProseIncrementalNode(String(opts.localId||''),clean,{
+    finalize:!!opts.sealed,
+  });
+  if(patched!==row) return false;
+  if(row.classList&&row.classList.contains('transparent-event-row')&&typeof _syncTransparentEventControls==='function'){
+    _syncTransparentEventControls(turn);
+  }
+  if(typeof scrollIfPinned==='function') scrollIfPinned();
+  return true;
+}
+if(typeof window!=='undefined'){
+  window._updateLiveAnchorReasoningRowForFallback=_updateLiveAnchorReasoningRowForFallback;
+  window._updateLiveAnchorProseRowForPatch=_updateLiveAnchorProseRowForPatch;
 }
 function renderLiveAnchorActivityScene(streamId, scene, opts){
   opts=opts||{};
@@ -15355,17 +15464,24 @@ function _hydrateIdLinkedHistoricalToolScenes(messages, options){
 function _captureMessageScrollSnapshot(){
   const el=$('messages');
   if(!el) return null;
-  const bottom=Math.max(0,el.scrollHeight-el.scrollTop-el.clientHeight);
+  // Read geometry once. A pinned tail follower never consumes a semantic row
+  // anchor, so avoid the getBoundingClientRect() scan over every rendered row.
+  const scrollHeight=el.scrollHeight;
+  const top=el.scrollTop;
+  const clientHeight=el.clientHeight;
+  const bottom=Math.max(0,scrollHeight-top-clientHeight);
   const readerAwayFromBottom=bottom>250&&(
     _messageUserUnpinned ||
     _scrollPinned===false ||
     (typeof _recentMessageScrollIntent==='function'&&_recentMessageScrollIntent())
   );
   return {
-    anchor:(typeof _captureMessageViewportAnchor==='function')?_captureMessageViewportAnchor():null,
-    top:el.scrollTop,
+    anchor:readerAwayFromBottom&&typeof _captureMessageViewportAnchor==='function'
+      ? _captureMessageViewportAnchor()
+      : null,
+    top,
     bottom,
-    scrollHeight:el.scrollHeight,
+    scrollHeight,
     inputGeneration:typeof _messageScrollInputGeneration==='number' ? _messageScrollInputGeneration : 0,
     pinned:readerAwayFromBottom?false:_shouldFollowMessagesOnDomReplace(),
     userUnpinned:readerAwayFromBottom?true:_messageUserUnpinned,

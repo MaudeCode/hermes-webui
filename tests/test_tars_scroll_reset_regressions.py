@@ -58,7 +58,7 @@ def test_scroll_to_bottom_settles_across_late_markdown_layout_growth():
     # scrollToBottom uses force=false so the observer runs, and explicit=true so the
     # settle still runs even when Auto-follow is off (explicit user jump). The
     # automatic scrollIfPinned() path passes no explicit flag (stays auto-gated).
-    assert "_settleMessageScrollToBottom(false, true)" in scroll
+    assert "_settleMessageScrollToBottom(false, true, true)" in scroll
     assert "_settleMessageScrollToBottom(false)" in pinned
     assert "!_scrollPinned" in settle
     assert "const token=++_bottomSettleToken" in settle
@@ -69,7 +69,7 @@ def test_scroll_to_bottom_writes_scroll_position_immediately_before_delayed_sett
     scroll = _function_body(UI_JS, "function scrollToBottom")
 
     immediate_idx = scroll.index("_setMessageScrollToBottom();")
-    settle_idx = scroll.index("_settleMessageScrollToBottom(false, true)")
+    settle_idx = scroll.index("_settleMessageScrollToBottom(false, true, true)")
 
     assert immediate_idx < settle_idx, (
         "scrollToBottom() must write scrollTop synchronously before scheduling the "
@@ -166,7 +166,7 @@ def test_preserve_scroll_restores_unpinned_viewport_after_dom_rebuild():
     assert "_restoreMessageScrollSnapshot(scrollSnapshot);\n    _maybeShowNewMessageScrollCue(scrollSnapshot);" in after_render
     assert "_shouldFollowMessagesOnDomReplace()" in follow
     assert "scrollToBottom();" in follow
-    assert "anchor:(typeof _captureMessageViewportAnchor==='function')?_captureMessageViewportAnchor():null" in capture
+    assert "anchor:readerAwayFromBottom&&typeof _captureMessageViewportAnchor==='function'" in capture
     assert "sessionIdx:Number.isFinite(sessionIdx)?sessionIdx:_messageSessionIndexForRawIdx(rawIdx)" in UI_JS
     assert "key:row&&row.dataset?String(row.dataset.messageAnchorKey||''):''" in UI_JS
     assert "row.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);" in UI_JS

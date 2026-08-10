@@ -25393,8 +25393,6 @@ def _handle_session_compress(handler, body):
 
         session_payload = redact_session_data(
             s.compact() | {
-                "messages": s.messages,
-                "tool_calls": s.tool_calls,
                 "active_stream_id": s.active_stream_id,
                 "pending_user_message": s.pending_user_message,
                 "pending_attachments": s.pending_attachments,

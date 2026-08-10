@@ -1074,10 +1074,11 @@ def test_messages_js_live_assistant_segment_reuses_live_turn_wrapper(cleanup_tes
 
 
 def test_messages_js_stream_perf_cleanup_lifecycle(cleanup_test_sessions):
-    """#5455 review: throttled snapshot timers and incremental anchor caches tear down at terminal events."""
+    """Live DOM snapshots stay off paint/tool hot paths; anchor caches still tear down."""
     src = (REPO_ROOT / "static/messages.js").read_text()
     assert "function _cancelThrottledSnapshotTimer()" in src
-    assert "clearTimeout(_snapshotLiveTurnTimer)" in src
+    assert "_snapshotLiveTurnTimer" not in src
+    assert "_throttledSnapshotLiveTurn" not in src
     assert "function _clearAnchorProseIncrementalNode()" in src
     assert "window.__anchorProseIncrementalNode===_anchorProseIncrementalNode" in src
     assert "_anchorProseSmdCache.clear();" in src
