@@ -66,6 +66,10 @@ _FSYNC_MODE_TERMINAL_ONLY = "terminal-only"
 _SESSION_REPLAY_MAX_BYTES = 4 * 1024 * 1024
 _SESSION_REPLAY_MAX_ROWS = 4096
 _SESSION_REPLAY_READ_CHUNK_BYTES = 64 * 1024
+_LIVE_SNAPSHOT_MAX_BYTES = 1024 * 1024
+_LIVE_SNAPSHOT_MAX_ROWS = 512
+_RUN_SUMMARY_MAX_BYTES = 4 * 1024 * 1024
+_RUN_SUMMARY_MAX_ROWS = 512
 _SNAPSHOT_ARGS_MAX_ITEMS = 64
 _SNAPSHOT_ARGS_MAX_DEPTH = 8
 _SNAPSHOT_ARGS_MAX_STRING_CHARS = 8192
@@ -688,6 +692,64 @@ def read_run_events(
     }
 
 
+def read_run_event_tail(
+    session_id: str,
+    run_id: str,
+    *,
+    session_dir: Path | None = None,
+    max_bytes: int = _LIVE_SNAPSHOT_MAX_BYTES,
+    max_rows: int = _LIVE_SNAPSHOT_MAX_ROWS,
+) -> dict:
+    """Read a bounded recent window for active-run recovery snapshots."""
+    sid = _validate_id(session_id, "session_id")
+    rid = _validate_id(run_id, "run_id")
+    path = _run_path(sid, rid, session_dir=session_dir)
+    byte_limit = max(1, int(max_bytes))
+    row_limit = max(1, int(max_rows))
+    try:
+        size = path.stat().st_size
+        start = max(0, size - byte_limit)
+        with path.open("rb") as fh:
+            fh.seek(start)
+            raw = fh.read(byte_limit)
+    except (FileNotFoundError, OSError):
+        return {
+            "session_id": sid,
+            "run_id": rid,
+            "events": [],
+            "malformed": [],
+            "truncated": False,
+        }
+
+    if start:
+        newline = raw.find(b"\n")
+        raw = b"" if newline < 0 else raw[newline + 1 :]
+    raw_lines = raw.splitlines()
+    rows_truncated = len(raw_lines) > row_limit
+    selected = raw_lines[-row_limit:]
+    events: list[dict] = []
+    malformed: list[dict] = []
+    for offset, line in enumerate(selected, start=1):
+        if not line.strip():
+            continue
+        try:
+            parsed = json.loads(line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            malformed.append({"tail_line": offset})
+            continue
+        if isinstance(parsed, dict):
+            events.append(parsed)
+        else:
+            malformed.append({"tail_line": offset})
+    return {
+        "session_id": sid,
+        "run_id": rid,
+        "events": events,
+        "malformed": malformed,
+        "truncated": bool(start or rows_truncated),
+    }
+
+
 def select_authoritative_terminal_event(events: Iterable[dict]) -> dict | None:
     """Return the terminal event that owns the run's settled outcome.
 
@@ -738,8 +800,18 @@ def latest_run_summary(session_id: str, run_id: str, *, session_dir: Path | None
     if cached is not None:
         return cached
     pre_read_signature = _summary_cache_signature(path)
-    events, _malformed = _read_jsonl(path)
+    tail = read_run_event_tail(
+        session_id,
+        run_id,
+        session_dir=session_dir,
+        max_bytes=_RUN_SUMMARY_MAX_BYTES,
+        max_rows=_RUN_SUMMARY_MAX_ROWS,
+    )
+    events = tail.get("events") or []
     summary = _summary_from_events(session_id, run_id, events)
+    if events:
+        summary["event_count"] = int(events[-1].get("seq") or len(events))
+    summary["journal_truncated"] = bool(tail.get("truncated"))
     _cache_summary(path, summary, expected_signature=pre_read_signature)
     return summary
 
@@ -787,8 +859,18 @@ def find_run_summary(run_id: str, *, session_dir: Path | None = None) -> dict | 
         summary = _get_cached_summary(path)
         if summary is None:
             pre_read_signature = _summary_cache_signature(path)
-            events, _malformed = _read_jsonl(path)
+            tail = read_run_event_tail(
+                session_id,
+                rid,
+                session_dir=root,
+                max_bytes=_RUN_SUMMARY_MAX_BYTES,
+                max_rows=_RUN_SUMMARY_MAX_ROWS,
+            )
+            events = tail.get("events") or []
             summary = _summary_from_events(session_id, rid, events)
+            if events:
+                summary["event_count"] = int(events[-1].get("seq") or len(events))
+            summary["journal_truncated"] = bool(tail.get("truncated"))
             _cache_summary(path, summary, expected_signature=pre_read_signature)
         summary["path"] = str(path)
         return summary

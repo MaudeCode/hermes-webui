@@ -2300,7 +2300,7 @@ def test_runtime_journal_snapshot_includes_live_anchor_activity_scene(monkeypatc
     )
     monkeypatch.setattr(
         routes,
-        "read_run_events",
+        "read_run_event_tail",
         lambda session_id, run_id: {"events": events},
     )
 
@@ -2352,7 +2352,7 @@ def test_runtime_journal_snapshot_dedupes_reasoning_interim_progress_echo(monkey
     )
     monkeypatch.setattr(
         routes,
-        "read_run_events",
+        "read_run_event_tail",
         lambda session_id, run_id: {"events": events},
     )
 
@@ -2380,7 +2380,7 @@ def test_runtime_journal_snapshot_has_running_anchor_row_before_first_token(monk
     )
     monkeypatch.setattr(
         routes,
-        "read_run_events",
+        "read_run_event_tail",
         lambda session_id, run_id: {
             "events": [
                 {

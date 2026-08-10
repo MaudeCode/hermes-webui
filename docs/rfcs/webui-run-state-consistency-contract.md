@@ -113,6 +113,15 @@ and 5; it does not mark every run-state boundary implemented.
    diagnostic detail, not the source of truth for the divider's running state.
    Later tool, reasoning, or interim assistant events prove the compression
    barrier has passed even if no explicit completion event was delivered.
+7. **Recovery work is bounded.** Session load and live-run reattach may project a
+   recent journal window while preserving the latest durable cursor and total
+   event count. They must not parse, serialize, or render an unbounded active
+   journal in one request. A truncated transport snapshot is an observation
+   optimization; the append-only journal remains authoritative.
+8. **Automatic turns have a distinct circuit breaker.** A process-completion
+   wakeup uses bounded tool iterations, wall-clock runtime, and no-activity time.
+   Those limits do not apply to a user-started WebUI turn, and a limit exit must
+   be reported as an automatic-wakeup limit rather than a user cancellation.
    Settled final history should omit live-only automatic-compression rows unless
    there is a user-visible recovery or error state to explain.
 7. **Observation has a degraded path.** Long-running or many-session observation

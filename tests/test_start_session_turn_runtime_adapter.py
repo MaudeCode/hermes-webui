@@ -128,3 +128,65 @@ def test_start_session_turn_routes_through_adapter_when_enabled(
     assert resp["_status"] == 200
     assert resp["stream_id"] == "stream-via-adapter"
     assert invoked == {"adapter": 1, "start_run": 1}
+
+
+def test_process_wakeup_start_retargets_sealed_snapshot(monkeypatch):
+    """The authoritative start entrypoint must never execute on a snapshot."""
+    from api import routes
+
+    parent = types.SimpleNamespace(
+        session_id="sealed-parent",
+        pre_compression_snapshot=True,
+    )
+    child = types.SimpleNamespace(
+        session_id="live-child",
+        pre_compression_snapshot=False,
+        model="opus",
+        model_provider="anthropic",
+        profile="developer-general",
+        workspace="/tmp/ws-test",
+    )
+    sessions = {parent.session_id: parent, child.session_id: child}
+    monkeypatch.setattr(routes, "get_session", lambda sid: sessions[sid])
+    monkeypatch.setattr(
+        routes,
+        "_pre_compression_continuation_session_id",
+        lambda session: child.session_id if session is parent else None,
+    )
+    monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda *_: child.workspace)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda model, provider, **_kwargs: (model, provider, model),
+    )
+    started = []
+    monkeypatch.setattr(
+        routes,
+        "_start_run",
+        lambda session, **kwargs: started.append((session.session_id, kwargs["source"]))
+        or {"_status": 200, "stream_id": "child-stream", "session_id": session.session_id},
+    )
+    import api.background_process as bp
+    monkeypatch.setattr(bp, "get_session_channel", lambda _sid: None)
+
+    response = routes.start_session_turn(parent.session_id, "wake", source="process_wakeup")
+
+    assert response["session_id"] == child.session_id
+    assert started == [(child.session_id, "process_wakeup")]
+
+
+def test_process_wakeup_start_refuses_snapshot_without_continuation(monkeypatch):
+    """Uncertain snapshot ownership is retained for retry, never run permissively."""
+    from api import routes
+
+    parent = types.SimpleNamespace(
+        session_id="sealed-parent",
+        pre_compression_snapshot=True,
+    )
+    monkeypatch.setattr(routes, "get_session", lambda _sid: parent)
+    monkeypatch.setattr(routes, "_pre_compression_continuation_session_id", lambda _session: None)
+
+    response = routes.start_session_turn(parent.session_id, "wake", source="process_wakeup")
+
+    assert response["_status"] == 409
+    assert response["error"] == "process_wakeup_snapshot_unresolved"

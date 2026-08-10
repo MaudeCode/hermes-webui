@@ -1264,7 +1264,7 @@ def test_equal_seq_recovery_preserves_full_durable_tool_args(monkeypatch):
     )
     monkeypatch.setattr(
         routes,
-        "read_run_events",
+        "read_run_event_tail",
         lambda session_id, run_id: {"events": events}
         if session_id == "session-1" and run_id == stream_id
         else {"events": []},

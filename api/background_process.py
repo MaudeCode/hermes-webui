@@ -977,8 +977,19 @@ def _start_async_delegation_wakeup_turn(
         try:
             from api.routes import start_session_turn
 
+            target_session_id = _resolve_startable_wakeup_target(session_id)
+            if not target_session_id:
+                release_async_delegation_delivery(evt, claim)
+                _retry_unclaimed_async_delegation_event(
+                    process_registry, evt, keep_legacy_retrying=True
+                )
+                logger.warning(
+                    "async delegation wakeup retained for session %s: no verified live continuation",
+                    session_id,
+                )
+                return
             resp = start_session_turn(
-                session_id,
+                target_session_id,
                 wakeup_prompt,
                 source="process_wakeup",
             )
@@ -990,13 +1001,13 @@ def _start_async_delegation_wakeup_turn(
             if 200 <= status < 300:
                 _record_async_delegation_accepted(
                     evt,
-                    session_id=session_id,
+                    session_id=target_session_id,
                     claim=claim,
                 )
                 logger.info(
                     "async delegation wakeup turn accepted for session %s "
                     "(stream_id=%s)",
-                    session_id,
+                    target_session_id,
                     (resp or {}).get("stream_id"),
                 )
                 return
@@ -1008,13 +1019,13 @@ def _start_async_delegation_wakeup_turn(
             if status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
                 logger.info(
                     "async delegation wakeup paused for session %s; delivery remains retryable",
-                    session_id,
+                    target_session_id,
                 )
             else:
                 logger.debug(
                     "async delegation wakeup not accepted for session %s: "
                     "status=%s err=%r; durable retry scheduled",
-                    session_id,
+                    target_session_id,
                     status,
                     (resp or {}).get("error"),
                 )
@@ -1135,6 +1146,48 @@ def _resolve_live_completion_target(session_id: str) -> str:
             exc_info=True,
         )
     return candidate
+
+
+def _resolve_startable_wakeup_target(session_id: str) -> str:
+    """Return a live continuation that may safely own new automatic work.
+
+    Completion ownership lookup remains backward-compatible for legacy ids,
+    but execution must fail closed: a sealed pre-compression snapshot is never
+    a valid turn owner, and an unreadable/ambiguous lineage is not permission
+    to mutate it.  Follow a bounded chain because long sessions can compress
+    more than once before a deferred completion is drained.
+    """
+    candidate = str(session_id or "").strip()
+    seen: set[str] = set()
+    try:
+        from api.models import get_session
+        from api.routes import _pre_compression_continuation_session_id
+
+        for _ in range(8):
+            if not candidate or candidate in seen:
+                return ""
+            seen.add(candidate)
+            session = get_session(candidate, metadata_only=True)
+            if not getattr(session, "pre_compression_snapshot", False):
+                return candidate
+            continuation = str(
+                _pre_compression_continuation_session_id(session) or ""
+            ).strip()
+            if not continuation:
+                logger.warning(
+                    "automatic wakeup retained: sealed snapshot %s has no "
+                    "resolvable continuation",
+                    candidate,
+                )
+                return ""
+            candidate = continuation
+    except Exception:
+        logger.warning(
+            "automatic wakeup retained: could not verify live owner for %r",
+            candidate,
+            exc_info=True,
+        )
+    return ""
 
 
 def _resolve_completion_target(
@@ -1492,6 +1545,36 @@ def claim_deferred_wakeups(session_id: str) -> list[dict]:
         return []
 
 
+def _move_deferred_wakeups(source_session_id: str, target_session_id: str) -> int:
+    """Atomically re-key queued prompts after a compression rotation."""
+    source = str(source_session_id or "").strip()
+    target = str(target_session_id or "").strip()
+    if not source or not target or source == target:
+        return 0
+    from api import config as _cfg
+
+    with _cfg.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        incoming = _cfg.DEFERRED_PROCESS_WAKEUPS.pop(source, []) or []
+        if not incoming:
+            return 0
+        existing = _cfg.DEFERRED_PROCESS_WAKEUPS.setdefault(target, [])
+        existing_ids = {
+            str((entry or {}).get("process_id") or "")
+            for entry in existing
+            if str((entry or {}).get("process_id") or "")
+        }
+        moved = 0
+        for entry in incoming:
+            process_id = str((entry or {}).get("process_id") or "")
+            if process_id and process_id in existing_ids:
+                continue
+            existing.append(entry)
+            if process_id:
+                existing_ids.add(process_id)
+            moved += 1
+        return moved
+
+
 def drain_deferred_wakeups_for_session(session_id: str) -> int:
     """Turn-teardown idle-hook: redeliver deferred wakeups once idle.
 
@@ -1517,8 +1600,18 @@ def drain_deferred_wakeups_for_session(session_id: str) -> int:
     from api import config as _cfg
 
     try:
+        target_session_id = _resolve_startable_wakeup_target(session_id)
+        if not target_session_id:
+            # Fail closed and leave the source queue intact. A later lineage
+            # repair/retry may make the continuation resolvable.
+            return 0
+        if target_session_id != session_id and _session_has_active_turn(target_session_id):
+            _move_deferred_wakeups(session_id, target_session_id)
+            _cfg.PENDING_BG_TASK_COMPLETIONS.discard(session_id)
+            _cfg.PENDING_BG_TASK_COMPLETIONS.add(target_session_id)
+            return 0
         # Multi-stream guard: only fire when the session is TRULY idle.
-        if _session_has_active_turn(session_id):
+        if _session_has_active_turn(target_session_id):
             return 0
         # Peek without claiming: avoid taking the entries then discovering
         # there is nothing to do under contention.
@@ -1557,12 +1650,12 @@ def drain_deferred_wakeups_for_session(session_id: str) -> int:
             # hook and tries to claim them.
             for entry in leftover[1:]:
                 record_deferred_wakeup(
-                    session_id,
+                    target_session_id,
                     str((entry or {}).get("process_id") or ""),
                     str((entry or {}).get("wakeup_prompt") or "").strip(),
                 )
             _start_server_side_wakeup_turn(
-                session_id,
+                target_session_id,
                 str((first or {}).get("wakeup_prompt") or "").strip(),
                 process_id=str((first or {}).get("process_id") or ""),
             )
@@ -1572,7 +1665,7 @@ def drain_deferred_wakeups_for_session(session_id: str) -> int:
                 "turn-teardown idle-hook redelivered %d deferred wakeup(s) "
                 "for session %s",
                 started,
-                session_id,
+                target_session_id,
             )
         return started
     except Exception:
@@ -1647,14 +1740,23 @@ def _start_server_side_wakeup_turn(
         try:
             from api.routes import start_session_turn
 
+            target_session_id = _resolve_startable_wakeup_target(session_id)
+            if not target_session_id:
+                if wakeup_prompt:
+                    record_deferred_wakeup(session_id, process_id, wakeup_prompt)
+                logger.warning(
+                    "server-side wakeup retained for session %s: no verified live continuation",
+                    session_id,
+                )
+                return
             resp = start_session_turn(
-                session_id, wakeup_prompt, source="process_wakeup"
+                target_session_id, wakeup_prompt, source="process_wakeup"
             )
             status = int((resp or {}).get("_status", 200) or 200)
             if status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
                 logger.info(
                     "server-side wakeup suppressed for session %s: provider credential state is paused",
-                    session_id,
+                    target_session_id,
                 )
             elif status == 409:
                 # Raced an active turn (e.g. a human /api/chat/start, or a
@@ -1665,23 +1767,23 @@ def _start_server_side_wakeup_turn(
                 # delivery, and BG_TASK_COMPLETE_EVENTS_SEEN already deduped
                 # this process_id, so re-recording cannot double-fire.
                 if wakeup_prompt:
-                    record_deferred_wakeup(session_id, process_id, wakeup_prompt)
+                    record_deferred_wakeup(target_session_id, process_id, wakeup_prompt)
                 logger.debug(
                     "server-side wakeup raced an active turn for session %s; "
                     "re-deferred for redelivery on next teardown/turn",
-                    session_id,
+                    target_session_id,
                 )
             elif status >= 400:
                 logger.warning(
                     "server-side wakeup failed for session %s: status=%s err=%r",
-                    session_id,
+                    target_session_id,
                     status,
                     (resp or {}).get("error"),
                 )
             else:
                 logger.info(
                     "server-side wakeup turn started for session %s (stream_id=%s)",
-                    session_id,
+                    target_session_id,
                     (resp or {}).get("stream_id"),
                 )
         except Exception:

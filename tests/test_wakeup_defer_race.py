@@ -35,6 +35,20 @@ import queue
 import threading
 import types
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _existing_test_sessions_are_startable(monkeypatch):
+    """Legacy unit fixtures use synthetic ids without persisted sidecars."""
+    from api import background_process as bp
+
+    monkeypatch.setattr(
+        bp,
+        "_resolve_startable_wakeup_target",
+        lambda session_id: str(session_id or ""),
+    )
+
 
 # --------------------------------------------------------------------------
 # Fakes / fixtures (mirrors test_process_complete_ab_coexistence +
@@ -678,3 +692,122 @@ def test_idle_path_409_redefer_carries_process_id_and_dedups(monkeypatch):
     finally:
         bp.unregister_process_session(sid)
         _reset_cfg_state()
+
+
+def test_deferred_wakeup_retargets_compressed_parent_to_continuation(monkeypatch):
+    """A queued completion follows compression before teardown delivery."""
+    from api import background_process as bp, config as cfg
+    import api.routes as routes
+
+    _reset_cfg_state()
+    parent = "snapshot-parent"
+    child = "live-continuation"
+    prompt = "[IMPORTANT: Background process completed.]"
+    calls = []
+    event = threading.Event()
+    monkeypatch.setattr(
+        bp,
+        "_resolve_startable_wakeup_target",
+        lambda sid: child if sid in {parent, child} else "",
+    )
+
+    def _start(session_id, message, *, source="process_wakeup"):
+        calls.append((session_id, message, source))
+        event.set()
+        return {"_status": 200, "stream_id": "child-stream"}
+
+    monkeypatch.setattr(routes, "start_session_turn", _start)
+    bp.record_deferred_wakeup(parent, "proc-compressed", prompt)
+
+    assert bp.drain_deferred_wakeups_for_session(parent) == 1
+    assert event.wait(timeout=1.0)
+    assert calls == [(child, prompt, "process_wakeup")]
+    with cfg.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        assert parent not in cfg.DEFERRED_PROCESS_WAKEUPS
+        assert child not in cfg.DEFERRED_PROCESS_WAKEUPS
+    _reset_cfg_state()
+
+
+def test_deferred_wakeup_stays_queued_when_snapshot_target_is_unknown(monkeypatch):
+    """Unknown continuation ownership fails closed without losing the prompt."""
+    from api import background_process as bp, config as cfg
+
+    _reset_cfg_state()
+    parent = "snapshot-without-visible-child"
+    prompt = "[IMPORTANT: Background process completed.]"
+    monkeypatch.setattr(bp, "_resolve_startable_wakeup_target", lambda _sid: "")
+    bp.record_deferred_wakeup(parent, "proc-quarantined", prompt)
+
+    assert bp.drain_deferred_wakeups_for_session(parent) == 0
+    with cfg.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        assert cfg.DEFERRED_PROCESS_WAKEUPS[parent] == [
+            {"process_id": "proc-quarantined", "wakeup_prompt": prompt}
+        ]
+    _reset_cfg_state()
+
+
+def test_deferred_wakeup_moves_to_busy_continuation_until_its_teardown(monkeypatch):
+    """A busy child owns the queue; the sealed parent's teardown starts nothing."""
+    from api import background_process as bp, config as cfg
+    import api.routes as routes
+
+    _reset_cfg_state()
+    parent = "busy-snapshot-parent"
+    child = "busy-live-continuation"
+    prompt = "[IMPORTANT: Background process completed.]"
+    calls = []
+    event = threading.Event()
+    monkeypatch.setattr(
+        bp,
+        "_resolve_startable_wakeup_target",
+        lambda sid: child if sid in {parent, child} else "",
+    )
+    monkeypatch.setattr(
+        routes,
+        "start_session_turn",
+        lambda sid, message, *, source="process_wakeup": calls.append((sid, message, source))
+        or event.set()
+        or {"_status": 200, "stream_id": "next-child-stream"},
+    )
+    bp.record_deferred_wakeup(parent, "proc-busy-child", prompt)
+    with cfg.ACTIVE_RUNS_LOCK:
+        cfg.ACTIVE_RUNS["current-child-stream"] = {"session_id": child}
+
+    assert bp.drain_deferred_wakeups_for_session(parent) == 0
+    with cfg.DEFERRED_PROCESS_WAKEUPS_LOCK:
+        assert parent not in cfg.DEFERRED_PROCESS_WAKEUPS
+        assert cfg.DEFERRED_PROCESS_WAKEUPS[child][0]["process_id"] == "proc-busy-child"
+    assert calls == []
+
+    cfg.unregister_active_run("current-child-stream")
+    assert bp.drain_deferred_wakeups_for_session(child) == 1
+    assert event.wait(timeout=1.0)
+    assert calls == [(child, prompt, "process_wakeup")]
+    _reset_cfg_state()
+
+
+def test_wakeup_daemon_recanonicalizes_again_immediately_before_start(monkeypatch):
+    """The daemon closes the resolve-to-start race instead of trusting its caller."""
+    from api import background_process as bp
+    import api.routes as routes
+
+    _reset_cfg_state()
+    calls = []
+    event = threading.Event()
+    monkeypatch.setattr(
+        bp,
+        "_resolve_startable_wakeup_target",
+        lambda sid: "new-tip" if sid in {"old-tip", "new-tip"} else "",
+    )
+
+    def _start(session_id, message, *, source="process_wakeup"):
+        calls.append((session_id, source))
+        event.set()
+        return {"_status": 200, "stream_id": "new-stream"}
+
+    monkeypatch.setattr(routes, "start_session_turn", _start)
+    bp._start_server_side_wakeup_turn("old-tip", "wake", process_id="proc-race")
+
+    assert event.wait(timeout=1.0)
+    assert calls == [("new-tip", "process_wakeup")]
+    _reset_cfg_state()

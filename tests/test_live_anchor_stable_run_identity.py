@@ -70,7 +70,7 @@ def test_runtime_journal_snapshot_preserves_run_id_separately_from_stream_id(
     )
     monkeypatch.setattr(
         routes,
-        "read_run_events",
+        "read_run_event_tail",
         lambda loaded_session_id, lookup_id: {"events": events},
     )
 
@@ -119,7 +119,7 @@ def test_runtime_journal_lifecycle_shell_preserves_stable_run_id(monkeypatch):
     )
     monkeypatch.setattr(
         routes,
-        "read_run_events",
+        "read_run_event_tail",
         lambda loaded_session_id, lookup_id: {"events": [event]},
     )
 
@@ -171,7 +171,7 @@ def test_runtime_journal_malformed_envelope_run_id_falls_back_to_transport_curso
     )
     monkeypatch.setattr(
         routes,
-        "read_run_events",
+        "read_run_event_tail",
         lambda loaded_session_id, lookup_id: {"events": [event]},
     )
 

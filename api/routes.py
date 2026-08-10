@@ -3301,7 +3301,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     session_id = str(summary.get("session_id") or "")
     if not session_id:
         return None
-    journal = read_run_events(session_id, stream_id)
+    journal = read_run_event_tail(session_id, stream_id)
     events = [event for event in (journal.get("events") or []) if isinstance(event, dict)]
     if not events:
         return None
@@ -3812,7 +3812,8 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         "stream_id": stream_id,
         "last_seq": last_seq,
         "last_event_id": last_event_id,
-        "event_count": len(events),
+        "event_count": max(last_seq, len(events)),
+        "journal_window_truncated": bool(journal.get("truncated")),
         "fresh_segment": fresh_segment,
         "messages": messages,
         "tool_calls": tool_calls,
@@ -3855,6 +3856,47 @@ def _runtime_journal_snapshot_for_session_payload(snapshot: dict | None) -> dict
         return snapshot
 
     projected = dict(snapshot)
+    try:
+        transport_settings = load_settings() or {}
+    except Exception:
+        transport_settings = {}
+    try:
+        max_tool_calls = max(
+            1,
+            min(200, int(transport_settings.get("inflight_state_max_tool_calls", 48) or 48)),
+        )
+    except (TypeError, ValueError):
+        max_tool_calls = 48
+    try:
+        max_string_chars = max(
+            1000,
+            min(500_000, int(transport_settings.get("inflight_state_max_string_chars", 60_000) or 60_000)),
+        )
+    except (TypeError, ValueError):
+        max_string_chars = 60_000
+    try:
+        max_json_chars = max(
+            100_000,
+            min(4_000_000, int(transport_settings.get("inflight_state_max_json_chars", 1_500_000) or 1_500_000)),
+        )
+    except (TypeError, ValueError):
+        max_json_chars = 1_500_000
+
+    def bound_transport_strings(value, limit=max_string_chars):
+        if isinstance(value, str):
+            if len(value) <= limit:
+                return value
+            return value[:limit] + "\n…[truncated for live recovery]"
+        if isinstance(value, dict):
+            return {key: bound_transport_strings(item, limit) for key, item in value.items()}
+        if isinstance(value, list):
+            return [bound_transport_strings(item, limit) for item in value]
+        return value
+
+    projected = bound_transport_strings(projected)
+    max_activity_rows = max_tool_calls + 16
+    total_tool_calls = len(projected.get("tool_calls") or [])
+    transport_truncated = total_tool_calls > max_tool_calls
     # The frontend reconstructs this single live assistant row from the
     # authoritative last_* strings when messages is empty. Preserve the row's
     # timestamp separately so the synthesized message keeps stable identity.
@@ -3872,7 +3914,7 @@ def _runtime_journal_snapshot_for_session_payload(snapshot: dict | None) -> dict
 
     scene = projected.get("anchor_activity_scene")
     compact_calls = []
-    for raw_call in projected.get("tool_calls") or []:
+    for raw_call in (projected.get("tool_calls") or [])[-max_tool_calls:]:
         if not isinstance(raw_call, dict):
             continue
         call = dict(raw_call)
@@ -3885,6 +3927,9 @@ def _runtime_journal_snapshot_for_session_payload(snapshot: dict | None) -> dict
     projected["tool_calls"] = compact_calls
 
     if not isinstance(scene, dict):
+        if transport_truncated:
+            projected["transport_truncated"] = True
+            projected["transport_total_tool_calls"] = total_tool_calls
         return projected
     compact_scene = dict(scene)
     compact_rows = []
@@ -3892,7 +3937,11 @@ def _runtime_journal_snapshot_for_session_payload(snapshot: dict | None) -> dict
         "row_id", "local_id", "kind", "role", "source_event_type", "status",
         "created_at", "group", "text", "thinking", "tool_call_id", "tool",
     )
-    for raw_row in scene.get("activity_rows") or []:
+    raw_activity_rows = scene.get("activity_rows") or []
+    total_activity_rows = len(raw_activity_rows)
+    if total_activity_rows > max_activity_rows:
+        transport_truncated = True
+    for raw_row in raw_activity_rows[-max_activity_rows:]:
         if not isinstance(raw_row, dict):
             continue
         row = {
@@ -3918,6 +3967,29 @@ def _runtime_journal_snapshot_for_session_payload(snapshot: dict | None) -> dict
         compact_rows.append(row)
     compact_scene["activity_rows"] = compact_rows
     projected["anchor_activity_scene"] = compact_scene
+    if transport_truncated:
+        projected["transport_truncated"] = True
+        projected["transport_total_tool_calls"] = total_tool_calls
+        projected["transport_total_activity_rows"] = total_activity_rows
+    try:
+        while len(json.dumps(projected, ensure_ascii=False, separators=(",", ":"))) > max_json_chars:
+            rows = projected["anchor_activity_scene"].get("activity_rows") or []
+            calls = projected.get("tool_calls") or []
+            if len(rows) <= 1 and len(calls) <= 1:
+                projected = bound_transport_strings(
+                    projected,
+                    max(1000, min(max_string_chars, max_json_chars // 8)),
+                )
+                break
+            if len(rows) > 1:
+                del rows[: max(1, len(rows) // 4)]
+            if len(calls) > 1:
+                del calls[: max(1, len(calls) // 4)]
+            projected["transport_truncated"] = True
+            projected["transport_total_tool_calls"] = total_tool_calls
+            projected["transport_total_activity_rows"] = total_activity_rows
+    except (TypeError, ValueError):
+        logger.debug("Failed to enforce runtime snapshot JSON transport budget", exc_info=True)
     return projected
 
 
@@ -9910,6 +9982,7 @@ from api.run_journal import (
     bound_run_journal_snapshot_args,
     find_run_summary,
     read_run_events,
+    read_run_event_tail,
     read_session_run_events,
     session_journal_fingerprint,
     stale_interrupted_event,
@@ -22114,6 +22187,48 @@ def start_session_turn(
         s = get_session(session_id)
     except KeyError:
         return {"error": "Session not found", "_status": 404}
+
+    if turn_source == "process_wakeup":
+        seen_session_ids: set[str] = set()
+        for _ in range(8):
+            current_session_id = str(getattr(s, "session_id", session_id) or "").strip()
+            if not current_session_id or current_session_id in seen_session_ids:
+                return {
+                    "error": "process_wakeup_snapshot_unresolved",
+                    "message": "Automatic wakeup retained until the live continuation can be verified.",
+                    "retryable": True,
+                    "_status": 409,
+                }
+            seen_session_ids.add(current_session_id)
+            if not getattr(s, "pre_compression_snapshot", False):
+                session_id = current_session_id
+                break
+            continuation_session_id = str(
+                _pre_compression_continuation_session_id(s) or ""
+            ).strip()
+            if not continuation_session_id:
+                return {
+                    "error": "process_wakeup_snapshot_unresolved",
+                    "message": "Automatic wakeup retained because this session is a sealed compression snapshot.",
+                    "retryable": True,
+                    "_status": 409,
+                }
+            try:
+                s = get_session(continuation_session_id)
+            except KeyError:
+                return {
+                    "error": "process_wakeup_snapshot_unresolved",
+                    "message": "Automatic wakeup retained until the continuation session is available.",
+                    "retryable": True,
+                    "_status": 409,
+                }
+        else:
+            return {
+                "error": "process_wakeup_snapshot_unresolved",
+                "message": "Automatic wakeup retained because the compression lineage is cyclic or too deep.",
+                "retryable": True,
+                "_status": 409,
+            }
 
     try:
         workspace = _resolve_chat_workspace_with_recovery(s, None)

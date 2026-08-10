@@ -355,7 +355,7 @@ def test_live_journal_snapshot_reconstructs_visible_progress_and_tool_aliases(mo
     )
     monkeypatch.setattr(
         routes,
-        "read_run_events",
+        "read_run_event_tail",
         lambda session_id, run_id: {
             "events": [
                 {
@@ -540,6 +540,107 @@ def test_runtime_snapshot_transport_projection_keeps_tool_fallback_without_scene
     assert snapshot["tool_calls"][0]["preview"] == "same result"
 
 
+def test_runtime_snapshot_transport_projection_bounds_large_live_worklog(monkeypatch):
+    """Reattaching to a runaway live run sends a recent bounded window only."""
+    import api.routes as routes
+
+    calls = [
+        {
+            "name": "process",
+            "tid": f"call-{index}",
+            "args": {"action": "poll", "index": index},
+            "snippet": f"result-{index}",
+            "done": True,
+        }
+        for index in range(240)
+    ]
+    rows = [
+        {
+            "row_id": f"tool:call-{index}:{index}",
+            "local_id": f"call-{index}",
+            "kind": "tool_completed",
+            "role": "tool",
+            "source_event_type": "tool_complete",
+            "status": "completed",
+            "tool_call_id": f"call-{index}",
+            "tool": dict(calls[index]),
+        }
+        for index in range(240)
+    ]
+    snapshot = {
+        "event_count": 5000,
+        "last_seq": 5000,
+        "messages": [],
+        "last_assistant_text": "still working",
+        "last_reasoning_text": "",
+        "tool_calls": calls,
+        "anchor_activity_scene": {
+            "version": "activity_scene_v1",
+            "activity_rows": rows,
+        },
+    }
+    monkeypatch.setattr(
+        routes,
+        "load_settings",
+        lambda: {
+            "inflight_state_max_tool_calls": 48,
+            "inflight_state_max_string_chars": 60_000,
+            "inflight_state_max_json_chars": 1_500_000,
+        },
+    )
+
+    projected = routes._runtime_journal_snapshot_for_session_payload(snapshot)
+
+    assert len(projected["tool_calls"]) <= 48
+    assert projected["tool_calls"][-1]["tid"] == "call-239"
+    assert len(projected["anchor_activity_scene"]["activity_rows"]) <= 64
+    assert projected["anchor_activity_scene"]["activity_rows"][-1]["tool_call_id"] == "call-239"
+    assert projected["transport_truncated"] is True
+    assert projected["transport_total_tool_calls"] == 240
+
+
+def test_runtime_snapshot_transport_projection_enforces_total_json_budget(monkeypatch):
+    import api.routes as routes
+
+    huge = "x" * 100_000
+    calls = [
+        {"name": "terminal", "tid": f"call-{i}", "snippet": huge, "args": {"output": huge}}
+        for i in range(60)
+    ]
+    snapshot = {
+        "messages": [],
+        "last_assistant_text": huge,
+        "last_reasoning_text": huge,
+        "tool_calls": calls,
+        "anchor_activity_scene": {
+            "activity_rows": [
+                {
+                    "row_id": f"tool:{i}",
+                    "role": "tool",
+                    "tool_call_id": f"call-{i}",
+                    "tool": dict(call),
+                }
+                for i, call in enumerate(calls)
+            ]
+        },
+    }
+    monkeypatch.setattr(
+        routes,
+        "load_settings",
+        lambda: {
+            "inflight_state_max_tool_calls": 48,
+            "inflight_state_max_string_chars": 60_000,
+            "inflight_state_max_json_chars": 100_000,
+        },
+    )
+
+    projected = routes._runtime_journal_snapshot_for_session_payload(snapshot)
+
+    assert projected["transport_truncated"] is True
+    assert len(json.dumps(projected, ensure_ascii=False, separators=(",", ":"))) <= 110_000
+    assert projected["tool_calls"][-1]["tid"] == "call-59"
+
+
 def test_paginated_session_followup_does_not_repeat_runtime_snapshot():
     from tests.test_session_tail_payload import _FakeSession, _invoke
 
@@ -616,7 +717,7 @@ def test_live_journal_snapshot_bounds_pathological_tool_args(monkeypatch):
     )
     monkeypatch.setattr(
         routes,
-        "read_run_events",
+        "read_run_event_tail",
         lambda session_id, run_id: {
             "events": [
                 {

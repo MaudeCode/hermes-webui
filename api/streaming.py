@@ -147,6 +147,42 @@ def _cancel_event_payload(
     return payload
 
 
+def _process_wakeup_max_iterations(configured, source: str, environ=None) -> int | None:
+    """Apply a separate bounded tool-call budget to automatic wakeup turns."""
+    if str(source or "").strip() != "process_wakeup":
+        return configured
+    env = os.environ if environ is None else environ
+    try:
+        cap = int(env.get("HERMES_WEBUI_PROCESS_WAKEUP_MAX_TURNS", 32) or 32)
+    except (TypeError, ValueError):
+        cap = 32
+    cap = max(1, min(cap, 128))
+    try:
+        current = int(configured) if configured is not None else None
+    except (TypeError, ValueError):
+        current = None
+    return min(current, cap) if current and current > 0 else cap
+
+
+def _process_wakeup_time_limits(environ=None) -> tuple[float, float]:
+    """Return hard-runtime and no-activity ceilings for automatic turns."""
+    env = os.environ if environ is None else environ
+
+    def _seconds(name: str, default: float) -> float:
+        try:
+            value = float(env.get(name, default))
+        except (TypeError, ValueError):
+            value = default
+        if value <= 0:
+            return 0.0
+        return max(30.0, min(value, 24 * 60 * 60.0))
+
+    return (
+        _seconds("HERMES_WEBUI_PROCESS_WAKEUP_MAX_SECONDS", 30 * 60.0),
+        _seconds("HERMES_WEBUI_PROCESS_WAKEUP_IDLE_SECONDS", 10 * 60.0),
+    )
+
+
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
 # concurrent runs of the SAME session, but two DIFFERENT sessions can still
 # interleave their os.environ writes. This global lock serializes the env
@@ -7903,6 +7939,16 @@ def _run_agent_streaming(
 
     # Sprint 10: create a cancel event for this stream
     cancel_event = threading.Event()
+    _automatic_wakeup_limit_reason = [None]
+    _automatic_wakeup_watchdog_stop = threading.Event()
+    _automatic_wakeup_watchdog_thread = None
+    _automatic_wakeup_started_monotonic = time.monotonic()
+    _automatic_wakeup_last_activity = [_automatic_wakeup_started_monotonic]
+
+    def _turn_cancel_payload(default_message: str = "Cancelled by user") -> dict:
+        return _cancel_event_payload(
+            _automatic_wakeup_limit_reason[0] or default_message
+        )
     with STREAMS_LOCK:
         CANCEL_FLAGS[stream_id] = cancel_event
         STREAM_PARTIAL_TEXT[stream_id] = []  # chunked partial text accumulator (#893)
@@ -8212,6 +8258,8 @@ def _run_agent_streaming(
     _success_writeback_committed = False
 
     def put(event, data):
+        if event != 'metering':
+            _automatic_wakeup_last_activity[0] = time.monotonic()
         # If cancelled, drop all further events except the cancel event itself
         if cancel_event.is_set() and not _success_writeback_committed and event not in ('cancel', 'apperror'):
             return
@@ -8329,6 +8377,40 @@ def _run_agent_streaming(
         _turn_session_identity_tokens = _set_turn_session_identity(session_id)
         s = get_session(session_id)
         _turn_pending_source = getattr(s, 'pending_user_source', None) or 'webui'
+        if _turn_pending_source == 'process_wakeup':
+            _hard_limit_seconds, _idle_limit_seconds = _process_wakeup_time_limits()
+
+            def _automatic_wakeup_watchdog():
+                while not _automatic_wakeup_watchdog_stop.wait(1.0):
+                    _now = time.monotonic()
+                    _reason = None
+                    if (
+                        _hard_limit_seconds > 0
+                        and _now - _automatic_wakeup_started_monotonic >= _hard_limit_seconds
+                    ):
+                        _reason = "Automatic wakeup stopped after reaching its runtime limit."
+                    elif (
+                        _idle_limit_seconds > 0
+                        and _now - _automatic_wakeup_last_activity[0] >= _idle_limit_seconds
+                    ):
+                        _reason = "Automatic wakeup stopped after making no observable progress."
+                    if _reason:
+                        _automatic_wakeup_limit_reason[0] = _reason
+                        logger.warning(
+                            "process_wakeup circuit breaker stopped session %s stream %s: %s",
+                            session_id,
+                            stream_id,
+                            _reason,
+                        )
+                        cancel_event.set()
+                        return
+
+            _automatic_wakeup_watchdog_thread = threading.Thread(
+                target=_automatic_wakeup_watchdog,
+                name=f"hermes-webui-wakeup-watchdog-{str(stream_id)[:8]}",
+                daemon=True,
+            )
+            _automatic_wakeup_watchdog_thread.start()
         _active_turn_identity = _active_turn_authority(s, stream_id, msg_text)
         update_active_run(stream_id, phase="running", session_id=session_id)
         s.workspace = str(Path(workspace).expanduser().resolve())
@@ -8371,7 +8453,7 @@ def _run_agent_streaming(
                     message='Task cancelled before start.',
                     stream_id=stream_id,
                 )
-            put('cancel', _cancel_event_payload('Cancelled before start'))
+            put('cancel', _turn_cancel_payload('Cancelled before start'))
             return
 
         # Resolve profile home for this agent run — use the session's own profile
@@ -9371,6 +9453,10 @@ def _run_agent_streaming(
                         _max_iterations_cfg = _parsed_max_iterations
             except Exception:
                 _max_iterations_cfg = None
+            _max_iterations_cfg = _process_wakeup_max_iterations(
+                _max_iterations_cfg,
+                _turn_pending_source,
+            )
 
             # CLI-parity max output cap: read config.yaml's max_tokens and pass
             # it to AIAgent when supported. Without this WebUI-created agents use
@@ -9672,7 +9758,7 @@ def _run_agent_streaming(
                             message='Task cancelled before start.',
                             stream_id=stream_id,
                         )
-                    put('cancel', _cancel_event_payload('Cancelled by user'))
+                    put('cancel', _turn_cancel_payload())
                     return
 
             # Prepend workspace context so the agent always knows which directory
@@ -9899,7 +9985,7 @@ def _run_agent_streaming(
                             )
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                put('cancel', _cancel_event_payload('Cancelled by user'))
+                put('cancel', _turn_cancel_payload())
                 return
             # ── Ephemeral mode (/btw): deliver answer, skip persistence, cleanup ──
             if ephemeral:
@@ -9941,7 +10027,7 @@ def _run_agent_streaming(
                         )
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                put('cancel', _cancel_event_payload('Cancelled by user'))
+                put('cancel', _turn_cancel_payload())
                 return
             _writeback_timings = []
             _writeback_started = time.perf_counter()
@@ -10002,7 +10088,7 @@ def _run_agent_streaming(
                             )
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                        put('cancel', _cancel_event_payload('Cancelled by user'))
+                        put('cancel', _turn_cancel_payload())
                         return
                     _result_messages = _settle_result_messages(
                         s,
@@ -10255,7 +10341,7 @@ def _run_agent_streaming(
                                 )
                             except Exception:
                                 logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                        put('cancel', _cancel_event_payload('Cancelled by user'))
+                        put('cancel', _turn_cancel_payload())
                         return
                     _err_str = str(_last_err) if _last_err else ''
                     if _is_quota:
@@ -10918,7 +11004,7 @@ def _run_agent_streaming(
                         )
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                    put('cancel', _cancel_event_payload('Cancelled by user'))
+                    put('cancel', _turn_cancel_payload())
                     return
                 with _stream_writeback_stage(_writeback_timings, "session_save"):
                     s.save()
@@ -10936,7 +11022,7 @@ def _run_agent_streaming(
                         )
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                    put('cancel', _cancel_event_payload('Cancelled by user'))
+                    put('cancel', _turn_cancel_payload())
                     return
                 if not ephemeral:
                     try:
@@ -11040,7 +11126,7 @@ def _run_agent_streaming(
                         )
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                    put('cancel', _cancel_event_payload('Cancelled by user'))
+                    put('cancel', _turn_cancel_payload())
                     return
                 try:
                     _latest_pause_owner = get_session(getattr(s, 'session_id', session_id))
@@ -11072,7 +11158,7 @@ def _run_agent_streaming(
                             )
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                        put('cancel', _cancel_event_payload('Cancelled by user'))
+                        put('cancel', _turn_cancel_payload())
                         return
                     with _stream_writeback_stage(_writeback_timings, "process_wakeup_pause_clear_save"):
                         s.save(touch_updated_at=False)
@@ -11095,7 +11181,7 @@ def _run_agent_streaming(
                             )
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                        put('cancel', _cancel_event_payload('Cancelled by user'))
+                        put('cancel', _turn_cancel_payload())
                         return
                 _success_writeback_committed = True
             usage = {
@@ -11474,7 +11560,7 @@ def _run_agent_streaming(
             # An obsolete worker whose writeback generation was replaced must
             # not publish a stale terminal event on its retired stream.
             if _cancel_finalized:
-                put('cancel', _cancel_event_payload('Cancelled by user'))
+                put('cancel', _turn_cancel_payload())
             return
         _exc_is_quota = _classification['type'] == 'quota_exhausted'
         # Exception quota text still includes: 'more credits' in _exc_lower, 'can only afford' in _exc_lower, 'fewer max_tokens' in _exc_lower.
@@ -11721,6 +11807,7 @@ def _run_agent_streaming(
             _error_payload['old_session_id'] = session_id
         put('apperror', _error_payload)
     finally:
+        _automatic_wakeup_watchdog_stop.set()
         # #4633/#2476: symmetric metering teardown. begin_session() (top of the
         # outer try) had no paired end_session(), so zero-token turns leaked a
         # _sessions[stream_id] entry that get_stats() pruning never reclaims (its

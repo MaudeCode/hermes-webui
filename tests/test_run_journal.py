@@ -9,6 +9,7 @@ from api.run_journal import (
     find_run_summary,
     latest_run_summary,
     read_run_events,
+    read_run_event_tail,
     stale_interrupted_event,
 )
 
@@ -74,6 +75,50 @@ def test_run_journal_reads_bounded_replay_window(tmp_path):
 
     assert [event["seq"] for event in journal["events"]] == [2, 3]
     assert [event["payload"]["text"] for event in journal["events"]] == ["two", "three"]
+
+
+def test_run_journal_tail_reader_bounds_active_snapshot_work(tmp_path):
+    writer = RunJournalWriter("session_tail", "run_tail", session_dir=tmp_path)
+    for index in range(300):
+        writer.append_sse_event("token", {"text": f"event-{index}-" + ("x" * 80)})
+
+    journal = read_run_event_tail(
+        "session_tail",
+        "run_tail",
+        session_dir=tmp_path,
+        max_bytes=12_000,
+        max_rows=40,
+    )
+
+    assert journal["truncated"] is True
+    assert 1 <= len(journal["events"]) <= 40
+    assert journal["events"][-1]["seq"] == 300
+    assert journal["events"][-1]["payload"]["text"].startswith("event-299-")
+
+
+def test_run_summary_uses_bounded_tail_for_large_or_stale_journal(tmp_path, monkeypatch):
+    import api.run_journal as run_journal
+
+    writer = RunJournalWriter("session_summary_tail", "run_summary_tail", session_dir=tmp_path)
+    for index in range(700):
+        writer.append_sse_event("token", {"text": f"event-{index}"})
+    writer.append_sse_event("stream_end", {"session_id": "session_summary_tail"})
+    monkeypatch.setattr(
+        run_journal,
+        "_read_jsonl",
+        lambda _path: (_ for _ in ()).throw(AssertionError("unbounded reader used")),
+    )
+
+    summary = latest_run_summary(
+        "session_summary_tail",
+        "run_summary_tail",
+        session_dir=tmp_path,
+    )
+
+    assert summary["terminal"] is True
+    assert summary["last_seq"] == 701
+    assert summary["event_count"] == 701
+    assert summary["journal_truncated"] is True
 
 
 def test_run_journal_default_fsyncs_terminal_events_only(tmp_path, monkeypatch):
@@ -193,12 +238,12 @@ def test_summary_cache_does_not_store_result_when_journal_changes_during_read(tm
 
     import api.run_journal as run_journal
 
-    original_read = run_journal._read_jsonl
+    original_read = run_journal.read_run_event_tail
     appended = False
 
-    def append_after_read(path):
+    def append_after_read(*args, **kwargs):
         nonlocal appended
-        events, malformed = original_read(path)
+        result = original_read(*args, **kwargs)
         if not appended:
             appended = True
             append_run_event(
@@ -208,9 +253,9 @@ def test_summary_cache_does_not_store_result_when_journal_changes_during_read(tm
                 {"message": "Cancelled by user"},
                 session_dir=tmp_path,
             )
-        return events, malformed
+        return result
 
-    monkeypatch.setattr(run_journal, "_read_jsonl", append_after_read)
+    monkeypatch.setattr(run_journal, "read_run_event_tail", append_after_read)
 
     first = latest_run_summary("session_1", "run_1", session_dir=tmp_path)
     second = latest_run_summary("session_1", "run_1", session_dir=tmp_path)
@@ -223,12 +268,12 @@ def test_summary_cache_does_not_store_result_when_journal_changes_during_read(tm
 def test_summary_cache_rejects_first_append_that_races_missing_journal_read(tmp_path, monkeypatch):
     import api.run_journal as run_journal
 
-    original_read = run_journal._read_jsonl
+    original_read = run_journal.read_run_event_tail
     appended = False
 
-    def append_after_missing_read(path):
+    def append_after_missing_read(*args, **kwargs):
         nonlocal appended
-        events, malformed = original_read(path)
+        result = original_read(*args, **kwargs)
         if not appended:
             appended = True
             append_run_event(
@@ -238,9 +283,9 @@ def test_summary_cache_rejects_first_append_that_races_missing_journal_read(tmp_
                 {"session": {}},
                 session_dir=tmp_path,
             )
-        return events, malformed
+        return result
 
-    monkeypatch.setattr(run_journal, "_read_jsonl", append_after_missing_read)
+    monkeypatch.setattr(run_journal, "read_run_event_tail", append_after_missing_read)
 
     raced = latest_run_summary("session_1", "run_first_append", session_dir=tmp_path)
     refreshed = latest_run_summary("session_1", "run_first_append", session_dir=tmp_path)

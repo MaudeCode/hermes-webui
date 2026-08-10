@@ -83,6 +83,12 @@ correct visible session target, not moving execution ownership.
 7. **404 self-heal is separate from lineage resolution.** Missing/deleted sessions
    should still use the stale-route recovery path. A present archived parent with
    a live continuation is not a 404; it is a canonicalization problem.
+8. **New execution never targets a compression snapshot.** Automatic wakeups and
+   other detached work must resolve lineage again immediately before admission.
+   A snapshot with a verified continuation routes to that continuation; an
+   unreadable or unresolved lineage fails closed and retains the work for retry.
+   Persisted snapshot metadata must not carry `active_stream_id` or pending-turn
+   ownership fields.
 
 ## Entry Point Matrix
 

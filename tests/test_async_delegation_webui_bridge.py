@@ -48,6 +48,13 @@ class _FakeProcessRegistry:
 
 def _install_fake_process_registry(monkeypatch):
     registry = _FakeProcessRegistry()
+    # Synthetic test ids have no persisted session sidecars. The routing tests
+    # exercise delivery semantics, so treat those ids as verified live owners.
+    monkeypatch.setattr(
+        bp,
+        "_resolve_startable_wakeup_target",
+        lambda session_id: str(session_id or ""),
+    )
 
     def _format(evt):
         return f"[ASYNC DELEGATION BATCH COMPLETE — {evt['delegation_id']}]\nbackend summary"
@@ -1403,5 +1410,4 @@ def test_next_turn_drain_respects_origin_over_session_key_index(monkeypatch):
     assert [consumer for _evt, consumer in delivery["claim"]] == ["webui-next-turn"]
     assert len(delivery["complete"]) == 1
     assert delivery["release"] == []
-
 

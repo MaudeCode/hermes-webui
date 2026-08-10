@@ -655,7 +655,15 @@ def _install_fake_start_session_turn(monkeypatch, *, status=200):
     ``tests/_wakeup_helpers.py`` and is shared with
     ``test_wakeup_defer_race.py`` (Copilot PR #2971 r3305700944).
     """
+    from api import background_process as bp
     from tests._wakeup_helpers import install_fake_start_session_turn as _impl
+
+    # These unit tests use synthetic session ids with no persisted sidecars.
+    monkeypatch.setattr(
+        bp,
+        "_resolve_startable_wakeup_target",
+        lambda session_id: str(session_id or ""),
+    )
     return _impl(monkeypatch, status=status)
 
 

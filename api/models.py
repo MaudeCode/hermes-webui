@@ -1481,6 +1481,16 @@ class Session:
             'share_token', 'share_created_at',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
+        if bool(meta.get('pre_compression_snapshot')):
+            # A compression parent is an immutable history snapshot, never an
+            # execution owner. A late writeback from a worker that crossed the
+            # rotation boundary must not resurrect running/pending UI state on
+            # that sealed parent.
+            meta['active_stream_id'] = None
+            meta['pending_user_message'] = None
+            meta['pending_attachments'] = []
+            meta['pending_started_at'] = None
+            meta['pending_user_source'] = None
         # #5854: message_count and a compact anchor-scene fingerprint go in the
         # metadata prefix (BEFORE messages) so load_metadata_only() and the
         # sidebar-poll freshness check never have to parse the full (250-480KB)

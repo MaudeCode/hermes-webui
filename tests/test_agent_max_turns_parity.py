@@ -28,3 +28,26 @@ def test_streaming_agent_cache_signature_includes_max_iterations():
     sig_start = STREAMING_PY.index("_sig_blob = _json.dumps")
     sig_block = STREAMING_PY[sig_start:STREAMING_PY.index("], sort_keys=True)", sig_start)]
     assert "_max_iterations_cfg or ''" in sig_block
+
+
+def test_process_wakeup_iteration_budget_is_separate_and_bounded():
+    from api.streaming import _process_wakeup_max_iterations
+
+    assert _process_wakeup_max_iterations(600, "process_wakeup", {}) == 32
+    assert _process_wakeup_max_iterations(16, "process_wakeup", {}) == 16
+    assert _process_wakeup_max_iterations(600, "webui", {}) == 600
+    assert _process_wakeup_max_iterations(
+        600,
+        "process_wakeup",
+        {"HERMES_WEBUI_PROCESS_WAKEUP_MAX_TURNS": "48"},
+    ) == 48
+
+
+def test_process_wakeup_time_and_idle_limits_are_bounded_and_disableable():
+    from api.streaming import _process_wakeup_time_limits
+
+    assert _process_wakeup_time_limits({}) == (1800.0, 600.0)
+    assert _process_wakeup_time_limits({
+        "HERMES_WEBUI_PROCESS_WAKEUP_MAX_SECONDS": "0",
+        "HERMES_WEBUI_PROCESS_WAKEUP_IDLE_SECONDS": "90",
+    }) == (0.0, 90.0)

@@ -411,6 +411,31 @@ def test_pre_compression_snapshot_marker_is_persisted_and_compact():
     assert compact["archived"] is False
 
 
+def test_pre_compression_snapshot_save_never_persists_live_runtime_ownership():
+    """Late stale-worker saves cannot make a sealed parent look active again."""
+    s = Session(
+        session_id="sess_snapshot_runtime",
+        title="Before Compression",
+        messages=[{"role": "user", "content": "hi"}],
+        pre_compression_snapshot=True,
+        active_stream_id="stale-parent-stream",
+        pending_user_message="automatic wakeup",
+        pending_attachments=[{"name": "stale"}],
+        pending_started_at=123.0,
+        pending_user_source="process_wakeup",
+    )
+
+    s.save()
+
+    payload = json.loads(s.path.read_text(encoding="utf-8"))
+    assert payload["pre_compression_snapshot"] is True
+    assert payload["active_stream_id"] is None
+    assert payload["pending_user_message"] is None
+    assert payload["pending_attachments"] == []
+    assert payload["pending_started_at"] is None
+    assert payload["pending_user_source"] is None
+
+
 def test_pre_compression_snapshot_hidden_from_active_sidebar_but_file_remains(monkeypatch):
     """Preserved compression snapshots should not appear as active sidebar rows."""
     snapshot = Session(
