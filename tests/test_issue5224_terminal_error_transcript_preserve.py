@@ -63,6 +63,8 @@ function installRuntimeHelpers() {
     "_messageIdentityKey",
     "_isHistoricalAnchorActivityScene",
     "_carryForwardEphemeralTurnFields",
+    "_terminalSessionPath",
+    "_applyTerminalMessageWindowMetadata",
     "_isTerminalStreamErrorMarkerMessage",
     "_ensureSingleTerminalStreamErrorMarker",
     "_restoreSettledSession",
@@ -142,6 +144,9 @@ function buildRuntime() {
   globalThis._messageRenderableMessageCount = () => scenario.messageRenderableCount || 50;
   globalThis._currentMessageRenderWindowSize = () => scenario.currentWindowSize || 12;
   globalThis._messageRenderWindowSize = 20;
+  globalThis._TERMINAL_SESSION_VISIBLE_MESSAGE_LIMIT = 80;
+  globalThis._messagesTruncated = false;
+  globalThis._oldestIdx = 0;
   globalThis._streamFinalized = !!scenario.streamFinalized;
   globalThis._persistTimer = null;
   globalThis.api = async () => scenario.apiPayload || { session: null };

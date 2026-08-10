@@ -204,6 +204,12 @@ Requirements:
   explain a visible error or recovery outcome.
 - Very long final answers remain complete and readable. They should not be
   hidden inside the activity summary or replaced by a progress/status artifact.
+- Terminal SSE events and terminal recovery fetches carry a bounded recent
+  transcript window, not the full durable session. Their `message_count`
+  remains the canonical full count, while `_messages_offset` and
+  `_messages_truncated` preserve older-message pagination. Normal completion,
+  application error, cancel, gateway completion, and recovery use the same
+  window contract so settlement work stays bounded as a session grows.
 
 ### Activity display and disclosure addenda
 

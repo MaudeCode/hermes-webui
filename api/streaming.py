@@ -53,6 +53,11 @@ from api.config import (
     PROCESS_SESSION_INDEX, PROCESS_SESSION_INDEX_LOCK,
 )
 from api.helpers import redact_session_data, _redact_text
+from api.message_window import (
+    message_window_for_display,
+    messages_for_limited_payload,
+    tool_calls_for_message_window,
+)
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
 from api.compression_recovery import stamp_compression_exhausted_recovery
 from api.metering import meter
@@ -81,22 +86,36 @@ from api.process_event_utils import (
 )
 
 
-def _session_payload_with_full_messages(session, *, tool_calls=None):
-    """Return compact session metadata plus the embedded full transcript.
+_TERMINAL_SSE_VISIBLE_MESSAGE_LIMIT = 80
 
-    ``Session.compact()`` may intentionally use metadata-only counts from an
-    index/sidebar load. A settled SSE payload that embeds ``session.messages``
-    must report the count of that embedded transcript, otherwise completion and
-    reconcile paths can mistake a complete payload for a stale short window.
+
+def _session_payload_with_terminal_window(session, *, tool_calls=None):
+    """Return compact metadata plus a bounded settled transcript tail.
+
+    The durable ``message_count`` remains the full transcript count while the
+    embedded rows use the same visible-message window contract as GET
+    ``/api/session?msg_limit=...``. This keeps terminal SSE settlement bounded
+    even for multi-megabyte sessions and preserves pagination coordinates.
     """
     messages = list(getattr(session, 'messages', None) or [])
+    window, offset = message_window_for_display(
+        messages,
+        msg_limit=_TERMINAL_SSE_VISIBLE_MESSAGE_LIMIT,
+    )
+    window = messages_for_limited_payload(window)
     raw = session.compact() | {
-        'messages': messages,
+        'messages': window,
         'message_count': len(messages),
+        '_messages_offset': offset,
+        '_messages_truncated': offset > 0,
     }
     attach_todo_state(raw, messages)
     if tool_calls is not None:
-        raw['tool_calls'] = tool_calls
+        raw['tool_calls'] = tool_calls_for_message_window(
+            tool_calls,
+            offset,
+            len(window),
+        )
     return raw
 
 
@@ -119,11 +138,11 @@ def _strip_compact_echo_suffix(value: str, suffix: str, *, search_window: int = 
     return raw, False
 
 
-def _redacted_session_payload_with_full_messages(session, *, tool_calls=None) -> dict | None:
+def _redacted_session_payload_with_terminal_window(session, *, tool_calls=None) -> dict | None:
     """Best-effort terminal SSE session payload for already-persisted state."""
     try:
         return redact_session_data(
-            _session_payload_with_full_messages(session, tool_calls=tool_calls)
+            _session_payload_with_terminal_window(session, tool_calls=tool_calls)
         )
     except Exception:
         logger.debug("Failed to build redacted session payload", exc_info=True)
@@ -10625,7 +10644,7 @@ def _run_agent_streaming(
                         except Exception:
                             pass
                         _error_payload['session'] = redact_session_data(
-                            _session_payload_with_full_messages(s, tool_calls=s.tool_calls)
+                            _session_payload_with_terminal_window(s, tool_calls=s.tool_calls)
                         )
                         _error_payload['session_id'] = s.session_id
                         _error_payload['old_session_id'] = _compression_origin_session_id
@@ -11482,7 +11501,7 @@ def _run_agent_streaming(
             except Exception as _goal_exc:
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
             with _stream_writeback_stage(_writeback_timings, "done_payload"):
-                raw_session = _session_payload_with_full_messages(s, tool_calls=tool_calls)
+                raw_session = _session_payload_with_terminal_window(s, tool_calls=tool_calls)
                 _done_payload = {'session': redact_session_data(raw_session), 'usage': usage}
                 if _tool_limit_reached:
                     _done_payload['terminal_state'] = 'tool_limit_reached'
@@ -12482,7 +12501,7 @@ def cancel_stream(stream_id: str) -> bool:
                         'timestamp': int(time.time()),
                     })
                 _cs.save()
-                _cancel_session_payload = _redacted_session_payload_with_full_messages(_cs)
+                _cancel_session_payload = _redacted_session_payload_with_terminal_window(_cs)
             except Exception:
                 logger.debug("Failed to clear session state on cancel for %s", _cancel_session_id)
 

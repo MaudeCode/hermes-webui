@@ -749,7 +749,7 @@ def _settle_gateway_terminal_error(
         _classify_provider_error,
         _materialize_pending_user_turn_before_error,
         _provider_error_payload,
-        _session_payload_with_full_messages,
+        _session_payload_with_terminal_window,
         _snapshot_and_append_partial_on_error,
         _terminal_turn_duration,
     )
@@ -805,7 +805,7 @@ def _settle_gateway_terminal_error(
         except Exception:
             logger.debug("Failed to persist gateway terminal error settlement", exc_info=True)
         try:
-            terminal_session_payload = _session_payload_with_full_messages(session, tool_calls=[])
+            terminal_session_payload = _session_payload_with_terminal_window(session, tool_calls=[])
         except Exception:
             # Settlement itself has already been persisted. A lightweight test
             # double or future session implementation must not turn payload
@@ -1427,8 +1427,8 @@ def _run_gateway_chat_streaming(
                 session_id,
                 goal_exc,
             )
-        from api.streaming import _session_payload_with_full_messages
-        gateway_session_payload = _session_payload_with_full_messages(s, tool_calls=[])
+        from api.streaming import _session_payload_with_terminal_window
+        gateway_session_payload = _session_payload_with_terminal_window(s, tool_calls=[])
         put_gateway_event("done", {"session": redact_session_data(gateway_session_payload), "usage": usage})
         put_gateway_event("stream_end", {"session_id": session_id})
     except urllib.error.HTTPError as exc:

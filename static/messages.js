@@ -8,6 +8,23 @@ function _apiUrl(path) {
   return new URL(path, document.baseURI || location.href).href;
 }
 
+const _TERMINAL_SESSION_VISIBLE_MESSAGE_LIMIT=80;
+
+function _terminalSessionPath(sid){
+  return `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${_TERMINAL_SESSION_VISIBLE_MESSAGE_LIMIT}&expand_renderable=1`;
+}
+
+function _applyTerminalMessageWindowMetadata(sessionPayload){
+  if(!sessionPayload||typeof sessionPayload!=='object') return;
+  if(typeof _messagesTruncated!=='undefined'){
+    _messagesTruncated=!!sessionPayload._messages_truncated;
+  }
+  if(typeof _oldestIdx!=='undefined'){
+    const offset=Number(sessionPayload._messages_offset);
+    _oldestIdx=Number.isFinite(offset)&&offset>0?offset:0;
+  }
+}
+
 // Module-scope dedupe ring buffer for bg_task_complete events. Shared between
 // the in-turn STREAMS path (per-turn EventSource inside the chat-stream wirer)
 // and the persistent session-scoped path (/api/session/stream), so the
@@ -6491,9 +6508,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCost=(S.session&&S.session.estimated_cost)||0;
           const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
-          S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
-          // #4720: reset _oldestIdx (full-load symmetry; keeps the #4613 anchor aligned).
-          if(typeof _oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0;
+          S.session=d.session;
+          _applyTerminalMessageWindowMetadata(d.session);
+          S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);
           S.messages=_filterRecoveryControlMessages(S.messages || []);
           if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
           if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
@@ -6630,11 +6647,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // delivered the final messages and tool calls.
           if(typeof window!=='undefined') window._streamJustFinished=true;
           setTimeout(()=>{ if(typeof window!=='undefined') window._streamJustFinished=false; }, 5000);
-          // Expand render window to cover all messages so the done render
-          // doesn't hide Activity behind a tiny window (winSize=50).
-          if(typeof _messageRenderableMessageCount==='function'&&typeof _messageRenderWindowSize!=='undefined'){
-            _messageRenderWindowSize=Math.max(typeof _currentMessageRenderWindowSize==='function'?_currentMessageRenderWindowSize():50, _messageRenderableMessageCount());
-          }
           // #4650 review: the agent turn that just completed may have changed
           // server-side reasoning config (e.g. a `/reasoning <level>` slash
           // command writes agent.reasoning_effort) WITHOUT changing the model/
@@ -6925,6 +6937,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             if(typeof showToast==='function') showToast('Stream recovery signal received. Restoring transcript...',3500,'error');
           } else if(d.session&&typeof d.session==='object'){
             S.session=d.session;
+            _applyTerminalMessageWindowMetadata(d.session);
             const _nextMsgs3018=(d.session.messages||[]).filter(m=>m&&m.role);
             _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
             S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
@@ -7077,8 +7090,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             return;
           }
           // Last-ditch: the stream may have finished while we were retrying.
-          // _restoreSettledSession polls the full session API (not just stream
-          // status) and can recover a completed response without an error banner.
+          // _restoreSettledSession polls a bounded settled-session tail (not just
+          // stream status) and can recover a completed response without an error banner.
           // This is especially important on iOS where Tailscale reconnects can
           // take longer than the retry window.
           setComposerStatus('Restoring session…');
@@ -7176,6 +7189,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             ? _isMessageReaderUnpinned()
             : (typeof _messageUserUnpinned!=='undefined' && _messageUserUnpinned));
         S.session=sessionPayload;
+        _applyTerminalMessageWindowMetadata(sessionPayload);
         const _nextMsgs3018=(sessionPayload.messages||[]).filter(m=>m&&m.role);
         _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
         S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
@@ -7197,7 +7211,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // Fetch latest session from server to get accurate message list (includes cancel status)
           // This ensures messages stay in sync with server, fixing race condition where local
           // "*Task cancelled.*" message gets lost when done event overwrites S.messages
-          const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+          const data=await api(_terminalSessionPath(activeSid));
           if(data&&data.session) _applyCancelSessionPayload(data.session);
         }catch(_){
           // Fallback to local cancel message if API fails
@@ -7284,7 +7298,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       return returnStatus?'stale':false;
     }
     try{
-      const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+      const data=await api(_terminalSessionPath(activeSid));
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
       // we were awaiting the network roundtrip, bail out — done already settled.
       if(_streamFinalized) return returnStatus?'restored':true;
@@ -7316,6 +7330,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         S.activeStreamId=null;
         clearLiveToolCards();if(!assistantText)removeThinking();
         S.session=session;
+        _applyTerminalMessageWindowMetadata(session);
         const _nextMsgs3018=(session.messages||[]).filter(m=>m&&m.role);
         const _currentMessages=Array.isArray(S.messages)?S.messages:[];
         const _currentVisibleMessages=_filterRecoveryControlMessages(_currentMessages || []);
@@ -7365,10 +7380,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           S.toolCalls=[];
         }
         if(isSessionViewed) _markSessionViewed(completedSid, session.message_count ?? S.messages.length);
-        // Expand render window so the settled render doesn't hide Activity.
-        if(typeof _messageRenderableMessageCount==='function'&&typeof _messageRenderWindowSize!=='undefined'){
-          _messageRenderWindowSize=Math.max(typeof _currentMessageRenderWindowSize==='function'?_currentMessageRenderWindowSize():50, _messageRenderableMessageCount());
-        }
         syncTopbar();renderMessages({preserveScroll:true});
       }
       if(_isActiveSession()) _queueDrainSid=activeSid;

@@ -738,7 +738,7 @@ def test_gateway_success_save_and_projection_failures_emit_terminal_errors(tmp_p
     STREAMS[projection_stream_id] = projection_channel
     monkeypatch.setattr(
         streaming,
-        "_session_payload_with_full_messages",
+        "_session_payload_with_terminal_window",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("projection failed")),
     )
 

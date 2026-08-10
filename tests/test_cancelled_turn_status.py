@@ -257,7 +257,7 @@ class TestCancelledTurnPersistenceGuards:
         assert "const _applyCancelSessionPayload=(sessionPayload)=>" in block
         assert "const _cancelSessionPayload=_cancelData&&typeof _cancelData.session==='object'?_cancelData.session:null;" in block
         assert "if(_applyCancelSessionPayload(_cancelSessionPayload)) return;" in block
-        assert "const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);" in block
+        assert "const data=await api(_terminalSessionPath(activeSid));" in block
         assert block.index("if(_applyCancelSessionPayload(_cancelSessionPayload)) return;") < block.index("const data=await api("), (
             "Cancel handler must apply the terminal SSE session payload before falling back "
             "to /api/session so captured _partial reasoning/tool rows are visible immediately."

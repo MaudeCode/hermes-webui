@@ -47,6 +47,12 @@ from api.agent_sessions import (
     read_session_lineage_report,
 )
 from api.compression_anchor import visible_messages_for_anchor
+from api.message_window import (
+    message_counts_as_renderable as _shared_message_counts_as_renderable,
+    message_window_for_display as _message_window_for_display,
+    messages_for_limited_payload as _messages_for_limited_payload,
+    tool_calls_for_message_window as _tool_calls_for_message_window,
+)
 from api.compression_recovery import (
     COMPRESSION_RECOVERY_ACTION_START_FOCUSED,
     clear_compression_recovery,
@@ -8728,146 +8734,11 @@ def _messages_include_tool_metadata(messages) -> bool:
     return False
 
 
-def _tool_calls_for_message_window(tool_calls, start_idx: int, message_count: int) -> list:
-    """Keep session-level tool calls that point into a returned message window.
-
-    ``assistant_msg_idx`` is stored in the full transcript coordinate space, but
-    the frontend renders the returned ``messages`` array from index 0. Rebase the
-    index into the returned window so legacy session-level tool cards still
-    anchor to their visible assistant turn after paginated loads.
-    """
-    if not isinstance(tool_calls, list) or message_count <= 0:
-        return []
-    end_idx = start_idx + message_count
-    filtered = []
-    for tool_call in tool_calls:
-        if not isinstance(tool_call, dict):
-            continue
-        assistant_idx = tool_call.get("assistant_msg_idx")
-        if isinstance(assistant_idx, bool) or not isinstance(assistant_idx, int):
-            continue
-        if start_idx <= assistant_idx < end_idx:
-            rebased = dict(tool_call)
-            rebased["assistant_msg_idx"] = assistant_idx - start_idx
-            filtered.append(rebased)
-    return filtered
-
-
 def _message_counts_as_renderable_for_window(message) -> bool:
-    """Return true when a paginated window should include this transcript row.
-
-    Tool result rows are rendered through their assistant anchor or hidden as raw
-    tool output. Empty partial activity rows can be preserved after cancellation
-    to keep thinking/tool details inspectable, but they are not reply text. A
-    tail page containing only transient metadata makes the frontend open to
-    collapsed activity while newer real replies sit behind "load older messages".
-    """
-    if not isinstance(message, dict):
-        return False
-    if _is_empty_partial_activity_message(message):
-        return False
-    role = str(message.get("role") or "").strip().lower()
-    return bool(role and role != "tool")
+    """Compatibility wrapper for existing route callers and focused tests."""
+    return _shared_message_counts_as_renderable(message)
 
 
-def _tool_call_ids_in_messages(messages) -> set:
-    """Collect tool-call IDs declared on renderable rows (assistant tool_calls /
-    partial tool_calls / Anthropic tool_use content blocks) so trailing
-    tool-result rows can be matched back to a call present in the window."""
-    ids = set()
-    for msg in messages or []:
-        if not isinstance(msg, dict):
-            continue
-        for key in ("tool_calls", "_partial_tool_calls"):
-            for call in msg.get(key) or []:
-                if isinstance(call, dict):
-                    cid = call.get("id") or call.get("tool_call_id")
-                    if cid:
-                        ids.add(str(cid))
-        content = msg.get("content")
-        if isinstance(content, list):
-            for part in content:
-                if isinstance(part, dict) and part.get("type") == "tool_use":
-                    cid = part.get("id")
-                    if cid:
-                        ids.add(str(cid))
-    return ids
-
-
-def _tool_result_matches_call_ids(message, call_ids) -> bool:
-    """Return True if a role:tool row's tool_call_id/tool_use_id is in ``call_ids``."""
-    if not call_ids or not isinstance(message, dict):
-        return False
-    if str(message.get("role") or "").lower() != "tool":
-        return False
-    tid = message.get("tool_call_id") or message.get("tool_use_id") or ""
-    return bool(tid) and str(tid) in call_ids
-
-
-def _message_window_for_display(messages, msg_limit=None, msg_before=None, expand_renderable=False) -> tuple[list, int]:
-    """Return a paginated message window plus its offset in ``messages``.
-
-    ``msg_limit`` is a visible transcript limit, not a raw storage-row cap.
-    Tool result rows are hidden or folded into assistant tool cards, so they
-    should not consume the user's "load N messages" budget. Return the smallest
-    suffix containing the last ``msg_limit`` renderable user/assistant rows, plus
-    any intervening tool rows needed for card snippets.
-
-    ``expand_renderable`` is accepted for compatibility with older frontend
-    callers. Visible-row expansion is now the default for every limited window.
-    """
-    _ = expand_renderable
-    messages = list(messages or [])
-    if msg_before is not None:
-        before_idx = max(0, min(int(msg_before), len(messages)))
-    else:
-        before_idx = len(messages)
-    source = messages[:before_idx]
-    if not source:
-        return [], 0
-    if not msg_limit:
-        return source, 0
-    limit = max(1, int(msg_limit))
-    end_idx = len(source)
-    last_renderable_idx = None
-    for idx in range(end_idx - 1, -1, -1):
-        if _message_counts_as_renderable_for_window(source[idx]):
-            last_renderable_idx = idx
-            break
-    if last_renderable_idx is None:
-        start_idx = max(0, end_idx - limit)
-        return source[start_idx:end_idx], start_idx
-    # Keep the last renderable row, plus any immediately-following tool-result
-    # rows whose tool_call_id matches a tool-call on a renderable row already in
-    # the window. The renderer rebuilds tool cards (CLI-origin / empty
-    # S.toolCalls path) from role:"tool" rows indexed by tool_call_id
-    # (static/ui.js resultsByTid), so dropping the result row that follows the
-    # newest assistant tool-call would leave that card without its snippet.
-    # Orphan trailing tool-only rows (no matching call in the window) are still
-    # skipped, preserving the visible-row budget. (#4070 ship-review)
-    end_idx = last_renderable_idx + 1
-    window_tool_call_ids = _tool_call_ids_in_messages(source[: last_renderable_idx + 1])
-    while end_idx < len(source) and not _message_counts_as_renderable_for_window(
-        source[end_idx]
-    ):
-        if _tool_result_matches_call_ids(source[end_idx], window_tool_call_ids):
-            end_idx += 1
-        else:
-            break
-    start_idx = 0
-    renderable_count = 0
-    for idx in range(last_renderable_idx, -1, -1):
-        if not _message_counts_as_renderable_for_window(source[idx]):
-            continue
-        renderable_count += 1
-        if renderable_count >= limit:
-            start_idx = idx
-            break
-    window = source[start_idx:end_idx]
-    return window, start_idx
-
-
-_LIMITED_TOOL_CONTENT_MAX_CHARS = 4096
 # Server-side ceiling on the ?msg_limit= tail-window size. A client could
 # otherwise request msg_limit=1000000 and force the server to assemble and
 # serialize an unbounded message payload (the frontend's own pagination grows
@@ -8934,48 +8805,6 @@ def _state_db_backstop_limit_for_display(session, msg_before) -> int | None:
         or getattr(session, "truncation_boundary", None) not in (None, "")
     )
     return None if has_boundary_prefix else _STATE_DB_DISPLAY_ROW_BACKSTOP
-
-
-_LIMITED_TOOL_CONTENT_NOTICE = (
-    "\n\n[Tool output truncated in paginated session response; "
-    "load the full transcript to inspect the complete result.]"
-)
-
-
-def _tool_message_for_limited_payload(message):
-    """Return a bounded copy of large hidden tool-result rows for paginated loads."""
-    if not isinstance(message, dict) or str(message.get("role") or "").lower() != "tool":
-        return message
-    content = message.get("content")
-    if content in (None, ""):
-        return message
-    if isinstance(content, str):
-        text = content
-    else:
-        try:
-            text = json.dumps(content, ensure_ascii=False, default=str)
-        except Exception:
-            text = str(content)
-    if len(text) <= _LIMITED_TOOL_CONTENT_MAX_CHARS:
-        return message
-    clipped = dict(message)
-    preview = text[:_LIMITED_TOOL_CONTENT_MAX_CHARS] + _LIMITED_TOOL_CONTENT_NOTICE
-    if isinstance(content, str):
-        clipped["content"] = preview
-    elif isinstance(content, list):
-        clipped["content"] = [{"type": "text", "text": preview}]
-    elif isinstance(content, dict):
-        clipped["content"] = {"_truncated": True, "preview": preview}
-    else:
-        clipped["content"] = preview
-    clipped["_content_truncated"] = True
-    clipped["_content_original_chars"] = len(text)
-    return clipped
-
-
-def _messages_for_limited_payload(messages) -> list:
-    """Bound hidden tool-result payloads before sending a msg_limit response."""
-    return [_tool_message_for_limited_payload(msg) for msg in list(messages or [])]
 
 
 def _limited_webui_messages_for_display(session, state_db_messages) -> list:
@@ -9728,7 +9557,6 @@ from api.models import (
     _session_messages_have_prefix,
     _session_message_visible_key,
     _message_timestamp_as_float,
-    _is_empty_partial_activity_message,
     _hide_from_default_sidebar,
     prune_session_from_index,
     agent_session_rows_existing,

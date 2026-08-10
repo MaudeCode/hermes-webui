@@ -826,14 +826,15 @@ def test_stream_end_restore_attaches_projected_anchor_scene_before_render():
 def test_cancel_settlement_attaches_projected_anchor_scene_before_render():
     cancel = _event_listener_body(MESSAGES_JS, "cancel")
 
+    metadata_idx = cancel.index("_applyTerminalMessageWindowMetadata(sessionPayload);")
     fetch_idx = cancel.index("const _nextMsgs3018=(sessionPayload.messages||[]).filter(m=>m&&m.role);")
     attach_idx = cancel.index("_attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);")
     carry_idx = cancel.index("S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);")
     render_idx = cancel.index("renderMessages({preserveScroll:true});")
-    assert fetch_idx < attach_idx < carry_idx < render_idx
+    assert metadata_idx < fetch_idx < attach_idx < carry_idx < render_idx
 
     embedded_idx = cancel.index("if(_applyCancelSessionPayload(_cancelSessionPayload)) return;")
-    fallback_get_idx = cancel.index("const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);")
+    fallback_get_idx = cancel.index("const data=await api(_terminalSessionPath(activeSid));")
     fallback_apply_idx = cancel.index("if(data&&data.session) _applyCancelSessionPayload(data.session);")
     assert embedded_idx < fallback_get_idx < fallback_apply_idx
 
@@ -847,11 +848,12 @@ def test_application_error_settlement_attaches_projected_anchor_scene_before_ren
     apperror = _event_listener_body(MESSAGES_JS, "apperror")
 
     assert "_applyToAnchor('apperror'" in apperror
+    metadata_idx = apperror.index("_applyTerminalMessageWindowMetadata(d.session);")
     session_idx = apperror.index("const _nextMsgs3018=(d.session.messages||[]).filter(m=>m&&m.role);")
     attach_idx = apperror.index("_attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);")
     carry_idx = apperror.index("S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);")
     render_idx = apperror.index("renderMessages({preserveScroll:true});")
-    assert session_idx < attach_idx < carry_idx < render_idx
+    assert metadata_idx < session_idx < attach_idx < carry_idx < render_idx
 
     synthetic_push_idx = apperror.index("S.messages.push({role:'assistant',content:`**${label}:**")
     synthetic_attach_idx = apperror.index("_attachProjectedAnchorSceneToLastAssistant(S.messages);", synthetic_push_idx)
