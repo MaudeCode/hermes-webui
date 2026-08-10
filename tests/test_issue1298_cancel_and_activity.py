@@ -362,8 +362,8 @@ class TestIssue1298ActivityGroupExpandPersistence:
 
     def test_clear_live_tool_cards_resets_expand_intent(self):
         """clearLiveToolCards() — invoked between turns — must reset the
-        per-turn user-expand tracker so the next turn starts collapsed by
-        default (#1298)."""
+        per-turn user-expand tracker so the next turn's automatic live-open
+        policy is not overridden by the prior turn (#1298)."""
         src = (REPO_ROOT / "static" / "ui.js").read_text()
         m = re.search(
             r"function clearLiveToolCards\(\)\{(.*?)\n\}",

@@ -12101,12 +12101,9 @@ function _renderTransparentTurnFooter(turn, opts){
   footer.innerHTML=html.replace(/^<div class="transparent-turn-footer">|<\/div>$/g,'');
 }
 // ── Activity-group user expand intent (#1298) ──────────────────────────────
-// When the user manually expands the live "Activity" dropdown during streaming,
-// preserve that intent across the destroy/recreate cycle that fires on every
-// thinking/tool event. Without this, ensureActivityGroup() re-creates the group
-// with the default collapsed state and finalizeThinkingCard() force-collapses
-// it whenever the assistant transitions from thinking → tool → thinking, so
-// the panel snaps shut every few seconds while the user is trying to read it.
+// Preserve the user's explicit live "Processed" disclosure choice across the
+// destroy/recreate cycle that can fire on thinking/tool transitions. Fresh runs
+// open automatically; once the user closes one, later activity must not reopen it.
 //
 // The tracker is a singleton boolean: there is at most one live activity group
 // at a time (selector .tool-call-group[data-live-tool-call-group="1"]). It is
@@ -14205,11 +14202,31 @@ function _syncLiveWorklogReasonsForAnchor(anchor, displayTextOverride){
 function _clearLiveActivityUserIntent(){
   _liveActivityUserExpanded = undefined;
 }
+function _applyLiveActivityDisclosureIntent(group, opts, savedState){
+  if(!group||!opts||!opts.live) return;
+  let open;
+  // User intent always wins. The persisted state covers a reload/reconnect of
+  // the same stream; the in-memory flag covers live DOM rebuilds in this tab.
+  if(_liveActivityUserExpanded===true) open=true;
+  else if(_liveActivityUserExpanded===false) open=false;
+  else if(savedState==='open') open=true;
+  else if(savedState==='closed') open=false;
+  // A newly-running Processed group should reveal its activity immediately.
+  // Reconciliation calls this for reused groups too, closing the gap where an
+  // earlier programmatic collapsed class survived after the stream started.
+  else if(opts.collapsed!==undefined) open=opts.collapsed===false;
+  else return;
+  group.classList.toggle('tool-call-group-collapsed',!open);
+  group.classList.toggle('open',open);
+  const summary=group.querySelector&&group.querySelector('.tool-worklog-summary,.tool-call-group-summary');
+  if(summary) summary.setAttribute('aria-expanded',open?'true':'false');
+}
 function ensureActivityGroup(inner, opts){
   opts=opts||{};
   if(!inner) return null;
   const live=!!opts.live;
   const activityKey=opts.activityKey||(live?_activityKeyForLiveTurn():null);
+  const savedState=live?_readActivityDisclosureState(activityKey):null;
   const burstId=opts.burstId!==undefined&&opts.burstId!==null?String(opts.burstId):'';
   const segmentSeq=opts.segmentSeq!==undefined&&opts.segmentSeq!==null?String(opts.segmentSeq):'';
   const liveSelectors=segmentSeq
@@ -14267,7 +14284,6 @@ function ensureActivityGroup(inner, opts){
     group=document.createElement('div');
     let collapsed=opts.collapsed!==false;
     if(window._worklogDetailsExpandedByDefault===true) collapsed=false;
-    const savedState=_readActivityDisclosureState(activityKey);
     // Restore the user's explicit expand intent when recreating the live
     // activity group within the same turn (#1298), then let persisted chat/turn
     // state win across session switches and reloads. Saved closed-state should
@@ -14312,6 +14328,7 @@ function ensureActivityGroup(inner, opts){
     summary.removeAttribute('aria-disabled');
     summary.disabled=false;
   }
+  _applyLiveActivityDisclosureIntent(group,opts,savedState);
   const anchor=opts.anchor||null;
   if(anchor&&anchor.parentElement===inner&&group.parentElement===inner){
     if(opts.beforeAnchor){
@@ -18882,8 +18899,8 @@ function clearLiveToolCards(){
     const inner=_assistantTurnBlocks($('liveAssistantTurn'));
     if(inner) inner.querySelectorAll('.live-worklog[data-live-worklog-shell],.tool-worklog-group[data-live-tool-call-group],.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid]:not(.transparent-event-row),[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
   }
-  // Reset the per-turn user expand intent so the next turn starts at the
-  // default collapsed state (#1298).
+  // Reset the per-turn user intent so the next stream gets its own automatic
+  // live-open policy rather than inheriting the prior turn's choice (#1298).
   if(typeof _clearLiveActivityUserIntent==='function') _clearLiveActivityUserIntent();
   // Legacy #liveToolCards container cleanup (sibling to the settled-rendered
   // subtree). Always clear/hide it to avoid leaking stale fallback content.

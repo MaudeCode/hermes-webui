@@ -1685,6 +1685,53 @@ def test_live_processed_anchor_is_clickable_while_streaming():
 
 
 @pytest.mark.skipif(NODE is None, reason="node is required for live disclosure behavior tests")
+def test_live_processed_auto_opens_but_respects_user_close():
+    script = f"""
+const assert = require('assert');
+let _liveActivityUserExpanded;
+function _applyLiveActivityDisclosureIntent(group, opts, savedState) {{
+{_function_body(UI_JS, "_applyLiveActivityDisclosureIntent")}
+}}
+function makeGroup(initialOpen) {{
+  const classes = new Set(initialOpen ? ['open'] : ['tool-call-group-collapsed']);
+  const summary = {{ attrs: {{}}, setAttribute(name, value) {{ this.attrs[name] = String(value); }} }};
+  return {{
+    classes,
+    summary,
+    classList: {{
+      toggle(name, force) {{
+        if(force) classes.add(name); else classes.delete(name);
+        return !!force;
+      }}
+    }},
+    querySelector() {{ return summary; }}
+  }};
+}}
+
+const fresh = makeGroup(false);
+_applyLiveActivityDisclosureIntent(fresh, {{live:true, collapsed:false}}, null);
+assert.strictEqual(fresh.classes.has('open'), true);
+assert.strictEqual(fresh.classes.has('tool-call-group-collapsed'), false);
+assert.strictEqual(fresh.summary.attrs['aria-expanded'], 'true');
+
+_liveActivityUserExpanded = false;
+const userClosed = makeGroup(true);
+_applyLiveActivityDisclosureIntent(userClosed, {{live:true, collapsed:false}}, null);
+assert.strictEqual(userClosed.classes.has('open'), false);
+assert.strictEqual(userClosed.classes.has('tool-call-group-collapsed'), true);
+assert.strictEqual(userClosed.summary.attrs['aria-expanded'], 'false');
+
+_liveActivityUserExpanded = undefined;
+const restoredClosed = makeGroup(true);
+_applyLiveActivityDisclosureIntent(restoredClosed, {{live:true, collapsed:false}}, 'closed');
+assert.strictEqual(restoredClosed.classes.has('open'), false);
+assert.strictEqual(restoredClosed.classes.has('tool-call-group-collapsed'), true);
+console.log(JSON.stringify({{ok:true}}));
+"""
+    _run_node_script(script)
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for live disclosure behavior tests")
 def test_live_processed_anchor_toggle_collapses_current_worklog_group():
     script = f"""
 const assert = require('assert');
