@@ -130,6 +130,69 @@ def test_server_turn_no_session_channel_is_noop(monkeypatch):
     assert bp.get_session_channel(sid) is None
 
 
+def test_server_turn_fans_to_retargeted_continuation_channel(monkeypatch):
+    """A compression-race retarget must notify the accepted child, not its parent."""
+    from api import background_process as bp
+    import api.routes as routes
+
+    parent_sid = "sess-optz-compressed-parent"
+    child_sid = "sess-optz-live-child"
+    fake_stream_id = "stream-optz-retargeted"
+
+    def _fake_start_chat_stream_for_session(_session, **_kwargs):
+        return {
+            "stream_id": fake_stream_id,
+            "session_id": child_sid,
+            "_status": 200,
+        }
+
+    class _FakeSession:
+        session_id = parent_sid
+        pre_compression_snapshot = False
+        model = "test-model"
+        model_provider = None
+
+    monkeypatch.setattr(
+        routes,
+        "_start_chat_stream_for_session",
+        _fake_start_chat_stream_for_session,
+        raising=True,
+    )
+    monkeypatch.setattr(routes, "get_session", lambda _sid: _FakeSession(), raising=True)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_chat_workspace_with_recovery",
+        lambda _session, _workspace: "/tmp/ws",
+        raising=True,
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda _model, _provider, **_kwargs: ("test-model", None, False),
+        raising=True,
+    )
+
+    child_channel = bp.get_or_create_session_channel(child_sid)
+    queue = child_channel.subscribe()
+    try:
+        response = routes.start_session_turn(
+            parent_sid,
+            "[IMPORTANT: bg done]",
+            source="process_wakeup",
+        )
+
+        assert response["session_id"] == child_sid
+        event_name, data = queue.get(timeout=2.0)
+        assert event_name == "server_turn_started"
+        assert data["session_id"] == child_sid
+        assert data["stream_id"] == fake_stream_id
+        assert bp.get_session_channel(parent_sid) is None
+    finally:
+        child_channel.unsubscribe(queue)
+        with bp.SESSION_CHANNELS_LOCK:
+            bp.SESSION_CHANNELS.pop(child_sid, None)
+
+
 # ---------------------------------------------------------------------------
 # Defect A — SSE write deadline drops a stuck writer / releases the thread
 # ---------------------------------------------------------------------------
@@ -774,4 +837,3 @@ def test_loadsession_idle_cleanup_does_not_clobber_concurrent_live_stream():
     assert reread_ix != -1 and branch_ix != -1 and reread_ix < branch_ix, (
         "race-guard re-read must precede the attach/idle branch"
     )
-

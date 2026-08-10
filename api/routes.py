@@ -21742,6 +21742,7 @@ def _start_chat_stream_for_session(
         return stale_response
     attachments = attachments or []
     session_lock = _get_session_agent_lock(s.session_id)
+    process_wakeup_lineage_seen: set[str] = set()
     diag.stage("session_lock_wait") if diag else None
     while True:
         with session_lock:
@@ -21758,6 +21759,58 @@ def _start_chat_stream_for_session(
                 }
             if authoritative_session is not s:
                 s = authoritative_session
+            if source == "process_wakeup" and getattr(
+                s, "pre_compression_snapshot", False
+            ):
+                # A completion can resolve its owner immediately before a long
+                # turn crosses a compression boundary, then wait on that turn's
+                # lock. Re-check lineage after acquiring the admission lock so
+                # the queued wakeup cannot start a second writable child from
+                # the newly sealed parent. Release this lock and retry under the
+                # continuation's lock; persisted aliases are not guaranteed
+                # after a process restart.
+                current_sid = str(getattr(s, "session_id", "") or "").strip()
+                if not current_sid or current_sid in process_wakeup_lineage_seen:
+                    return {
+                        "error": "process_wakeup_snapshot_unresolved",
+                        "message": (
+                            "Automatic wakeup retained until the live continuation "
+                            "can be verified."
+                        ),
+                        "retryable": True,
+                        "_status": 409,
+                    }
+                process_wakeup_lineage_seen.add(current_sid)
+                continuation_sid = str(
+                    _pre_compression_continuation_session_id(s) or ""
+                ).strip()
+                if (
+                    not continuation_sid
+                    or continuation_sid in process_wakeup_lineage_seen
+                ):
+                    return {
+                        "error": "process_wakeup_snapshot_unresolved",
+                        "message": (
+                            "Automatic wakeup retained because this session is a "
+                            "sealed compression snapshot."
+                        ),
+                        "retryable": True,
+                        "_status": 409,
+                    }
+                try:
+                    s = get_session(continuation_sid)
+                except KeyError:
+                    return {
+                        "error": "process_wakeup_snapshot_unresolved",
+                        "message": (
+                            "Automatic wakeup retained until the continuation "
+                            "session is available."
+                        ),
+                        "retryable": True,
+                        "_status": 409,
+                    }
+                session_lock = _get_session_agent_lock(s.session_id)
+                continue
             diag.stage("active_stream_check") if diag else None
             locked_stream_id = getattr(s, "active_stream_id", None)
             if locked_stream_id:
@@ -22401,12 +22454,15 @@ def start_session_turn(
         if status < 400 and stream_id:
             from api.background_process import get_session_channel
 
-            ch = get_session_channel(session_id)
+            accepted_session_id = str(
+                (resp or {}).get("session_id") or session_id
+            ).strip()
+            ch = get_session_channel(accepted_session_id)
             if ch is not None:
                 ch.emit(
                     "server_turn_started",
                     {
-                        "session_id": str(session_id),
+                        "session_id": accepted_session_id,
                         "stream_id": str(stream_id),
                         "pending_started_at": (resp or {}).get("pending_started_at"),
                         "source": source,

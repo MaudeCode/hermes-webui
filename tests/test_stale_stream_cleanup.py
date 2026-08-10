@@ -216,6 +216,110 @@ def test_chat_start_stale_deleted_handle_cannot_resurrect_session(monkeypatch, t
         routes.PENDING_BG_TASK_COMPLETIONS.discard(stale.session_id)
 
 
+def test_process_wakeup_retargets_snapshot_created_while_waiting_for_admission(
+    monkeypatch, tmp_path
+):
+    """A compression-boundary waiter must start only on the live child."""
+    config.STREAMS.clear()
+    config.ACTIVE_RUNS.clear()
+    config.SESSION_AGENT_LOCKS.clear()
+
+    class CompressionSession:
+        def __init__(self, session_id, *, snapshot=False):
+            self.session_id = session_id
+            self.pre_compression_snapshot = snapshot
+            self.active_stream_id = None
+            self.pending_user_message = None
+            self.pending_attachments = []
+            self.pending_started_at = None
+            self.pending_user_source = None
+            self.messages = [{"role": "user", "content": "existing"}]
+            self.title = "Compression race"
+            self.worktree_path = None
+
+    parent = CompressionSession("compression-race-parent")
+    child = CompressionSession("compression-race-child")
+    sessions = {parent.session_id: parent, child.session_id: child}
+    lock_entries = []
+
+    class AdmissionLock:
+        def __init__(self, session_id):
+            self.session_id = session_id
+
+        def __enter__(self):
+            lock_entries.append(self.session_id)
+            if self.session_id == parent.session_id:
+                # The caller captured a writable parent, then the active turn
+                # compressed it before this queued wakeup acquired admission.
+                parent.pre_compression_snapshot = True
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    prepared = []
+
+    def prepare(session, **kwargs):
+        prepared.append(session.session_id)
+        session.active_stream_id = kwargs["stream_id"]
+        session.pending_user_message = kwargs["msg"]
+        session.pending_attachments = kwargs["attachments"]
+        session.pending_started_at = 123.0
+        session.pending_user_source = kwargs["source"]
+
+    class NoopThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(routes, "get_session", lambda sid: sessions[sid])
+    monkeypatch.setattr(
+        routes,
+        "_pre_compression_continuation_session_id",
+        lambda session: child.session_id if session is parent else None,
+    )
+    monkeypatch.setattr(
+        routes, "_get_session_agent_lock", lambda sid: AdmissionLock(sid)
+    )
+    monkeypatch.setattr(routes, "_prepare_chat_start_session_for_stream", prepare)
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_: None)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: False)
+    monkeypatch.setattr(
+        routes.uuid,
+        "uuid4",
+        lambda: type("FakeUuid", (), {"hex": "redirected-stream"})(),
+    )
+    monkeypatch.setattr(routes, "set_last_workspace", lambda _workspace: None)
+    monkeypatch.setattr(routes, "create_stream_channel", queue.Queue)
+    monkeypatch.setattr(routes, "register_stream_owner", lambda *_args: None)
+    monkeypatch.setattr(routes.threading, "Thread", NoopThread)
+    import api.turn_journal as turn_journal
+
+    monkeypatch.setattr(turn_journal, "append_turn_journal_event", lambda *_a, **_k: {})
+
+    try:
+        response = routes._start_chat_stream_for_session(
+            parent,
+            msg="delegation complete",
+            attachments=[],
+            workspace=str(tmp_path),
+            model="test-model",
+            model_provider=None,
+            source="process_wakeup",
+        )
+
+        assert response["session_id"] == child.session_id
+        assert response["stream_id"] == "redirected-stream"
+        assert lock_entries == [parent.session_id, child.session_id]
+        assert prepared == [child.session_id]
+        assert parent.active_stream_id is None
+        assert child.pending_user_source == "process_wakeup"
+    finally:
+        routes.STREAMS.pop("redirected-stream", None)
+
+
 def test_chat_start_blocks_same_session_active_run_after_cancel_clears_stream_id(monkeypatch, tmp_path):
     """Regression for #3808: cancel clears active_stream_id before worker exit.
 
