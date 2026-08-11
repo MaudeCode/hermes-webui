@@ -2878,6 +2878,13 @@ function _applyFontSize(size){
   }
 }
 
+function _applyFullWidthChat(enabled){
+  const full=enabled===true;
+  if(full) document.documentElement.dataset.chatWidth='full';
+  else delete document.documentElement.dataset.chatWidth;
+  try{ localStorage.setItem('hermes-full-width-chat',full?'true':'false'); }catch(_){}
+}
+
 function _pickFontSize(size){
   localStorage.setItem('hermes-font-size',size);
   _applyFontSize(size);
@@ -3344,6 +3351,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     // settings.json), so it can be written synchronously here — no deferred
     // write needed.
     window._autoScrollFollow=_persistAutoScrollFollow(s.auto_scroll_follow!==false);
+    _applyFullWidthChat(s.full_width_chat===true);
     window._largeTextPasteAsAttachment=s.large_text_paste_as_attachment!==false;
     window._projectQuickCreate=!!s.project_quick_create_buttons;
     window._composerControlVisibility=_composerControlVisibilityFromSettings(s);

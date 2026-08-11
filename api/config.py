@@ -9340,6 +9340,7 @@ _SETTINGS_DEFAULTS = {
     "theme": "dark",  # light | dark | system
     "skin": "default",  # accent color skin: default | ares | mono | graphite | slate | poseidon | sisyphus | charizard | sienna | catppuccin | nous
     "font_size": "default",  # small | default | large | xlarge
+    "full_width_chat": False,  # opt-in: let transcript and composer use the full center pane
     "session_jump_buttons": False,  # show Start/End transcript jump pills
     "render_user_markdown": False,  # opt-in: render full markdown in user messages (#3870)
     "large_text_paste_as_attachment": True,  # convert very large composer text pastes into .md attachments by default
@@ -9661,6 +9662,7 @@ _SETTINGS_BOOL_KEYS = {
     "virtualize_transcript_optin",
     "show_tps",
     "fade_text_effect",
+    "full_width_chat",
     "show_cli_sessions",
     "show_claude_code_sessions",
     "show_cron_sessions",

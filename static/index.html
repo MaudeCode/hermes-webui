@@ -19,6 +19,7 @@
 <link rel="apple-touch-icon" sizes="512x512" href="static/apple-touch-icon.png">
 <script>(function(){try{var themes={light:1,dark:1,system:1},skins={codex:1,terracotta:1,default:1,ares:1,mono:1,graphite:1,github:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1,catppuccin:1,hepburn:1,nous:1,'geist-contrast':1,neon:1,'neon-soft':1,'neon-paint':1,zeus:1,'verdigris':1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark');var pendingExt=s&&s!=='default'&&!skins[s]&&!legacy[s];var skin=skins[s]?s:(pendingExt?s:(m?m[1]:'default'));localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;}catch(e){document.documentElement.classList.add('dark');}})()</script>
 <script>(function(){try{var fs=localStorage.getItem('hermes-font-size');if(fs&&fs!=='default')document.documentElement.dataset.fontSize=fs;}catch(e){}})()</script>
+<script>(function(){try{if(localStorage.getItem('hermes-full-width-chat')==='true')document.documentElement.dataset.chatWidth='full';}catch(e){}})()</script>
 <!-- theme-color: surfaces the active app chrome color to native status bars (Safari status bar, PWA, native WKWebView wrappers). Updated dynamically by boot.js when theme/skin changes. The light/dark default values match style.css :root --sidebar / :root.dark --sidebar. -->
 <meta name="theme-color" content="#FAF7F0" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#141425" media="(prefers-color-scheme: dark)">
@@ -992,7 +993,7 @@
               </div>
               <input type="hidden" id="settingsSkin" value="default">
             </div>
-                        <div class="settings-field">
+            <div class="settings-field">
               <label data-i18n="settings_label_font_size">Font size</label>
               <div id="fontSizePickerGrid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:8px;margin-top:4px">
                 <button type="button" data-font-size-val="small" onclick="_pickFontSize('small')" class="font-size-pick-btn" style="border:1px solid var(--border2);border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;background:none;transition:all .15s">
@@ -1021,6 +1022,13 @@
                 </button>
               </div>
               <input type="hidden" id="settingsFontSize" value="default">
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsFullWidthChat" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_full_width_chat">Use full-width chat</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_full_width_chat">Let the transcript and composer use the available center pane instead of the compact reading column.</div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">

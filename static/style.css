@@ -6401,6 +6401,13 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
 @media (min-width: 1400px) { .messages-inner { max-width: calc(var(--msg-max) + 40px); } }
 @media (min-width: 1800px) { .messages-inner { max-width: calc(var(--msg-max) + 80px); } }
 
+/* Opt-in layout for wide monitors and split-pane workflows. The compact
+   reading column remains the default; this mode consumes only the available
+   center pane, so sidebar and workspace widths remain untouched. */
+:root[data-chat-width="full"] { --msg-max: 100%; }
+:root[data-chat-width="full"] .messages-inner,
+:root[data-chat-width="full"] .composer-box { max-width: none; }
+
 @media (max-width: 700px) {
   .msg-role { margin-bottom: 4px; }
   .msg-row[data-role="user"] .msg-body { padding: 8px 12px; }

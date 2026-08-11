@@ -8550,6 +8550,7 @@ function _appearancePayloadFromUi(){
     theme: ($('settingsTheme')||{}).value || localStorage.getItem('hermes-theme') || 'dark',
     skin: ($('settingsSkin')||{}).value || localStorage.getItem('hermes-skin') || 'default',
     font_size: ($('settingsFontSize')||{}).value || localStorage.getItem('hermes-font-size') || 'default',
+    full_width_chat: !!($('settingsFullWidthChat')||{}).checked,
     chat_activity_display_mode: chatActivityModeSel&&(chatActivityModeSel.value==='transparent_stream'||chatActivityModeSel.value==='hide_all_activity')
       ? chatActivityModeSel.value
       : 'compact_worklog',
@@ -8657,6 +8658,11 @@ async function _autosaveAppearanceSettings(payload){
     _rememberAppearanceSaved(payload);
     if(saved&&saved.font_size){
       localStorage.setItem('hermes-font-size',saved.font_size);
+    }
+    if(saved&&typeof saved.full_width_chat==='boolean'&&typeof _applyFullWidthChat==='function'){
+      _applyFullWidthChat(saved.full_width_chat);
+      const fullWidthCb=$('settingsFullWidthChat');
+      if(fullWidthCb) fullWidthCb.checked=saved.full_width_chat;
     }
     if(saved){
       window._sessionJumpButtonsEnabled=!!saved.session_jump_buttons;
@@ -9151,6 +9157,15 @@ async function loadSettingsPanel(){
     const fontSizeSel=$('settingsFontSize');
     if(fontSizeSel) fontSizeSel.value=fontSizeVal;
     if(typeof _syncFontSizePicker==='function') _syncFontSizePicker(fontSizeVal);
+    const fullWidthChatCb=$('settingsFullWidthChat');
+    if(fullWidthChatCb){
+      fullWidthChatCb.checked=settings.full_width_chat===true;
+      if(typeof _applyFullWidthChat==='function') _applyFullWidthChat(fullWidthChatCb.checked);
+      fullWidthChatCb.onchange=function(){
+        if(typeof _applyFullWidthChat==='function') _applyFullWidthChat(this.checked);
+        _scheduleAppearanceAutosave();
+      };
+    }
     const jumpButtonsCb=$('settingsSessionJumpButtons');
     if(jumpButtonsCb){
       jumpButtonsCb.checked=!!settings.session_jump_buttons;
@@ -12112,6 +12127,9 @@ function _applySavedSettingsUi(saved, body, opts){
     window._autoScrollFollow=body.auto_scroll_follow!==false;
     if(typeof _persistAutoScrollFollow==='function') _persistAutoScrollFollow(window._autoScrollFollow);
   }
+  if(Object.prototype.hasOwnProperty.call(body,'full_width_chat')&&typeof _applyFullWidthChat==='function'){
+    _applyFullWidthChat(body.full_width_chat===true);
+  }
   window._largeTextPasteAsAttachment=body.large_text_paste_as_attachment!==false;
   window._projectQuickCreate=!!body.project_quick_create_buttons;
   if(Object.prototype.hasOwnProperty.call(body,'structured_code_default_view')){
@@ -12738,6 +12756,7 @@ async function saveSettings(andClose){
   body.theme=theme;
   body.skin=skin;
   body.font_size=fontSize;
+  body.full_width_chat=!!($('settingsFullWidthChat')||{}).checked;
   body.session_jump_buttons=!!($('settingsSessionJumpButtons')||{}).checked;
   body.session_endless_scroll=!!($('settingsSessionEndlessScroll')||{}).checked;
   body.chat_activity_display_mode=((($('settingsChatActivityDisplayMode')||{}).value==='transparent_stream')

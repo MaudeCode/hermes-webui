@@ -169,6 +169,12 @@ For UI changes, verify the relevant states:
 Controls should remain usable at touch sizes, and mobile navigation should not
 steal chat height unnecessarily.
 
+The transcript and composer default to a compact reading column on desktop.
+Users who prefer to use the entire center pane can enable **Use full-width chat**
+under Settings → Appearance. New transcript-width rules should honor the shared
+`--msg-max` token and the `data-chat-width="full"` root mode so prose, worklogs,
+tool rows, status cards, and the composer remain aligned.
+
 ## Themes and skins
 
 Theme and skin work should use the existing variable system. `THEMES.md` points
