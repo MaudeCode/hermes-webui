@@ -9127,6 +9127,16 @@ def register_active_run(stream_id: str, **metadata) -> None:
     entry.setdefault("stream_id", stream_id)
     entry.setdefault("started_at", now)
     entry.setdefault("phase", "running")
+    # ACTIVE_RUNS is the worker-lifecycle authority, not merely an SSE
+    # connection registry.  Record the owning thread so admission can
+    # distinguish a legitimately long-running worker whose browser stream was
+    # detached from an actually-dead worker that leaked its lifecycle row.
+    # Thread/native ids are scalar so health/debug payloads remain JSON-safe.
+    entry.setdefault("owner_thread_ident", threading.get_ident())
+    try:
+        entry.setdefault("owner_thread_native_id", threading.get_native_id())
+    except AttributeError:  # Python < 3.8 compatibility for downstream users
+        pass
     with ACTIVE_RUNS_LOCK:
         ACTIVE_RUNS[stream_id] = entry
 

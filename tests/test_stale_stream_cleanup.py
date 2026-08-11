@@ -445,8 +445,8 @@ def test_chat_start_allows_same_session_after_active_run_unregisters(monkeypatch
         routes.STREAMS.pop("new-stream", None)
 
 
-def test_chat_start_reaps_aged_detached_active_run(monkeypatch, tmp_path):
-    """A stale ACTIVE_RUNS row without a live stream must not 409 forever."""
+def test_chat_start_keeps_aged_detached_live_worker_blocking(monkeypatch, tmp_path):
+    """A disconnected browser must not make a long worker safe to supersede."""
     config.STREAMS.clear()
     config.ACTIVE_RUNS.clear()
     config.SESSION_AGENT_LOCKS.clear()
@@ -473,12 +473,13 @@ def test_chat_start_reaps_aged_detached_active_run(monkeypatch, tmp_path):
     monkeypatch.setattr(routes, "get_session", lambda sid: session)
     stale_stream_id = "wedged-old-stream"
     config.register_active_run(stale_stream_id, session_id=session.session_id, phase="running")
-    # Simulate a detached lifecycle row that outlived its stream and worker.
+    # The SSE stream is detached and the run is old, but register_active_run()
+    # recorded this still-live test thread as the worker owner.
     with config.ACTIVE_RUNS_LOCK:
         config.ACTIVE_RUNS[stale_stream_id]["started_at"] = time.time() - 600
 
-    assert routes._active_run_stream_for_session(session.session_id) is None
-    assert stale_stream_id not in config.ACTIVE_RUNS
+    assert routes._active_run_stream_for_session(session.session_id) == stale_stream_id
+    assert stale_stream_id in config.ACTIVE_RUNS
 
     class NoopThread:
         def __init__(self, *args, **kwargs):
@@ -502,14 +503,114 @@ def test_chat_start_reaps_aged_detached_active_run(monkeypatch, tmp_path):
             model="test-model",
             model_provider=None,
         )
-        assert "error" not in response
-        assert response["stream_id"] == "new-stream"
-        assert session.active_stream_id == "new-stream"
-        assert session.pending_user_message == "successor prompt"
+        assert response["_status"] == 409
+        assert response["active_stream_id"] == stale_stream_id
+        assert session.active_stream_id is None
+        assert session.pending_user_message is None
     finally:
         config.unregister_active_run(stale_stream_id)
         config.unregister_active_run("new-stream")
         routes.STREAMS.pop("new-stream", None)
+
+
+def test_dead_worker_row_without_stream_is_reaped():
+    """Thread ownership preserves stale-row recovery without an age guess."""
+    config.STREAMS.clear()
+    config.ACTIVE_RUNS.clear()
+    sid = "dead-worker-session"
+    stream_id = "dead-worker-stream"
+
+    def register_then_exit():
+        config.register_active_run(stream_id, session_id=sid, phase="running")
+
+    worker = threading.Thread(target=register_then_exit)
+    worker.start()
+    worker.join(2)
+    assert not worker.is_alive()
+
+    assert routes._active_run_stream_for_session(sid) is None
+    assert stream_id not in config.ACTIVE_RUNS
+
+
+def test_compression_tip_blocks_active_snapshot_ancestor(monkeypatch, tmp_path):
+    """Automatic work cannot overlap a writer registered on an older segment."""
+    config.STREAMS.clear()
+    config.ACTIVE_RUNS.clear()
+    config.SESSION_AGENT_LOCKS.clear()
+
+    class CompressionSession:
+        def __init__(self, sid, *, parent=None, snapshot=False):
+            self.session_id = sid
+            self.parent_session_id = parent
+            self.pre_compression_snapshot = snapshot
+            self.relationship_type = None
+            self.profile = "default"
+            self.active_stream_id = None
+            self.pending_user_message = None
+            self.pending_attachments = []
+            self.pending_started_at = None
+            self.messages = []
+            self.title = "Compression lineage"
+            self.worktree_path = None
+
+        def save(self, *args, **kwargs):
+            return None
+
+    root = CompressionSession("compression-active-root", snapshot=True)
+    tip = CompressionSession(
+        "compression-idle-tip",
+        parent=root.session_id,
+        snapshot=False,
+    )
+    sessions = {root.session_id: root, tip.session_id: tip}
+    monkeypatch.setattr(routes, "get_session", lambda sid, **_kwargs: sessions[sid])
+    monkeypatch.setattr(
+        routes.Session,
+        "load_metadata_only",
+        lambda sid, **_kwargs: sessions.get(sid),
+    )
+
+    active_stream = "root-live-stream"
+    config.register_active_run(active_stream, session_id=root.session_id, phase="running")
+    try:
+        response = routes._start_chat_stream_for_session(
+            tip,
+            msg="delegation complete",
+            attachments=[],
+            workspace=str(tmp_path),
+            model="test-model",
+            model_provider=None,
+            source="process_wakeup",
+        )
+        assert response["_status"] == 409
+        assert response["active_stream_id"] == active_stream
+        assert tip.pending_user_message is None
+        assert not routes.STREAMS
+    finally:
+        config.unregister_active_run(active_stream)
+
+
+def test_compression_admission_lineage_does_not_cross_ordinary_fork(monkeypatch):
+    class Row:
+        profile = "default"
+        relationship_type = None
+
+        def __init__(self, sid, *, parent=None, snapshot=False):
+            self.session_id = sid
+            self.parent_session_id = parent
+            self.pre_compression_snapshot = snapshot
+
+    parent = Row("ordinary-fork-parent", snapshot=False)
+    fork = Row("ordinary-fork-child", parent=parent.session_id)
+    rows = {parent.session_id: parent, fork.session_id: fork}
+    monkeypatch.setattr(routes, "get_session", lambda sid, **_kwargs: rows[sid])
+    monkeypatch.setattr(
+        routes.Session,
+        "load_metadata_only",
+        lambda sid, **_kwargs: rows.get(sid),
+    )
+
+    assert routes._compression_admission_lineage_ids(fork.session_id) == {fork.session_id}
 
 
 def test_live_worker_age_never_disables_active_run_guard():

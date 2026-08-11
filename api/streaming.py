@@ -10282,6 +10282,16 @@ def _run_agent_streaming(
                     # too until the weak registry can reclaim both safely after
                     # all old-ID holders and waiters release the lock.
                     _alias_session_agent_lock(old_sid, new_sid, _agent_lock)
+                    # ACTIVE_RUNS is also an admission authority. Move this
+                    # still-live worker onto the continuation id immediately so
+                    # an automatic wakeup resolved to the new tip cannot miss
+                    # the foreground writer merely because its browser stream
+                    # began on the pre-compression id.
+                    update_active_run(
+                        stream_id,
+                        session_id=new_sid,
+                        compression_previous_session_id=old_sid,
+                    )
                     # Migrate cached agent to the new session ID so the turn
                     # count survives context compression.
                     from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK

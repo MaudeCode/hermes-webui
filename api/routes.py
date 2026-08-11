@@ -21518,8 +21518,71 @@ def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
     return False
 
 
+def _compression_admission_lineage_ids(session_id: str | None) -> set[str]:
+    """Return WebUI compression ancestors that share one writable turn lane.
+
+    Physical session ids rotate during context compression, but turn admission
+    must remain serialized for the logical conversation.  Walk only edges whose
+    parent is a sealed pre-compression snapshot; ordinary forks and delegated
+    child sessions retain independent writable lanes.
+    """
+    sid = str(session_id or "").strip()
+    if not sid or not is_safe_session_id(sid):
+        return {sid} if sid else set()
+    lineage_ids = {sid}
+    try:
+        current = get_session(sid, metadata_only=True)
+    except Exception:
+        return lineage_ids
+    seen = {sid}
+    for _ in range(20):
+        if str(getattr(current, "relationship_type", "") or "").strip().lower() == "child_session":
+            break
+        parent_sid = str(getattr(current, "parent_session_id", "") or "").strip()
+        if not parent_sid or parent_sid in seen or not is_safe_session_id(parent_sid):
+            break
+        try:
+            parent = Session.load_metadata_only(parent_sid)
+        except Exception:
+            break
+        if parent is None or not bool(getattr(parent, "pre_compression_snapshot", False)):
+            break
+        if not _profiles_match(
+            getattr(current, "profile", None),
+            getattr(parent, "profile", None),
+        ):
+            break
+        lineage_ids.add(parent_sid)
+        seen.add(parent_sid)
+        current = parent
+    return lineage_ids
+
+
+def _active_run_owner_thread_alive(run: dict) -> bool | None:
+    """Return worker-thread liveness, or None for a legacy unowned row."""
+    try:
+        owner_ident = int(run.get("owner_thread_ident"))
+    except (TypeError, ValueError):
+        return None
+    try:
+        owner_native_id = int(run.get("owner_thread_native_id"))
+    except (TypeError, ValueError):
+        owner_native_id = None
+    for thread in threading.enumerate():
+        if thread.ident != owner_ident:
+            continue
+        if owner_native_id is not None:
+            try:
+                if thread.native_id != owner_native_id:
+                    continue
+            except AttributeError:
+                pass
+        return bool(thread.is_alive())
+    return False
+
+
 def _active_run_stream_for_session(session_id: str | None) -> str | None:
-    """Return a live worker stream for this session even if sidecar stream id is clear.
+    """Return a live worker stream for this compression lineage.
 
     cancel_stream() intentionally clears ``session.active_stream_id`` before the
     worker thread fully exits so Stop remains responsive. During that unwind
@@ -21527,87 +21590,81 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
     the same session must wait or it can reuse the cached agent while the old
     interrupt is still landing (#3808).
 
-    Bounded: the post-cancel unwind is short (dominated by the worker finally's
-    ``_ckpt_thread.join(timeout=15)``), and ``unregister_active_run`` runs in that
-    finally, so a healthy worker leaves ACTIVE_RUNS within seconds. A detached /
-    wedged worker that never reaches its finally (e.g. stuck in a provider call,
-    or leaked by SIGKILL without restart) must NOT 409 the session forever — so an
-    entry older than the unwind ceiling (180s) is treated as stale and ignored
-    here. For a phase="cancelling" row the ceiling is anchored on the cancel time
-    (``cancelled_at``), never on the original run start: cancel_stream() removes
-    STREAMS itself, so absence from STREAMS is not worker-death proof, and a
-    long-running turn that was just cancelled must not be reaped (and a successor
-    admitted) while the old worker is still alive (#6623). A legitimately
-    long-running turn keeps ``active_stream_id`` SET and is handled by
-    ``_active_stream_blocks_chat_start`` above; this guard only covers the
-    cleared-stream-id unwind window. (Codex brick-gate hardening, #3822.)
+    A detached SSE channel is not evidence that the worker stopped. Long turns
+    routinely outlive browser connections by hours, so running rows are reaped
+    only when their recorded owner thread is actually gone. Explicitly-cancelled
+    workers retain the bounded 180s unwind escape hatch; their stale writeback is
+    separately generation-guarded (#6623).
     """
     sid = str(session_id or "").strip()
     if not sid:
         return None
+    target_lineage_ids = _compression_admission_lineage_ids(sid)
     ceiling = 180.0  # generous vs the 15s checkpoint-join unwind; finite to avoid permanent-409
     now = time.time()
     try:
         from api import config as _live_config
-        # Snapshot the live-worker set BEFORE taking ACTIVE_RUNS_LOCK (sequential,
-        # not nested, so no lock-ordering/deadlock risk). A long turn whose
-        # active_stream_id was already cleared during final writeback can still be
-        # mid-teardown — its STREAMS entry present — past the age ceiling, so age
-        # alone must NOT pop its lifecycle row (health / background-wakeup /
-        # active-agent-cache consumers read ACTIVE_RUNS as worker-lifecycle truth).
+        # Snapshot the live-stream set before ACTIVE_RUNS (sequential, not
+        # nested, so no lock-ordering/deadlock risk). It remains a secondary
+        # liveness signal for external/legacy runners and for cancelled-worker
+        # unwind; browser detachment alone never authorizes a successor.
         with _live_config.STREAMS_LOCK:
             live_stream_ids = set(_live_config.STREAMS.keys())
-        stale_stream_ids = []
         with _live_config.ACTIVE_RUNS_LOCK:
-            for run_stream_id, raw in list((_live_config.ACTIVE_RUNS or {}).items()):
-                stream_id = str((raw or {}).get("stream_id") or run_stream_id or "").strip()
-                run_sid = str((raw or {}).get("session_id") or "").strip()
-                if run_sid != sid or not stream_id:
+            run_rows = [
+                (run_key, dict(raw or {}))
+                for run_key, raw in list((_live_config.ACTIVE_RUNS or {}).items())
+            ]
+        matching_rows = []
+        for run_key, raw in run_rows:
+            stream_id = str(raw.get("stream_id") or run_key or "").strip()
+            run_sid = str(raw.get("session_id") or "").strip()
+            if not run_sid or not stream_id:
+                continue
+            run_lineage_ids = _compression_admission_lineage_ids(run_sid)
+            if not (target_lineage_ids & run_lineage_ids):
+                continue
+            matching_rows.append((run_key, stream_id))
+
+        with _live_config.ACTIVE_RUNS_LOCK:
+            for run_stream_id, stream_id in matching_rows:
+                raw = (_live_config.ACTIVE_RUNS or {}).get(run_stream_id)
+                if not raw:
                     continue
-                try:
-                    started_at = float((raw or {}).get("started_at") or 0)
-                except (TypeError, ValueError):
-                    started_at = 0.0
-                # #6623 re-gate: cancel_stream() removes STREAMS itself, so a
-                # missing SSE channel is NOT proof that a cancelled worker is
-                # dead. For a phase="cancelling" row the unwind ceiling must be
-                # anchored on the CANCEL time (cancelled_at, started_at as a
-                # legacy fallback), never on the original run start: a turn that
-                # ran for minutes and was just cancelled would otherwise be
-                # reaped the instant its started_at crosses the ceiling and a
-                # successor admitted while the old worker is still alive. A
-                # recently cancelled run therefore keeps blocking a successor
-                # (this function returns its stream id) until the worker either
-                # unwinds (its finally unregisters the row within seconds) or
-                # the cancel itself has been outstanding past the ceiling.
-                _run_phase = str((raw or {}).get("phase") or "").strip()
+                if str(raw.get("stream_id") or run_stream_id or "").strip() != stream_id:
+                    continue
+                _run_phase = str(raw.get("phase") or "").strip()
                 if _run_phase == "cancelling":
                     try:
                         _age_anchor = float(
-                            (raw or {}).get("cancelled_at") or started_at or 0
+                            raw.get("cancelled_at") or raw.get("started_at") or 0
                         )
                     except (TypeError, ValueError):
-                        _age_anchor = started_at
-                else:
-                    _age_anchor = started_at
-                # Past the unwind ceiling: never block a successor on it (the
-                # anti-permanent-409 guarantee, #3822). Additionally reconcile the
-                # zombie out of ACTIVE_RUNS so health/recovery polling stops seeing a
-                # half-alive run — but ONLY when the worker is truly gone from
-                # STREAMS, so a still-live / still-tearing-down worker keeps its
-                # lifecycle row. Pop by the real dict key. (Codex gate, #4492)
-                if _age_anchor and (now - _age_anchor) > ceiling:
-                    if run_stream_id in live_stream_ids or stream_id in live_stream_ids:
-                        return stream_id
-                    stale_stream_ids.append(run_stream_id)
+                        _age_anchor = 0.0
+                    if (
+                        _age_anchor
+                        and (now - _age_anchor) > ceiling
+                        and run_stream_id not in live_stream_ids
+                        and stream_id not in live_stream_ids
+                    ):
+                        (_live_config.ACTIVE_RUNS or {}).pop(run_stream_id, None)
+                        unregister_stream_owner(stream_id)
+                        continue
+                    return stream_id
+
+                worker_alive = _active_run_owner_thread_alive(raw)
+                if (
+                    worker_alive is False
+                    and run_stream_id not in live_stream_ids
+                    and stream_id not in live_stream_ids
+                ):
+                    (_live_config.ACTIVE_RUNS or {}).pop(run_stream_id, None)
+                    unregister_stream_owner(stream_id)
                     continue
+                # True means a confirmed live worker. None is a legacy row with
+                # no ownership metadata; fail closed rather than admitting a
+                # second writer on uncertainty.
                 return stream_id
-            for stale_stream_id in stale_stream_ids:
-                (_live_config.ACTIVE_RUNS or {}).pop(stale_stream_id, None)
-                # The zombie run is pruned directly here (not via the normal teardown
-                # finally / unregister_active_run), so release its stream-owner entry too
-                # or STREAM_SESSION_OWNERS leaks for every reconciled zombie. (#5198 gate)
-                unregister_stream_owner(stale_stream_id)
     except Exception:
         logger.exception("Failed to verify active worker ownership for session %s", sid)
         return "unknown-active-run"
