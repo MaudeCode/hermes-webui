@@ -19,7 +19,7 @@ import sys
 import os
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -44,6 +44,7 @@ def _clear_caches():
     from api.config import (
         ACTIVE_RUNS,
         ACTIVE_RUNS_LOCK,
+        AGENT_INSTANCES,
         SESSION_AGENT_CACHE,
         SESSION_AGENT_CACHE_LOCK,
         STREAMS,
@@ -54,7 +55,9 @@ def _clear_caches():
         SESSION_AGENT_CACHE.clear()
     with STREAMS_LOCK:
         streams_snap = dict(STREAMS)
+        agent_instances_snap = dict(AGENT_INSTANCES)
         STREAMS.clear()
+        AGENT_INSTANCES.clear()
     with ACTIVE_RUNS_LOCK:
         active_runs_snap = dict(ACTIVE_RUNS)
         ACTIVE_RUNS.clear()
@@ -65,6 +68,8 @@ def _clear_caches():
     with STREAMS_LOCK:
         STREAMS.clear()
         STREAMS.update(streams_snap)
+        AGENT_INSTANCES.clear()
+        AGENT_INSTANCES.update(agent_instances_snap)
     with ACTIVE_RUNS_LOCK:
         ACTIVE_RUNS.clear()
         ACTIVE_RUNS.update(active_runs_snap)
@@ -122,6 +127,67 @@ class TestHandleChatSteerHappyPath:
         agent.steer.assert_called_once_with("Use Python instead")
         body = _captured_response(handler)
         assert body == {"accepted": True, "fallback": None, "stream_id": stream_id}
+
+    def test_accepts_live_agent_after_mid_turn_compression(self, _clear_caches):
+        """Steer follows the active stream while its agent rotates session ids."""
+        from api.streaming import _handle_chat_steer
+        from api.config import (
+            AGENT_INSTANCES,
+            SESSION_AGENT_CACHE,
+            SESSION_AGENT_CACHE_LOCK,
+            STREAMS,
+            STREAMS_LOCK,
+        )
+
+        old_sid = "sid_before_compression"
+        new_sid = "sid_after_compression"
+        stream_id = "stream_spanning_compression"
+        agent = MagicMock()
+        agent.session_id = new_sid
+        agent.steer = MagicMock(return_value=True)
+
+        # Hermes rotates the live AIAgent immediately, while WebUI's cache-key
+        # migration happens only after run_conversation() returns.
+        with SESSION_AGENT_CACHE_LOCK:
+            SESSION_AGENT_CACHE[old_sid] = (agent, "sig")
+        with STREAMS_LOCK:
+            import queue as _q
+            STREAMS[stream_id] = _q.Queue()
+            AGENT_INSTANCES[stream_id] = agent
+
+        sess = MagicMock()
+        sess.active_stream_id = stream_id
+        with patch("api.streaming.get_session", return_value=sess):
+            handler = _make_handler()
+            _handle_chat_steer(handler, {"session_id": old_sid, "text": "keep going"})
+
+        agent.steer.assert_called_once_with("keep going")
+        assert _captured_response(handler) == {
+            "accepted": True,
+            "fallback": None,
+            "stream_id": stream_id,
+        }
+        with SESSION_AGENT_CACHE_LOCK:
+            assert SESSION_AGENT_CACHE[old_sid][0] is agent
+
+        # A failed request from an older server version may already have
+        # evicted that stale-key cache entry. The active worker reference must
+        # remain sufficient for subsequent steering attempts.
+        with SESSION_AGENT_CACHE_LOCK:
+            SESSION_AGENT_CACHE.clear()
+        with patch("api.streaming.get_session", return_value=sess):
+            handler = _make_handler()
+            _handle_chat_steer(handler, {"session_id": old_sid, "text": "one more change"})
+
+        assert agent.steer.call_args_list == [
+            call("keep going"),
+            call("one more change"),
+        ]
+        assert _captured_response(handler) == {
+            "accepted": True,
+            "fallback": None,
+            "stream_id": stream_id,
+        }
 
 
 class TestHandleChatSteerFallbacks:

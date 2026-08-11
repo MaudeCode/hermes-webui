@@ -12041,9 +12041,9 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     """Inject a /steer payload into the active agent for a session.
 
     Mirrors the CLI's `/steer <text>` command (cli.py:6140-6155):
-      - Look up the cached AIAgent for the session (PR #1051's
-        SESSION_AGENT_CACHE).
-      - Verify a stream is currently active for this session.
+      - Resolve the session's active stream and use its live AIAgent instance.
+      - Fall back to PR #1051's SESSION_AGENT_CACHE only during the narrow
+        startup window before the stream registers its live agent.
       - Call agent.steer(text) — thread-safe, stashes text in
         _pending_steer for application at the next tool-result boundary.
 
@@ -12053,8 +12053,11 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     of the tool output on its next iteration. The user's stream is NOT
     interrupted.
 
-    If no agent is cached, the agent is too old to support steer, or no
-    stream is active, return {"accepted": False, "fallback": "<reason>"}.
+    The active stream is authoritative because Hermes can rotate the AIAgent's
+    session id during automatic compression before run_conversation() returns
+    and WebUI migrates its reusable cache key. If no live/cached agent exists,
+    the agent is too old to support steer, or no stream is active, return
+    {"accepted": False, "fallback": "<reason>"}.
     The frontend must surface that failure without cancelling the active run;
     Steer is active-run guidance, not implicit permission to Queue, Interrupt,
     or Stop-and-send.
@@ -12072,52 +12075,61 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     if not text:
         return bad(handler, "text required")
 
+    try:
+        s = get_session(sid)
+    except KeyError:
+        s = None
+    active_stream_id = getattr(s, "active_stream_id", None) or None
+    stream_alive = False
+    agent = None
+    if active_stream_id:
+        # AGENT_INSTANCES is owned by the active worker and remains stable
+        # across mid-turn compression. Snapshot it with STREAMS under their
+        # shared lock so the liveness decision and selected agent agree.
+        with _cfg.STREAMS_LOCK:
+            stream_alive = active_stream_id in _cfg.STREAMS
+            if stream_alive:
+                agent = _cfg.AGENT_INSTANCES.get(active_stream_id)
+
     evicted_cached_entry = None
-    with _cfg.SESSION_AGENT_CACHE_LOCK:
-        cached = _cfg.SESSION_AGENT_CACHE.get(sid)
-        if cached:
-            agent = cached[0]
-            if not _cached_agent_matches_session(agent, sid):
-                evicted_cached_entry = _cfg.SESSION_AGENT_CACHE.pop(sid, None)
-                logger.warning(
-                    '[webui] Evicted cached agent before steer due to mismatched session identity: cache_key=%s agent_session_id=%s',
-                    sid,
-                    _cached_agent_session_identity(agent),
-                )
-                cached = None
+    if agent is None:
+        with _cfg.SESSION_AGENT_CACHE_LOCK:
+            cached_entry = _cfg.SESSION_AGENT_CACHE.get(sid)
+            if cached_entry:
+                cached_agent = cached_entry[0]
+                if _cached_agent_matches_session(cached_agent, sid):
+                    agent = cached_agent
+                else:
+                    evicted_cached_entry = _cfg.SESSION_AGENT_CACHE.pop(sid, None)
+                    logger.warning(
+                        '[webui] Evicted cached agent before steer due to mismatched session identity: cache_key=%s agent_session_id=%s',
+                        sid,
+                        _cached_agent_session_identity(cached_agent),
+                    )
     if evicted_cached_entry is not None:
         try:
             _close_cached_agent_entry_at_session_boundary(sid, evicted_cached_entry)
         except Exception:
             logger.debug("Failed to close steer identity-mismatched cached agent for session %s", sid, exc_info=True)
-    if not cached:
-        try:
-            s = get_session(sid)
-            active_stream_id = getattr(s, "active_stream_id", None) or None
-        except KeyError:
-            active_stream_id = None
-        if active_stream_id:
-            with _cfg.STREAMS_LOCK:
-                stream_alive = active_stream_id in _cfg.STREAMS
-            if stream_alive:
-                try:
-                    with _cfg.ACTIVE_RUNS_LOCK:
-                        active_run = dict((_cfg.ACTIVE_RUNS or {}).get(str(active_stream_id)) or {})
-                    if active_run.get("backend") == "gateway":
-                        return j(handler, {"accepted": False, "fallback": "gateway_steer_queued",
-                                           "stream_id": active_stream_id})
-                except Exception:
-                    logger.warning(
-                        "Gateway ownership lookup failed before steer fallback for session=%s stream_id=%s",
-                        sid,
-                        active_stream_id,
-                        exc_info=True,
-                    )
+    if agent is None:
+        if stream_alive:
+            try:
+                with _cfg.ACTIVE_RUNS_LOCK:
+                    active_run = dict((_cfg.ACTIVE_RUNS or {}).get(str(active_stream_id)) or {})
+                if active_run.get("backend") == "gateway":
+                    return j(handler, {"accepted": False, "fallback": "gateway_steer_queued",
+                                       "stream_id": active_stream_id})
+            except Exception:
+                logger.warning(
+                    "Gateway ownership lookup failed before steer fallback for session=%s stream_id=%s",
+                    sid,
+                    active_stream_id,
+                    exc_info=True,
+                )
         # No active local agent for this session — caller surfaces a steer failure
         # without cancelling the active run.
         return j(handler, {"accepted": False, "fallback": "no_cached_agent",
                            "stream_id": None})
-    agent = cached[0]
     if not hasattr(agent, "steer"):
         # Older hermes-agent that pre-dates the steer() method
         return j(handler, {"accepted": False, "fallback": "agent_lacks_steer",
@@ -12126,17 +12138,12 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     # Verify the agent is currently running. Use the session's
     # active_stream_id rather than calling load_session_locked() which
     # would block on the streaming thread's lock.
-    try:
-        s = get_session(sid)
-    except KeyError:
+    if s is None:
         return j(handler, {"accepted": False, "fallback": "session_not_found",
                            "stream_id": None})
-    active_stream_id = getattr(s, "active_stream_id", None) or None
     if not active_stream_id:
         return j(handler, {"accepted": False, "fallback": "not_running",
                            "stream_id": None})
-    with _cfg.STREAMS_LOCK:
-        stream_alive = active_stream_id in _cfg.STREAMS
     if not stream_alive:
         # Active stream id is stale — stream has ended; caller falls back
         return j(handler, {"accepted": False, "fallback": "stream_dead",
