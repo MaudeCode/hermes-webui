@@ -6,6 +6,33 @@ If your symptom isn't listed and the diagnostics don't narrow it down, file a bu
 
 ---
 
+## "Failed to load session" or "Could not load conversations" after an update
+
+**Symptom.** Session navigation or the conversation sidebar fails, but a browser
+reload immediately restores it.
+
+**Why it happens.** A long-lived tab can keep an older JavaScript bundle after
+the WebUI server restarts on a newer commit. The old client may issue obsolete or
+duplicated session requests until it is refreshed. Embedded Hermes Agent debug
+floods can also delay otherwise successful session endpoints long enough for a
+reverse proxy or browser request to give up first.
+
+**Current behavior.** The WebUI compares its stamped browser-bundle version with
+the server version. When they differ, a visible tab with an empty composer clears
+its shell cache and reloads once automatically. Tabs containing unsent composer
+text or queued attachments keep the version-mismatch banner and require an
+explicit **Hard refresh now**, so an update cannot discard in-progress input.
+The per-version retry marker prevents automatic reload loops. The server also
+suppresses embedded LSP DEBUG records while retaining INFO, WARNING, and ERROR
+diagnostics.
+
+If the problem survives a hard refresh, inspect `/health`, the request-duration
+entries in the WebUI log, and the browser Network panel. A session endpoint that
+eventually logs HTTP 200 after several seconds usually indicates backend
+contention rather than a missing session.
+
+---
+
 ## "AIAgent not available -- check that hermes-agent is on sys.path"
 
 **Symptom.** WebUI starts, shows the chat interface, but every chat request fails immediately with this error in the response or the server log. As of v0.51.6 the error includes a diagnostic block with the running Python interpreter, the relevant `sys.path` entries, and the most-common fix; on older versions the message is bare.

@@ -76,6 +76,9 @@ def _make_stub(bundle_version: str, extra_globals: str = "") -> str:
         const _bannerEl = {{ style: {{ display: '' }} }};
         const _msgEl = {{ _text: '' }};
         const _verEl = {{ _text: '' }};
+        const _composerEl = {{ value: '' }};
+        const _sessionValues = new Map();
+        let _refreshCalls = 0;
         Object.defineProperty(_msgEl, 'textContent', {{
             set(v) {{ _msgEl._text = v; }}, get() {{ return _msgEl._text; }}
         }});
@@ -87,6 +90,7 @@ def _make_stub(bundle_version: str, extra_globals: str = "") -> str:
                 if (id === 'staleClientBanner') return _bannerEl;
                 if (id === 'staleClientMessage') return _msgEl;
                 if (id === 'staleClientVersions') return _verEl;
+                if (id === 'msg') return _composerEl;
                 return null;
             }},
             addEventListener() {{}},
@@ -96,6 +100,12 @@ def _make_stub(bundle_version: str, extra_globals: str = "") -> str:
             __HERMES_WEBUI_BUNDLE_VERSION__: {json.dumps(bundle_version)},
             addEventListener() {{}},
         }};
+        global.S = {{ pendingFiles: [] }};
+        global.sessionStorage = {{
+            getItem(key) {{ return _sessionValues.has(key) ? _sessionValues.get(key) : null; }},
+            setItem(key, value) {{ _sessionValues.set(key, String(value)); }},
+        }};
+        global.hardRefreshWebUIClient = async () => {{ _refreshCalls += 1; }};
         global.api = () => Promise.resolve({{}});
         {extra_globals}
     """)
@@ -106,6 +116,8 @@ _CAPTURE_AND_EXIT = textwrap.dedent("""\
         display: _bannerEl.style.display,
         message: _msgEl._text,
         versions: _verEl._text,
+        refreshCalls: _refreshCalls,
+        refreshMarker: _sessionValues.get('hermes-stale-client-auto-refresh') || null,
     };
     process.stdout.write(JSON.stringify(_result) + '\\n');
     process.exit(0);
@@ -149,6 +161,72 @@ def test_node_mismatch_shows_banner():
     assert "v1" in result["versions"] and "v2" in result["versions"], (
         f"Version text missing client+server: {result['versions']!r}"
     )
+
+
+def test_node_mismatch_auto_refreshes_safe_idle_tab_once():
+    """A visible stale tab with an empty composer repairs itself once."""
+    helpers = _extract_skew_helpers(PANELS_JS.read_text(encoding="utf-8"))
+    result = _run_harness(
+        _make_stub("v1"),
+        helpers,
+        textwrap.dedent("""\
+            checkWebUIVersionSkew({ webui_version: "v2" });
+            checkWebUIVersionSkew({ webui_version: "v2" });
+            await new Promise(resolve => setTimeout(resolve, 400));
+        """),
+    )
+    assert result["refreshCalls"] == 1, result
+    assert result["refreshMarker"] == "v1->v2", result
+
+
+def test_node_mismatch_preserves_typed_composer_and_keeps_banner():
+    """Automatic repair must not reload over unsent composer text."""
+    helpers = _extract_skew_helpers(PANELS_JS.read_text(encoding="utf-8"))
+    result = _run_harness(
+        _make_stub("v1", "_composerEl.value = 'unsent draft';"),
+        helpers,
+        textwrap.dedent("""\
+            checkWebUIVersionSkew({ webui_version: "v2" });
+            await new Promise(resolve => setTimeout(resolve, 400));
+        """),
+    )
+    assert result["display"] == "flex", result
+    assert result["refreshCalls"] == 0, result
+    assert result["refreshMarker"] is None, result
+
+
+def test_node_mismatch_preserves_queued_attachments_and_keeps_banner():
+    """Automatic repair must not reload over files staged in the composer."""
+    helpers = _extract_skew_helpers(PANELS_JS.read_text(encoding="utf-8"))
+    result = _run_harness(
+        _make_stub("v1", "S.pendingFiles.push({ name: 'unsent.txt' });"),
+        helpers,
+        textwrap.dedent("""\
+            checkWebUIVersionSkew({ webui_version: "v2" });
+            await new Promise(resolve => setTimeout(resolve, 400));
+        """),
+    )
+    assert result["display"] == "flex", result
+    assert result["refreshCalls"] == 0, result
+    assert result["refreshMarker"] is None, result
+
+
+def test_node_mismatch_marker_prevents_reload_loop():
+    """A failed cache refresh cannot trap the tab in an automatic reload loop."""
+    helpers = _extract_skew_helpers(PANELS_JS.read_text(encoding="utf-8"))
+    result = _run_harness(
+        _make_stub(
+            "v1",
+            "_sessionValues.set('hermes-stale-client-auto-refresh', 'v1->v2');",
+        ),
+        helpers,
+        textwrap.dedent("""\
+            checkWebUIVersionSkew({ webui_version: "v2" });
+            await new Promise(resolve => setTimeout(resolve, 400));
+        """),
+    )
+    assert result["display"] == "flex", result
+    assert result["refreshCalls"] == 0, result
 
 
 # ---------------------------------------------------------------------------

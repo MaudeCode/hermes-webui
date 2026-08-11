@@ -101,6 +101,13 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
+from api.logging_hygiene import install_webui_dependency_log_floors
+
+# The WebUI embeds Hermes Agent in this process. Establish its logging boundary
+# before importing routes or starting any agent so dependency DEBUG floods cannot
+# monopolize the same interpreter and stderr file used by HTTP request threads.
+install_webui_dependency_log_floors()
+
 from api.auth import check_auth, reset_trusted_auth_request_state
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import (

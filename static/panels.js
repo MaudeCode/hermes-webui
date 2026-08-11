@@ -2597,6 +2597,76 @@ function _currentWebUIBundleVersion(){
   }catch(_){ return ''; }
 }
 
+const _STALE_CLIENT_AUTO_REFRESH_STORAGE_KEY='hermes-stale-client-auto-refresh';
+let _staleClientAutoRefreshTimer=null;
+let _staleClientAutoRefreshKey='';
+let _staleClientMismatch=null;
+
+function _staleClientMismatchKey(clientVersion,serverVersion){
+  return String(clientVersion)+'->'+String(serverVersion);
+}
+
+function _staleClientAutoRefreshIsSafe(){
+  if(document.hidden) return false;
+  const composer=document.getElementById('msg');
+  // Draft text is normally persisted, but an update must never assume that an
+  // in-progress composition has reached storage. Keep the visible banner and
+  // let the user choose when to refresh instead of risking unsent input.
+  if(composer&&String(composer.value||'').trim()) return false;
+  // File objects are held in memory until the message is accepted. A reload
+  // would discard them even when the text draft itself is empty.
+  if(typeof S!=='undefined'&&S&&Array.isArray(S.pendingFiles)&&S.pendingFiles.some(Boolean)) return false;
+  return true;
+}
+
+function _cancelStaleClientAutoRefresh(){
+  if(_staleClientAutoRefreshTimer){
+    clearTimeout(_staleClientAutoRefreshTimer);
+    _staleClientAutoRefreshTimer=null;
+  }
+  _staleClientAutoRefreshKey='';
+}
+
+function _scheduleStaleClientAutoRefresh(clientVersion,serverVersion){
+  const mismatchKey=_staleClientMismatchKey(clientVersion,serverVersion);
+  let priorAttempt='';
+  try{
+    priorAttempt=sessionStorage.getItem(_STALE_CLIENT_AUTO_REFRESH_STORAGE_KEY)||'';
+  }catch(_){
+    // Without a durable per-tab marker, an unsuccessful cache clear could
+    // create an infinite reload loop. Fail closed and leave the banner visible.
+    return false;
+  }
+  if(priorAttempt===mismatchKey) return false;
+  if(!_staleClientAutoRefreshIsSafe()) return false;
+  if(_staleClientAutoRefreshTimer&&_staleClientAutoRefreshKey===mismatchKey) return true;
+  _cancelStaleClientAutoRefresh();
+  _staleClientAutoRefreshKey=mismatchKey;
+  _staleClientAutoRefreshTimer=setTimeout(async function(){
+    _staleClientAutoRefreshTimer=null;
+    if(!_staleClientMismatch||_staleClientAutoRefreshKey!==mismatchKey) return;
+    if(!_staleClientAutoRefreshIsSafe()) return;
+    try{
+      // Write before reloading. If cache/service-worker cleanup fails and the
+      // same stale bundle comes back, the banner remains actionable without a
+      // reload loop. A later server version gets a different mismatch key.
+      sessionStorage.setItem(_STALE_CLIENT_AUTO_REFRESH_STORAGE_KEY,mismatchKey);
+    }catch(_){
+      return;
+    }
+    try{ await hardRefreshWebUIClient(); }catch(_){}
+  },250);
+  return true;
+}
+
+function _retryStaleClientAutoRefresh(){
+  if(!_staleClientMismatch) return false;
+  return _scheduleStaleClientAutoRefresh(
+    _staleClientMismatch.client,
+    _staleClientMismatch.server
+  );
+}
+
 function _showStaleWebUIClientBanner(clientVersion,serverVersion){
   const banner=document.getElementById('staleClientBanner');
   if(!banner) return;
@@ -2612,10 +2682,18 @@ function checkWebUIVersionSkew(settings){
     if(!settings) return;
     const client=_currentWebUIBundleVersion();
     const server=_normalizeWebUIVersion(settings.webui_version);
-    if(!client||!server) return;
-    if(client===server) return;
+    if(!client||!server) return false;
+    if(client===server){
+      _staleClientMismatch=null;
+      _cancelStaleClientAutoRefresh();
+      return false;
+    }
+    _staleClientMismatch={client,server};
     _showStaleWebUIClientBanner(client,server);
+    _scheduleStaleClientAutoRefresh(client,server);
+    return true;
   }catch(_){}
+  return false;
 }
 window.checkWebUIVersionSkew=checkWebUIVersionSkew;
 
@@ -2626,7 +2704,10 @@ function _startWebUIVersionSkewMonitor(){
     return !!(banner&&banner.style.display==='flex');
   }
   function _check(){
-    if(_isBannerVisible()) return;
+    if(_isBannerVisible()){
+      _retryStaleClientAutoRefresh();
+      return;
+    }
     Promise.resolve().then(function(){ return api('/api/settings'); }).then(function(s){ checkWebUIVersionSkew(s); }).catch(function(){});
   }
   function _startPoll(){
@@ -2639,10 +2720,16 @@ function _startWebUIVersionSkewMonitor(){
   }
   _check();
   document.addEventListener('visibilitychange',function(){
-    if(!document.hidden){ _check(); _startPoll(); }
+    if(!document.hidden){ _retryStaleClientAutoRefresh(); _check(); _startPoll(); }
     else if(_pollTimer){ clearInterval(_pollTimer); _pollTimer=null; }
   });
-  window.addEventListener('focus',function(){ _check(); });
+  window.addEventListener('focus',function(){ _retryStaleClientAutoRefresh(); _check(); });
+  document.addEventListener('input',function(event){
+    const target=event&&event.target;
+    if(target&&target.id==='msg'&&!String(target.value||'').trim()){
+      _retryStaleClientAutoRefresh();
+    }
+  });
   _startPoll();
 }
 _startWebUIVersionSkewMonitor();
