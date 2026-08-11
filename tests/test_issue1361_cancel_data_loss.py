@@ -52,6 +52,10 @@ def _isolate_stream_state():
     config.STREAMS.clear()
     config.CANCEL_FLAGS.clear()
     config.AGENT_INSTANCES.clear()
+    config.ACTIVE_RUNS.clear()
+    config.STREAM_SESSION_OWNERS.clear()
+    with config.SESSION_AGENT_CACHE_LOCK:
+        config.SESSION_AGENT_CACHE.clear()
     config.STREAM_PARTIAL_TEXT.clear()
     # New shared dicts for §A and §B
     if hasattr(config, 'STREAM_REASONING_TEXT'):
@@ -62,6 +66,10 @@ def _isolate_stream_state():
     config.STREAMS.clear()
     config.CANCEL_FLAGS.clear()
     config.AGENT_INSTANCES.clear()
+    config.ACTIVE_RUNS.clear()
+    config.STREAM_SESSION_OWNERS.clear()
+    with config.SESSION_AGENT_CACHE_LOCK:
+        config.SESSION_AGENT_CACHE.clear()
     config.STREAM_PARTIAL_TEXT.clear()
     if hasattr(config, 'STREAM_REASONING_TEXT'):
         config.STREAM_REASONING_TEXT.clear()
@@ -240,6 +248,186 @@ class TestCancelPreservesToolCalls:
         has_content = any(m.get('content') for m in partial_msgs)
         assert has_content, \
             f"Expected partial content with tools after cancel. Got: {partial_msgs}"
+
+    def test_cancel_preserves_agent_tool_history_for_next_turn_and_browser(self):
+        """Stop must settle the agent's real provider-valid work, not only UI cards."""
+        sid = "test_cancel_agent_context"
+        stream_id = "stream_cancel_agent_context"
+        previous = [
+            {"role": "user", "content": "Inspect the deployment"},
+            {"role": "assistant", "content": "I will inspect it."},
+        ]
+        s = _make_session(
+            session_id=sid,
+            pending_msg="Check the rollout and fix what you find",
+            messages=list(previous),
+        )
+        s.context_messages = list(previous)
+        s.save()
+        _, agent = _setup_cancel_state(sid, stream_id)
+        agent._persist_user_message_idx = 2
+        agent._current_turn_id = "turn-cancel-agent-context"
+        agent._session_messages = [
+            *previous,
+            {"role": "user", "content": "Check the rollout and fix what you find"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "terminal", "arguments": '{"command":"kubectl get pods"}'},
+                }],
+            },
+            {
+                "role": "tool",
+                "name": "terminal",
+                "tool_call_id": "call-1",
+                "content": "api-7d9f Ready; worker-2 CrashLoopBackOff",
+            },
+        ]
+        q = config.STREAMS[stream_id]
+
+        cancel_stream(stream_id)
+
+        persisted = models.SESSIONS[sid]
+        api_history = streaming._sanitize_messages_for_api(persisted.context_messages)
+        assert sum(
+            m.get("role") == "user"
+            and m.get("content") == "Check the rollout and fix what you find"
+            for m in api_history
+        ) == 1
+        assert any(
+            m.get("role") == "tool"
+            and m.get("tool_call_id") == "call-1"
+            and "CrashLoopBackOff" in str(m.get("content") or "")
+            for m in api_history
+        ), f"Next turn lost the stopped turn's tool result: {api_history}"
+        assert api_history[-1] == {
+            "role": "assistant",
+            "content": "Operation interrupted.",
+        }
+
+        event_type, payload = q.get_nowait()
+        assert event_type == "cancel"
+        visible_roles = [m.get("role") for m in payload["session"]["messages"]]
+        assert "tool" in visible_roles, payload["session"]["messages"]
+
+    def test_cancel_uses_stream_owner_while_agent_has_unsettled_compression_id(self):
+        """Mid-turn compression must not redirect Stop to a nonexistent sidecar."""
+        old_sid = "sid_before_mid_turn_compression"
+        new_sid = "sid_after_mid_turn_compression"
+        stream_id = "stream_mid_turn_compression_cancel"
+        s = _make_session(
+            session_id=old_sid,
+            pending_msg="Continue through the migration",
+            messages=[{"role": "assistant", "content": "Starting migration."}],
+        )
+        _, agent = _setup_cancel_state(old_sid, stream_id)
+        agent.session_id = new_sid
+        agent._persist_user_message_idx = 1
+        agent._current_turn_id = "turn-mid-compression-cancel"
+        agent._session_messages = [
+            {"role": "assistant", "content": "Starting migration."},
+            {"role": "user", "content": "Continue through the migration"},
+            {"role": "assistant", "content": "Migration rehearsal completed phase one."},
+        ]
+        config.register_stream_owner(stream_id, old_sid)
+        q = config.STREAMS[stream_id]
+
+        assert cancel_stream(stream_id) is True
+
+        persisted = models.SESSIONS[old_sid]
+        assert any(
+            "Migration rehearsal completed phase one." in str(m.get("content") or "")
+            for m in persisted.context_messages
+            if isinstance(m, dict)
+        )
+        event_type, payload = q.get_nowait()
+        assert event_type == "cancel"
+        assert payload["session_id"] == old_sid
+        assert not (pathlib.Path(models.SESSION_DIR) / f"{new_sid}.json").exists()
+
+    def test_detached_cancel_preserves_cached_agents_canonical_history(self):
+        """SSE detachment must not reduce Stop persistence to display buffers."""
+        sid = "sid_detached_canonical_cancel"
+        stream_id = "stream_detached_canonical_cancel"
+        s = _make_session(
+            session_id=sid,
+            pending_msg="Inspect the detached worker",
+            messages=[{"role": "assistant", "content": "Starting inspection."}],
+        )
+        s.active_stream_id = stream_id
+        s.save()
+        agent = Mock()
+        agent.session_id = sid
+        agent.interrupt = Mock()
+        agent._persist_user_message_idx = 1
+        agent._current_turn_id = "turn-detached-canonical-cancel"
+        agent._session_messages = [
+            {"role": "assistant", "content": "Starting inspection."},
+            {"role": "user", "content": "Inspect the detached worker"},
+            {"role": "assistant", "content": "The detached worker completed its audit."},
+        ]
+        config.ACTIVE_RUNS[stream_id] = {
+            "session_id": sid,
+            "phase": "running",
+        }
+        with config.SESSION_AGENT_CACHE_LOCK:
+            config.SESSION_AGENT_CACHE[sid] = (agent, "sig")
+
+        assert cancel_stream(stream_id) is True
+
+        assert any(
+            "The detached worker completed its audit." in str(m.get("content") or "")
+            for m in models.SESSIONS[sid].context_messages
+            if isinstance(m, dict)
+        )
+
+    def test_cancel_keeps_unfinished_streamed_prose_in_next_turn_context(self):
+        """Text streamed after the last tool result remains model-facing after Stop."""
+        sid = "sid_cancel_partial_context"
+        stream_id = "stream_cancel_partial_context"
+        _make_session(
+            session_id=sid,
+            pending_msg="Inspect the rollout",
+            messages=[{"role": "assistant", "content": "Starting."}],
+        )
+        _, agent = _setup_cancel_state(sid, stream_id)
+        agent._persist_user_message_idx = 1
+        agent._current_turn_id = "turn-cancel-partial-context"
+        agent._session_messages = [
+            {"role": "assistant", "content": "Starting."},
+            {"role": "user", "content": "Inspect the rollout"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call-partial",
+                    "type": "function",
+                    "function": {"name": "terminal", "arguments": "{}"},
+                }],
+            },
+            {
+                "role": "tool",
+                "name": "terminal",
+                "tool_call_id": "call-partial",
+                "content": "worker-2 CrashLoopBackOff",
+            },
+        ]
+        config.STREAM_PARTIAL_TEXT[stream_id] = (
+            "The rollout issue is worker-2, and I was preparing the fix."
+        )
+
+        assert cancel_stream(stream_id) is True
+
+        api_history = streaming._sanitize_messages_for_api(
+            models.SESSIONS[sid].context_messages
+        )
+        assert api_history[-1]["role"] == "assistant"
+        assert api_history[-1]["content"] == (
+            "The rollout issue is worker-2, and I was preparing the fix."
+        )
 
 
 # ── §C: Empty _stripped skips entire append ─────────────────────────────────

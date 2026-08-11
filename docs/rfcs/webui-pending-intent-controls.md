@@ -251,6 +251,12 @@ Stop belongs to the active run.
 Stop only stops the active run unless the interaction clearly becomes
 Stop-and-send.
 
+Stopping is not a rollback. Completed tool calls and results, plus any
+user-visible assistant prose streamed before Stop, remain in the session's
+durable model-facing context and visible Worklog. A provider request that was
+interrupted before producing any valid output has no additional response to
+preserve; the already-completed work before that request still remains.
+
 Stop-and-send involves two objects:
 
 - the waiting Queue message, owned by the session

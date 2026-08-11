@@ -7362,6 +7362,105 @@ def _build_partial_message(content_text, reasoning_text, tool_calls) -> dict | N
     return _msg
 
 
+def _snapshot_agent_messages_for_cancel(agent) -> list:
+    """Deep-copy the live agent's canonical transcript before interrupting it.
+
+    ``STREAM_*`` buffers are presentation projections. They preserve prose,
+    reasoning, and compact tool cards, but they do not contain the provider-
+    valid assistant ``tool_calls`` / ``tool`` result pairs the next turn needs.
+    Hermes keeps that canonical history on ``_session_messages`` throughout a
+    turn. Snapshot it before ``agent.interrupt()`` lets Stop preserve completed
+    work even though the normal result-settlement path is bypassed.
+    """
+    if agent is None:
+        return []
+    try:
+        messages = vars(agent).get('_session_messages')
+    except (TypeError, AttributeError):
+        return []
+    if not isinstance(messages, list) or not messages:
+        return []
+    try:
+        return copy.deepcopy(list(messages))
+    except Exception:
+        logger.debug("Failed to snapshot live agent transcript before cancel", exc_info=True)
+        return []
+
+
+def _unsettled_visible_cancel_text(agent_messages, partial_text, current_user_idx) -> str:
+    """Return streamed prose not already represented in canonical agent rows."""
+    partial = _build_partial_message(partial_text, None, None)
+    remaining = str((partial or {}).get('content') or '').strip()
+    if not remaining:
+        return ''
+    start = current_user_idx if isinstance(current_user_idx, int) else -1
+    for message in list(agent_messages or [])[start + 1:]:
+        if not isinstance(message, dict) or message.get('role') != 'assistant':
+            continue
+        completed_text = _message_text(message.get('content', '')).strip()
+        if completed_text and completed_text in remaining:
+            remaining = remaining.replace(completed_text, '', 1).strip()
+    return remaining
+
+
+def _settle_agent_progress_before_cancel(
+    session,
+    agent,
+    agent_messages,
+    stream_id,
+    partial_text='',
+) -> bool:
+    """Persist canonical in-turn work into display and model-facing histories."""
+    if not isinstance(agent_messages, list) or not agent_messages:
+        return False
+
+    pending_text = str(getattr(session, 'pending_user_message', None) or '')
+    pending_source = getattr(session, 'pending_user_source', None) or 'webui'
+    active_turn_identity = _resolve_active_turn_authority(
+        _active_turn_authority(session, stream_id, pending_text),
+        agent=agent,
+    )
+    settled_messages = _drop_synthetic_control_messages(agent_messages)
+    unsettled_visible_text = _unsettled_visible_cancel_text(
+        settled_messages,
+        partial_text,
+        active_turn_identity.get('current_turn_user_idx'),
+    )
+
+    # Match Hermes Agent's own interrupt finalizer. A completed tool result as
+    # the tail cannot be followed directly by the user's next message on strict
+    # providers, so close the interrupted turn with a real assistant boundary.
+    if (
+        settled_messages
+        and isinstance(settled_messages[-1], dict)
+        and settled_messages[-1].get('role') == 'tool'
+    ):
+        settled_messages.append({
+            'role': 'assistant',
+            'content': unsettled_visible_text or 'Operation interrupted.',
+            **({'_partial': True} if unsettled_visible_text else {}),
+        })
+    elif unsettled_visible_text:
+        settled_messages.append({
+            'role': 'assistant',
+            'content': unsettled_visible_text,
+            '_partial': True,
+        })
+
+    previous_messages = list(getattr(session, 'messages', None) or [])
+    previous_context = list(_session_context_messages(session) or [])
+    _settle_result_messages(
+        session,
+        previous_messages,
+        previous_context,
+        settled_messages,
+        pending_text,
+        pending_source,
+        active_turn_identity,
+    )
+    return True
+
+
 def _snapshot_and_append_partial_on_error(session, stream_id) -> dict | None:
     """Snapshot streaming buffers under STREAMS_LOCK and append a _partial message.
 
@@ -12205,6 +12304,7 @@ def cancel_stream(stream_id: str) -> bool:
     _snap_tool_calls = None
     _snap_flag = None
     _snap_agent = None
+    _snap_agent_messages = []
     _snap_owner_session_id = None
     _cancel_session_payload = None
 
@@ -12245,6 +12345,12 @@ def cancel_stream(stream_id: str) -> bool:
                 return False
             active_run_session_id = str(active_run_entry.get("session_id") or "").strip() or None
 
+    # A long agent transcript can be large; copy it outside STREAMS_LOCK so
+    # Stop does not block unrelated stream event/cancel bookkeeping while
+    # serializing nested tool payloads. This still happens before interrupt(),
+    # so the worker cannot tear down its canonical transcript first.
+    _snap_agent_messages = _snapshot_agent_messages_for_cancel(_snap_agent)
+
     if active_run_entry is None:
         try:
             with _live_config.ACTIVE_RUNS_LOCK:
@@ -12279,6 +12385,11 @@ def cancel_stream(stream_id: str) -> bool:
                 agent = cached[0]
         except Exception:
             pass
+    if agent is not None and not _snap_agent_messages:
+        # Detached SSE path: AGENT_INSTANCES may already be gone while the
+        # worker remains live in ACTIVE_RUNS and its cached agent still owns
+        # the canonical transcript. Snapshot that same source before interrupt.
+        _snap_agent_messages = _snapshot_agent_messages_for_cancel(agent)
     if agent:
         try:
             agent.interrupt("Cancelled by user")
@@ -12332,18 +12443,51 @@ def cancel_stream(stream_id: str) -> bool:
     # Session cleanup (get_session + save) must happen OUTSIDE the lock —
     # get_session() acquires LOCK, and the streaming thread does LOCK first
     # then STREAMS_LOCK, so inverting the order here would cause deadlock.
-    _cancel_session_id = getattr(agent, 'session_id', None) if agent else None
-    if not _cancel_session_id and active_run_session_id:
-        _cancel_session_id = active_run_session_id
-    # Third fallback: stream owner registry — populated before the worker
-    # thread starts, so it's always available even for early cancels that
-    # race ahead of AGENT_INSTANCES and ACTIVE_RUNS (#6623). The owner is
-    # read UNDER streams_lock above (while STREAMS[stream_id] still exists),
-    # NOT here after the eager pop: the just-starting worker unregisters the
-    # owner the instant the stream map entry disappears, so a post-pop lookup
-    # would race that teardown and return None.
-    if not _cancel_session_id and _snap_owner_session_id:
-        _cancel_session_id = _snap_owner_session_id
+    # Resolve the WebUI sidecar that still owns this stream. Hermes may rotate
+    # ``agent.session_id`` during automatic compression before
+    # run_conversation() returns and WebUI creates/migrates the continuation
+    # sidecar. In that interval the agent id is real for state.db but cannot be
+    # used as the WebUI writeback target. Prefer the first candidate whose
+    # loaded Session still points at this exact stream; this also handles the
+    # narrow post-handoff window where the new sidecar already owns it.
+    _cancel_session_candidates = [
+        getattr(agent, 'session_id', None) if agent else None,
+        active_run_session_id,
+        _snap_owner_session_id,
+    ]
+    _cancel_session_id = None
+    _seen_cancel_session_ids = set()
+    _unique_cancel_session_ids = []
+    for _candidate in _cancel_session_candidates:
+        _candidate = str(_candidate or '').strip()
+        if not _candidate or _candidate in _seen_cancel_session_ids:
+            continue
+        _seen_cancel_session_ids.add(_candidate)
+        _unique_cancel_session_ids.append(_candidate)
+    if len(_unique_cancel_session_ids) == 1:
+        # Preserve the established early-Stop path: one authoritative owner,
+        # one locked get_session() below. Besides being cheaper, this avoids a
+        # check-then-use gap when no identity disagreement needs resolving.
+        _cancel_session_id = _unique_cancel_session_ids[0]
+    else:
+        for _candidate in _unique_cancel_session_ids:
+            try:
+                _candidate_session = get_session(_candidate)
+            except Exception:
+                continue
+            if getattr(_candidate_session, 'active_stream_id', None) == stream_id:
+                _cancel_session_id = _candidate
+                break
+    if _cancel_session_id is None:
+        # The stream-owner registry is populated synchronously before worker
+        # startup, so it is the safest best-effort target for an early cancel
+        # whose Session could not be loaded during the probe above (#6623).
+        _cancel_session_id = (
+            str(_snap_owner_session_id or '').strip()
+            or str(active_run_session_id or '').strip()
+            or str(getattr(agent, 'session_id', None) or '').strip()
+            or None
+        )
     # Use the snapshots captured under streams_lock above (the worker's finally
     # may have popped the live buffers by now via agent.interrupt()). For the
     # ACTIVE_RUNS-only path (stream absent) the snapshots are None → fall back to
@@ -12451,6 +12595,23 @@ def cancel_stream(stream_id: str) -> bool:
                     logger.debug(
                         "Failed to recover pending user message on cancel for %s",
                         _cancel_session_id,
+                    )
+                try:
+                    _settle_agent_progress_before_cancel(
+                        _cs,
+                        agent,
+                        _snap_agent_messages,
+                        stream_id,
+                        _cancel_partial_text,
+                    )
+                except Exception:
+                    # Stop must remain reliable even if a malformed provider
+                    # message defeats canonical settlement. The existing
+                    # STREAM_* partial snapshot below is the safe fallback.
+                    logger.warning(
+                        "Failed to settle live agent progress on cancel for %s",
+                        _cancel_session_id,
+                        exc_info=True,
                     )
                 _cs.active_stream_id = None
                 _cs.pending_user_message = None
