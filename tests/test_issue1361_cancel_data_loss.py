@@ -318,7 +318,7 @@ class TestCancelPreservesToolCalls:
         old_sid = "sid_before_mid_turn_compression"
         new_sid = "sid_after_mid_turn_compression"
         stream_id = "stream_mid_turn_compression_cancel"
-        s = _make_session(
+        _make_session(
             session_id=old_sid,
             pending_msg="Continue through the migration",
             messages=[{"role": "assistant", "content": "Starting migration."}],

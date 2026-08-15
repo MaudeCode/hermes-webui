@@ -575,6 +575,7 @@ global.EventSource=FakeEventSource;
 const attachStart=messagesSrc.indexOf('let _liveStreamOwnerGeneration=');
 const attachEnd=messagesSrc.indexOf('\nfunction transcript(){',attachStart);
 if(attachStart<0||attachEnd<0) throw new Error('attachLiveStream source boundary not found');
+eval(extractFunc(messagesSrc,'_dispatchExtensionTurnLifecycle'));
 eval(messagesSrc.slice(attachStart,attachEnd));
 attachLiveStream('sid-1','stream-1');
 const source=FakeEventSource.instances[0];

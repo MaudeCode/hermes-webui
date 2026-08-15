@@ -1,7 +1,5 @@
 """Behavioral coverage for failed multi-file chat-upload rollback receipts."""
 
-from pathlib import Path
-
 import api.upload as upload
 
 

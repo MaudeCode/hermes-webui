@@ -73,7 +73,8 @@ def test_live_anchor_worklog_rebuild_defers_snapshot_restore_until_after_mutatio
     guard_idx = body.index("const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(scrollSnapshot);")
     remove_idx = body.index("blocks.querySelectorAll('[data-anchor-scene-owner=\"1\"],[data-anchor-scene-row=\"1\"]')")
     restore_detail_idx = body.index("_restoreWorklogDetailDisclosureState(blocks, liveDisclosureState);")
-    dedupe_idx = body.index("_dedupeLiveProcessedWorklogAnchors(turn);")
+    # The reconciler returns the surviving Processed group after deduplication.
+    dedupe_idx = body.index("_dedupeLiveProcessedWorklogAnchors(turn)")
     move_status_idx = body.index("_moveLiveRunStatusToTurnEnd();")
     release_idx = body.index("_restoreLiveAnchorScrollSnapshotAfterRebuild(scrollSnapshot,scrollRebuildGuard);")
 

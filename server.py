@@ -100,14 +100,9 @@ except ImportError:  # pragma: no cover - resource is Unix-only
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
-
 from api.logging_hygiene import install_webui_dependency_log_floors
-
-# The WebUI embeds Hermes Agent in this process. Establish its logging boundary
-# before importing routes or starting any agent so dependency DEBUG floods cannot
-# monopolize the same interpreter and stderr file used by HTTP request threads.
+# Install dependency log floors before importing routes or starting an agent.
 install_webui_dependency_log_floors()
-
 from api.auth import check_auth, reset_trusted_auth_request_state
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import (
@@ -153,8 +148,7 @@ class QuietHTTPServer(ThreadingHTTPServer):
             self.allow_reuse_address = False
             SO_EXCLUSIVEADDRUSE = getattr(socket, 'SO_EXCLUSIVEADDRUSE', -5)
             self.socket.setsockopt(socket.SOL_SOCKET, SO_EXCLUSIVEADDRUSE, 1)
-            # Allow a previous self-update process up to 10 seconds to release the port.
-            max_retries = 20
+            max_retries = 20  # Allow self-update up to 10 seconds to release the port.
             retry_delay = 0.5
             for attempt in range(max_retries):
                 try:
