@@ -22225,7 +22225,7 @@ def _start_chat_stream_for_session(
     )
     try:
         thr.start()
-    except Exception as start_exc:
+    except Exception:
         if backend_is_gateway:
             try:
                 from api.gateway_chat import _finish_gateway_run_starting
