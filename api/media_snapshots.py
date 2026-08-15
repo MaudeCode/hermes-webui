@@ -290,9 +290,12 @@ def _record_source_binding(digest: str, source: Path) -> None:
 
     A digest is only ever served back for the EXACT path it was captured from
     (see :func:`snapshot_servable_for_path`): a digest must never become a
-    bearer capability readable through any other allowed path.  The sidecar is
-    a tiny path list, rewritten tmp+rename atomically.  Caller holds
-    ``_LOCK`` (capture is serialized), so concurrent settles cannot race it.
+    bearer capability readable through any other allowed path.  ``source`` is
+    the canonical path already authorized against the held file descriptor;
+    do not resolve it again here or a pathname replacement could change the
+    binding after authorization.  The sidecar is a tiny path list, rewritten
+    tmp+rename atomically.  Caller holds ``_LOCK`` (capture is serialized), so
+    concurrent settles cannot race it.
     """
     try:
         binding_file = _binding_path_for_digest(digest)
@@ -302,7 +305,7 @@ def _record_source_binding(digest: str, source: Path) -> None:
             sources = set(data.get("sources", []))
         except (OSError, ValueError, TypeError):
             sources = set()
-        sources.add(str(Path(source).resolve()))
+        sources.add(str(source))
         tmp = binding_file.with_name(binding_file.name + ".tmp")
         tmp.write_text(
             json.dumps({"digest": digest, "sources": sorted(sources)}, sort_keys=True),
@@ -320,8 +323,8 @@ def snapshot_servable_for_path(digest: str, target: Path) -> bool:
     the snapshot branch serves a digest only for the exact authorized path it
     was captured from, so replaying a digest through a different (allowed)
     path can never read stored bytes the normal ``path=`` gate would refuse.
-    A missing/invalid sidecar returns False — the caller falls back to the
-    live file.
+    A missing or invalid sidecar returns False, and the caller fails closed
+    rather than substituting mutable live bytes for a requested snapshot.
     """
     if not is_valid_digest(digest):
         return False
@@ -396,10 +399,15 @@ def _enforce_quota_locked(directory: Path) -> None:
             logger.debug("media snapshot eviction failed for %s: %s", path, exc)
 
 
-def capture_snapshot(source: Path, *, max_file_bytes: int | None = None) -> str | None:
+def capture_snapshot(
+    source: Path,
+    *,
+    max_file_bytes: int | None = None,
+    allowed_predicate=None,
+) -> str | None:
     """Copy ``source`` into the content-addressed store; return its digest.
 
-    Returns None (caller falls back to live-file previews) when:
+    Returns None (caller records no snapshot) when:
     * the file is missing / not a regular file / unreadable,
     * the file exceeds the per-file cap,
     * any I/O error occurs mid-copy (the torn tmp is removed).
@@ -407,17 +415,10 @@ def capture_snapshot(source: Path, *, max_file_bytes: int | None = None) -> str 
     Never raises — snapshotting is a durability enhancement and must not be
     able to break the settle path.
     """
+    source = Path(source)
     cap = _max_file_bytes() if max_file_bytes is None else max_file_bytes
-    try:
-        st = source.stat()
-    except OSError:
-        return None
-    import stat as stat_mod
-
-    if not stat_mod.S_ISREG(st.st_mode):
-        return None
-    if cap and st.st_size > cap:
-        return None
+    if allowed_predicate is None:
+        allowed_predicate = media_capture_allowed
 
     with _LOCK:
         directory = get_snapshot_dir()
@@ -428,9 +429,39 @@ def capture_snapshot(source: Path, *, max_file_bytes: int | None = None) -> str 
 
         digest = hashlib.sha256()
         tmp_path: Path | None = None
+        source_fd: int | None = None
         try:
+            flags = os.O_RDONLY
+            flags |= getattr(os, "O_BINARY", 0)
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            source_fd = os.open(source, flags)
+            opened_stat = os.fstat(source_fd)
+            if not stat.S_ISREG(opened_stat.st_mode):
+                raise OSError("media snapshot source is not a regular file")
+            # A hard link can give a denied inode an otherwise allowed
+            # pathname. Path-based authorization cannot identify the other
+            # aliases, so fail closed whenever this inode has more than one
+            # directory entry.
+            if getattr(opened_stat, "st_nlink", 1) > 1:
+                raise OSError("media snapshot source has multiple hard links")
+            if cap and opened_stat.st_size > cap:
+                raise OSError("media snapshot source exceeds per-file cap")
+
+            # Authorize and bind the exact object held by source_fd. Resolving,
+            # authorizing, and statting after open closes the writable-path race:
+            # a replaced parent/final symlink either fails O_NOFOLLOW, resolves
+            # outside the allow-list, or has an identity different from the fd.
+            canonical_source = source.resolve(strict=True)
+            if allowed_predicate is not None and not allowed_predicate(canonical_source):
+                raise OSError("media snapshot source is not authorized")
+            current_stat = canonical_source.stat()
+            if not os.path.samestat(opened_stat, current_stat):
+                raise OSError("media snapshot source changed during authorization")
+
             tmp_path = directory / f".tmp.{os.getpid()}.{threading.get_ident()}"
-            with open(source, "rb") as src, open(tmp_path, "wb") as dst:
+            with os.fdopen(source_fd, "rb", closefd=True) as src, open(tmp_path, "wb") as dst:
+                source_fd = None
                 copied = 0
                 while True:
                     chunk = src.read(1024 * 1024)
@@ -456,11 +487,16 @@ def capture_snapshot(source: Path, *, max_file_bytes: int | None = None) -> str 
             tmp_path = None
             # Server-owned source-path binding: this digest may only be served
             # back for THIS canonical path (see snapshot_servable_for_path).
-            _record_source_binding(hex_digest, source)
+            _record_source_binding(hex_digest, canonical_source)
             _enforce_quota_locked(directory)
             return hex_digest
-        except OSError as exc:
+        except Exception as exc:
             logger.debug("media snapshot capture failed for %s: %s", source, exc)
+            if source_fd is not None:
+                try:
+                    os.close(source_fd)
+                except OSError:
+                    pass
             if tmp_path is not None:
                 try:
                     tmp_path.unlink()
@@ -482,8 +518,8 @@ def annotate_media_snapshots(
     Messages whose refs are already fully annotated are skipped (idempotent
     across repeated settles).  A recorded digest is FINAL: even if its blob is
     later evicted by quota, a re-settle must not re-capture the CURRENT live
-    bytes and silently rebind the historical message — evicted blobs degrade
-    to live-file serving instead (#6979 Round 2 SHOULD-FIX).
+    bytes and silently rebind the historical message. The serve path returns
+    410 for that final-but-unavailable digest (#6979 Round 2 SHOULD-FIX).
 
     ``resolve_ref(raw_ref) -> Path | None`` maps a raw MEDIA token to an
     absolute file path (defaults to :func:`resolve_media_ref`); refs it cannot
@@ -534,8 +570,7 @@ def annotate_media_snapshots(
             # re-checked): quota eviction must not cause a re-settle to
             # re-capture the current live bytes and rebind the historical
             # message — that would defeat per-message immutability and thrash
-            # the store with re-capture I/O. Evicted blobs simply fall back to
-            # live-file serving on the serve side.
+            # the store with re-capture I/O. Evicted blobs fail closed at serve.
             pending = [k for k in keys if not (snaps.get(k) and is_valid_digest(snaps[k]))]
             if not pending:
                 continue  # already stored under every key — zero-I/O fast path
@@ -545,7 +580,7 @@ def annotate_media_snapshots(
                         continue
                 except Exception:
                     continue
-            digest = capture_snapshot(path)
+            digest = capture_snapshot(path, allowed_predicate=allowed_predicate)
             if digest:
                 for k in keys:
                     snaps[k] = digest

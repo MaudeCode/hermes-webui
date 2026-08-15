@@ -156,6 +156,27 @@ def test_capture_snapshot_dedupes_identical_content(snap_dir, tmp_path):
     assert len(list(snap_dir.glob("*.snap"))) == 1
 
 
+def test_record_source_binding_does_not_reresolve_authorized_path(
+    snap_dir, tmp_path, monkeypatch
+):
+    import json
+
+    from api.media_snapshots import _binding_path_for_digest, _record_source_binding
+
+    source = tmp_path / "already-canonical.png"
+    digest = "a" * 64
+    snap_dir.mkdir()
+
+    def reject_late_resolve(_self, *args, **kwargs):
+        raise AssertionError("authorized source path must not be resolved again")
+
+    monkeypatch.setattr(Path, "resolve", reject_late_resolve)
+    _record_source_binding(digest, source)
+
+    binding = json.loads(_binding_path_for_digest(digest).read_text(encoding="utf-8"))
+    assert binding["sources"] == [str(source)]
+
+
 def test_capture_snapshot_skips_missing_and_over_cap(snap_dir, tmp_path):
     from api.media_snapshots import capture_snapshot
 
@@ -164,6 +185,27 @@ def test_capture_snapshot_skips_missing_and_over_cap(snap_dir, tmp_path):
     big = tmp_path / "big.mp4"
     big.write_bytes(b"x" * 1024)
     assert capture_snapshot(big, max_file_bytes=512) is None
+
+
+def test_capture_snapshot_rejects_hard_link_alias_of_denied_file(
+    routes, snap_dir, tmp_path, monkeypatch
+):
+    from api.media_snapshots import capture_snapshot, media_capture_allowed
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    secret = state_dir / "auth.json"
+    secret.write_text('{"secret": true}')
+    alias = tmp_path / "report.png"
+    os.link(secret, alias)
+    monkeypatch.setattr("api.config.STATE_DIR", str(state_dir))
+
+    assert media_capture_allowed(secret) is False
+    assert alias.stat().st_nlink > 1
+    assert media_capture_allowed(alias) is False
+    assert capture_snapshot(alias) is None
+    assert list(snap_dir.glob("*.snap")) == []
+    assert _media_get(routes, monkeypatch, alias).status == 403
 
 
 def test_capture_snapshot_enforces_cap_during_copy(snap_dir, tmp_path, monkeypatch):
@@ -338,14 +380,14 @@ def test_handle_media_invalid_snap_falls_back_to_live(routes, monkeypatch, snap_
     assert bytes(replayed.body) == b"live-bytes"
 
 
-def test_handle_media_missing_snap_falls_back_to_live(routes, monkeypatch, snap_dir, tmp_path):
+def test_handle_media_missing_valid_snap_fails_closed(routes, monkeypatch, snap_dir, tmp_path):
     target = tmp_path / "pic.png"
     target.write_bytes(b"live-bytes")
     missing = _media_get(
         routes, monkeypatch, target, query_extra="&snap=" + "0" * 64
     )
-    assert missing.status == 200
-    assert bytes(missing.body) == b"live-bytes"
+    assert missing.status == 410
+    assert b"snapshot unavailable" in bytes(missing.body)
 
 
 def test_handle_media_snap_does_not_bypass_deny(routes, monkeypatch, snap_dir, tmp_path):
@@ -477,9 +519,8 @@ def test_handle_media_snap_requires_source_path_binding(routes, monkeypatch, sna
     """MUST-FIX 1 serve-side repro: a digest captured from path A must not be
     servable through path B, even when B is an allowed path.
 
-    Round 1 served stored bytes for ANY allowed path carrying the digest
-    (/tmp/whatever.png?snap=<digest> -> 200 with A's bytes). With the binding:
-    B falls back to its live file (404 when absent; live bytes when present).
+    Round 1 served stored bytes for ANY allowed path carrying the digest.
+    With the binding, B fails closed and never receives A's or B's live bytes.
     """
     from api.media_snapshots import capture_snapshot
 
@@ -492,17 +533,18 @@ def test_handle_media_snap_requires_source_path_binding(routes, monkeypatch, sna
     assert bound.status == 200
     assert bytes(bound.body) == b"frozen-bytes-from-a"
 
-    # Unbound + absent path: NOT the snapshot; live fallback -> 404.
+    # A valid but unbound snapshot request fails closed regardless of whether
+    # the mutable live path exists.
     other_missing = tmp_path / "b.png"
     unbound = _media_get(routes, monkeypatch, other_missing, query_extra=f"&snap={digest}")
-    assert unbound.status == 404
+    assert unbound.status == 410
 
-    # Unbound + present path: live bytes, never the frozen snapshot.
+    # Unbound + present path must not silently serve mutable live bytes.
     other_live = tmp_path / "b.png"
     other_live.write_bytes(b"live-bytes-of-b")
     unbound_live = _media_get(routes, monkeypatch, other_live, query_extra=f"&snap={digest}")
-    assert unbound_live.status == 200
-    assert bytes(unbound_live.body) == b"live-bytes-of-b"
+    assert unbound_live.status == 410
+    assert b"snapshot unavailable" in bytes(unbound_live.body)
 
 
 def test_handle_media_snap_dedup_binds_every_source_path(routes, monkeypatch, snap_dir, tmp_path):
@@ -527,9 +569,7 @@ def test_handle_media_snap_dedup_binds_every_source_path(routes, monkeypatch, sn
     c = tmp_path / "c.png"
     c.write_bytes(b"live-different-bytes")
     sc = _media_get(routes, monkeypatch, c, query_extra=f"&snap={d1}")
-    assert sc.status == 200
-    # Live file served (distinguishable from the frozen bytes), NOT the snapshot.
-    assert bytes(sc.body) == b"live-different-bytes"
+    assert sc.status == 410
 
 
 def test_handle_media_denies_custom_named_store_via_bare_path(routes, monkeypatch, tmp_path):
@@ -590,6 +630,93 @@ def test_annotate_evicted_snapshot_is_final(snap_dir, tmp_path):
     snaps1: dict = messages[0].get("_media_snapshots") or {}
     assert snaps1[str(target)] == digest
     assert not blob.exists()  # no re-capture
+
+
+def test_handle_media_evicted_snapshot_never_serves_overwritten_live_bytes(
+    routes, monkeypatch, snap_dir, tmp_path
+):
+    from api.media_snapshots import capture_snapshot
+
+    target = tmp_path / "report.html"
+    target.write_text("<html>v1</html>")
+    digest = capture_snapshot(target)
+    assert digest
+    (snap_dir / f"{digest}.snap").unlink()
+    target.write_text("<html>v2 overwritten</html>")
+
+    response = _media_get(routes, monkeypatch, target, query_extra=f"&snap={digest}")
+    assert response.status == 410
+    assert b"v2 overwritten" not in bytes(response.body)
+
+
+def test_annotate_revalidates_the_opened_source_after_symlink_replacement(
+    snap_dir, tmp_path, monkeypatch
+):
+    from api import media_snapshots
+
+    hermes_home = tmp_path / ".hermes"
+    state_dir = hermes_home / "webui"
+    state_dir.mkdir(parents=True)
+    secret = state_dir / "secret.json"
+    secret.write_text('{"secret": true}')
+    source = tmp_path / "safe.txt"
+    source.write_text("safe")
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr("api.config.STATE_DIR", str(state_dir))
+
+    calls = 0
+
+    def replace_after_first_authorization(path):
+        nonlocal calls
+        calls += 1
+        allowed = media_snapshots.media_capture_allowed(path)
+        if calls == 1 and allowed:
+            source.unlink()
+            source.symlink_to(secret)
+        return allowed
+
+    messages = [{"role": "assistant", "content": f"MEDIA:{source}"}]
+    captured = media_snapshots.annotate_media_snapshots(
+        messages,
+        allowed_predicate=replace_after_first_authorization,
+    )
+
+    assert captured == 0
+    assert "_media_snapshots" not in messages[0]
+    assert list(snap_dir.glob("*.snap")) == []
+
+
+def test_capture_revalidates_after_open_before_copy(snap_dir, tmp_path, monkeypatch):
+    from api import media_snapshots
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    secret = state_dir / "auth.json"
+    secret.write_text('{"secret": true}')
+    source = tmp_path / "safe.txt"
+    source.write_text("safe")
+    monkeypatch.setattr("api.config.STATE_DIR", str(state_dir))
+
+    real_open = media_snapshots.os.open
+    replaced = False
+
+    def open_then_replace(path, flags, *args, **kwargs):
+        nonlocal replaced
+        fd = real_open(path, flags, *args, **kwargs)
+        if Path(path) == source and not replaced:
+            replaced = True
+            source.unlink()
+            source.symlink_to(secret)
+        return fd
+
+    monkeypatch.setattr(media_snapshots.os, "open", open_then_replace)
+    # Exercise the portability path where final-component no-follow is not
+    # available; post-open identity and authorization must still fail closed.
+    monkeypatch.delattr(media_snapshots.os, "O_NOFOLLOW", raising=False)
+
+    assert media_snapshots.capture_snapshot(source) is None
+    assert replaced is True
+    assert list(snap_dir.glob("*.snap")) == []
 
 
 def test_quota_eviction_drops_source_binding_sidecar(snap_dir, tmp_path, monkeypatch):

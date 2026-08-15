@@ -75,7 +75,7 @@ def test_csv_media_file_keeps_download_affordance():
         src = f.read()
     csv_section = src[src.find('function buildCsvTablePreview'):src.find('function loadCsvInline') + 1600]
     assert 'csv-download-link msg-media-link' in csv_section
-    assert '_csvMediaUrl(path,{download:true})' in src
+    assert '_csvMediaUrl(path,{download:true,snap:snap||undefined})' in src
     assert 'download="${esc(fname)}"' in csv_section
     assert 'buildCsvTablePreview(path, text, downloadUrl)' in src
 
@@ -118,6 +118,17 @@ def test_csv_error_handling():
     helper_body = WORKSPACE_JS[helper_start:helper_end]
     assert "if(preview.errorKey&&typeof _csvPreviewErrorHtml==='function'){" in helper_body
     assert "$('previewMd').innerHTML=_csvPreviewErrorHtml(path, preview.errorKey);" in helper_body
+
+
+def test_csv_snapshot_digest_survives_error_and_oversize_fallbacks():
+    with open('static/ui.js', encoding="utf-8") as f:
+        src = f.read()
+    helper = src[src.index('function _csvPreviewErrorHtml'):src.index('function loadCsvInline')]
+    loader = src[src.index('function loadCsvInline'):src.index('function loadExcalidrawInline')]
+    assert "function _csvPreviewErrorHtml(path, errorKey, snap='')" in helper
+    assert "_csvMediaUrl(path,{download:true,snap:snap||undefined})" in helper
+    assert "_csvPreviewErrorHtml(path, preview.errorKey||'csv_error', snap)" in loader
+    assert "_csvPreviewErrorHtml(path, 'csv_error', snap)" in loader
 
 
 def test_csv_loadCsvInline_called_after_render():

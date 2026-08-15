@@ -19543,9 +19543,21 @@ def _media_deny_reason(target: Path) -> str | None:
     default home, and STATE_DIR — which also defends sibling profiles).
     """
     import os as _os
+    import stat as _stat
 
     _HOME = Path(_os.path.expanduser("~"))
     _HERMES_HOME = Path(_os.getenv("HERMES_HOME", str(_HOME / ".hermes"))).expanduser()
+
+    # A hard link can make a denied inode reachable through an otherwise
+    # allowed pathname. Path-based policy cannot discover every alias, so
+    # reject multiply linked regular files on both serve and snapshot paths.
+    # Missing paths remain eligible for historical snapshot replay below.
+    try:
+        _target_stat = target.stat()
+        if _stat.S_ISREG(_target_stat.st_mode) and _target_stat.st_nlink > 1:
+            return "media file has multiple hard links"
+    except OSError:
+        pass
 
     _DENY_FILENAMES = {
         "settings.json", "state.db", "state.db-wal", "state.db-shm",
@@ -19866,7 +19878,8 @@ def _handle_media(handler, parsed):
     # still compare old vs new. The allow/deny checks above still gate the
     # request: `snap` only selects WHICH bytes to serve for an already-
     # authorized path; it never grants access to a path that would be denied
-    # without it. A missing/evicted snapshot falls back to the live file.
+    # without it. A syntactically valid snapshot request is immutable: missing,
+    # evicted, or unbound digests fail closed instead of serving mutable bytes.
     snap_digest = qs.get("snap", [""])[0].strip().lower()
     snapshot_file = None
     snap_dir = None
@@ -19885,10 +19898,11 @@ def _handle_media(handler, parsed):
             # digest may only be served back for the EXACT canonical path it
             # was captured from. Replaying a digest through a different
             # (allowed) path must not leak the stored bytes — treat it as an
-            # invalid snapshot and fall back to the live file (or 404 when the
-            # live file is absent).
+            # unavailable snapshot and fail closed below.
             if snapshot_file is not None and not snapshot_servable_for_path(snap_digest, target):
                 snapshot_file = None
+            if snapshot_file is None:
+                return j(handler, {"error": "snapshot unavailable"}, status=410)
     if snapshot_file is not None:
         # Content-addressed and immutable: the digest IS the SHA-256 of the
         # exact bytes, so the browser may cache forever and never revalidate.
