@@ -2994,7 +2994,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const liveAfterStatus=LIVE_STREAMS[activeSid];
           if(!_ownsStreamLifecycle()||!liveAfterStatus||liveAfterStatus.source!==source) return;
           if(st.active){
-            setComposerStatus('Reconnected');
+            setComposerStatus('Reconnected',1000);
             _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}),source);
             return;
           }
@@ -7198,9 +7198,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           return;
         }
         // Show as a small inline notice, not a full error
-        setComposerStatus(`${d.message||'Warning'}`);
-        // If it's a fallback notice, show it briefly then clear
-        if(d.type==='fallback') setTimeout(()=>setComposerStatus(''),4000);
+        setComposerStatus(`${d.message||'Warning'}`,d.type==='fallback'?4000:undefined);
       }catch(_){}
     });
 
@@ -7255,7 +7253,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             const liveAfterProbe=LIVE_STREAMS[activeSid];
             if(!_ownsStreamLifecycle()||!liveAfterProbe||liveAfterProbe.source!==source) return;
             if(st&&st.active){
-              setComposerStatus('Reconnected');
+              setComposerStatus('Reconnected',1000);
               _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}),source);
               return;
             }
