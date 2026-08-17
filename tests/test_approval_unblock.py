@@ -396,12 +396,14 @@ class TestApprovalHTTPEndpoints:
 
         sid = f"http-gateway-stale-{uuid.uuid4().hex[:8]}"
         approval_a = {
+            "request_id": f"request-a-{uuid.uuid4().hex}",
             "command": "rm -rf /tmp/stale-a",
             "pattern_key": "recursive delete",
             "pattern_keys": ["recursive delete"],
             "description": "recursive delete",
         }
         approval_b = {
+            "request_id": f"request-b-{uuid.uuid4().hex}",
             "command": "rm -rf /tmp/live-b",
             "pattern_key": "recursive delete",
             "pattern_keys": ["recursive delete"],
@@ -418,13 +420,20 @@ class TestApprovalHTTPEndpoints:
         with _lock:
             r._pending.pop(sid, None)
             r._gateway_queues.pop(sid, None)
-            r._gateway_queues[sid] = [_ApprovalEntry(approval_a)]
+            entry_a = _ApprovalEntry(approval_a)
+            r._gateway_queues[sid] = [entry_a]
         try:
-            ra.submit_gateway_pending_mirror(sid, approval_a)
+            # Production notifies WebUI with a COPY of the entry payload
+            # (core: notify_cb(dict(entry.data))), which carries the entry's
+            # stamped request_id — pass that faithful copy, not the pre-stamp
+            # source dict, so the mirror matches its producer the way it does
+            # in production.
+            ra.submit_gateway_pending_mirror(sid, dict(entry_a.data))
             with _lock:
                 r._gateway_queues.pop(sid, None)
-                r._gateway_queues[sid] = [_ApprovalEntry(approval_b)]
-            ra.submit_gateway_pending_mirror(sid, approval_b)
+                entry_b = _ApprovalEntry(approval_b)
+                r._gateway_queues[sid] = [entry_b]
+            ra.submit_gateway_pending_mirror(sid, dict(entry_b.data))
 
             parsed = urllib.parse.urlparse(f"/api/approval/pending?session_id={urllib.parse.quote(sid)}")
             r._handle_approval_pending(object(), parsed)
@@ -490,12 +499,14 @@ class TestApprovalHTTPEndpoints:
 
         sid = f"http-stale-id-{uuid.uuid4().hex[:8]}"
         approval_a = {
+            "request_id": f"request-a-{uuid.uuid4().hex}",
             "command": "rm -rf /tmp/stale-a",
             "pattern_key": "recursive delete",
             "pattern_keys": ["recursive delete"],
             "description": "recursive delete",
         }
         approval_b = {
+            "request_id": f"request-b-{uuid.uuid4().hex}",
             "command": "rm -rf /tmp/live-b",
             "pattern_key": "recursive delete",
             "pattern_keys": ["recursive delete"],
@@ -507,7 +518,8 @@ class TestApprovalHTTPEndpoints:
             r._pending.pop(sid, None)
             r._gateway_queues[sid] = [entry_a]
         try:
-            ra.submit_gateway_pending_mirror(sid, approval_a)
+            # Faithful to production: submit the stamped copy (see note above).
+            ra.submit_gateway_pending_mirror(sid, dict(entry_a.data))
             with _lock:
                 mirror_aid_a = r._pending[sid][0]["approval_id"]
 
@@ -516,7 +528,7 @@ class TestApprovalHTTPEndpoints:
             entry_b = _ApprovalEntry(approval_b)
             with _lock:
                 r._gateway_queues[sid] = [entry_b]
-            ra.submit_gateway_pending_mirror(sid, approval_b)
+            ra.submit_gateway_pending_mirror(sid, dict(entry_b.data))
 
             resolved = r._resolve_approval_legacy(sid, mirror_aid_a, "once")
             assert resolved is False, "stale approval_id must not resolve live B"
@@ -599,8 +611,16 @@ class TestApprovalHTTPEndpoints:
 
         sid = f"http-gateway-local-{uuid.uuid4().hex[:8]}"
         stream_id = f"stream-local-{uuid.uuid4().hex[:8]}"
-        approval = {"command": "rm -rf /tmp/local", "description": "local"}
-        sibling = {"command": "rm -rf /tmp/sibling", "description": "sibling"}
+        approval = {
+            "request_id": f"request-local-{uuid.uuid4().hex}",
+            "command": "rm -rf /tmp/local",
+            "description": "local",
+        }
+        sibling = {
+            "request_id": f"request-sibling-{uuid.uuid4().hex}",
+            "command": "rm -rf /tmp/sibling",
+            "description": "sibling",
+        }
         captured = {}
 
         def fake_j(handler, data, status=200, extra_headers=None):
@@ -617,7 +637,8 @@ class TestApprovalHTTPEndpoints:
             r._pending.pop(sid, None)
             r._gateway_queues[sid] = [entry, sibling_entry]
         try:
-            ra.submit_gateway_pending_mirror(sid, approval)
+            # Faithful to production: submit the stamped copy (see note above).
+            ra.submit_gateway_pending_mirror(sid, dict(entry.data))
             with _lock:
                 approval_id = r._pending[sid][0]["approval_id"]
 
@@ -710,8 +731,16 @@ class TestApprovalHTTPEndpoints:
         from api import route_approvals as ra
 
         sid = f"http-gateway-non-head-{uuid.uuid4().hex[:8]}"
-        approval_a = {"command": "rm -rf /tmp/a", "description": "a"}
-        approval_b = {"command": "rm -rf /tmp/b", "description": "b"}
+        approval_a = {
+            "request_id": f"request-a-{uuid.uuid4().hex}",
+            "command": "rm -rf /tmp/a",
+            "description": "a",
+        }
+        approval_b = {
+            "request_id": f"request-b-{uuid.uuid4().hex}",
+            "command": "rm -rf /tmp/b",
+            "description": "b",
+        }
         entry_a = _ApprovalEntry(approval_a)
         entry_b = _ApprovalEntry(approval_b)
         captured = {}
@@ -728,8 +757,9 @@ class TestApprovalHTTPEndpoints:
             r._pending.pop(sid, None)
             r._gateway_queues[sid] = [entry_a, entry_b]
         try:
-            ra.submit_gateway_pending_mirror(sid, approval_a)
-            ra.submit_gateway_pending_mirror(sid, approval_b)
+            # Faithful to production: submit the stamped copies (see note above).
+            ra.submit_gateway_pending_mirror(sid, dict(entry_a.data))
+            ra.submit_gateway_pending_mirror(sid, dict(entry_b.data))
             with _lock:
                 approval_b_id = next(
                     item["approval_id"] for item in r._pending[sid]

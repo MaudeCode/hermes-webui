@@ -50,8 +50,11 @@ def routes():
 
 
 @pytest.fixture(autouse=True)
-def allow_test_media_root(tmp_path, monkeypatch):
+def media_allowed_root(tmp_path, monkeypatch):
+    # tmp_path is under /tmp only on Linux; register it and make Path.home()
+    # resolve to the same fixture root on Windows so deny tests reach #3234.
     monkeypatch.setenv("MEDIA_ALLOWED_ROOTS", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
 
 
 # ── _serve_file_bytes ETag / 304 ──────────────────────────────────────────
