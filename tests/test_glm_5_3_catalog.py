@@ -196,9 +196,20 @@ def test_glm_5_3_in_models_payload_for_zai_provider(tmp_path, monkeypatch):
         monkeypatch.setattr(hm, "list_available_providers", fake_prov)
     except Exception:
         pass
-    # Exercise the WebUI's curated fallback catalog rather than whichever
-    # hermes_cli model list happens to be installed in the test environment.
-    monkeypatch.setattr(c, "_read_live_provider_model_ids", lambda _provider: [])
+
+    # Pin the agent-core catalog: get_available_models() sources the zai
+    # model list from the INSTALLED hermes-cli core (via
+    # _read_live_provider_model_ids -> provider_model_ids), not from the
+    # repo's static _PROVIDER_MODELS. On a box whose installed core predates
+    # glm-5.3 this test previously failed spuriously ("glm-5.3 missing from
+    # zai group models"). Stub the core catalog to a deterministic empty
+    # list so the repo's own _PROVIDER_MODELS fallback is exercised — this
+    # tests WebUI catalog propagation, not the installed core version.
+    try:
+        import hermes_cli.models as hm
+        monkeypatch.setattr(hm, "provider_model_ids", lambda _pid: [])
+    except Exception:
+        pass
 
     result = c.get_available_models()
     c.reload_config()
