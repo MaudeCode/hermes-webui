@@ -29,7 +29,7 @@ def _run_node(script: str) -> dict:
 
 _EXTRACT_FUNC_JS = r"""
 function extractFunc(name){
-  const start=src.indexOf('function '+name);
+  const start=src.indexOf('function '+name+'(');
   if(start<0) throw new Error(name+' not found');
   const params=src.indexOf('(',start);
   let depth=0,close=-1;
@@ -163,7 +163,7 @@ global.isSimplifiedToolCalling=()=>true;
 global.$=id=>id==='liveAssistantTurn'?turn:id==='emptyState'?emptyState:null;
 global._anchorSceneRowsForRendering=scene=>scene.activity_rows;
 global._liveAnchorRowWindow=rows=>({{rows,hiddenCount:0,total:rows.length}});
-global._buildLiveAnchorEarlierStepsAffordance=()=>null;
+global._buildLiveAnchorWindowEdges=()=>({{beforeNode:null,afterNode:null}});
 global._assistantTurnBlocks=()=>blocks;
 global._captureWorklogDetailDisclosureState=()=>null;
 global._captureMessageScrollSnapshot=()=>({{pinned:true,userUnpinned:false}});
@@ -222,7 +222,7 @@ global.isSimplifiedToolCalling=()=>true;
 global.$=id=>id==='liveAssistantTurn'?turn:id==='emptyState'?{{style:{{}}}}:null;
 global._anchorSceneRowsForRendering=scene=>scene.activity_rows;
 global._liveAnchorRowWindow=rows=>({{rows,hiddenCount:0,total:rows.length}});
-global._buildLiveAnchorEarlierStepsAffordance=()=>null;
+global._buildLiveAnchorWindowEdges=()=>({{beforeNode:null,afterNode:null}});
 global._assistantTurnBlocks=()=>blocks;
 global._captureWorklogDetailDisclosureState=()=>null;
 global._captureMessageScrollSnapshot=()=>({{pinned:true}});
@@ -255,44 +255,51 @@ def test_closed_workspace_panel_skips_hidden_subtree_rendering():
 
 
 @pytest.mark.skipif(NODE is None, reason="node is required for DOM-executed live-render tests")
-def test_live_activity_window_is_bounded_and_can_reveal_every_older_row():
-    """Long active runs keep bounded DOM while older rows remain reachable."""
+def test_live_activity_window_scrolls_bidirectionally_with_bounded_overlap():
+    """Long active runs page both directions without growing mounted DOM."""
     script = f"""
 const fs=require('fs');
 const src=fs.readFileSync({json.dumps(str(ROOT / 'static' / 'ui.js'))},'utf8');
 {_EXTRACT_FUNC_JS}
-if(!src.includes('const _LIVE_ANCHOR_ROW_CAP=80;')||!src.includes('const _LIVE_ANCHOR_ROW_PAGE=80;')) throw new Error('live anchor row window constants missing');
+if(!src.includes('const _LIVE_ANCHOR_ROW_CAP=80;')||!src.includes('const _LIVE_ANCHOR_ROW_PAGE=40;')) throw new Error('live anchor row window constants missing');
 global._LIVE_ANCHOR_ROW_CAP=80;
-global._LIVE_ANCHOR_ROW_PAGE=80;
+global._LIVE_ANCHOR_ROW_PAGE=40;
 eval(extractFunc('_liveAnchorRowWindow'));
-eval(extractFunc('_increaseLiveAnchorRowWindow'));
+eval(extractFunc('_shiftLiveAnchorRowWindowState'));
 const all=Array.from({{length:500}},(_,i)=>({{row_id:'row-'+i}}));
 const turn={{dataset:{{}}}};
 const first=_liveAnchorRowWindow(all,turn);
-const revealed=[];
-while(true){{
-  const view=_liveAnchorRowWindow(all,turn);
-  revealed.push(...view.rows.map(row=>row.row_id));
-  if(view.hiddenCount===0) break;
-  _increaseLiveAnchorRowWindow(turn,all.length);
-}}
-const final=_liveAnchorRowWindow(all,turn);
+_shiftLiveAnchorRowWindowState(turn,'earlier',all.length);
+const earlier=_liveAnchorRowWindow(all,turn);
+_shiftLiveAnchorRowWindowState(turn,'newer',all.length);
+const newer=_liveAnchorRowWindow(all,turn);
+const overlap=first.rows.filter(row=>earlier.rows.includes(row)).length;
 process.stdout.write(JSON.stringify({{
   firstCount:first.rows.length,
   firstId:first.rows[0].row_id,
   firstHidden:first.hiddenCount,
-  finalCount:final.rows.length,
-  finalHidden:final.hiddenCount,
-  allReachable:new Set(revealed).size===500,
+  earlierCount:earlier.rows.length,
+  earlierFirst:earlier.rows[0].row_id,
+  earlierHidden:earlier.hiddenCount,
+  earlierNewer:earlier.newerCount,
+  overlap,
+  newerFirst:newer.rows[0].row_id,
+  newerHidden:newer.hiddenCount,
+  newerMode:turn.dataset.liveAnchorWindowMode,
 }}));
 """
     assert _run_node(script) == {
         "firstCount": 80,
         "firstId": "row-420",
         "firstHidden": 420,
-        "finalCount": 500,
-        "finalHidden": 0,
-        "allReachable": True,
+        "earlierCount": 80,
+        "earlierFirst": "row-380",
+        "earlierHidden": 380,
+        "earlierNewer": 40,
+        "overlap": 40,
+        "newerFirst": "row-420",
+        "newerHidden": 420,
+        "newerMode": "tail",
     }
 
 
@@ -321,6 +328,83 @@ process.stdout.write(JSON.stringify({{text:pre.textContent,label:btn.textContent
         "text": "complete result that must remain available",
         "label": "Show less",
         "htmlCarriesFull": False,
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for DOM-executed live-render tests")
+def test_live_activity_window_prefetches_before_scroll_reaches_edge():
+    """Approaching a live-window sentinel shifts automatically, without a click."""
+    script = f"""
+const fs=require('fs');
+const src=fs.readFileSync({json.dumps(str(ROOT / 'static' / 'ui.js'))},'utf8');
+{_EXTRACT_FUNC_JS}
+let shifts=[];
+global.S={{activeStreamId:'stream-1'}};
+global._shiftLiveAnchorRowWindow=(_turn,direction)=>shifts.push(direction);
+const top={{getBoundingClientRect:()=>({{top:150,bottom:170}})}};
+const bottom={{getBoundingClientRect:()=>({{top:1800,bottom:1820}})}};
+const turn={{
+  isConnected:true,
+  dataset:{{liveAnchorWindowMode:'tail'}},
+  querySelector:selector=>selector.includes('="earlier"')?top:selector.includes('="newer"')?bottom:null,
+}};
+const messages={{
+  clientHeight:800,
+  getBoundingClientRect:()=>({{top:0,bottom:800}}),
+}};
+global.$=id=>id==='liveAssistantTurn'?turn:null;
+eval(extractFunc('_maybeShiftLiveAnchorWindowOnScroll'));
+_maybeShiftLiveAnchorWindowOnScroll(messages,{{movedUp:true,movedDown:false}});
+_maybeShiftLiveAnchorWindowOnScroll(messages,{{movedUp:false,movedDown:true}});
+process.stdout.write(JSON.stringify({{shifts,mode:turn.dataset.liveAnchorWindowMode}}));
+"""
+    assert _run_node(script) == {"shifts": ["earlier"], "mode": "history"}
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for DOM-executed live-render tests")
+def test_live_activity_window_shift_preserves_visible_row_position():
+    """Swapping overlapping slices compensates scrollTop around a stable row."""
+    script = f"""
+const fs=require('fs');
+const src=fs.readFileSync({json.dumps(str(ROOT / 'static' / 'ui.js'))},'utf8');
+{_EXTRACT_FUNC_JS}
+global._LIVE_ANCHOR_ROW_CAP=80;
+global._LIVE_ANCHOR_ROW_PAGE=40;
+global._liveAnchorWindowShiftBusy=false;
+global._programmaticScroll=false;
+global._programmaticScrollSetAt=0;
+global._lastScrollTop=0;
+global.performance={{now:()=>123}};
+global.requestAnimationFrame=fn=>{{fn();return 1;}};
+global.S={{activeStreamId:'stream-1',session:{{session_id:'sid-1'}}}};
+global.chatActivityMode=()=> 'compact_worklog';
+let rowTop=100;
+const row={{
+  getAttribute:name=>name==='data-anchor-row-id'?'row-450':name==='data-anchor-row-role'?'tool':name==='data-anchor-source-event-type'?'tool_complete':'',
+  getBoundingClientRect:()=>({{top:rowTop,bottom:rowTop+30}}),
+}};
+const turn={{
+  isConnected:true,
+  dataset:{{liveAnchorWindowStart:'420',liveAnchorWindowTotal:'500',liveAnchorWindowMode:'tail',sessionId:'sid-1'}},
+  getAttribute:name=>name==='data-anchor-stream-id'?'stream-1':'',
+  querySelectorAll:()=>[row],
+}};
+const messages={{
+  scrollTop:500,
+  getBoundingClientRect:()=>({{top:0,bottom:800}}),
+}};
+global.$=id=>id==='messages'?messages:id==='liveAssistantTurn'?turn:null;
+global.window={{_renderLiveAnchorActivitySceneForStream:()=>{{rowTop=300;return true;}}}};
+for(const name of ['_shiftLiveAnchorRowWindowState','_liveAnchorWindowVisibleAnchor','_findLiveAnchorWindowAnchor','_shiftLiveAnchorRowWindow']) global[name]=eval('('+extractFunc(name)+')');
+const shifted=_shiftLiveAnchorRowWindow(turn,'earlier');
+process.stdout.write(JSON.stringify({{shifted,start:turn.dataset.liveAnchorWindowStart,mode:turn.dataset.liveAnchorWindowMode,scrollTop:messages.scrollTop,programmatic:_programmaticScroll}}));
+"""
+    assert _run_node(script) == {
+        "shifted": True,
+        "start": "380",
+        "mode": "history",
+        "scrollTop": 700,
+        "programmatic": True,
     }
 
 

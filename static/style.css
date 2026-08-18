@@ -6347,7 +6347,7 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
 .load-older-indicator:hover{opacity:.75;}
 .message-window-load-earlier{align-self:center;margin:4px auto 14px;padding:7px 14px;border:1px solid var(--border);border-radius:999px;background:var(--surface);box-shadow:var(--shadow-sm);}
 .message-window-load-earlier:hover{background:var(--hover-bg);border-color:var(--accent);}
-/* #5966: "Show earlier steps" affordance for a capped Transparent Stream turn.
+/* #5966: earlier/newer activity-window affordances for a capped live turn.
    Sits inline at the top of the turn's activity run, styled as a quiet pill in
    the app's own visual language (matches .message-window-load-earlier) but
    left-aligned + fit-content so the PILL (not the full row) is the click/tap
@@ -6379,6 +6379,7 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
   transition:transform .15s ease;
 }
 .transparent-earlier-steps:hover .transparent-earlier-steps-chevron{transform:translateY(-1px);}
+[data-live-anchor-window-edge="newer"]:hover .transparent-earlier-steps-chevron{transform:translateY(1px);}
 .transparent-earlier-steps-label{white-space:nowrap;}
 @media (max-width:640px){
   .transparent-earlier-steps{min-height:44px;padding:11px 15px;font-size:13px;}

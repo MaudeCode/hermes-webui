@@ -6489,6 +6489,12 @@ if(typeof window!=='undefined'){
       const showBottomButton=!_scrollPinned && el.scrollHeight-top-el.clientHeight>80;
       _syncScrollToBottomCue(showBottomButton,{newMessage:_newMessageCueVisible});
       if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
+      // The live worklog is a bounded bidirectional window. Prefetch the next
+      // overlapping slice before its edge reaches the viewport so ordinary
+      // wheel/touch/keyboard scrolling never stops on a loading control.
+      if(typeof _maybeShiftLiveAnchorWindowOnScroll==='function'){
+        _maybeShiftLiveAnchorWindowOnScroll(el,{movedUp,movedDown});
+      }
       // Prefetch older messages before the reader hits the hard top. Prepending
       // then preserving scrollTop is seamless only if there is runway left for
       // the user's continued upward wheel/touch movement.
@@ -7081,6 +7087,10 @@ document.addEventListener('DOMContentLoaded',function(){
 function _setMessageScrollToBottom(){
   const el=$('messages');
   if(!el) return;
+  // If the reader was paging through an older live-worklog slice, an explicit
+  // jump-to-bottom must first restore the live tail; otherwise the "bottom" of
+  // the mounted virtual window is not the actual newest activity.
+  if(typeof _resetLiveAnchorWindowToTail==='function') _resetLiveAnchorWindowToTail();
   _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
   el.scrollTop=el.scrollHeight;
   _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
@@ -13467,7 +13477,8 @@ function _anchorSceneCompactRowKey(node, index){
 }
 function _anchorSceneCompactTopLevelKey(node, index){
   if(!node||!node.getAttribute) return `section:${Number(index)||0}`;
-  if(node.getAttribute('data-live-anchor-earlier')==='1') return 'live:earlier-steps';
+  const liveEdge=node.getAttribute('data-live-anchor-window-edge');
+  if(liveEdge) return `live:${liveEdge}-steps`;
   if(node.getAttribute('data-worklog-tools')==='1'){
     const first=node.firstElementChild;
     return `tools:${_anchorSceneCompactRowKey(first,index)}`;
@@ -13522,8 +13533,9 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   const desired=[];
   let wrote=false;
   let currentTools=null;
-  if(opts&&opts.earlierNode){
-    desired.push(opts.earlierNode);
+  const beforeNode=opts&&(opts.beforeNode||opts.earlierNode);
+  if(beforeNode){
+    desired.push(beforeNode);
     wrote=true;
   }
   for(const row of rows){
@@ -13541,6 +13553,10 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
       currentTools=null;
       desired.push(node);
     }
+    wrote=true;
+  }
+  if(opts&&opts.afterNode){
+    desired.push(opts.afterNode);
     wrote=true;
   }
   _reconcileAnchorSceneCompactChildren(list,desired,true);
@@ -13789,40 +13805,194 @@ function _updateLiveAnchorProseRowForPatch(turn, text, opts){
 // A long autonomous run can produce thousands of tool/reasoning rows. Keeping
 // every one mounted makes Chromium retain the complete card subtree (including
 // syntax-highlighted output) until the turn ends. Keep the recent live tail
-// bounded by default, while letting the reader reveal the complete history in
-// deterministic chunks. The source registry remains complete and settlement
-// still persists every row; this is a DOM window, not data truncation.
+// bounded by default. As the reader approaches either edge, slide the window by
+// half its size so 40 rows overlap; that overlap lets us preserve a visible row
+// as a semantic scroll anchor and makes the swap feel like ordinary scrolling.
+// The source registry remains complete and settlement still persists every row;
+// this is DOM virtualization, not data truncation.
 const _LIVE_ANCHOR_ROW_CAP=80;
-const _LIVE_ANCHOR_ROW_PAGE=80;
+const _LIVE_ANCHOR_ROW_PAGE=40;
 function _liveAnchorRowWindow(rows, turn){
   const all=Array.isArray(rows)?rows:[];
-  const requested=Number(turn&&turn.dataset&&turn.dataset.liveAnchorRowLimit);
-  const limit=Number.isFinite(requested)&&requested>0
-    ? Math.max(_LIVE_ANCHOR_ROW_CAP,Math.min(all.length,Math.floor(requested)))
-    : Math.min(all.length,_LIVE_ANCHOR_ROW_CAP);
-  const start=Math.max(0,all.length-limit);
-  return {rows:all.slice(start),hiddenCount:start,total:all.length,limit};
+  const total=all.length;
+  const maxStart=Math.max(0,total-_LIVE_ANCHOR_ROW_CAP);
+  const rawStart=turn&&turn.dataset?turn.dataset.liveAnchorWindowStart:undefined;
+  const storedStart=rawStart!==undefined&&rawStart!==''?Number(rawStart):NaN;
+  const historyMode=!!(turn&&turn.dataset&&turn.dataset.liveAnchorWindowMode==='history');
+  const start=historyMode&&Number.isFinite(storedStart)
+    ? Math.max(0,Math.min(maxStart,Math.floor(storedStart)))
+    : maxStart;
+  const end=Math.min(total,start+_LIVE_ANCHOR_ROW_CAP);
+  if(turn&&turn.dataset){
+    turn.dataset.liveAnchorWindowStart=String(start);
+    turn.dataset.liveAnchorWindowTotal=String(total);
+    turn.dataset.liveAnchorWindowMode=historyMode&&start<maxStart?'history':'tail';
+  }
+  return {
+    rows:all.slice(start,end),
+    hiddenCount:start,
+    newerCount:Math.max(0,total-end),
+    total,
+    start,
+    end,
+    limit:_LIVE_ANCHOR_ROW_CAP,
+  };
 }
-function _increaseLiveAnchorRowWindow(turn, total){
+function _shiftLiveAnchorRowWindowState(turn, direction, total){
   if(!turn||!turn.dataset) return 0;
   const count=Math.max(0,Number(total)||0);
-  const current=Number(turn.dataset.liveAnchorRowLimit);
-  const base=Number.isFinite(current)&&current>0?current:_LIVE_ANCHOR_ROW_CAP;
-  const next=Math.min(count,Math.max(_LIVE_ANCHOR_ROW_CAP,base+_LIVE_ANCHOR_ROW_PAGE));
-  turn.dataset.liveAnchorRowLimit=String(next);
+  const maxStart=Math.max(0,count-_LIVE_ANCHOR_ROW_CAP);
+  const stored=Number(turn.dataset.liveAnchorWindowStart);
+  const current=Number.isFinite(stored)?Math.max(0,Math.min(maxStart,Math.floor(stored))):maxStart;
+  const next=direction==='earlier'
+    ? Math.max(0,current-_LIVE_ANCHOR_ROW_PAGE)
+    : Math.min(maxStart,current+_LIVE_ANCHOR_ROW_PAGE);
+  turn.dataset.liveAnchorWindowStart=String(next);
+  turn.dataset.liveAnchorWindowTotal=String(count);
+  turn.dataset.liveAnchorWindowMode=next>=maxStart?'tail':'history';
   return next;
 }
-function _buildLiveAnchorEarlierStepsAffordance(hiddenCount, turn, streamId, sessionId, mode, total){
-  if(!(hiddenCount>0)||!turn) return null;
-  const earlier=_buildTransparentEarlierStepsAffordance(hiddenCount);
-  earlier.setAttribute('data-live-anchor-earlier','1');
-  earlier.addEventListener('click',()=>{
-    _increaseLiveAnchorRowWindow(turn,total);
-    if(typeof window!=='undefined'&&typeof window._renderLiveAnchorActivitySceneForStream==='function'){
-      window._renderLiveAnchorActivitySceneForStream(streamId,sessionId,{mode});
+function _liveAnchorWindowVisibleAnchor(turn, messagesEl){
+  if(!turn||!messagesEl||!turn.querySelectorAll||!messagesEl.getBoundingClientRect) return null;
+  const rootRect=messagesEl.getBoundingClientRect();
+  const rows=turn.querySelectorAll('[data-anchor-scene-row="1"][data-anchor-row-id]');
+  for(const row of Array.from(rows)){
+    if(!row||!row.getBoundingClientRect) continue;
+    const rect=row.getBoundingClientRect();
+    if(rect.bottom<rootRect.top||rect.top>rootRect.bottom) continue;
+    return {
+      rowId:String(row.getAttribute('data-anchor-row-id')||''),
+      role:String(row.getAttribute('data-anchor-row-role')||''),
+      source:String(row.getAttribute('data-anchor-source-event-type')||''),
+      top:rect.top,
+    };
+  }
+  return null;
+}
+function _findLiveAnchorWindowAnchor(turn, anchor){
+  if(!turn||!anchor||!turn.querySelectorAll) return null;
+  const rows=turn.querySelectorAll('[data-anchor-scene-row="1"][data-anchor-row-id]');
+  for(const row of Array.from(rows)){
+    if(String(row.getAttribute('data-anchor-row-id')||'')!==anchor.rowId) continue;
+    if(String(row.getAttribute('data-anchor-row-role')||'')!==anchor.role) continue;
+    if(String(row.getAttribute('data-anchor-source-event-type')||'')!==anchor.source) continue;
+    return row;
+  }
+  return null;
+}
+let _liveAnchorWindowShiftBusy=false;
+function _shiftLiveAnchorRowWindow(turn, direction){
+  if(_liveAnchorWindowShiftBusy||!turn||!turn.isConnected) return false;
+  const total=Math.max(0,Number(turn.dataset&&turn.dataset.liveAnchorWindowTotal)||0);
+  const beforeStart=Math.max(0,Number(turn.dataset&&turn.dataset.liveAnchorWindowStart)||0);
+  const beforeMode=String(turn.dataset&&turn.dataset.liveAnchorWindowMode||'tail');
+  const nextStart=_shiftLiveAnchorRowWindowState(turn,direction,total);
+  if(nextStart===beforeStart) return false;
+  const restoreState=()=>{
+    turn.dataset.liveAnchorWindowStart=String(beforeStart);
+    turn.dataset.liveAnchorWindowMode=beforeMode;
+  };
+  const messagesEl=$('messages');
+  const anchor=_liveAnchorWindowVisibleAnchor(turn,messagesEl);
+  const streamId=String(turn.getAttribute&&turn.getAttribute('data-anchor-stream-id')||S.activeStreamId||'');
+  const sessionId=String(turn.dataset&&turn.dataset.sessionId||(S.session&&S.session.session_id)||'');
+  const mode=typeof chatActivityMode==='function'?chatActivityMode():'compact_worklog';
+  if(typeof window==='undefined'||typeof window._renderLiveAnchorActivitySceneForStream!=='function'){
+    restoreState();
+    return false;
+  }
+  _liveAnchorWindowShiftBusy=true;
+  let rendered=false;
+  try{rendered=window._renderLiveAnchorActivitySceneForStream(streamId,sessionId,{mode});}
+  catch(_){rendered=false;}
+  if(!rendered){restoreState();_liveAnchorWindowShiftBusy=false;return false;}
+  const settle=()=>{
+    const currentTurn=$('liveAssistantTurn');
+    const currentAnchor=_findLiveAnchorWindowAnchor(currentTurn,anchor);
+    if(anchor&&currentAnchor&&currentAnchor.getBoundingClientRect&&messagesEl){
+      const delta=currentAnchor.getBoundingClientRect().top-anchor.top;
+      if(Math.abs(delta)>0.5){
+        if(typeof _programmaticScroll!=='undefined') _programmaticScroll=true;
+        if(typeof _programmaticScrollSetAt!=='undefined') _programmaticScrollSetAt=performance.now();
+        messagesEl.scrollTop+=delta;
+        if(typeof _lastScrollTop!=='undefined') _lastScrollTop=messagesEl.scrollTop;
+        if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll();
+      }
     }
-  });
-  return earlier;
+    _liveAnchorWindowShiftBusy=false;
+  };
+  if(typeof requestAnimationFrame==='function') requestAnimationFrame(settle);
+  else settle();
+  return true;
+}
+function _resetLiveAnchorWindowToTail(){
+  const turn=$('liveAssistantTurn');
+  if(!turn||!turn.dataset||turn.dataset.liveAnchorWindowMode!=='history') return false;
+  const total=Math.max(0,Number(turn.dataset.liveAnchorWindowTotal)||0);
+  const previousStart=turn.dataset.liveAnchorWindowStart;
+  turn.dataset.liveAnchorWindowMode='tail';
+  turn.dataset.liveAnchorWindowStart=String(Math.max(0,total-_LIVE_ANCHOR_ROW_CAP));
+  const streamId=String(turn.getAttribute&&turn.getAttribute('data-anchor-stream-id')||S.activeStreamId||'');
+  const sessionId=String(turn.dataset.sessionId||(S.session&&S.session.session_id)||'');
+  const mode=typeof chatActivityMode==='function'?chatActivityMode():'compact_worklog';
+  let rendered=false;
+  try{
+    rendered=!!(typeof window!=='undefined'&&typeof window._renderLiveAnchorActivitySceneForStream==='function'
+      && window._renderLiveAnchorActivitySceneForStream(streamId,sessionId,{mode}));
+  }catch(_){rendered=false;}
+  if(!rendered){
+    turn.dataset.liveAnchorWindowMode='history';
+    turn.dataset.liveAnchorWindowStart=previousStart;
+  }
+  return rendered;
+}
+function _buildLiveAnchorWindowEdge(kind, count, turn){
+  if(!(count>0)||!turn) return null;
+  const edge=_buildTransparentEarlierStepsAffordance(count);
+  edge.removeAttribute('data-anchor-settled-scene-row');
+  edge.setAttribute('data-live-anchor-window-edge',kind);
+  if(kind==='earlier') edge.setAttribute('data-live-anchor-earlier','1');
+  else{
+    const label=count===1
+      ? _tOrDefault('show_newer_step_one','1 newer step')
+      : _tOrDefault('show_newer_steps',count+' newer steps',count);
+    edge.setAttribute('aria-label',label);
+    edge.setAttribute('data-earlier-count',String(count));
+    edge.innerHTML=`<span class="transparent-earlier-steps-chevron">${li('chevron-down',13)}</span><span class="transparent-earlier-steps-label">${esc(label)}</span>`;
+  }
+  edge.addEventListener('click',()=>_shiftLiveAnchorRowWindow(turn,kind));
+  return edge;
+}
+function _buildLiveAnchorWindowEdges(rowWindow, turn){
+  return {
+    beforeNode:_buildLiveAnchorWindowEdge('earlier',rowWindow&&rowWindow.hiddenCount,turn),
+    afterNode:_buildLiveAnchorWindowEdge('newer',rowWindow&&rowWindow.newerCount,turn),
+  };
+}
+function _maybeShiftLiveAnchorWindowOnScroll(messagesEl, direction){
+  if(!messagesEl||!S.activeStreamId||(typeof _liveAnchorWindowShiftBusy!=='undefined'&&_liveAnchorWindowShiftBusy)) return false;
+  const turn=$('liveAssistantTurn');
+  if(!turn||!turn.isConnected||!turn.querySelector||!messagesEl.getBoundingClientRect) return false;
+  const movedUp=!!(direction&&direction.movedUp);
+  const movedDown=!!(direction&&direction.movedDown);
+  const earlier=turn.querySelector('[data-live-anchor-window-edge="earlier"]');
+  const newer=turn.querySelector('[data-live-anchor-window-edge="newer"]');
+  if(movedUp&&earlier&&turn.dataset) turn.dataset.liveAnchorWindowMode='history';
+  const root=messagesEl.getBoundingClientRect();
+  const preload=Math.max(240,(Number(messagesEl.clientHeight)||0)*0.75);
+  if(movedUp&&earlier&&earlier.getBoundingClientRect){
+    const rect=earlier.getBoundingClientRect();
+    if(rect.bottom>rect.top&&rect.bottom>=root.top-preload&&rect.top<=root.bottom){
+      return _shiftLiveAnchorRowWindow(turn,'earlier');
+    }
+  }
+  if(movedDown&&newer&&newer.getBoundingClientRect){
+    const rect=newer.getBoundingClientRect();
+    if(rect.bottom>rect.top&&rect.top<=root.bottom+preload&&rect.bottom>=root.top){
+      return _shiftLiveAnchorRowWindow(turn,'newer');
+    }
+  }
+  return false;
 }
 if(typeof window!=='undefined'){
   window._updateLiveAnchorReasoningRowForFallback=_updateLiveAnchorReasoningRowForFallback;
@@ -13905,15 +14075,10 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
     el.setAttribute('aria-hidden','true');
     el.hidden=true;
   });
-  const earlierNode=typeof _buildLiveAnchorEarlierStepsAffordance==='function'?_buildLiveAnchorEarlierStepsAffordance(
-    rowWindow.hiddenCount,
-    turn,
-    streamId||S.activeStreamId||'',
-    S.session&&S.session.session_id,
-    sceneMode,
-    rowWindow.total
-  ):null;
-  const ok=_renderAnchorSceneRowsIntoWorklog(group,rows,{live:true,settled:false,earlierNode});
+  const windowEdges=typeof _buildLiveAnchorWindowEdges==='function'
+    ? _buildLiveAnchorWindowEdges(rowWindow,turn)
+    : {beforeNode:null,afterNode:null};
+  const ok=_renderAnchorSceneRowsIntoWorklog(group,rows,{live:true,settled:false,...windowEdges});
   if(!ok){
     const list=_toolWorklogListEl(group);
     if(list) list.innerHTML='';
@@ -13978,7 +14143,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
     if(key && !preserveByKey.has(key)) preserveByKey.set(key, node);
   });
   blocks.querySelectorAll('[data-anchor-scene-owner="1"]').forEach(el=>el.remove());
-  blocks.querySelectorAll('[data-live-anchor-earlier="1"]').forEach(el=>el.remove());
+  blocks.querySelectorAll('[data-live-anchor-window-edge]').forEach(el=>el.remove());
   blocks.querySelectorAll('[data-anchor-scene-row="1"]').forEach(el=>{
     if(el.getAttribute('data-live-stream-owned') === '1'){
       const key = _transparentLiveRowKey(el, activeStreamId);
@@ -14006,15 +14171,10 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   });
   const liveFooter=blocks.querySelector('#liveRunStatus');
   const renderedRows=[];
-  const earlierNode=typeof _buildLiveAnchorEarlierStepsAffordance==='function'?_buildLiveAnchorEarlierStepsAffordance(
-    rowWindow.hiddenCount,
-    turn,
-    streamId||S.activeStreamId||'',
-    S.session&&S.session.session_id,
-    'transparent_stream',
-    rowWindow.total
-  ):null;
-  if(earlierNode) renderedRows.push(earlierNode);
+  const windowEdges=typeof _buildLiveAnchorWindowEdges==='function'
+    ? _buildLiveAnchorWindowEdges(rowWindow,turn)
+    : {beforeNode:null,afterNode:null};
+  if(windowEdges.beforeNode) renderedRows.push(windowEdges.beforeNode);
   for(const row of rows){
     const rowEventTs=typeof _anchorSceneRowTimestampSeconds==='function'?_anchorSceneRowTimestampSeconds(row):null;
     const node=_anchorSceneTransparentNodeForRow(row,{
@@ -14035,6 +14195,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
     if(!renderedNode) continue;
     renderedRows.push(renderedNode);
   }
+  if(windowEdges.afterNode) renderedRows.push(windowEdges.afterNode);
   const transparentLiveRowAlreadyPositioned=(node, expectedNextSibling)=>!!(
     node &&
     node.parentElement===blocks &&

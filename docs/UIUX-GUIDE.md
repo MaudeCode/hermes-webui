@@ -100,8 +100,10 @@ preview, but the UI must expose an in-flow “Show earlier steps” affordance t
 loads the omitted prefix from durable state in bounded chunks. Collapsing,
 windowing, or switching sessions must not make earlier activity irretrievable.
 The same invariant applies while a run is live: the renderer may mount only a
-bounded recent tail, but “Show earlier steps” must reveal the complete in-memory
-activity history in chunks, and settlement must still persist every row.
+bounded, overlapping activity window, but approaching either scroll edge must
+prefetch the adjacent in-memory slice and preserve the reader's viewport. Keep
+the explicit earlier/newer controls as keyboard and fast-scroll fallbacks, and
+settlement must still persist every row.
 
 ## Typography and content
 
