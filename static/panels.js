@@ -7650,6 +7650,8 @@ let _settingsIndex = null;
 let _settingsIndexPromise = null;
 let _settingsSearchSeq = 0;
 let _extensionsStatusData = null;
+let _extensionsStatusGeneration = 0;
+let _extensionsStatusMutationQueue = Promise.resolve();
 let _extensionsSidecarMonitorSeq = 0;
 let _extensionsGalleryData = null;
 let _extensionsGalleryLoaded = false;
@@ -10013,7 +10015,18 @@ function _extensionSettingsControls(entry){
   </div>`;
 }
 
-function _extensionInstalledList(extensions,extensionDirConfigured){
+function _extensionConfigureButton(entry,surface){
+  if(surface!=='installed'||!(entry&&entry.effective_enabled)) return '';
+  const id=(entry&&entry.id)||'';
+  const runtime=window.HermesExtensionSettings;
+  if(!id||!runtime||typeof runtime._configureStateForExtension!=='function') return '';
+  const state=runtime._configureStateForExtension(id);
+  if(!state||!state.available) return '';
+  const pending=state.pending===true;
+  return `<button class="sm-btn extension-configure-btn" type="button" data-extension-configure-id="${esc(id)}" aria-busy="${pending?'true':'false'}"${pending?' disabled':''}>${pending?t('ext_configure_opening'):t('ext_configure')}</button>`;
+}
+
+function _extensionInstalledList(extensions,extensionDirConfigured,surface){
   const list=Array.isArray(extensions)?extensions:[];
   if(!list.length){
     if(!extensionDirConfigured) return '<div class="extension-url-empty">No extension directory is configured.</div>';
@@ -10030,6 +10043,7 @@ function _extensionInstalledList(extensions,extensionDirConfigured){
     const note=canToggle
       ? 'Toggles the WebUI-managed override for the next app load.'
       : 'Manifest-disabled entries cannot be enabled from WebUI.';
+    const configureButton=_extensionConfigureButton(entry,surface);
     return `<div class="extension-installed-row" data-extension-id="${esc(id)}">
       <div class="extension-installed-main">
         <div class="extension-installed-title-row">
@@ -10039,7 +10053,10 @@ function _extensionInstalledList(extensions,extensionDirConfigured){
         <div class="extension-installed-meta"><code>${esc(id)}</code><span>${esc(note)}</span></div>
         ${_extensionSettingsControls(entry)}
       </div>
-      <button class="sm-btn extension-toggle-btn" type="button" data-extension-toggle-id="${esc(id)}" data-extension-next-enabled="${nextEnabled}"${disabledAttr}>${esc(buttonText)}</button>
+      <div class="extension-installed-actions">
+        ${configureButton}
+        <button class="sm-btn extension-toggle-btn" type="button" data-extension-toggle-id="${esc(id)}" data-extension-next-enabled="${nextEnabled}"${disabledAttr}>${esc(buttonText)}</button>
+      </div>
     </div>`;
   }).join('')}</div>`;
 }
@@ -10247,6 +10264,7 @@ function _renderExtensionsPanel(data,seq){
   const copyBtn=$('extensionsCopyDiagnosticsBtn');
   if(!target) return;
   _extensionsStatusData=data||null;
+  if(_extensionsGalleryData) _extensionsGalleryData.statusData=data||null;
   _configureExtensionSettingsFromStatus(data);
   if(copyBtn) copyBtn.disabled=!data;
   const manifest=(data&&data.manifest)||{};
@@ -10297,7 +10315,7 @@ function _renderExtensionsPanel(data,seq){
         </div>
       </div>
       <div class="provider-card-body extension-card-body">
-        ${_extensionInstalledList(extensions,!!(data&&data.extension_dir_configured))}
+        ${_extensionInstalledList(extensions,!!(data&&data.extension_dir_configured),'diagnostics')}
       </div>
     </div>
     <div class="provider-card extension-assets-card">
@@ -10333,6 +10351,37 @@ function _renderExtensionsPanel(data,seq){
   _monitorExtensionSidecars(sidecars,seq);
 }
 
+function _bindExtensionConfigureButtons(root){
+  if(!root) return;
+  root.querySelectorAll('[data-extension-configure-id]').forEach(btn=>{
+    btn.addEventListener('click',()=>handleExtensionConfigure(btn));
+  });
+}
+
+function _syncExtensionConfigureButtonState(id){
+  const runtime=window.HermesExtensionSettings;
+  if(!runtime||typeof runtime._configureStateForExtension!=='function') return;
+  const state=runtime._configureStateForExtension(id);
+  document.querySelectorAll('[data-extension-configure-id]').forEach(btn=>{
+    if(!btn.dataset||btn.dataset.extensionConfigureId!==id) return;
+    const pending=!!(state&&state.available&&state.pending);
+    btn.disabled=pending;
+    btn.setAttribute('aria-busy',pending?'true':'false');
+    btn.textContent=pending?t('ext_configure_opening'):t('ext_configure');
+  });
+}
+
+function handleExtensionConfigure(btn){
+  if(!btn||btn.disabled) return;
+  const id=btn.dataset.extensionConfigureId||'';
+  const runtime=window.HermesExtensionSettings;
+  if(!id||!runtime||typeof runtime._invokeConfigure!=='function') return;
+  runtime._invokeConfigure(id,{
+    opener:btn,
+    onError:()=>showToast(t('ext_configure_failed'),4200,'error'),
+  });
+}
+
 function _bindExtensionToggleButtons(root){
   if(!root) return;
   root.querySelectorAll('[data-extension-toggle-id]').forEach(btn=>{
@@ -10347,6 +10396,12 @@ function _bindExtensionSidecarProxyButtons(root){
   });
 }
 
+function _enqueueExtensionStatusMutation(operation){
+  const run=_extensionsStatusMutationQueue.then(operation,operation);
+  _extensionsStatusMutationQueue=run.catch(()=>undefined);
+  return run;
+}
+
 async function handleExtensionToggle(btn){
   if(!btn||btn.disabled) return;
   const id=btn.dataset.extensionToggleId||'';
@@ -10356,8 +10411,9 @@ async function handleExtensionToggle(btn){
   btn.disabled=true;
   btn.textContent=enabled?'Enabling…':'Disabling…';
   try{
-    const data=await api('/api/extensions/toggle',{method:'POST',body:JSON.stringify({id,enabled})});
+    const data=await _enqueueExtensionStatusMutation(()=>api('/api/extensions/toggle',{method:'POST',body:JSON.stringify({id,enabled})}));
     showToast(enabled?'Extension enabled. Reload WebUI to apply changes.':'Extension disabled. Reload WebUI to apply changes.');
+    ++_extensionsStatusGeneration;
     _renderExtensionsPanel(data,++_extensionsSidecarMonitorSeq);
   }catch(e){
     btn.disabled=false;
@@ -10375,8 +10431,9 @@ async function handleExtensionSidecarProxyConsent(btn){
   btn.disabled=true;
   btn.textContent=approved?'Approving…':'Revoking…';
   try{
-    const data=await api('/api/extensions/sidecar-proxy-consent',{method:'POST',body:JSON.stringify({id,approved})});
+    const data=await _enqueueExtensionStatusMutation(()=>api('/api/extensions/sidecar-proxy-consent',{method:'POST',body:JSON.stringify({id,approved})}));
     showToast(approved?'Extension sidecar proxy approved.':'Extension sidecar proxy consent revoked.');
+    ++_extensionsStatusGeneration;
     _renderExtensionsPanel(data,++_extensionsSidecarMonitorSeq);
   }catch(e){
     btn.disabled=false;
@@ -10454,6 +10511,14 @@ function handleExtensionStorageClear(btn){
   showToast('Extension storage cleared in this browser.');
 }
 
+function _markExtensionConfigureStatusUnavailable(){
+  const runtime=window.HermesExtensionSettings;
+  if(runtime&&typeof runtime._markConfigureStatusUnavailable==='function'){
+    runtime._markConfigureStatusUnavailable();
+  }
+  if(_extensionsGalleryData) _extensionsGalleryData={..._extensionsGalleryData,statusData:null};
+}
+
 async function loadExtensionsPanel(opts){
   const target=$('extensionsDiagnostics');
   const copyBtn=$('extensionsCopyDiagnosticsBtn');
@@ -10467,13 +10532,15 @@ async function loadExtensionsPanel(opts){
   );
   if(copyBtn&&!preserveExisting) copyBtn.disabled=true;
   const seq=++_extensionsSidecarMonitorSeq;
+  const statusGeneration=++_extensionsStatusGeneration;
   if(!preserveExisting) target.innerHTML='<div class="extensions-loading">Loading extension diagnostics…</div>';
   try{
     const data=await api('/api/extensions/status');
-    if(seq!==_extensionsSidecarMonitorSeq) return;
+    if(seq!==_extensionsSidecarMonitorSeq||statusGeneration!==_extensionsStatusGeneration) return;
     _renderExtensionsPanel(data,seq);
   }catch(e){
-    if(seq!==_extensionsSidecarMonitorSeq) return;
+    if(seq!==_extensionsSidecarMonitorSeq||statusGeneration!==_extensionsStatusGeneration) return;
+    _markExtensionConfigureStatusUnavailable();
     if(preserveExisting&&target.innerHTML.trim()) return;
     _extensionsStatusData=null;
     if(copyBtn) copyBtn.disabled=true;
@@ -10492,6 +10559,19 @@ function switchExtensionsTab(tab){
   });
   if(tab==='diagnostics') loadExtensionsPanel({preserveExisting:true});
   if(tab==='gallery'&&!_extensionsGalleryLoaded) loadExtensionsGallery();
+}
+
+function _handleExtensionConfigureChange(change){
+  if(!change||!change.id) return;
+  if(change.reason==='pending'){
+    _syncExtensionConfigureButtonState(change.id);
+    return;
+  }
+  _syncExtensionConfigureEntry(change.id);
+}
+
+if(window.HermesExtensionSettings&&typeof window.HermesExtensionSettings._onConfigureChange==='function'){
+  window.HermesExtensionSettings._onConfigureChange(_handleExtensionConfigureChange);
 }
 
 function _extensionSafeHttpUrl(value){
@@ -10649,30 +10729,114 @@ function _extensionPostInstallNote(entry,isInstalled){
   </div>`;
 }
 
+function _syncExtensionConfigureEntry(id){
+  const clean=String(id||'').trim();
+  const installedEl=$('extensionsInstalled');
+  if(!clean||!installedEl) return;
+  const row=Array.from(installedEl.querySelectorAll('[data-extension-id]'))
+    .find(candidate=>candidate&&candidate.dataset&&candidate.dataset.extensionId===clean);
+  if(!row) return;
+  const actions=row.querySelector('.extension-installed-actions');
+  if(!actions) return;
+  const existing=Array.from(actions.querySelectorAll('[data-extension-configure-id]'))
+    .find(button=>button&&button.dataset&&button.dataset.extensionConfigureId===clean)||null;
+  const statusData=(_extensionsGalleryData&&_extensionsGalleryData.statusData)||_extensionsStatusData;
+  const entry=statusData&&Array.isArray(statusData.extensions)
+    ?statusData.extensions.find(item=>item&&String(item.id||'')===clean)
+    :null;
+  const runtime=window.HermesExtensionSettings;
+  const state=entry&&entry.effective_enabled!==false&&runtime&&typeof runtime._configureStateForExtension==='function'
+    ?runtime._configureStateForExtension(clean)
+    :null;
+  if(!state||!state.available){
+    if(existing) existing.remove();
+    return;
+  }
+  if(existing){
+    _syncExtensionConfigureButtonState(clean);
+    return;
+  }
+  const added=document.createElement('button');
+  added.className='sm-btn extension-configure-btn';
+  added.type='button';
+  added.dataset.extensionConfigureId=clean;
+  added.disabled=state.pending===true;
+  added.setAttribute('aria-busy',state.pending===true?'true':'false');
+  added.textContent=state.pending===true?t('ext_configure_opening'):t('ext_configure');
+  added.addEventListener('click',()=>handleExtensionConfigure(added));
+  actions.prepend(added);
+}
+
+function _renderInstalledExtensionsSurface(statusData){
+  const installedEl=$('extensionsInstalled');
+  if(!installedEl) return;
+  installedEl.innerHTML=_extensionInstalledList(
+    statusData&&statusData.extensions,
+    !!(statusData&&statusData.extension_dir_configured),
+    'installed'
+  );
+  _bindExtensionToggleButtons(installedEl);
+  _bindExtensionSettingsButtons(installedEl);
+  _bindExtensionConfigureButtons(installedEl);
+}
+
 async function loadExtensionsGallery(){
   _extensionsGalleryLoaded=true;
   const galleryEl=$('extensionsGallery');
   const installedEl=$('extensionsInstalled');
   if(galleryEl) galleryEl.innerHTML='<div class="extensions-loading">Loading gallery…</div>';
   if(installedEl) installedEl.innerHTML='<div class="extensions-loading">Loading installed extensions…</div>';
+
+  // Fetch the registry first, then take a fresh status snapshot. A slow
+  // registry response must never hold an older enabled snapshot that can
+  // overwrite a newer toggle or diagnostics refresh.
+  let regData=null;
+  let registryError=null;
   try{
-    const [regData,statusData]=await Promise.all([
-      api('/api/extensions/registry'),
-      api('/api/extensions/status'),
-    ]);
-    _extensionsGalleryData={regData,statusData};
-    _renderExtensionsGallery(regData.entries||[],statusData);
+    regData=await api('/api/extensions/registry');
+    if(regData&&regData.error) registryError=new Error(String(regData.error));
   }catch(e){
+    registryError=e;
+  }
+
+  const statusGeneration=++_extensionsStatusGeneration;
+  let statusData=null;
+  try{
+    statusData=await api('/api/extensions/status');
+  }catch(e){
+    // An older failed read cannot invalidate a newer successful mutation/read.
+    if(statusGeneration!==_extensionsStatusGeneration){
+      _extensionsGalleryLoaded=false;
+      if(_extensionsActiveTab==='gallery') return loadExtensionsGallery();
+      return;
+    }
     _extensionsGalleryLoaded=false;
+    _markExtensionConfigureStatusUnavailable();
     const msg=esc(e&&e.message?e.message:String(e));
     if(galleryEl) galleryEl.innerHTML='<div class="extensions-error">Failed to load gallery: '+msg+'</div>';
     if(installedEl) installedEl.innerHTML='<div class="extensions-error">Failed to load extension status.</div>';
+    return;
   }
+
+  if(statusGeneration!==_extensionsStatusGeneration){
+    _extensionsGalleryLoaded=false;
+    if(_extensionsActiveTab==='gallery') return loadExtensionsGallery();
+    return;
+  }
+  _extensionsGalleryData={regData:regData||{entries:[]},statusData};
+  if(registryError){
+    _extensionsGalleryLoaded=false;
+    const msg=esc(registryError&&registryError.message?registryError.message:String(registryError));
+    if(galleryEl) galleryEl.innerHTML='<div class="extensions-error">Failed to load gallery: '+msg+'</div>';
+    _configureExtensionSettingsFromStatus(statusData);
+    _renderInstalledExtensionsSurface(statusData);
+    return;
+  }
+  _renderExtensionsGallery(regData.entries||[],statusData);
 }
 
 function _renderExtensionsGallery(entries,statusData){
   const galleryEl=$('extensionsGallery');
-  const installedEl=$('extensionsInstalled');
   _configureExtensionSettingsFromStatus(statusData);
   const installedIds=new Set();
   if(statusData&&statusData.gallery_installed){
@@ -10683,11 +10847,7 @@ function _renderExtensionsGallery(entries,statusData){
   }
   if(!Array.isArray(entries)||entries.length===0){
     if(galleryEl) galleryEl.innerHTML='<div class="extensions-empty">No extensions found in the registry.</div>';
-    if(installedEl){
-      installedEl.innerHTML=_extensionInstalledList(statusData&&statusData.extensions,!!(statusData&&statusData.extension_dir_configured));
-      _bindExtensionToggleButtons(installedEl);
-      _bindExtensionSettingsButtons(installedEl);
-    }
+    _renderInstalledExtensionsSurface(statusData);
     return;
   }
   const galleryCards=[];
@@ -10731,11 +10891,7 @@ function _renderExtensionsGallery(entries,statusData){
     galleryCards.push(card);
   }
   if(galleryEl) galleryEl.innerHTML=galleryCards.length?galleryCards.join(''):'<div class="extensions-empty">No extensions found.</div>';
-  if(installedEl){
-    installedEl.innerHTML=_extensionInstalledList(statusData&&statusData.extensions,!!(statusData&&statusData.extension_dir_configured));
-    _bindExtensionToggleButtons(installedEl);
-    _bindExtensionSettingsButtons(installedEl);
-  }
+  _renderInstalledExtensionsSurface(statusData);
   _bindExtensionGalleryButtons(entries);
 }
 
@@ -10757,11 +10913,12 @@ async function handleExtensionInstall(btn,entry){
   btn.disabled=true;
   btn.textContent=t('ext_gallery_installing');
   try{
-    const result=await api('/api/extensions/install',{method:'POST',body:JSON.stringify({
+    const result=await _enqueueExtensionStatusMutation(()=>api('/api/extensions/install',{method:'POST',body:JSON.stringify({
       id:entry.id,
       download_url:entry.download_url||entry.download,
       sha256:entry.sha256,
-    })});
+    })}));
+    ++_extensionsStatusGeneration;
     const restart=!!(entry.lifecycle&&(entry.lifecycle.restart_required||entry.lifecycle.webui_restart_required));
     const hasPostInstall=!!(entry.post_install||(entry.lifecycle&&(entry.lifecycle.sidecar_start_required||entry.lifecycle.native_host_start_required)));
     showToast(restart
@@ -10782,7 +10939,12 @@ async function handleExtensionUninstall(btn,id){
   btn.disabled=true;
   btn.textContent='Uninstalling…';
   try{
-    await api('/api/extensions/uninstall',{method:'POST',body:JSON.stringify({id})});
+    await _enqueueExtensionStatusMutation(()=>api('/api/extensions/uninstall',{method:'POST',body:JSON.stringify({id})}));
+    ++_extensionsStatusGeneration;
+    const runtime=window.HermesExtensionSettings;
+    if(runtime&&typeof runtime._quarantineConfigureExtension==='function'){
+      runtime._quarantineConfigureExtension(id);
+    }
     showToast('Extension uninstalled.');
     _extensionsGalleryLoaded=false;
     await loadExtensionsGallery();
