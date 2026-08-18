@@ -162,6 +162,8 @@ global.chatActivityMode=()=> 'compact_worklog';
 global.isSimplifiedToolCalling=()=>true;
 global.$=id=>id==='liveAssistantTurn'?turn:id==='emptyState'?emptyState:null;
 global._anchorSceneRowsForRendering=scene=>scene.activity_rows;
+global._liveAnchorRowWindow=rows=>({{rows,hiddenCount:0,total:rows.length}});
+global._buildLiveAnchorEarlierStepsAffordance=()=>null;
 global._assistantTurnBlocks=()=>blocks;
 global._captureWorklogDetailDisclosureState=()=>null;
 global._captureMessageScrollSnapshot=()=>({{pinned:true,userUnpinned:false}});
@@ -219,6 +221,8 @@ global.chatActivityMode=()=> 'compact_worklog';
 global.isSimplifiedToolCalling=()=>true;
 global.$=id=>id==='liveAssistantTurn'?turn:id==='emptyState'?{{style:{{}}}}:null;
 global._anchorSceneRowsForRendering=scene=>scene.activity_rows;
+global._liveAnchorRowWindow=rows=>({{rows,hiddenCount:0,total:rows.length}});
+global._buildLiveAnchorEarlierStepsAffordance=()=>null;
 global._assistantTurnBlocks=()=>blocks;
 global._captureWorklogDetailDisclosureState=()=>null;
 global._captureMessageScrollSnapshot=()=>({{pinned:true}});
@@ -248,6 +252,83 @@ def test_closed_workspace_panel_skips_hidden_subtree_rendering():
     assert closed in css
     rule = css.split(closed, 1)[1].split("}", 1)[0]
     assert "content-visibility:hidden" in rule
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for DOM-executed live-render tests")
+def test_live_activity_window_is_bounded_and_can_reveal_every_older_row():
+    """Long active runs keep bounded DOM while older rows remain reachable."""
+    script = f"""
+const fs=require('fs');
+const src=fs.readFileSync({json.dumps(str(ROOT / 'static' / 'ui.js'))},'utf8');
+{_EXTRACT_FUNC_JS}
+if(!src.includes('const _LIVE_ANCHOR_ROW_CAP=80;')||!src.includes('const _LIVE_ANCHOR_ROW_PAGE=80;')) throw new Error('live anchor row window constants missing');
+global._LIVE_ANCHOR_ROW_CAP=80;
+global._LIVE_ANCHOR_ROW_PAGE=80;
+eval(extractFunc('_liveAnchorRowWindow'));
+eval(extractFunc('_increaseLiveAnchorRowWindow'));
+const all=Array.from({{length:500}},(_,i)=>({{row_id:'row-'+i}}));
+const turn={{dataset:{{}}}};
+const first=_liveAnchorRowWindow(all,turn);
+const revealed=[];
+while(true){{
+  const view=_liveAnchorRowWindow(all,turn);
+  revealed.push(...view.rows.map(row=>row.row_id));
+  if(view.hiddenCount===0) break;
+  _increaseLiveAnchorRowWindow(turn,all.length);
+}}
+const final=_liveAnchorRowWindow(all,turn);
+process.stdout.write(JSON.stringify({{
+  firstCount:first.rows.length,
+  firstId:first.rows[0].row_id,
+  firstHidden:first.hiddenCount,
+  finalCount:final.rows.length,
+  finalHidden:final.hiddenCount,
+  allReachable:new Set(revealed).size===500,
+}}));
+"""
+    assert _run_node(script) == {
+        "firstCount": 80,
+        "firstId": "row-420",
+        "firstHidden": 420,
+        "finalCount": 500,
+        "finalHidden": 0,
+        "allReachable": True,
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for DOM-executed live-render tests")
+def test_tool_show_more_reads_full_result_from_row_state_not_html_attribute():
+    """Full tool output stays usable without duplicating it into the DOM."""
+    script = f"""
+const fs=require('fs');
+const src=fs.readFileSync({json.dumps(str(ROOT / 'static' / 'ui.js'))},'utf8');
+{_EXTRACT_FUNC_JS}
+global._colorDiffLines=text=>text;
+eval(extractFunc('_toolCardFullSnippet'));
+eval(extractFunc('_toggleToolDiff'));
+const pre={{textContent:'short',querySelector:()=>null,appendChild(){{}}}};
+const row={{_tcData:{{snippet:'complete result that must remain available'}}}};
+const result={{querySelector:selector=>selector==='pre'?pre:null}};
+const btn={{
+  dataset:{{short:'short',isDiff:'0',moreLabel:'Show more',lessLabel:'Show less'}},
+  textContent:'Show more',
+  closest:selector=>selector==='.tool-card-result'?result:selector==='.tool-card-row'?row:null,
+}};
+_toggleToolDiff(btn);
+process.stdout.write(JSON.stringify({{text:pre.textContent,label:btn.textContent,htmlCarriesFull:'full' in btn.dataset}}));
+"""
+    assert _run_node(script) == {
+        "text": "complete result that must remain available",
+        "label": "Show less",
+        "htmlCarriesFull": False,
+    }
+
+
+def test_live_tool_dom_does_not_retain_full_serialized_rows():
+    node_builder = UI_JS[UI_JS.index("function _anchorSceneNodeForRow"):UI_JS.index("function _anchorSceneTransparentNodeForRow")]
+    tool_builder = UI_JS[UI_JS.index("function buildToolCard"):UI_JS.index("function _colorDiffLines")]
+    assert "JSON.stringify(row)" not in node_builder
+    assert "data-full=" not in tool_builder
 
 
 def test_returning_session_boot_does_not_animate_transient_empty_logo():

@@ -13201,6 +13201,46 @@ function _anchorSceneRowTimestampSeconds(row){
   }
   return null;
 }
+function _anchorSceneRenderSignature(row){
+  // Keep only a compact fingerprint on each mounted row. JSON.stringify(row)
+  // retained another complete copy of large tool outputs for the lifetime of
+  // the DOM node. Two independent 32-bit streams plus the visited character
+  // count make accidental equality vanishingly unlikely without allocating the
+  // serialized row string.
+  let h1=2166136261;
+  let h2=2246822507;
+  let units=0;
+  const seen=new WeakSet();
+  const add=value=>{
+    const text=String(value);
+    units+=text.length+1;
+    for(let i=0;i<text.length;i+=1){
+      const code=text.charCodeAt(i);
+      h1=Math.imul(h1^code,16777619);
+      h2=Math.imul(h2^code,3266489917);
+    }
+    h1=Math.imul(h1^255,16777619);
+    h2=Math.imul(h2^127,3266489917);
+  };
+  const visit=(value,depth)=>{
+    if(value===null){add('null');return;}
+    const type=typeof value;
+    if(type!=='object'){add(type);add(value);return;}
+    if(seen.has(value)){add('circular');return;}
+    if(depth>32){add('max-depth');add(Array.isArray(value)?value.length:Object.keys(value).length);return;}
+    seen.add(value);
+    if(Array.isArray(value)){
+      add('array');add(value.length);
+      for(const item of value) visit(item,depth+1);
+      return;
+    }
+    const keys=Object.keys(value).sort();
+    add('object');add(keys.length);
+    for(const key of keys){add(key);visit(value[key],depth+1);}
+  };
+  try{visit(row,0);}catch(_){return '';}
+  return `${units}:${h1>>>0}:${h2>>>0}`;
+}
 function _anchorSceneNodeForRow(row, opts){
   const settled=!!(opts&&opts.settled);
   if(!row) return null;
@@ -13275,10 +13315,11 @@ function _anchorSceneNodeForRow(row, opts){
   if(row.local_id) node.setAttribute('data-anchor-local-id',String(row.local_id));
   node.setAttribute('data-anchor-row-role',String(row.role||'activity'));
   node.setAttribute('data-anchor-source-event-type',String(row.source_event_type||''));
-  // Keep the exact projected-row payload off-DOM. Compact Worklog reconciliation
-  // uses this value to preserve unchanged live rows without relying on a hash or
-  // on serialized DOM that can differ solely because the reader expanded a card.
-  try{ node._anchorSceneRenderSignature=JSON.stringify(row); }catch(_){ node._anchorSceneRenderSignature=''; }
+  // Keep a compact projected-row fingerprint off-DOM. It preserves unchanged
+  // live rows without retaining a second serialized copy of every tool result.
+  node._anchorSceneRenderSignature=typeof _anchorSceneRenderSignature==='function'
+    ? _anchorSceneRenderSignature(row)
+    : '';
   return node;
 }
 function _anchorSceneTransparentNodeForRow(row, opts){
@@ -13426,6 +13467,7 @@ function _anchorSceneCompactRowKey(node, index){
 }
 function _anchorSceneCompactTopLevelKey(node, index){
   if(!node||!node.getAttribute) return `section:${Number(index)||0}`;
+  if(node.getAttribute('data-live-anchor-earlier')==='1') return 'live:earlier-steps';
   if(node.getAttribute('data-worklog-tools')==='1'){
     const first=node.firstElementChild;
     return `tools:${_anchorSceneCompactRowKey(first,index)}`;
@@ -13480,6 +13522,10 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   const desired=[];
   let wrote=false;
   let currentTools=null;
+  if(opts&&opts.earlierNode){
+    desired.push(opts.earlierNode);
+    wrote=true;
+  }
   for(const row of rows){
     const node=_anchorSceneNodeForRow(row,opts);
     if(!node) continue;
@@ -13740,6 +13786,44 @@ function _updateLiveAnchorProseRowForPatch(turn, text, opts){
   if(typeof scrollIfPinned==='function') scrollIfPinned();
   return true;
 }
+// A long autonomous run can produce thousands of tool/reasoning rows. Keeping
+// every one mounted makes Chromium retain the complete card subtree (including
+// syntax-highlighted output) until the turn ends. Keep the recent live tail
+// bounded by default, while letting the reader reveal the complete history in
+// deterministic chunks. The source registry remains complete and settlement
+// still persists every row; this is a DOM window, not data truncation.
+const _LIVE_ANCHOR_ROW_CAP=80;
+const _LIVE_ANCHOR_ROW_PAGE=80;
+function _liveAnchorRowWindow(rows, turn){
+  const all=Array.isArray(rows)?rows:[];
+  const requested=Number(turn&&turn.dataset&&turn.dataset.liveAnchorRowLimit);
+  const limit=Number.isFinite(requested)&&requested>0
+    ? Math.max(_LIVE_ANCHOR_ROW_CAP,Math.min(all.length,Math.floor(requested)))
+    : Math.min(all.length,_LIVE_ANCHOR_ROW_CAP);
+  const start=Math.max(0,all.length-limit);
+  return {rows:all.slice(start),hiddenCount:start,total:all.length,limit};
+}
+function _increaseLiveAnchorRowWindow(turn, total){
+  if(!turn||!turn.dataset) return 0;
+  const count=Math.max(0,Number(total)||0);
+  const current=Number(turn.dataset.liveAnchorRowLimit);
+  const base=Number.isFinite(current)&&current>0?current:_LIVE_ANCHOR_ROW_CAP;
+  const next=Math.min(count,Math.max(_LIVE_ANCHOR_ROW_CAP,base+_LIVE_ANCHOR_ROW_PAGE));
+  turn.dataset.liveAnchorRowLimit=String(next);
+  return next;
+}
+function _buildLiveAnchorEarlierStepsAffordance(hiddenCount, turn, streamId, sessionId, mode, total){
+  if(!(hiddenCount>0)||!turn) return null;
+  const earlier=_buildTransparentEarlierStepsAffordance(hiddenCount);
+  earlier.setAttribute('data-live-anchor-earlier','1');
+  earlier.addEventListener('click',()=>{
+    _increaseLiveAnchorRowWindow(turn,total);
+    if(typeof window!=='undefined'&&typeof window._renderLiveAnchorActivitySceneForStream==='function'){
+      window._renderLiveAnchorActivitySceneForStream(streamId,sessionId,{mode});
+    }
+  });
+  return earlier;
+}
 if(typeof window!=='undefined'){
   window._updateLiveAnchorReasoningRowForFallback=_updateLiveAnchorReasoningRowForFallback;
   window._updateLiveAnchorProseRowForPatch=_updateLiveAnchorProseRowForPatch;
@@ -13774,7 +13858,6 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   if(!S.session||!S.activeStreamId) return false;
   if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
   if(streamId&&S.activeStreamId!==streamId) return false;
-  const rows=_anchorSceneRowsForRendering(scene,{settled:false});
   $('emptyState').style.display='none';
   let turn=$('liveAssistantTurn');
   if(!turn){
@@ -13786,6 +13869,11 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   turn.setAttribute('data-anchor-stream-id',String(streamId||''));
   // Re-stamp when reusing a turn restored or previously rendered in another mode.
   if(S.session) turn.dataset.sessionId=S.session.session_id;
+  const allRows=_anchorSceneRowsForRendering(scene,{settled:false});
+  const rowWindow=typeof _liveAnchorRowWindow==='function'
+    ? _liveAnchorRowWindow(allRows,turn)
+    : {rows:allRows,hiddenCount:0,total:allRows.length,limit:allRows.length};
+  const rows=rowWindow.rows;
   const blocks=_assistantTurnBlocks(turn);
   if(!blocks) return false;
   const liveDisclosureState=typeof _captureWorklogDetailDisclosureState==='function'
@@ -13817,7 +13905,15 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
     el.setAttribute('aria-hidden','true');
     el.hidden=true;
   });
-  const ok=_renderAnchorSceneRowsIntoWorklog(group,rows,{live:true,settled:false});
+  const earlierNode=typeof _buildLiveAnchorEarlierStepsAffordance==='function'?_buildLiveAnchorEarlierStepsAffordance(
+    rowWindow.hiddenCount,
+    turn,
+    streamId||S.activeStreamId||'',
+    S.session&&S.session.session_id,
+    sceneMode,
+    rowWindow.total
+  ):null;
+  const ok=_renderAnchorSceneRowsIntoWorklog(group,rows,{live:true,settled:false,earlierNode});
   if(!ok){
     const list=_toolWorklogListEl(group);
     if(list) list.innerHTML='';
@@ -13845,8 +13941,6 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   if(!S.session||!S.activeStreamId) return false;
   if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
   if(streamId&&S.activeStreamId!==streamId) return false;
-  const rows=_anchorSceneRowsForRendering(scene,{settled:false});
-  if(!rows.length) return false;
   $('emptyState').style.display='none';
   let turn=$('liveAssistantTurn');
   if(!turn){
@@ -13858,6 +13952,15 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   turn.setAttribute('data-anchor-stream-id',String(streamId||''));
   turn.setAttribute('data-live-assistant-turn','1');
   if(S.session) turn.dataset.sessionId=S.session.session_id;
+  const allRows=_anchorSceneRowsForRendering(scene,{settled:false});
+  if(!allRows.length) return false;
+  const rowWindow=typeof _liveAnchorRowWindow==='function'
+    ? _liveAnchorRowWindow(allRows,turn)
+    : {rows:allRows,hiddenCount:0,total:allRows.length,limit:allRows.length};
+  const rows=rowWindow.rows;
+  const totalTools=allRows.filter(row=>row&&row.role==='tool').length;
+  if(rowWindow.hiddenCount>0) turn.setAttribute('data-transparent-total-tool-count',String(totalTools));
+  else turn.removeAttribute('data-transparent-total-tool-count');
   const blocks=_assistantTurnBlocks(turn);
   if(!blocks) return false;
   const scrollSnapshot=_captureMessageScrollSnapshot();
@@ -13875,6 +13978,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
     if(key && !preserveByKey.has(key)) preserveByKey.set(key, node);
   });
   blocks.querySelectorAll('[data-anchor-scene-owner="1"]').forEach(el=>el.remove());
+  blocks.querySelectorAll('[data-live-anchor-earlier="1"]').forEach(el=>el.remove());
   blocks.querySelectorAll('[data-anchor-scene-row="1"]').forEach(el=>{
     if(el.getAttribute('data-live-stream-owned') === '1'){
       const key = _transparentLiveRowKey(el, activeStreamId);
@@ -13902,6 +14006,15 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   });
   const liveFooter=blocks.querySelector('#liveRunStatus');
   const renderedRows=[];
+  const earlierNode=typeof _buildLiveAnchorEarlierStepsAffordance==='function'?_buildLiveAnchorEarlierStepsAffordance(
+    rowWindow.hiddenCount,
+    turn,
+    streamId||S.activeStreamId||'',
+    S.session&&S.session.session_id,
+    'transparent_stream',
+    rowWindow.total
+  ):null;
+  if(earlierNode) renderedRows.push(earlierNode);
   for(const row of rows){
     const rowEventTs=typeof _anchorSceneRowTimestampSeconds==='function'?_anchorSceneRowTimestampSeconds(row):null;
     const node=_anchorSceneTransparentNodeForRow(row,{
@@ -19139,7 +19252,7 @@ function buildToolCard(tc){
         }</div>`:''}
         ${displaySnippet?`<div class="tool-card-result">
           <pre>${tc.is_diff||_snippetLooksLikeDiff(displaySnippet)?`<code class="diff-block" data-highlighted="1">${_colorDiffLines(displaySnippet)}</code>`:esc(displaySnippet)}</pre>
-          ${hasMore?`<button class="tool-card-more" data-full="${esc(tc.snippet||'').replace(/"/g,'&quot;')}" data-short="${esc(displaySnippet||'').replace(/"/g,'&quot;')}" data-is-diff="${tc.is_diff||_snippetLooksLikeDiff(displaySnippet)?1:0}" data-more-label="${esc(moreLabel)}" data-less-label="${esc(lessLabel)}" onclick="event.stopPropagation();_toggleToolDiff(this)">${esc(moreLabel)}</button>`:''}
+          ${hasMore?`<button class="tool-card-more" data-short="${esc(displaySnippet||'').replace(/"/g,'&quot;')}" data-is-diff="${tc.is_diff||_snippetLooksLikeDiff(displaySnippet)?1:0}" data-more-label="${esc(moreLabel)}" data-less-label="${esc(lessLabel)}" onclick="event.stopPropagation();_toggleToolDiff(this)">${esc(moreLabel)}</button>`:''}
         </div>`:''}
       </div>`:''}
     </div>`;
@@ -19178,12 +19291,41 @@ function _snippetLooksLikeDiff(text){
   return plusMinus>=2;
 }
 
+function _toolCardFullSnippet(btn){
+  const row=btn&&btn.closest?btn.closest('.tool-card-row'):null;
+  const direct=row&&row._tcData;
+  if(direct&&direct.snippet!==undefined&&direct.snippet!==null) return String(direct.snippet);
+  // A live-turn HTML snapshot intentionally drops JS properties. Recover the
+  // canonical tool object by id after a session switch instead of embedding the
+  // complete result in a data-* attribute on every mounted card.
+  const disclosureKey=row&&row.getAttribute?String(row.getAttribute('data-tool-disclosure-key')||''):'';
+  const tid=disclosureKey.startsWith('id:')?disclosureKey.slice(3):'';
+  if(tid){
+    const turn=row&&row.closest?row.closest('#liveAssistantTurn'):null;
+    const sid=String(turn&&turn.dataset&&turn.dataset.sessionId||(S.session&&S.session.session_id)||'');
+    const inflight=(typeof INFLIGHT==='object'&&INFLIGHT&&sid&&INFLIGHT[sid])?INFLIGHT[sid]:null;
+    const candidates=[];
+    if(inflight&&Array.isArray(inflight.toolCalls)) candidates.push(...inflight.toolCalls);
+    if(S&&Array.isArray(S.toolCalls)) candidates.push(...S.toolCalls);
+    for(let i=candidates.length-1;i>=0;i--){
+      const tc=candidates[i];
+      if(!tc) continue;
+      const id=String(tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'');
+      if(id!==tid) continue;
+      if(tc.snippet!==undefined&&tc.snippet!==null) return String(tc.snippet);
+    }
+  }
+  // Backward compatibility for live snapshots created by older builds.
+  if(btn&&btn.dataset&&btn.dataset.full!==undefined) return String(btn.dataset.full||'');
+  return String(btn&&btn.dataset&&btn.dataset.short||'');
+}
+
 function _toggleToolDiff(btn){
   const pre=btn.closest('.tool-card-result')?.querySelector('pre');
   if(!pre) return;
   const isDiff=btn.dataset.isDiff==='1';
   const expanded=btn.textContent===btn.dataset.moreLabel;
-  const raw=expanded?btn.dataset.full:btn.dataset.short;
+  const raw=expanded?_toolCardFullSnippet(btn):btn.dataset.short;
   if(isDiff){
     let code=pre.querySelector('code');
     if(!code){code=document.createElement('code');code.className='diff-block';pre.textContent='';pre.appendChild(code);}

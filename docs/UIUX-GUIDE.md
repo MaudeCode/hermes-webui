@@ -99,6 +99,9 @@ durable worklog history. A normal session load may return only a recent activity
 preview, but the UI must expose an in-flow “Show earlier steps” affordance that
 loads the omitted prefix from durable state in bounded chunks. Collapsing,
 windowing, or switching sessions must not make earlier activity irretrievable.
+The same invariant applies while a run is live: the renderer may mount only a
+bounded recent tail, but “Show earlier steps” must reveal the complete in-memory
+activity history in chunks, and settlement must still persist every row.
 
 ## Typography and content
 

@@ -10,8 +10,8 @@ rebuilds a tool card from a persisted ``activity_scene_v1`` row through
 reconstructed card:
 
   * produces a "Show more" expand button for output over the 800-char cap, with
-    the FULL output carried in ``data-full=`` (so the inline ``_toggleToolDiff``
-    expand handler can reveal it), and
+    the FULL output resolved from the card's canonical tool state rather than
+    duplicated into a large ``data-full=`` DOM attribute, and
   * renders a ``diff-block`` for patch/edit snippets.
 
 #4622 was reported as a regression after the v0.51.547-.560 wave (which actually
@@ -84,7 +84,8 @@ global._isSkillUpdate = ()=>false;
 
 // Real functions under test (extracted from the live source):
 for (const fn of ['_snippetLooksLikeDiff','_colorDiffLines','_toolActionKind',
-                  '_toolCardAllowsDetail','buildToolCard','_anchorSceneToolCallFromRow']) {
+                  '_toolCardAllowsDetail','buildToolCard','_anchorSceneToolCallFromRow',
+                  '_toolCardFullSnippet']) {
   eval(extractFunc(fn));
 }
 
@@ -93,16 +94,26 @@ const payload = JSON.parse(process.argv[4]);
 let html;
 if (mode === 'direct') {
   // Build a card directly from a live tool-call object.
-  html = buildToolCard(payload).innerHTML;
+  const card = buildToolCard(payload);
+  html = card.innerHTML;
+  const btn = {dataset:{short:'short'},closest:(selector)=>selector==='.tool-card-row'?card:null};
+  process.stdout.write(JSON.stringify({
+    html,
+    snippet_len: (payload.snippet||'').length,
+    expanded_snippet_len: _toolCardFullSnippet(btn).length,
+  }));
+  return;
 } else if (mode === 'restored') {
   // Simulate the reload/settled path: reconstruct the tool call from a persisted
   // activity_scene_v1 row, then build the card from THAT.
   const tc = _anchorSceneToolCallFromRow(payload, {settled:true});
   const card = buildToolCard(tc);
   html = card.innerHTML;
+  const btn = {dataset:{short:'short'},closest:(selector)=>selector==='.tool-card-row'?card:null};
   process.stdout.write(JSON.stringify({
     html,
     snippet_len: (tc.snippet||'').length,
+    expanded_snippet_len: _toolCardFullSnippet(btn).length,
   }));
   return;
 } else {
@@ -144,9 +155,8 @@ class TestRestoredToolCardKeepsFullOutputAndExpand:
         assert "tool-card-more" in out["html"], (
             "a terminal output over the display cap must render a Show-more expand button"
         )
-        # The inline _toggleToolDiff handler reveals data-full; it must be
-        # present (it carries the full output, not the truncated preview).
-        assert "data-full=" in out["html"]
+        assert "data-full=" not in out["html"]
+        assert out["expanded_snippet_len"] == len(LONG_SHELL_OUTPUT)
 
     def test_restored_scene_terminal_card_stays_expandable(self, driver_path):
         """The reload/settled path reconstructs the card from a persisted scene
@@ -164,6 +174,7 @@ class TestRestoredToolCardKeepsFullOutputAndExpand:
         assert "tool-card-more" in out["html"], (
             "restored terminal card must still render the Show-more expand control"
         )
+        assert out["expanded_snippet_len"] >= len(LONG_SHELL_OUTPUT) - 4
 
 
 class TestRestoredPatchCardRendersDiff:
