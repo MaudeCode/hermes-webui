@@ -1327,16 +1327,64 @@ async function cmdGoal(args,ownerCtx){
   if(!S.session||!S.session.session_id){showToast(t('no_active_session'));return;}
   const activeSid=ownerCtx.sid||S.session.session_id;
   const ownerSession=ownerCtx.session||S.session;
+  const ownerMessages=Array.isArray(S.messages)?[...S.messages]:[];
   try{
+    // #6703: re-assert the explicit-pick marker on /api/goal the same way
+    // /api/chat/start does. Resolve every request field from the captured owner,
+    // never from mutable global session state after an async boundary.
+    const _goalModel=ownerSession.model||($('modelSelect')&&$('modelSelect').value)||'';
+    const _goalProvider=ownerSession.model_provider||null;
+    const _pendingPick=(typeof _readPendingSessionModel==='function')
+      ? _readPendingSessionModel(activeSid)
+      : null;
+    const _pendingPickMatch=_pendingPick
+      && _pendingPick.model===_goalModel
+      && String(_pendingPick.model_provider||'')===String(_goalProvider||'');
+    const _defaultModel=(typeof window!=='undefined' && window._defaultModel)||'';
+    const _activeProvider=(typeof window!=='undefined' && window._activeProvider)||null;
+    const _isCrossProviderPick=_goalModel
+      && _goalProvider
+      && _defaultModel
+      && _activeProvider
+      && _goalModel !== _defaultModel
+      && String(_goalProvider||'') !== String(_activeProvider||'');
+    const _explicitPick=(_pendingPickMatch||_isCrossProviderPick)||undefined;
     const r=await api('/api/goal',{method:'POST',body:JSON.stringify({
       session_id:activeSid,
       args:args||'',
       workspace:ownerSession.workspace,
-      model:ownerSession.model||($('modelSelect')&&$('modelSelect').value)||'',
-      model_provider:ownerSession.model_provider||null,
-      profile:S.activeProfile||ownerSession.profile||'default',
+      model:_goalModel,
+      model_provider:_goalProvider,
+      explicit_model_pick:_explicitPick,
+      profile:ownerSession.profile||S.activeProfile||'default',
     })});
-    if(!commandOwnerCurrent(ownerCtx))return;
+    // Consume the one-shot marker only after the originating kickoff was
+    // accepted. Do this before the visible-owner check: navigation may transfer
+    // the UI while the accepted background kickoff still owns this marker.
+    // Compare marker identity as well as value so a same-value onchange written
+    // during the request cannot be cleared as though it were the old marker.
+    if(r&&r.stream_id&&_pendingPickMatch
+      && typeof _readPendingSessionModel==='function'
+      && typeof _clearPendingSessionModel==='function'){
+      const _stillPending=_readPendingSessionModel(activeSid);
+      const _sameMarkerIdentity=!!(_stillPending&&(
+        (_pendingPick.marker_id&&_stillPending.marker_id===_pendingPick.marker_id)
+        ||(!_pendingPick.marker_id&&!_stillPending.marker_id
+          && Number(_stillPending.saved_at||0)===Number(_pendingPick.saved_at||0))
+      ));
+      if(_sameMarkerIdentity
+        && _stillPending.model===_goalModel
+        && String(_stillPending.model_provider||'')===String(_goalProvider||'')){
+        _clearPendingSessionModel(activeSid);
+      }
+    }
+    if(!commandOwnerCurrent(ownerCtx)){
+      // The accepted run belongs to the originating session, not the new pane.
+      if(r&&r.stream_id&&typeof _preserveAcceptedChatStartForBackgroundSession==='function'){
+        _preserveAcceptedChatStartForBackgroundSession(activeSid,r.stream_id,r,ownerMessages,[]);
+      }
+      return;
+    }
     const msg = (() => {
       const raw = String((r && r.message) || '').trim();
       const key = String((r && r.message_key) || '').trim();
@@ -1365,7 +1413,7 @@ async function cmdGoal(args,ownerCtx){
       if(r.effective_model)S.session.model=r.effective_model;
       if(r.effective_model_provider)S.session.model_provider=r.effective_model_provider;
     }
-    INFLIGHT[activeSid]={messages:[...S.messages],uploaded:[],toolCalls:[]};
+    INFLIGHT[activeSid]={streamId:r.stream_id,messages:[...S.messages],uploaded:[],toolCalls:[]};
     if(typeof markInflight==='function')markInflight(activeSid,r.stream_id);
     if(typeof saveInflightState==='function')saveInflightState(activeSid,{streamId:r.stream_id,messages:INFLIGHT[activeSid].messages,uploaded:[],toolCalls:[]});
     startApprovalPolling(activeSid);
