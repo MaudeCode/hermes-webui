@@ -232,8 +232,10 @@ class TestApprovalModuleExports:
         assert cb_start != -1, "_approval_notify_cb must exist"
         cb_end = STREAMING_SRC.find("_reg_notify(session_id, _approval_notify_cb)", cb_start)
         cb_body = STREAMING_SRC[cb_start:cb_end]
-        assert "head, total = _submit_pending_for_polling(session_id, approval_data)" in cb_body, \
-            "approval notify callback must mirror approval data into polling state"
+        assert "auto_resolved, head, total = _settle_pending_for_polling(" in cb_body, \
+            "approval notify callback must settle admission at the YOLO handoff boundary"
+        assert "if auto_resolved and head is None:" in cb_body, \
+            "an auto-resolved local approval must not publish a stale card"
         assert '"pending_count": total' in cb_body, \
             "approval notify callback must publish the reconciled pending count"
         assert "put('approval', approval_data)" in cb_body, \
@@ -540,7 +542,7 @@ class TestApprovalHTTPEndpoints:
                 pass  # no external token state to clean
 
     def test_gateway_mirror_without_run_id_and_no_producer_returns_explicit_conflict(self, monkeypatch):
-        """A no-run mirror stays actionable when no local producer is parked."""
+        """An expired no-run mirror returns conflict and is retired immediately."""
         from api import routes as r
         from api import route_approvals as ra
         from api.gateway_chat import _STREAM_RUN_IDS
@@ -592,10 +594,7 @@ class TestApprovalHTTPEndpoints:
                 "error": r._GATEWAY_APPROVAL_RELAY_UNAVAILABLE,
             }
             with _lock:
-                pending_queue = r._pending.get(sid)
-                assert isinstance(pending_queue, list)
-                assert len(pending_queue) == 1
-                assert pending_queue[0]["approval_id"] == approval_id
+                assert r._pending.get(sid) is None
                 assert sid not in r._gateway_queues
         finally:
             with _lock:
@@ -659,8 +658,8 @@ class TestApprovalHTTPEndpoints:
                 r._gateway_queues.pop(sid, None)
                 _STREAM_RUN_IDS.pop(stream_id, None)
 
-    def test_gateway_no_run_mirror_survives_pending_and_attention_reads_until_explicit_teardown(self, monkeypatch):
-        """A missing-producer 409 stays visible until a real teardown retires it."""
+    def test_gateway_no_run_mirror_disappears_from_pending_when_producer_is_gone(self, monkeypatch):
+        """A missing-producer 409 retires stale pending and attention state."""
         from api import routes as r
         from api import route_approvals as ra
         from api.gateway_chat import _STREAM_RUN_IDS, _cleanup_gateway_pending_mirror
@@ -706,11 +705,8 @@ class TestApprovalHTTPEndpoints:
                     f"/api/approval/pending?session_id={urllib.parse.quote(sid)}"
                 )
             )
-            assert pending["pending"]["approval_id"] == approval_id
-            assert pending["pending_count"] == 1
-            assert r._session_attention_summary(sid) == {
-                "kind": "approval", "count": 1, "severity": "critical"
-            }
+            assert pending == {"pending": None, "pending_count": 0}
+            assert r._session_attention_summary(sid) is None
             _cleanup_gateway_pending_mirror(sid)
             pending = r._handle_approval_pending(
                 object(), urllib.parse.urlparse(

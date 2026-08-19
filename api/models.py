@@ -1691,7 +1691,9 @@ class Session:
         return session
 
     @classmethod
-    def load_metadata_only(cls, sid, *, index_message_counts=None):
+    def load_metadata_only(
+        cls, sid, *, index_message_counts=None, allow_full_load: bool = True
+    ):
         """Load only the compact metadata fields, skipping the messages array.
 
         Session JSON files have metadata fields (session_id, title, model, etc.)
@@ -1706,14 +1708,20 @@ class Session:
         p = SESSION_DIR / f'{sid}.json'
         if not p.exists():
             return None
+
+        def _full_fallback():
+            if not allow_full_load:
+                raise _FullSessionResolveRequired
+            return cls.load(sid)
+
         try:
             prefix = _read_metadata_json_prefix(p)
             if not prefix:
-                return cls.load(sid)
+                return _full_fallback()
             parsed = json.loads(prefix)
             needed = {'session_id', 'title', 'created_at', 'updated_at'}
             if not needed.issubset(parsed.keys()):
-                return cls.load(sid)
+                return _full_fallback()
             parsed['messages'] = []
             parsed['tool_calls'] = []
             session = cls(**parsed)
@@ -1755,7 +1763,7 @@ class Session:
                 # facts cache with a TOCTOU-guarded write (expected_sig), so we
                 # do NOT re-cache here (an unguarded second write could stamp
                 # stale facts under a replacement file's signature — Codex r5).
-                return cls.load(sid)
+                return _full_fallback()
             # Modern sidecars carry an accurate message_count, so it is the
             # source of truth and we skip the per-row _index.json read in the
             # common case. The sidebar index is only a cache (it can lag behind
@@ -1775,9 +1783,11 @@ class Session:
             # See #1558 — v0.50.279 _clear_stale_stream_state() data-loss bug.
             session._loaded_metadata_only = True
             return session
+        except _FullSessionResolveRequired:
+            raise
         except Exception:
             # Corrupt prefix or decode error — fall back to full load
-            return cls.load(sid)
+            return _full_fallback()
 
     @staticmethod
     def _compute_user_message_count(messages) -> int:
@@ -3856,7 +3866,7 @@ def _repair_stale_pending(session) -> bool:
         return False
 
 
-def _sync_sidecar_from_state_db_if_newer(session) -> bool:
+def _sync_sidecar_from_state_db_if_newer(session, *, allow_full_load: bool = True) -> bool:
     """Read-side self-heal when WebUI sidecar lags Hermes state.db.
 
     A WebUI stream can lose its terminal ``done``/``stream_end`` path while the
@@ -3937,6 +3947,8 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
     # write. Non-blocking acquire: if a caller already holds the lock (retry_last,
     # undo_last, cancel_stream, the streaming worker's own finalize), bail rather
     # than deadlock — a later read will retry the self-heal.
+    if not allow_full_load:
+        raise _FullSessionResolveRequired
     lock = _get_session_agent_lock(sid)
     if not lock.acquire(blocking=False):
         logger.debug(
@@ -4346,7 +4358,7 @@ def _session_scene_updated_at(session) -> float:
     return _anchor_scene_records_updated_at(session)
 
 
-def _cached_session_lags_disk(cached) -> bool:
+def _cached_session_lags_disk(cached, *, allow_full_load: bool = True) -> bool:
     """Return True when a cached full session is older than its sidecar.
 
     Active/reconnect paths can update the persisted sidecar through another
@@ -4373,7 +4385,7 @@ def _cached_session_lags_disk(cached) -> bool:
         return False
     cached_count = len(getattr(cached, 'messages', None) or [])
     # Fast path: prefix read of just the metadata header.
-    disk_count = _persisted_message_count(sid)
+    disk_count = _persisted_message_count(sid, allow_full_load=allow_full_load)
     if disk_count is not None:
         if disk_count > cached_count:
             return True
@@ -4455,7 +4467,11 @@ def _cached_session_lags_disk(cached) -> bool:
             # at parity with disk.
             return False
     try:
-        disk_meta = Session.load_metadata_only(sid)
+        disk_meta = Session.load_metadata_only(
+            sid, allow_full_load=allow_full_load
+        )
+    except _FullSessionResolveRequired:
+        raise
     except Exception:
         return False
     if disk_meta is None:
@@ -4485,6 +4501,8 @@ def _cached_session_lags_disk(cached) -> bool:
             getattr(disk_meta, '_loaded_metadata_only', False)
             and getattr(disk_meta, '_anchor_scene_index', None) is None
         ):
+            if not allow_full_load:
+                raise _FullSessionResolveRequired
             try:
                 disk_full = Session.load(sid)
             except Exception:
@@ -4503,7 +4521,7 @@ def _cached_session_lags_disk(cached) -> bool:
     return False
 
 
-def _persisted_message_count(sid) -> int | None:
+def _persisted_message_count(sid, *, allow_full_load: bool = True) -> int | None:
     """Return the on-disk message count for *sid* without a full load (#4765).
 
     Reads only the sidecar metadata prefix (and falls back to the sidebar
@@ -4550,6 +4568,8 @@ def _persisted_message_count(sid) -> int | None:
                 # count from a file that was atomically replaced mid-read; retry
                 # boundedly on mismatch, then fall through to None. Bounded
                 # overall: the next save() rewrites the modern layout.
+                if not allow_full_load:
+                    raise _FullSessionResolveRequired
                 for _attempt in range(3):
                     sig_before = _sidecar_stat_signature(p)
                     try:
@@ -4564,6 +4584,8 @@ def _persisted_message_count(sid) -> int | None:
                     # File changed during the parse — the count is uncertain;
                     # retry with a fresh snapshot.
                 return None
+    except _FullSessionResolveRequired:
+        raise
     except Exception:
         # Fall through to the index-based fallback below.
         pass
@@ -4780,7 +4802,46 @@ def get_session_for_scan(sid):
         return None
 
 
-def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_miss=True):
+class _FullSessionResolveRequired(RuntimeError):
+    """Internal signal that a full sidecar load must enter the bounded path."""
+
+
+_FULL_SESSION_RESOLVE_MAX_CONCURRENT = 2
+_FULL_SESSION_RESOLVE_SLOTS = threading.BoundedSemaphore(
+    _FULL_SESSION_RESOLVE_MAX_CONCURRENT
+)
+_FULL_SESSION_RESOLVE_INFLIGHT: dict[str, threading.Event] = {}
+_FULL_SESSION_RESOLVE_INFLIGHT_LOCK = threading.Lock()
+_FULL_SESSION_RESOLVE_LOCAL = threading.local()
+
+
+def _claim_full_session_resolve(session_id: str) -> tuple[bool, threading.Event]:
+    """Return whether this caller owns the single-flight for ``session_id``."""
+    with _FULL_SESSION_RESOLVE_INFLIGHT_LOCK:
+        event = _FULL_SESSION_RESOLVE_INFLIGHT.get(session_id)
+        if event is not None:
+            return False, event
+        event = threading.Event()
+        _FULL_SESSION_RESOLVE_INFLIGHT[session_id] = event
+        return True, event
+
+
+def _finish_full_session_resolve(session_id: str, event: threading.Event) -> None:
+    """Release one single-flight owner and wake every waiter."""
+    with _FULL_SESSION_RESOLVE_INFLIGHT_LOCK:
+        if _FULL_SESSION_RESOLVE_INFLIGHT.get(session_id) is event:
+            _FULL_SESSION_RESOLVE_INFLIGHT.pop(session_id, None)
+    event.set()
+
+
+def _resolve_session_once(
+    sid,
+    metadata_only=False,
+    *,
+    promote_cache=True,
+    cache_on_miss=True,
+    allow_full_load=False,
+):
     """Resolve a session through the canonical freshness/recovery path.
 
     ``get_session_for_scan`` shares this resolver with normal reads so that
@@ -4793,6 +4854,7 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
         cached = SESSIONS.get(sid)
         if cached is not None and promote_cache:
             SESSIONS.move_to_end(sid)  # LRU: mark as recently used
+    replacement_loaded = False
     if cached is not None:
         # Defensive cache ownership check: compression/continuation and recovery
         # paths can temporarily juggle Session objects across lineage ids.  A
@@ -4810,27 +4872,27 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
                     SESSIONS.pop(sid, None)
             cached = None
     if cached is not None:
-        if not metadata_only and _cached_session_lags_disk(cached):
+        if not metadata_only and _cached_session_lags_disk(
+            cached, allow_full_load=allow_full_load
+        ):
+            if not allow_full_load:
+                raise _FullSessionResolveRequired
             try:
                 disk_session = Session.load(sid)
-                with LOCK:
-                    SESSIONS[sid] = disk_session
-                    if promote_cache:
-                        SESSIONS.move_to_end(sid)
                 cached = disk_session
+                replacement_loaded = True
             except Exception:
                 logger.debug(
                     "cached session disk-freshness check failed for session %s", sid, exc_info=True,
                 )
         if not metadata_only and _inactive_cache_tail_needs_disk_check(cached):
+            if not allow_full_load:
+                raise _FullSessionResolveRequired
             try:
                 disk_session = Session.load(sid)
                 if _cache_has_stale_unsaved_user_tail(cached, disk_session):
-                    with LOCK:
-                        SESSIONS[sid] = disk_session
-                        if promote_cache:
-                            SESSIONS.move_to_end(sid)
                     cached = disk_session
+                    replacement_loaded = True
             except Exception:
                 logger.debug(
                     "stale cached user-tail check failed for session %s", sid, exc_info=True,
@@ -4844,28 +4906,39 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
                 )
         if not metadata_only:
             try:
-                _sync_sidecar_from_state_db_if_newer(cached)
+                _sync_sidecar_from_state_db_if_newer(
+                    cached, allow_full_load=allow_full_load
+                )
+            except _FullSessionResolveRequired:
+                raise
             except Exception:
                 logger.debug(
                     "state.db newer-sidecar sync failed on cache hit for session %s", sid, exc_info=True,
                 )
+        if replacement_loaded:
+            # Publish only after retry and state.db reconciliation finish. Other
+            # full and metadata-only callers wait on this resolver's in-flight
+            # owner, so nobody observes a partially repaired replacement.
+            with LOCK:
+                SESSIONS[sid] = cached
+                if promote_cache:
+                    SESSIONS.move_to_end(sid)
         return cached
     if metadata_only:
-        s = Session.load_metadata_only(sid)
+        s = Session.load_metadata_only(sid, allow_full_load=allow_full_load)
         if s:
             return s
     else:
+        if not allow_full_load:
+            raise _FullSessionResolveRequired
         s = Session.load(sid)
     if s:
-        if cache_on_miss:
-            with LOCK:
-                SESSIONS[sid] = s
-                if promote_cache:
-                    SESSIONS.move_to_end(sid)
-                _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+        should_cache = cache_on_miss
         if not metadata_only:
             try:
-                synced_from_state = _sync_sidecar_from_state_db_if_newer(s)
+                synced_from_state = _sync_sidecar_from_state_db_if_newer(
+                    s, allow_full_load=allow_full_load
+                )
                 repaired = False if synced_from_state else _repair_stale_pending(s)
                 # If the stale-pending repair did not fire but the session
                 # already carries a pending-journal-retry marker (e.g. set on
@@ -4882,17 +4955,91 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
                 # do not pin the still-stale sidecar in the LRU cache forever.
                 # Leaving it cached would prevent future get_session() calls from
                 # re-entering the cache-miss repair path after the lock holder exits.
-                if cache_on_miss and not repaired and (len(s.messages) == 0
+                if not repaired and (len(s.messages) == 0
                         and s.pending_user_message
                         and s.active_stream_id
                         and s.active_stream_id not in _active_stream_ids()):
-                    with LOCK:
-                        if SESSIONS.get(sid) is s:
-                            SESSIONS.pop(sid, None)
+                    should_cache = False
             except Exception:
                 pass  # repair is best-effort
+        # Publish only the fully reconciled object. Same-session callers wait on
+        # the resolver single-flight until state.db sync and stale-pending repair
+        # have finished, so no request can observe an intermediate cold load.
+        if should_cache:
+            with LOCK:
+                SESSIONS[sid] = s
+                if promote_cache:
+                    SESSIONS.move_to_end(sid)
+                _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
         return s
     raise KeyError(sid)
+
+
+def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_miss=True):
+    """Resolve a session while single-flighting heavyweight full sidecar loads.
+
+    Metadata-only reads and full sessions that remain current in the cache take
+    the lock-free path. A cache miss or stale cache entry elects one leader per
+    session; waiters retry the canonical resolver after that leader publishes its
+    result. Leaders for different sessions share a small global slot budget so
+    concurrent JSON parses cannot multiply a large sidecar's transient memory.
+    """
+    session_id = str(sid)
+    while True:
+        active: set[str] = set(
+            getattr(_FULL_SESSION_RESOLVE_LOCAL, "active", ()) or ()
+        )
+        if not active:
+            # A leader may have published a freshly loaded cache object but still
+            # be reconciling it. Wait for that owner before consulting the cache,
+            # otherwise a concurrent hit can observe intermediate state.
+            with _FULL_SESSION_RESOLVE_INFLIGHT_LOCK:
+                inflight = _FULL_SESSION_RESOLVE_INFLIGHT.get(session_id)
+            if inflight is not None:
+                inflight.wait()
+                continue
+        try:
+            return _resolve_session_once(
+                sid,
+                metadata_only=metadata_only,
+                promote_cache=promote_cache,
+                cache_on_miss=cache_on_miss,
+            )
+        except _FullSessionResolveRequired:
+            pass
+
+        if active:
+            # Nested resolution already owns one global slot. Re-enter directly
+            # instead of waiting on this thread's own flight or consuming a
+            # second slot; the canonical resolver still owns all cache checks.
+            return _resolve_session_once(
+                sid,
+                metadata_only=metadata_only,
+                promote_cache=promote_cache,
+                cache_on_miss=cache_on_miss,
+                allow_full_load=True,
+            )
+
+        leader, event = _claim_full_session_resolve(session_id)
+        if not leader:
+            event.wait()
+            continue
+
+        active.add(session_id)
+        _FULL_SESSION_RESOLVE_LOCAL.active = active
+        try:
+            with _FULL_SESSION_RESOLVE_SLOTS:
+                return _resolve_session_once(
+                    sid,
+                    metadata_only=metadata_only,
+                    promote_cache=promote_cache,
+                    cache_on_miss=cache_on_miss,
+                    allow_full_load=True,
+                )
+        finally:
+            active.discard(session_id)
+            _FULL_SESSION_RESOLVE_LOCAL.active = active
+            _finish_full_session_resolve(session_id, event)
 
 
 def get_session(sid, metadata_only=False):
@@ -8438,7 +8585,8 @@ def get_state_db_session_message_keys_before_timestamp(
                         "content": row["content"],
                         "tool_calls": _json_loads_if_string(row["tool_calls"]),
                         "api_content": row["api_content"] if "api_content" in available else None,
-                    }
+                    },
+                    normalize_workspace_prefix=True,
                 )
                 for row in cur.fetchall()
             ]
@@ -9240,12 +9388,16 @@ def _loose_session_message_content(value: str) -> str:
     return " ".join(re.findall(r"\w+", str(value or "").casefold()))
 
 
-def _session_message_content_key(msg: dict):
+def _session_message_content_key(
+    msg: dict,
+    *,
+    normalize_workspace_prefix: bool = True,
+):
     if not isinstance(msg, dict):
         return ("non_dict", repr(msg))
     role = str(msg.get("role") or "")
     content = _normalized_session_message_content(msg)
-    if role == "user":
+    if role == "user" and normalize_workspace_prefix:
         # WebUI sends the model a workspace-prefixed user_message
         # ("[Workspace::v1: /path]\n<text>") while the visible/optimistic
         # bubble and the WebUI sidecar row carry only the bare "<text>". The
@@ -9273,7 +9425,11 @@ def _session_message_content_key(msg: dict):
     ), msg)
 
 
-def _session_message_visible_key(msg: dict):
+def _session_message_visible_key(
+    msg: dict,
+    *,
+    normalize_workspace_prefix: bool = False,
+):
     if not isinstance(msg, dict):
         return ("non_dict", repr(msg))
     # Include tool_calls so assistant messages that invoke different tools
@@ -9282,9 +9438,21 @@ def _session_message_visible_key(msg: dict):
     # ("assistant", "") and the merge treats state.db rows as replays.
     _tc = msg.get("tool_calls")
     _tc_key = json.dumps(_tc, sort_keys=True, default=str) if _tc else ""
+    role = str(msg.get("role") or "")
+    content = _normalized_session_message_content(msg)
+    if role == "user" and normalize_workspace_prefix:
+        # state.db stores the model-facing workspace-prefixed prompt while the
+        # WebUI sidecar owns the bare visible text. Fold that protocol wrapper
+        # into the exact key so large-session reconciliation does not depend on
+        # the bounded fuzzy fallback to recognize one logical turn.
+        from api.streaming import _strip_workspace_prefix
+
+        content = " ".join(
+            _strip_workspace_prefix(content, include_legacy=True).split()
+        )
     return _session_message_key_with_sidecar((
-        str(msg.get("role") or ""),
-        _normalized_session_message_content(msg),
+        role,
+        content,
         _tc_key,
     ), msg)
 
@@ -9307,6 +9475,7 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
 
 
 _MAX_FUZZY_VISIBLE_DUPLICATE_CANDIDATES = 256
+_VISIBLE_DUPLICATE_FUZZY_MAX_KEYS = 1000
 
 
 def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lookup: dict | None = None):
@@ -9316,6 +9485,12 @@ def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lo
     content = visible_key[1] if len(visible_key) > 1 else ""
     sidecar = visible_key[3] if len(visible_key) > 3 else None
     if not content:
+        return None
+    # Exact identity above remains authoritative at every size. The fallback
+    # below scans the existing keys for every candidate, so it becomes
+    # quadratic on long transcripts even when each individual message is small.
+    # Prefer an occasional near-duplicate over blocking every WebUI endpoint.
+    if len(visible_keys) > _VISIBLE_DUPLICATE_FUZZY_MAX_KEYS:
         return None
     if lookup is None:
         lookup = _build_visible_duplicate_lookup(visible_keys)
@@ -9424,8 +9599,14 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
         and str(sidecar_context[0].get('role') or '') == 'user'
     )
 
-    sidecar_keys = [_session_message_content_key(m) for m in sidecar_context]
-    state_keys = [_session_message_content_key(m) for m in state_messages]
+    sidecar_keys = [
+        _session_message_content_key(m, normalize_workspace_prefix=False)
+        for m in sidecar_context
+    ]
+    state_keys = [
+        _session_message_content_key(m, normalize_workspace_prefix=True)
+        for m in state_messages
+    ]
     max_offset = min(len(sidecar_keys), len(state_keys))
     best_len = 0
     best_offset = 0
@@ -9828,8 +10009,21 @@ def merge_session_messages_append_only(
     _message_key_helpers = {
         "merge": _session_message_merge_key,
         "dedup": _session_message_dedup_key,
-        "content": _session_message_content_key,
-        "visible": _session_message_visible_key,
+        "content_sidecar": lambda msg: _session_message_content_key(
+            msg, normalize_workspace_prefix=False
+        ),
+        "content_state": lambda msg: _session_message_content_key(
+            msg, normalize_workspace_prefix=True
+        ),
+        "visible_sidecar": lambda msg: _session_message_visible_key(
+            msg, normalize_workspace_prefix=False
+        ),
+        "visible_state": lambda msg: _session_message_visible_key(
+            msg, normalize_workspace_prefix=True
+        ),
+        "visible_state_raw": lambda msg: _session_message_visible_key(
+            msg, normalize_workspace_prefix=False
+        ),
     }
 
     def _cached_message_key(msg, kind):
@@ -9963,12 +10157,14 @@ def merge_session_messages_append_only(
     ambiguous_row_ids = set()
     max_sidecar_timestamp = None
 
-    def _remember_merged_message(message):
+    def _remember_merged_message(message, *, source: str):
         if not isinstance(message, dict):
             return
         merged_by_message_key.setdefault(_cached_message_key(message, "merge"), message)
         merged_by_dedup_key.setdefault(_cached_message_key(message, "dedup"), message)
-        merged_by_visible_key.setdefault(_cached_message_key(message, "visible"), message)
+        merged_by_visible_key.setdefault(
+            _cached_message_key(message, f"visible_{source}"), message
+        )
         row_id, row_id_valid = _state_db_row_identity_details(message)
         if row_id_valid and row_id is not None:
             if row_id in merged_by_row_id:
@@ -9983,16 +10179,16 @@ def merge_session_messages_append_only(
         key = _cached_message_key(msg, "merge")
         seen_message_keys.add(key)
         seen_dedup_keys.add(_cached_message_key(msg, "dedup"))
-        content_key = _cached_message_key(msg, "content")
+        content_key = _cached_message_key(msg, "content_sidecar")
         seen_content_keys.add(content_key)
-        visible_key = _cached_message_key(msg, "visible")
+        visible_key = _cached_message_key(msg, "visible_sidecar")
         seen_visible_keys.add(visible_key)
         sidecar_visible_keys.add(visible_key)
         sidecar_visible_counts[visible_key] = sidecar_visible_counts.get(visible_key, 0) + 1
         sidecar_visible_sequence.append(visible_key)
         sidecar_visible_messages.append(msg)
         merged_messages.append(msg)
-        _remember_merged_message(msg)
+        _remember_merged_message(msg, source="sidecar")
     if _sidecar_has_terminal_partial_error(sidecar_messages):
         return merged_messages
     sidecar_visible_lookup = _build_visible_duplicate_lookup(sidecar_visible_keys)
@@ -10014,14 +10210,17 @@ def merge_session_messages_append_only(
         timestamp = _message_timestamp_as_float(msg)
         key = _cached_message_key(msg, "merge")
         dedup_key = _cached_message_key(msg, "dedup")
-        visible_key = _cached_message_key(msg, "visible")
-        content_key = _cached_message_key(msg, "content")
+        visible_key = _cached_message_key(msg, "visible_state")
+        raw_visible_key = _cached_message_key(msg, "visible_state_raw")
+        workspace_prefix_normalized = raw_visible_key != visible_key
+        content_key = _cached_message_key(msg, "content_state")
         replays_sidecar_prefix = False
         replay_target = None
         if state_replay_idx < len(sidecar_visible_sequence):
             expected_visible_key = sidecar_visible_sequence[state_replay_idx]
-            if visible_key == expected_visible_key or _has_visible_duplicate(
-                visible_key, {expected_visible_key}
+            if visible_key == expected_visible_key or (
+                not workspace_prefix_normalized
+                and _has_visible_duplicate(visible_key, {expected_visible_key})
             ):
                 replays_sidecar_prefix = True
                 replay_target = sidecar_visible_messages[state_replay_idx]
@@ -10174,11 +10373,16 @@ def merge_session_messages_append_only(
         if key in seen_message_keys and key[0] == "message_id":
             _merge_session_display_metadata(merged_by_message_key.get(key), msg)
             continue
-        matched_visible_key = _matching_visible_duplicate(
-            visible_key,
-            sidecar_visible_keys,
-            sidecar_visible_lookup,
-        )
+        if workspace_prefix_normalized:
+            matched_visible_key = (
+                visible_key if visible_key in sidecar_visible_keys else None
+            )
+        else:
+            matched_visible_key = _matching_visible_duplicate(
+                visible_key,
+                sidecar_visible_keys,
+                sidecar_visible_lookup,
+            )
         if matched_visible_key is not None:
             skipped_count = skipped_state_visible_counts.get(matched_visible_key, 0)
             sidecar_count = sidecar_visible_counts.get(matched_visible_key, 0)
@@ -10241,7 +10445,7 @@ def merge_session_messages_append_only(
                             seen_dedup_keys.add(dedup_key)
                             seen_content_keys.add(content_key)
                             seen_visible_keys.add(visible_key)
-                            _remember_merged_message(msg)
+                            _remember_merged_message(msg, source="state")
                         continue
                     else:
                         _merge_session_display_metadata(merged_by_message_key.get(key), msg)
@@ -10253,7 +10457,7 @@ def merge_session_messages_append_only(
                             seen_dedup_keys.add(dedup_key)
                             seen_content_keys.add(content_key)
                             seen_visible_keys.add(visible_key)
-                            _remember_merged_message(msg)
+                            _remember_merged_message(msg, source="state")
                         continue
                     _merge_session_display_metadata(merged_by_message_key.get(key), msg)
                     continue
@@ -10262,7 +10466,7 @@ def merge_session_messages_append_only(
         seen_content_keys.add(content_key)
         seen_visible_keys.add(visible_key)
         merged_messages.append(msg)
-        _remember_merged_message(msg)
+        _remember_merged_message(msg, source="state")
     return merged_messages
 
 

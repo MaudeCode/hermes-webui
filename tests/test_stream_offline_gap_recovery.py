@@ -2,10 +2,10 @@
 Regression tests for #4633/#5788 — the SSE handler must ENFORCE run-journal
 coverage before draining a truncated offline tail.
 
-``StreamChannel.subscribe_with_snapshot()`` reports ``offline_dropped_events``
-when the capped offline buffer evicted frames during a disconnect gap. The
-retained tail is only safe to drain when the run journal provably backfills
-everything from the client's replay cursor through the snapshot cutoff —
+``StreamChannel.subscribe_with_snapshot()`` reports its retained offline range
+and any explicit evictions. The retained tail is only safe to drain when it is
+contiguous with the client's cursor or the run journal provably backfills the
+missing bridge through the snapshot cutoff —
 otherwise the browser would render later frames plus a normal ``stream_end``
 with a silent transcript hole in the middle (the journal being missing,
 incomplete, or unreadable leaves the evicted frames unrecoverable).
@@ -17,6 +17,9 @@ Enforcement contract pinned here:
   ``run_journal.stale_interrupted_event`` — the tab restores the transcript
   from persisted state) and do NOT stream the tail.
 * dropped > 0 and the journal DOES cover the gap → replay + tail as before.
+* a retained tail that starts after the cursor has the same proof requirement
+  even when ``offline_dropped_events == 0``; disconnect queues can be discarded
+  before the offline deque starts and therefore leave an uncounted hole.
 * a client cursor already at/past the snapshot cutoff has no gap to cover —
   no recovery even when the journal is missing.
 * the retained tail itself covers [first buffered frame → cutoff]: the journal
@@ -128,6 +131,106 @@ def test_dropped_frames_without_journal_emit_recovery_not_tail(monkeypatch):
     assert "tail-frame" not in body
     assert "event: stream_end" not in body
     # Every exit path returns the queue to the channel.
+    assert stream.unsubscribed is True
+
+
+def test_uncounted_gap_without_journal_emits_recovery_not_tail(monkeypatch):
+    """A retained tail starting after the cursor needs proof even with no eviction."""
+    stream = _FakeStream(
+        {
+            "last_event_id": "run_1:5",
+            "offline_buffered_events": 2,
+            "offline_dropped_events": 0,
+            "offline_first_event_id": "run_1:4",
+        },
+        [
+            ("token", {"text": "tail-frame"}, "run_1:4"),
+            ("stream_end", {}, "run_1:5"),
+        ],
+    )
+    monkeypatch.setattr(routes, "find_run_summary", lambda _sid: None)
+    monkeypatch.setattr(routes, "stream_owner_session_id", lambda _sid: "session_1")
+
+    body = _run_handler(monkeypatch, stream, "stream_id=run_1&replay=1&after_seq=2")
+
+    payloads = _sse_payloads(body, "apperror")
+    assert len(payloads) == 1
+    assert payloads[0]["recovery_control"] is True
+    assert payloads[0]["offline_dropped_events"] == 1
+    assert "tail-frame" not in body
+    assert "event: stream_end" not in body
+    assert stream.unsubscribed is True
+
+
+def test_dropped_frames_with_unknown_event_ids_fail_closed(monkeypatch):
+    """Explicit eviction is a gap even when no numeric boundaries survived."""
+    stream = _FakeStream(
+        {
+            "last_event_id": None,
+            "offline_buffered_events": 2,
+            "offline_dropped_events": 3,
+            "offline_first_event_id": None,
+        },
+        [
+            ("token", {"text": "unknown-tail"}, None),
+            ("stream_end", {}, None),
+        ],
+    )
+    monkeypatch.setattr(routes, "find_run_summary", lambda _sid: None)
+    monkeypatch.setattr(routes, "stream_owner_session_id", lambda _sid: "session_1")
+
+    body = _run_handler(monkeypatch, stream, "stream_id=run_1&replay=1&after_seq=0")
+
+    payloads = _sse_payloads(body, "apperror")
+    assert len(payloads) == 1
+    assert payloads[0]["recovery_control"] is True
+    assert payloads[0]["offline_dropped_events"] == 3
+    assert "unknown-tail" not in body
+    assert "event: stream_end" not in body
+    assert stream.unsubscribed is True
+
+
+def test_terminal_delivered_by_journal_replay_closes_empty_live_queue(monkeypatch):
+    """A replayed terminal is itself the close fence; no queue duplicate is required."""
+    stream = _FakeStream(
+        {
+            "last_event_id": "run_1:4",
+            "offline_buffered_events": 0,
+            "offline_dropped_events": 0,
+            "offline_first_event_id": None,
+        },
+        [],
+    )
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda sid: {"session_id": "session_1", "run_id": sid, "terminal": True},
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda _session_id, _run_id, after_seq=None, max_seq=None: {
+            "events": [
+                {
+                    "event": "token",
+                    "payload": {"text": "journal-3"},
+                    "event_id": "run_1:3",
+                    "seq": 3,
+                },
+                {
+                    "event": "stream_end",
+                    "payload": {},
+                    "event_id": "run_1:4",
+                    "seq": 4,
+                },
+            ]
+        },
+    )
+
+    body = _run_handler(monkeypatch, stream, "stream_id=run_1&replay=1&after_seq=2")
+
+    assert "journal-3" in body
+    assert "event: stream_end" in body
     assert stream.unsubscribed is True
 
 
@@ -377,14 +480,10 @@ def test_cursor_past_buffer_head_does_not_double_render_queued_frames(monkeypatc
     assert stream.unsubscribed is True
 
 
-def test_bogus_cursor_is_clamped_so_terminal_frame_survives(monkeypatch):
-    """The client-cursor dedup bound is clamped at the snapshot cutoff.
-
-    A legitimate cursor can never exceed the channel's last known frame; an
-    out-of-range one (corrupt client state) must not raise the dedup cutoff
-    past the queued terminal frame — the drain loop's `seq <=` skip runs
-    BEFORE its terminal break, so a filtered stream_end would pin the loop on
-    heartbeats until the write deadline."""
+def test_ahead_of_stream_cursor_without_journal_fails_closed_to_recovery(monkeypatch):
+    """An ahead-of-stream cursor is invalid, so a retained tail needs a proven
+    journal bridge before it can be drained. Without one, emit recovery instead
+    of filtering or trusting the client's impossible position."""
     from urllib.parse import parse_qs
 
     monkeypatch.setattr(routes, "find_run_summary", lambda _sid: None)
@@ -400,7 +499,7 @@ def test_bogus_cursor_is_clamped_so_terminal_frame_survives(monkeypatch):
             "offline_first_event_id": "run_1:103",
         },
     )
-    assert handled is False
-    # Clamped to the cutoff (105): the queued stream_end (seq 106) passes the
-    # drain loop's dedup filter and terminates the connection.
-    assert cutoff == 105
+    assert handled is True
+    assert cutoff is None
+    payloads = _sse_payloads(handler.wfile.getvalue().decode("utf-8"), "apperror")
+    assert payloads and payloads[0]["recovery_control"] is True
