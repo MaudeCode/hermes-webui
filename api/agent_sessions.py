@@ -607,10 +607,13 @@ def read_importable_agent_session_rows(
         # Writable dbs self-heal by recreating the index. Read-only or locked dbs
         # fall back to the pre-aggregated cron-only path below instead of failing.
         messages_index_present = False
+        user_messages_index_present = False
         if messages_has_session_id and messages_has_timestamp:
             try:
                 cur.execute("PRAGMA index_list(messages)")
-                messages_index_present = any(str(row[1]) == "idx_messages_session" for row in cur.fetchall())
+                message_indexes = {str(row[1]) for row in cur.fetchall()}
+                messages_index_present = "idx_messages_session" in message_indexes
+                user_messages_index_present = "idx_messages_session_user" in message_indexes
             except sqlite3.Error:
                 messages_index_present = False
             if not messages_index_present:
@@ -629,10 +632,37 @@ def read_importable_agent_session_rows(
                 except sqlite3.Error:
                     pass  # read-only db / locked / older schema — degrade gracefully
 
+            # Counting user turns through the general session/timestamp index
+            # forces SQLite to fetch every matching row from the multi-GB
+            # messages table just to inspect ``role``. A small partial index
+            # keeps that count index-only without duplicating the full message
+            # history. If the live database cannot be migrated, the query below
+            # falls back to a short-circuiting existence check so listing stays usable.
+            if 'role' in message_cols and not user_messages_index_present:
+                try:
+                    with closing(sqlite3.connect(str(db_path))) as _heal:
+                        _heal.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_messages_session_user "
+                            "ON messages(session_id) WHERE role = 'user'"
+                        )
+                        _heal.commit()
+                    user_messages_index_present = True
+                except sqlite3.Error:
+                    pass
+
         if use_messages_join:
             actual_count_expr = f"COUNT(m.{count_col})"
             if 'role' in message_cols:
-                user_message_count_expr = "COUNT(CASE WHEN LOWER(m.role) = 'user' THEN 1 END)"
+                if user_messages_index_present:
+                    user_message_count_expr = (
+                        "(SELECT COUNT(*) FROM messages um "
+                        "WHERE um.session_id = s.id AND um.role = 'user')"
+                    )
+                else:
+                    user_message_count_expr = (
+                        "EXISTS(SELECT 1 FROM messages um "
+                        "WHERE um.session_id = s.id AND LOWER(um.role) = 'user')"
+                    )
             else:
                 user_message_count_expr = f"COUNT(m.{count_col})"
             last_activity_expr = "MAX(m.timestamp)" if messages_has_timestamp else "NULL"

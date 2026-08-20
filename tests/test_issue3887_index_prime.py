@@ -75,7 +75,7 @@ def _messages_indexes(path):
 
 
 def test_prime_creates_missing_index(tmp_path):
-    """A db missing idx_messages_session gets it primed on the first scan."""
+    """A db missing sidebar indexes gets them primed on the first scan."""
     db = tmp_path / "state.db"
     _full_schema_db(db)
     assert "idx_messages_session" not in _messages_indexes(db)
@@ -86,8 +86,9 @@ def test_prime_creates_missing_index(tmp_path):
 
     # Listing still returns the sessions ...
     assert {r["id"] for r in rows} == {"sess0", "sess1", "sess2"}
-    # ... and the index now exists on (session_id, timestamp).
+    # ... and both index-only sidebar paths are now available.
     assert "idx_messages_session" in _messages_indexes(db)
+    assert "idx_messages_session_user" in _messages_indexes(db)
     conn = sqlite3.connect(str(db))
     try:
         sql = conn.execute(
@@ -96,6 +97,14 @@ def test_prime_creates_missing_index(tmp_path):
     finally:
         conn.close()
     assert "session_id" in sql and "timestamp" in sql
+    conn = sqlite3.connect(str(db))
+    try:
+        user_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name='idx_messages_session_user'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert "session_id" in user_sql and "role = 'user'" in user_sql
 
 
 def test_prime_is_noop_when_index_exists(tmp_path):
@@ -106,6 +115,10 @@ def test_prime_is_noop_when_index_exists(tmp_path):
     conn = sqlite3.connect(str(db))
     conn.execute(
         "CREATE INDEX idx_messages_session ON messages(session_id, timestamp)"
+    )
+    conn.execute(
+        "CREATE INDEX idx_messages_session_user ON messages(session_id) "
+        "WHERE role = 'user'"
     )
     conn.commit()
     conn.close()
@@ -119,6 +132,26 @@ def test_prime_is_noop_when_index_exists(tmp_path):
     # Index set is unchanged — no duplicate, no error.
     assert _messages_indexes(db) == before
     assert "idx_messages_session" in _messages_indexes(db)
+    assert "idx_messages_session_user" in _messages_indexes(db)
+
+
+def test_user_message_count_uses_partial_index_and_stays_exact(tmp_path):
+    db = tmp_path / "state.db"
+    _full_schema_db(db)
+    conn = sqlite3.connect(str(db))
+    conn.executemany(
+        "INSERT INTO messages(session_id, role, content, timestamp) VALUES (?,?,?,?)",
+        [("sess0", "user", "again", 2001.0), ("sess0", "user", "once more", 2002.0)],
+    )
+    conn.commit()
+    conn.close()
+
+    rows = agent_sessions.read_importable_agent_session_rows(
+        db, limit=20, exclude_sources=None
+    )
+
+    by_id = {row["id"]: row for row in rows}
+    assert by_id["sess0"]["actual_user_message_count"] == 3
 
 
 def test_prime_skipped_without_timestamp_column(tmp_path):
