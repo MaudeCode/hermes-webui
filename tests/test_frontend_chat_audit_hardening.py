@@ -164,36 +164,87 @@ def test_compact_render_cache_verifies_full_content_on_collision():
     }
 
 
-def test_regenerate_does_not_mutate_destination_during_truncate_await():
+def test_regenerate_does_not_mutate_destination_during_start_await():
     owner = _function(UI, "_sessionStillOwnsAsyncChatAction")
     regenerate = _function(UI, "regenerateResponse")
+    start_regeneration = _function(MESSAGES, "startRegeneration")
     script = textwrap.dedent(
         f"""
-        let _loadingSessionId=null, _oldestIdx=0, sends=0, renders=0, resolveTruncate;
-        const input={{value:'destination draft'}};
-        const S={{busy:false,session:{{session_id:'A'}},messages:[
+        let _loadingSessionId=null, _oldestIdx=0, resolveStart;
+        let attaches=0, statuses=0;
+        const INFLIGHT={{}};
+        const S={{busy:false,activeStreamId:null,session:{{session_id:'A',regeneration_revision:'rev'}},messages:[
           {{role:'user',content:'question'}},{{role:'assistant',content:'answer'}}
         ]}};
-        function msgContent(m){{return m.content;}}
         async function _ensureAllMessagesLoaded(){{}}
-        function api(){{return new Promise(resolve=>{{resolveTruncate=resolve;}});}}
-        function renderMessages(){{renders++;}} function $(){{return input;}}
-        async function send(){{sends++;}} function setStatus(){{}} function t(){{return '';}}
+        function api(){{return new Promise(resolve=>{{resolveStart=resolve;}});}}
+        function renderMessages(){{}} function setBusy(value){{S.busy=value;}}
+        function ensureLiveWorklogShell(){{}} function setStatus(){{statuses++;}} function t(){{return '';}}
+        function attachLiveStream(){{attaches++;}}
         {owner}
+        {start_regeneration}
         {regenerate}
         const btn={{closest:()=>({{dataset:{{msgIdx:'1'}}}})}};
         const pending=regenerateResponse(btn);
-        setTimeout(()=>{{_loadingSessionId='B';resolveTruncate({{}});}},0);
+        setTimeout(()=>{{
+          _loadingSessionId='B';
+          S.session={{session_id:'B'}};
+          S.messages=[{{role:'user',content:'destination draft'}}];
+          resolveStart({{stream_id:'run-A'}});
+        }},0);
         pending.then(()=>console.log(JSON.stringify({{
-          count:S.messages.length,input:input.value,sends,renders
+          session:S.session.session_id,messages:S.messages,active:S.activeStreamId,attaches,statuses
         }}))).catch(error=>{{console.error(error);process.exit(1);}});
         """
     )
     assert _node(script) == {
-        "count": 2,
-        "input": "destination draft",
-        "sends": 0,
-        "renders": 0,
+        "session": "B",
+        "messages": [{"role": "user", "content": "destination draft"}],
+        "active": None,
+        "attaches": 0,
+        "statuses": 0,
+    }
+
+
+def test_regeneration_late_failure_cannot_rollback_after_a_b_a_navigation():
+    owner = _function(UI, "_sessionStillOwnsAsyncChatAction")
+    start_regeneration = _function(MESSAGES, "startRegeneration")
+    script = textwrap.dedent(
+        f"""
+        let _loadingSessionId=null, rejectStart, clears=0, removals=0;
+        const INFLIGHT={{}};
+        const S={{busy:false,session:{{session_id:'A'}},messages:[
+          {{role:'user',content:'old question'}},{{role:'assistant',content:'old answer'}}
+        ]}};
+        function api(){{return new Promise((_resolve,reject)=>{{rejectStart=reject;}});}}
+        function renderMessages(){{}} function setBusy(value){{S.busy=value;}}
+        function ensureLiveWorklogShell(){{}} function clearInflightState(){{clears++;}}
+        function removeThinking(){{removals++;}} function setComposerStatus(){{}}
+        {owner}
+        {start_regeneration}
+        const pending=startRegeneration('A','revision').catch(()=>{{}});
+        setTimeout(()=>{{
+          _loadingSessionId='B';
+          S.session={{session_id:'B'}};
+          S.messages=[{{role:'user',content:'B'}}];
+          _loadingSessionId=null;
+          S.session={{session_id:'A'}};
+          S.messages=[{{role:'user',content:'fresh A'}}];
+          S.busy=false;
+          INFLIGHT.A={{streamId:'newer-A'}};
+          rejectStart(new Error('late failure'));
+        }},0);
+        pending.then(()=>console.log(JSON.stringify({{
+          messages:S.messages,inflight:INFLIGHT.A,busy:S.busy,clears,removals
+        }}))).catch(error=>{{console.error(error);process.exit(1);}});
+        """
+    )
+    assert _node(script) == {
+        "messages": [{"role": "user", "content": "fresh A"}],
+        "inflight": {"streamId": "newer-A"},
+        "busy": False,
+        "clears": 0,
+        "removals": 0,
     }
 
 

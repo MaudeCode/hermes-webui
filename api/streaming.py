@@ -158,6 +158,25 @@ def _session_payload_with_terminal_window(session, *, tool_calls=None):
     even for multi-megabyte sessions and preserves pagination coordinates.
     """
     messages = list(getattr(session, 'messages', None) or [])
+    revision = None
+    try:
+        from api.session_ops import (
+            regeneration_authority,
+            regeneration_state,
+        )
+        canonical_messages, canonical_context = regeneration_state(session)
+        revision = regeneration_authority(
+            session,
+            rows=canonical_messages,
+            context=canonical_context,
+            full_transcript=True,
+            canonical_state=(canonical_messages, canonical_context),
+        )
+        if revision:
+            messages = list(canonical_messages)
+    except Exception:
+        revision = None
+
     window, offset = message_window_for_display(
         messages,
         msg_limit=_TERMINAL_SSE_VISIBLE_MESSAGE_LIMIT,
@@ -176,6 +195,10 @@ def _session_payload_with_terminal_window(session, *, tool_calls=None):
             offset,
             len(window),
         )
+    if revision:
+        raw['regeneration_revision'] = revision
+    else:
+        raw.pop('regeneration_revision', None)
     return raw
 
 
@@ -1586,12 +1609,29 @@ def _clean_synthetic_control_messages_with_provenance(messages):
 def _active_turn_authority(session, stream_id, msg_text):
     """Capture the stream-owned pending turn before settlement mutates it."""
     pending_text = getattr(session, 'pending_user_message', None)
+    token = build_active_turn_token(stream_id, getattr(session, 'pending_started_at', None))
+    checkpoint = (
+        next(
+            (
+                copy.deepcopy(message)
+                for message in reversed(list(getattr(session, 'messages', None) or []))
+                if isinstance(message, dict)
+                and message.get('role') == 'user'
+                and message.get('_active_turn_token') == token
+            ),
+            None,
+        )
+        if token
+        else None
+    )
     return {
-        'token': build_active_turn_token(stream_id, getattr(session, 'pending_started_at', None)),
+        'session_id': getattr(session, 'session_id', None),
+        'token': token,
         'text': pending_text if pending_text is not None else msg_text,
         'timestamp': getattr(session, 'pending_started_at', None),
         'source': getattr(session, 'pending_user_source', None) or 'webui',
         'attachments': copy.deepcopy(getattr(session, 'pending_attachments', None) or []),
+        'checkpoint': checkpoint,
         'current_turn_user_idx': None,
         'turn_id': '',
     }
@@ -1684,7 +1724,7 @@ def _mark_active_turn_checkpoint_in_history(messages, identity, msg_text, *, all
     if (
         not isinstance(message, dict)
         or message.get('role') != 'user'
-        or _normalize_user_text(message.get('content')) != _normalize_user_text(expected_text)
+        or _normalize_user_text(_message_text(message.get('content'))) != _normalize_user_text(expected_text)
     ):
         return messages, False
     _mark_active_turn_checkpoint(message, identity)
@@ -1731,19 +1771,24 @@ def _find_active_turn_checkpoint_index(result_messages, previous_context, identi
         if (
             isinstance(message, dict)
             and message.get('role') == 'user'
-            and _normalize_user_text(message.get('content')) == _normalize_user_text(expected_text)
+            and _normalize_user_text(_message_text(message.get('content'))) == _normalize_user_text(expected_text)
         ):
             return idx
     return None
 
 
 def _materialize_active_turn_user(identity, msg_text, source):
-    message = {
-        'role': 'user',
-        'content': identity.get('text') if isinstance(identity, dict) else msg_text,
-    }
+    checkpoint = identity.get('checkpoint') if isinstance(identity, dict) else None
+    message = (
+        copy.deepcopy(checkpoint)
+        if isinstance(checkpoint, dict) and checkpoint.get('role') == 'user'
+        else {
+            'role': 'user',
+            'content': identity.get('text') if isinstance(identity, dict) else msg_text,
+        }
+    )
     if isinstance(identity, dict):
-        if identity.get('timestamp') is not None:
+        if identity.get('timestamp') is not None and message.get('timestamp') is None:
             message['timestamp'] = identity['timestamp']
         if identity.get('attachments'):
             message['attachments'] = copy.deepcopy(identity['attachments'])
@@ -1752,8 +1797,15 @@ def _materialize_active_turn_user(identity, msg_text, source):
             identity.get('source') or source or 'webui',
             active_turn_token=identity.get('token'),
         )
+        if str(identity.get('source') or source or '').strip().lower() == 'fork':
+            child_session_id = identity.get('session_id')
+            if child_session_id:
+                message['_fork_child_turn'] = child_session_id
     else:
-        stamp_message_source(message, source)
+        stamp_message_source(
+            message,
+            source,
+        )
     return message
 
 
@@ -1798,7 +1850,18 @@ def _settle_current_turn_boundary(previous_context, result_messages, identity, m
         msg_text,
     )
     if _checkpoint_idx is not None:
-        _mark_active_turn_checkpoint(result_messages[_checkpoint_idx], identity)
+        existing_checkpoint = result_messages[_checkpoint_idx]
+        if isinstance(identity.get('checkpoint'), dict):
+            retained_checkpoint = _materialize_active_turn_user(identity, msg_text, source)
+            if (
+                retained_checkpoint.get('id') is None
+                and isinstance(existing_checkpoint, dict)
+                and existing_checkpoint.get('id') is not None
+            ):
+                retained_checkpoint['id'] = existing_checkpoint['id']
+            result_messages[_checkpoint_idx] = retained_checkpoint
+        else:
+            _mark_active_turn_checkpoint(existing_checkpoint, identity)
         return result_messages
     previous_context = list(previous_context or [])
     if _messages_have_prefix(result_messages, previous_context):
@@ -7502,7 +7565,7 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
         except (TypeError, ValueError):
             return False
         return (
-            _normalize_user_text(existing.get('content')) == _normalize_user_text(pending_text)
+            _normalize_user_text(_message_text(existing.get('content'))) == _normalize_user_text(pending_text)
             and existing_ts == recovered_ts
             and existing_source == pending_source
             and list(existing.get('attachments') or []) == pending_attachments
@@ -7516,6 +7579,8 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
         'timestamp': recovered_ts,
         '_recovered': True,
     }
+    if str(pending_source or '').strip().lower() == 'fork':
+        recovered['_fork_child_turn'] = session.session_id
     stamp_message_source(recovered, pending_source)
     if pending_attachments:
         recovered['attachments'] = pending_attachments

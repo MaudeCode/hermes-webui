@@ -210,6 +210,7 @@ def test_all_programmatic_scroll_writers_stamp_the_shared_freshness_clock():
         for writer in writers:
             tail = source[writer.end() : writer.end() + 160]
             assert re.match(
-                r"\s*_programmaticScrollSetAt\s*=\s*performance\.now\(\)\s*;",
+                r"\s*(?:if\(typeof _programmaticScrollSetAt!==['\"]undefined['\"]\)\s*)?"
+                r"_programmaticScrollSetAt\s*=\s*performance\.now\(\)\s*;",
                 tail,
             ), f"{source_name} writer lacks a paired freshness timestamp"

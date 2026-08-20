@@ -39,7 +39,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 _FN_NAMES = [
     '_toolDisplayName', '_toolActionKind', '_toolKindIcon', '_toolPathBasename',
     '_decodeToolLabelEntities', '_redactToolTargetLabel', '_shortToolLabel', '_toolI18n',
-    '_toolTargetLabel', '_toolReadRangeLabel', '_toolVisibleTargetLabel', '_toolCommandTitle', '_toolQueryTitle',
+    '_toolTargetLabel', '_toolReadRangeLabel', '_toolFullCommandLabel', '_toolVisibleTargetLabel', '_toolCommandTitle', '_toolQueryTitle',
     '_toolActionLabelText', '_toolArgPreviewValue', '_toolArgPreviewKeyIsHidden',
     '_formatToolArgPreview', '_toolResultOneLiner', '_toolCardPreviewText', '_toolCardAllowsDetail',
     '_toolDetailLeadLabel', '_toolDetailLeadText', '_toolShortName', '_transparentEventPreview',
@@ -61,6 +61,8 @@ def _function_source(src: str, name: str) -> str:
     escaped = False
     in_line_comment = False
     in_block_comment = False
+    in_regex = False
+    in_regex_class = False
     while i < len(src) and depth:
         ch = src[i]
         nxt = src[i + 1] if i + 1 < len(src) else ""
@@ -74,6 +76,19 @@ def _function_source(src: str, name: str) -> str:
                 in_block_comment = False
                 i += 2
                 continue
+            i += 1
+            continue
+        if in_regex:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == "[":
+                in_regex_class = True
+            elif ch == "]":
+                in_regex_class = False
+            elif ch == "/" and not in_regex_class:
+                in_regex = False
             i += 1
             continue
         if in_string:
@@ -93,6 +108,14 @@ def _function_source(src: str, name: str) -> str:
             in_block_comment = True
             i += 2
             continue
+        if ch == "/":
+            prior = src[:i].rstrip()
+            previous = prior[-1:] if prior else ""
+            if previous in "([=,:;!?&|{}>" or prior.endswith(("return", "case", "throw")):
+                in_regex = True
+                in_regex_class = False
+                i += 1
+                continue
         if ch in "'\"`":
             in_string = ch
             i += 1

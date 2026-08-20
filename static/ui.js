@@ -499,7 +499,7 @@ async function startCompressionRecovery(btn){
     if(!sid) throw new Error('Compression recovery did not return a session.');
     try{localStorage.setItem('hermes-webui-session',sid);}catch(_){}
     if(typeof loadSession==='function') await loadSession(sid,{preserveActiveInput:false});
-    else if(data.session){S.session=data.session;S.messages=data.session.messages||[];syncTopbar();renderMessages();}
+    else if(data.session){S.session=data.session;if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];syncTopbar();renderMessages();}
     if(typeof renderSessionList==='function') await renderSessionList();
     if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(sid);
     if(typeof showToast==='function') showToast((data&&data.message)||'Started focused continuation.',3000,'success');
@@ -10121,6 +10121,7 @@ async function refreshSession() {
   try {
     const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`);
     S.session = data.session;
+    if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
     S.messages = data.session.messages || [];
     _messagesTruncated = !!data.session._messages_truncated;
     _oldestIdx = data.session._messages_offset || 0;
@@ -10964,14 +10965,14 @@ function _activeTurnTokenMatches(msg, session){
  * same text twice in a row (a plain "继续" follow-up) legitimately gets two
  * identical user turns, and matching on text would swallow the new one. The
  * discriminator is therefore exact identity, never proximity: the active turn's
- * row either carries the server-stamped `_active_turn_token` (stream_id +
- * started_at — unique to this turn), or its timestamp equals `pending_started_at`
- * within a precision-only epsilon that absorbs float/state.db drift but never a
- * full second. A whole-second (or sub-second) mismatch is ambiguous and returns
- * null so the caller materializes the pending turn — the transient duplicate is
- * harmless, hiding a turn + moving its attachments is not. Text equality is
- * still required downstream, so a false match needs identical text AND an exact
- * identity signal.
+ * public row carries `_active_turn_user`, while private rows carry the server-
+ * stamped `_active_turn_token` (stream_id + started_at — unique to this turn),
+ * or their timestamp equals `pending_started_at` within a precision-only epsilon
+ * that absorbs float/state.db drift but never a full second. A whole-second (or
+ * sub-second) mismatch is ambiguous and returns null so the caller materializes
+ * the pending turn — the transient duplicate is harmless, hiding a turn + moving
+ * its attachments is not. Text equality is still required downstream, so a false
+ * match needs identical text AND an exact identity signal.
  */
 function _pendingActiveTurnUserMessage(messages, session){
   const startedAt=Number(session?.pending_started_at);
@@ -10981,6 +10982,8 @@ function _pendingActiveTurnUserMessage(messages, session){
     const msg=list[i];
     if(!msg||String(msg.role||'')!=='user') continue;
     if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(msg)) continue;
+    // Public projections replace the private token with this authoritative marker.
+    if(msg._active_turn_user===true) return msg;
     // Unambiguous: the row carries the active turn's exact token
     // (stream_id + started_at) stamped by the server's eager-checkpoint path.
     if(typeof _activeTurnTokenMatches==='function'&&_activeTurnTokenMatches(msg,session)) return msg;
@@ -20000,35 +20003,31 @@ function _sessionStillOwnsAsyncChatAction(sid){
 
 async function regenerateResponse(btn) {
   if(!S.session || S.busy) return;
-  const row = btn.closest('[data-msg-idx]');
-  if(!row) return;
-  const assistantIdx = parseInt(row.dataset.msgIdx, 10);
-  const absoluteKeepCount = _oldestIdx + assistantIdx;
+  const row=btn&&btn.closest&&btn.closest('[data-msg-idx]');
+  if(!row)return;
+  const clickedAbsoluteIndex=_oldestIdx+parseInt(row.dataset.msgIdx,10);
   const initialSid = S.session.session_id;
-  let lastUserText = '';
-  for(let i = assistantIdx - 1; i >= 0; i--) {
-    const m = S.messages[i];
-    if(m && m.role === 'user') { lastUserText = msgContent(m); break; }
-  }
-  if(!lastUserText) return;
   if(typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
   }
   if(!_sessionStillOwnsAsyncChatAction(initialSid)) return;
+  if(!S.session.regeneration_revision){ setStatus(t('regen_failed')); return; }
+  let latestAssistantAbsoluteIndex=-1;
+  for(let i=S.messages.length-1;i>=0;i--){
+    if(S.messages[i]?.role==='assistant'){
+      latestAssistantAbsoluteIndex=_oldestIdx+i;
+      break;
+    }
+  }
+  if(clickedAbsoluteIndex!==latestAssistantAbsoluteIndex){
+    setStatus(t('regen_failed'));
+    return;
+  }
   try {
-    await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
-      session_id: initialSid,
-      keep_count: absoluteKeepCount
-    })});
-    // Navigation can begin while truncate is in flight. S.session remains the
-    // old object during draft persistence, so include _loadingSessionId in the
-    // post-await proof before slicing messages or calling send().
-    if(!_sessionStillOwnsAsyncChatAction(initialSid)) return;
-    S.messages = S.messages.slice(0, absoluteKeepCount);
-    renderMessages();
-    $('msg').value = lastUserText;
-    await send();
-  } catch(e) { setStatus(t('regen_failed') + e.message); }
+    await startRegeneration(initialSid, S.session.regeneration_revision);
+  } catch(e) {
+    if(_sessionStillOwnsAsyncChatAction(initialSid)) setStatus(t('regen_failed') + e.message);
+  }
 }
 
 // postProcessRenderedMessages() runs one frame AFTER the render + JS scroll
@@ -22126,7 +22125,7 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
       // System-minted session (#6022): explicit worktree:false — creating a
       // file from a blank page must not inherit the config worktree default.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('create_failed')+e.message);return;}
   }
   if(!S.session)return;
@@ -22159,7 +22158,7 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
       // System-minted session (#6022): explicit worktree:false — creating a
       // folder from a blank page must not inherit the config worktree default.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('folder_create_failed')+e.message);return;}
   }
   if(!S.session)return;

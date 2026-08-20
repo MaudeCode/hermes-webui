@@ -1,6 +1,7 @@
 """Default-off Hermes Gateway bridge for browser-originated chat turns."""
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -580,12 +581,64 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
     }
 
 
+def _gateway_session_key(session_id: str, stream_id: str, regeneration: bool) -> str:
+    if regeneration:
+        return f"webui:{session_id}:regeneration:{stream_id}"
+    return f"webui:{session_id}"
+
+
+def _gateway_retained_context_user(session: Any, stream_id: str) -> dict | None:
+    """Return the final context user only when this regeneration owns it."""
+    for entry in reversed(list(getattr(session, "context_messages", None) or [])):
+        if not isinstance(entry, dict):
+            continue
+        role = str(entry.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        token = str(entry.get("_active_turn_token") or "")
+        token_stream_id = token.rsplit(":", 1)[0] if ":" in token else ""
+        if role == "user" and token_stream_id == str(stream_id):
+            return entry
+        return None
+    return None
+
+
+def _gateway_session_conversation_history(
+    session: Any,
+    *,
+    regeneration: bool,
+    stream_id: str,
+) -> list[dict]:
+    """Project canonical context without duplicating a retained regeneration user."""
+    from api.streaming import _strip_oob_blocks
+
+    projected: list[tuple[dict, dict]] = []
+    for entry in getattr(session, "context_messages", None) or []:
+        if not isinstance(entry, dict):
+            continue
+        role = str(entry.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = entry.get("content")
+        if content is None:
+            continue
+        content = _strip_oob_blocks(content)
+        projected.append((entry, {"role": role, "content": content}))
+    if regeneration and projected:
+        source_row, _ = projected[-1]
+        retained_user = _gateway_retained_context_user(session, stream_id)
+        if source_row is retained_user:
+            projected.pop()
+    return [row for _, row in projected]
+
+
 def _run_gateway_runs_api_streaming(
     session_id, msg_text, model, workspace, stream_id,
     base_url, api_key, prefill_messages, body_extras,
     *, put_gateway_event, cancel_event,
     attachments=None, cfg=None, session=None,
     active_provider: str = "",
+    regeneration: bool = False,
 ):
     """Submit via POST /v1/runs and relay SSE events including approval."""
     try:
@@ -597,7 +650,11 @@ def _run_gateway_runs_api_streaming(
         }
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-            headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
+            headers["X-Hermes-Session-Key"] = _gateway_session_key(
+                session_id,
+                stream_id,
+                regeneration,
+            )
         message_content: Any = str(msg_text or "")
         if attachments:
             try:
@@ -607,20 +664,14 @@ def _run_gateway_runs_api_streaming(
             except Exception:
                 logger.debug("Failed to build runs-API multimodal attachment payload", exc_info=True)
                 message_content = str(msg_text or "")
+        instructions_parts = []
+        conversation_history = _gateway_session_conversation_history(
+            session,
+            regeneration=regeneration,
+            stream_id=stream_id,
+        )
         from api.streaming import _strip_oob_blocks
 
-        instructions_parts = []
-        conversation_history = []
-        for entry in getattr(session, "context_messages", None) or []:
-            if not isinstance(entry, dict):
-                continue
-            role = str(entry.get("role") or "").strip().lower()
-            if role not in {"user", "assistant"}:
-                continue
-            content = entry.get("content")
-            if content is not None:
-                content = _strip_oob_blocks(content)
-                conversation_history.append({"role": role, "content": content})
         for entry in prefill_messages or []:
             if not isinstance(entry, dict):
                 continue
@@ -836,6 +887,7 @@ def _settle_gateway_terminal_error(
     terminal_error,
     *,
     error_payload_override=None,
+    regeneration: bool = False,
 ):
     from api.streaming import (
         _classify_provider_error,
@@ -860,6 +912,25 @@ def _settle_gateway_terminal_error(
                 error_classification.get("hint", ""),
             )
         turn_duration = _terminal_turn_duration(session)
+        if regeneration and _gateway_retained_context_user(session, stream_id) is None:
+            from api.streaming import _active_turn_authority, _materialize_active_turn_user
+
+            pending_text = str(getattr(session, "pending_user_message", None) or "")
+            pending_source = getattr(session, "pending_user_source", None) or "webui"
+            active_turn_identity = _active_turn_authority(session, stream_id, pending_text)
+            context_user = _materialize_active_turn_user(
+                active_turn_identity,
+                pending_text,
+                pending_source,
+            )
+            context_user["timestamp"] = float(
+                active_turn_identity.get("timestamp") or time.time()
+            )
+            context_rows = getattr(session, "context_messages", None)
+            if not isinstance(context_rows, list):
+                context_rows = []
+                session.context_messages = context_rows
+            context_rows.append(copy.deepcopy(context_user))
         _materialize_pending_user_turn_before_error(session)
         session.active_stream_id = None
         session.pending_user_message = None
@@ -953,6 +1024,7 @@ def _run_gateway_chat_streaming(
     *,
     model_provider=None,
     goal_related=False,
+    regeneration=False,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -1045,8 +1117,12 @@ def _run_gateway_chat_streaming(
     final_chunks: list[str] = []
     terminal_error = ""
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
+    regeneration_context_user_retained = False
     try:
         s = get_session(session_id)
+        regeneration_context_user_retained = bool(
+            regeneration and _gateway_retained_context_user(s, stream_id) is not None
+        )
         from api.config import get_config  # imported lazily to avoid config-cycle churn
 
         cfg = get_config()
@@ -1127,6 +1203,7 @@ def _run_gateway_chat_streaming(
                     cfg=cfg,
                     session=s,
                     active_provider=(model_provider or ""),
+                    regeneration=regeneration,
                 )
             except Exception as exc:
                 error_payload = _settle_gateway_terminal_error(
@@ -1136,6 +1213,7 @@ def _run_gateway_chat_streaming(
                     model,
                     model_provider,
                     str(exc),
+                    regeneration=regeneration,
                 )
                 if error_payload is None:
                     return
@@ -1174,7 +1252,11 @@ def _run_gateway_chat_streaming(
                 headers["Authorization"] = f"Bearer {api_key}"
                 # Scope Gateway long-term continuity to this WebUI conversation
                 # without exposing the browser's auth cookie or CSRF material.
-                headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
+                headers["X-Hermes-Session-Key"] = _gateway_session_key(
+                    session_id,
+                    stream_id,
+                    regeneration,
+                )
             message_content: Any = str(msg_text or "")
             if attachments:
                 try:
@@ -1184,10 +1266,23 @@ def _run_gateway_chat_streaming(
                 except Exception:
                     logger.debug("Failed to build gateway multimodal attachment payload", exc_info=True)
                     message_content = str(msg_text or "")
+            conversation_history = (
+                _gateway_session_conversation_history(
+                    s,
+                    regeneration=True,
+                    stream_id=stream_id,
+                )
+                if regeneration
+                else []
+            )
             body = {
                 "model": _gateway_model_field(model) or "default",
                 "stream": True,
-                "messages": [*prefill_messages, {"role": "user", "content": message_content}],
+                "messages": [
+                    *prefill_messages,
+                    *conversation_history,
+                    {"role": "user", "content": message_content},
+                ],
             }
             if model_provider:
                 body["provider"] = model_provider
@@ -1312,6 +1407,7 @@ def _run_gateway_chat_streaming(
                 model,
                 model_provider,
                 terminal_error,
+                regeneration=regeneration,
             )
             if error_payload is None:
                 return
@@ -1332,6 +1428,7 @@ def _run_gateway_chat_streaming(
                 model_provider,
                 empty_payload["message"],
                 error_payload_override=empty_payload,
+                regeneration=regeneration,
             )
             if error_payload is not None:
                 put_gateway_event("apperror", error_payload)
@@ -1352,18 +1449,29 @@ def _run_gateway_chat_streaming(
             # same sort key; later transcript merges can then fall back to
             # role/content ordering instead of turn order.
             assistant_ts = now + 0.000001
-            user_msg = {"role": "user", "content": str(msg_text or ""), "timestamp": now}
             pending_source = getattr(s, "pending_user_source", None) or "webui"
-            if pending_source != "webui":
-                user_msg["_source"] = pending_source
-            if attachments:
-                user_msg["attachments"] = list(attachments)
+            from api.streaming import _active_turn_authority, _materialize_active_turn_user
+
+            active_turn_identity = _active_turn_authority(s, stream_id, msg_text)
+            user_msg = _materialize_active_turn_user(
+                active_turn_identity,
+                str(msg_text or ""),
+                pending_source,
+            )
+            user_msg["timestamp"] = float(
+                active_turn_identity.get("timestamp") or now
+            )
             assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
             saved_reasoning = stream_text_value(STREAM_REASONING_TEXT, stream_id)
             if saved_reasoning:
                 assistant_msg["reasoning"] = saved_reasoning
             previous_messages = list(getattr(s, "messages", None) or [])
-            previous_context = list(getattr(s, "context_messages", None) or getattr(s, "messages", None) or [])
+            stored_context = getattr(s, "context_messages", None)
+            previous_context = list(
+                stored_context
+                if isinstance(stored_context, list) and (regeneration or stored_context)
+                else getattr(s, "messages", None) or []
+            )
             previous_process_wakeup_pause = dict(getattr(s, "process_wakeup_pause", {}) or {})
             previous_pending_state = {
                 "active_stream_id": getattr(s, "active_stream_id", None),
@@ -1372,20 +1480,25 @@ def _run_gateway_chat_streaming(
                 "pending_started_at": getattr(s, "pending_started_at", None),
                 "pending_user_source": getattr(s, "pending_user_source", None),
             }
-            # Stamp stable ids on the two new rows (shared with the display merge
-            # below) so display and model-context copies share an id for the
-            # fork/truncate aligner (#context-message-stable-id).
+            # Stamp stable ids on rows newly added to model context. Regeneration
+            # appends only the replacement assistant when context retained the
+            # selected user; otherwise it repairs context by appending both rows.
+            turn_rows = (
+                [assistant_msg]
+                if regeneration_context_user_retained
+                else [user_msg, assistant_msg]
+            )
             try:
                 from api.streaming import _assign_stable_message_ids
 
                 _assign_stable_message_ids(
-                    [user_msg, assistant_msg],
+                    turn_rows,
                     previous_context,
                     list(getattr(s, "messages", None) or []),
                 )
             except Exception:
                 logger.debug("Failed to stamp stable ids on gateway turn rows", exc_info=True)
-            s.context_messages = previous_context + [user_msg, assistant_msg]
+            s.context_messages = previous_context + turn_rows
             try:
                 from api.streaming import _is_context_compression_marker
 
@@ -1421,7 +1534,7 @@ def _run_gateway_chat_streaming(
                         msg_norm = " ".join(str(msg_text or "").split())
                         if latest_text == msg_norm:
                             display = display[:-1]
-                s.messages = display + [user_msg, assistant_msg]
+                s.messages = display + turn_rows
             s.active_stream_id = None
             s.pending_user_message = None
             s.pending_attachments = None
@@ -1541,6 +1654,7 @@ def _run_gateway_chat_streaming(
             model_provider,
             http_payload.get("message") or str(exc),
             error_payload_override=http_payload,
+            regeneration=regeneration,
         )
         if error_payload is not None:
             put_gateway_event("apperror", error_payload)
@@ -1561,6 +1675,7 @@ def _run_gateway_chat_streaming(
                 model_provider,
                 gateway_payload["message"],
                 error_payload_override=gateway_payload,
+                regeneration=regeneration,
             )
         except Exception:
             logger.exception(

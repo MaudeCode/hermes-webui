@@ -7,16 +7,14 @@ import api.session_ops as session_ops
 import pytest
 
 
-def _old_matcher(context, display, keep):
-    """Test-local copy of the pre-indexed matcher for differential checks."""
+def _reference_matcher(context, display, keep):
+    """Test-local unindexed matcher for differential checks."""
     if keep <= 0:
         return []
     ctx = context if isinstance(context, list) else []
     display = display if isinstance(display, list) else []
     if not ctx or not display:
         return []
-    if len(ctx) == len(display):
-        return ctx[:keep]
 
     def signature(row):
         if not isinstance(row, dict):
@@ -139,7 +137,7 @@ def test_indexed_alignment_matches_reference_for_ordering_hazards():
         ),
     ]
     for context, display in cases:
-        expected = _old_matcher(copy.deepcopy(context), copy.deepcopy(display), 1)
+        expected = _reference_matcher(copy.deepcopy(context), copy.deepcopy(display), 1)
         actual = session_ops.truncate_context_for_display_keep(context, display, 1)
         assert actual == expected
 
@@ -204,12 +202,12 @@ def test_alignment_preserves_cross_hashability_equality():
         },
         {"role": "assistant", "content": "tail"},
     ]
-    expected = _old_matcher(copy.deepcopy(context), copy.deepcopy(display), 2)
+    expected = _reference_matcher(copy.deepcopy(context), copy.deepcopy(display), 2)
     actual = session_ops.truncate_context_for_display_keep(context, display, 2)
     assert actual == expected == context[:2]
 
 
-def test_alignment_matches_old_matcher_for_non_reflexive_id():
+def test_alignment_matches_reference_matcher_for_non_reflexive_id():
     nan = float("nan")
     context = [
         {"role": "assistant", "content": "x", "id": nan},
@@ -219,7 +217,7 @@ def test_alignment_matches_old_matcher_for_non_reflexive_id():
         {"role": "assistant", "content": "x"},
     ]
 
-    expected = _old_matcher(context, display, 1)
+    expected = _reference_matcher(context, display, 1)
     actual = session_ops.truncate_context_for_display_keep(context, display, 1)
     assert actual == expected == []
 
@@ -235,7 +233,7 @@ def test_alignment_matches_unsafe_context_id_against_safe_display_id():
         {"role": "assistant", "content": "tail"},
     ]
 
-    expected = _old_matcher(copy.deepcopy(context), copy.deepcopy(display), 1)
+    expected = _reference_matcher(copy.deepcopy(context), copy.deepcopy(display), 1)
     actual = session_ops.truncate_context_for_display_keep(context, display, 1)
     assert actual == expected == context[:2]
 
@@ -255,12 +253,12 @@ def test_alignment_matches_unsafe_context_timestamp_against_safe_display_timesta
         {"role": "assistant", "content": "tail"},
     ]
 
-    expected = _old_matcher(copy.deepcopy(context), copy.deepcopy(display), 1)
+    expected = _reference_matcher(copy.deepcopy(context), copy.deepcopy(display), 1)
     actual = session_ops.truncate_context_for_display_keep(context, display, 1)
     assert actual == expected == context[:2]
 
 
-def test_alignment_matches_old_matcher_for_non_reflexive_timestamp():
+def test_alignment_matches_reference_matcher_for_non_reflexive_timestamp():
     nan = float("nan")
     context = [
         {"role": "assistant", "content": "x", "timestamp": nan},
@@ -270,12 +268,12 @@ def test_alignment_matches_old_matcher_for_non_reflexive_timestamp():
         {"role": "assistant", "content": "x"},
     ]
 
-    expected = _old_matcher(context, display, 1)
+    expected = _reference_matcher(context, display, 1)
     actual = session_ops.truncate_context_for_display_keep(context, display, 1)
     assert actual == expected == []
 
 
-def test_alignment_matches_old_matcher_for_non_reflexive_hashable_object():
+def test_alignment_matches_reference_matcher_for_non_reflexive_hashable_object():
     value = _NonReflexiveHashableValue("same")
     context = [{"role": "assistant", "content": "x", "id": value}]
     display = [
@@ -283,7 +281,7 @@ def test_alignment_matches_old_matcher_for_non_reflexive_hashable_object():
         {"role": "assistant", "content": "x"},
     ]
 
-    expected = _old_matcher(context, display, 1)
+    expected = _reference_matcher(context, display, 1)
     actual = session_ops.truncate_context_for_display_keep(context, display, 1)
     assert actual == expected == []
 
@@ -302,7 +300,7 @@ def test_shorter_context_reverse_fallback_prefers_ambiguous_kept_boundary():
         {"role": "assistant", "content": "extra unmatched"},
     ]
 
-    expected = _old_matcher(copy.deepcopy(context), copy.deepcopy(display), 2)
+    expected = _reference_matcher(copy.deepcopy(context), copy.deepcopy(display), 2)
     actual = session_ops.truncate_context_for_display_keep(context, display, 2)
     assert actual == expected == context[:2]
 
@@ -332,7 +330,7 @@ def test_alignment_differential_randomized_against_origin_matcher():
         context = [make_row(i) for i in range(context_len)]
         display = [make_row(i + 20) for i in range(display_len)]
         keep = rng.randrange(-1, display_len + 2)
-        expected = _old_matcher(copy.deepcopy(context), copy.deepcopy(display), keep)
+        expected = _reference_matcher(copy.deepcopy(context), copy.deepcopy(display), keep)
         actual = session_ops.truncate_context_for_display_keep(context, display, keep)
         assert actual == expected, (context, display, keep)
 
@@ -380,7 +378,7 @@ def test_alignment_preserves_reached_raising_context_signature():
     ]
 
     with pytest.raises(TypeError):
-        _old_matcher(context, display, 1)
+        _reference_matcher(context, display, 1)
     with pytest.raises(TypeError):
         session_ops.truncate_context_for_display_keep(context, display, 1)
 
@@ -400,7 +398,7 @@ def test_alignment_defers_unreachable_raising_context_signature():
         {"role": "assistant", "content": "second", "id": "second"},
     ]
 
-    expected = _old_matcher(context, display, 1)
+    expected = _reference_matcher(context, display, 1)
     actual = session_ops.truncate_context_for_display_keep(context, display, 1)
 
     assert expected == context[:1]
@@ -425,7 +423,7 @@ def test_alignment_stops_before_unsafe_id_after_weak_ambiguity():
         {"role": "assistant", "content": "tail"},
     ]
 
-    expected = _old_matcher(context, display, 1)
+    expected = _reference_matcher(context, display, 1)
     actual = session_ops.truncate_context_for_display_keep(context, display, 1)
 
     assert expected == context[:2]
@@ -447,7 +445,7 @@ def test_alignment_stops_before_unsafe_timestamp_after_weak_ambiguity():
         {"role": "assistant", "content": "tail"},
     ]
 
-    expected = _old_matcher(context, display, 1)
+    expected = _reference_matcher(context, display, 1)
     actual = session_ops.truncate_context_for_display_keep(context, display, 1)
 
     assert expected == context[:2]

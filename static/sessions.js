@@ -261,6 +261,15 @@ function _clearRememberedNewChatDraftSession(sid) {
   } catch (_) {}
 }
 
+function _adoptRegenerationRevision(sessionPayload){
+  if(!S||!S.session||!sessionPayload||typeof sessionPayload!=='object') return;
+  if(Object.prototype.hasOwnProperty.call(sessionPayload,'regeneration_revision')){
+    S.session.regeneration_revision=sessionPayload.regeneration_revision;
+  }else{
+    delete S.session.regeneration_revision;
+  }
+}
+
 async function _restoreRememberedNewChatDraftSession() {
   let sid = '';
   try { sid = localStorage.getItem(NEW_CHAT_DRAFT_SESSION_KEY) || ''; } catch (_) { sid = ''; }
@@ -1620,7 +1629,7 @@ async function newSession(flash, options={}){
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
-    S.session=data.session;S.messages=data.session.messages||[];
+    S.session=data.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];
     S._pendingSessionToolsets=null;
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
@@ -2155,6 +2164,7 @@ async function loadSession(sid){
     return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
   S.session=data.session;
+  if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
   // Loading a real existing session abandons any pre-session toolset override
   // staged on the empty composer before any deferred refresh work runs.
@@ -3394,6 +3404,7 @@ async function _ensureMessagesLoaded(sid, opts) {
     );
   }
   if(S.session&&S.session.session_id===sid){
+    if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
     S.session.message_count=Number(data.session.message_count || msgs.length);
     S.lastUsage={...(data.session.last_usage||S.lastUsage||{})};
     // Phase 2: the messages=1 response carries the canonical cold-load
@@ -4090,6 +4101,11 @@ async function _ensureAllMessagesLoaded() {
     _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
     if (S.session && S.session.session_id === sid) {
       S.session.message_count = Number(data.session.message_count || msgs.length);
+      if (Object.prototype.hasOwnProperty.call(data.session, 'regeneration_revision')) {
+        S.session.regeneration_revision = data.session.regeneration_revision;
+      } else {
+        delete S.session.regeneration_revision;
+      }
     }
   } finally {
     _loadingOlder = false;

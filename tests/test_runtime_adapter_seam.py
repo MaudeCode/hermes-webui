@@ -694,7 +694,7 @@ def test_configured_runner_sse_stream_observes_runner_without_process_maps(monke
     assert handler.status == 200
     assert calls == [("run-1", "5")]
     assert "event: message" in body
-    assert "id: run-1:6" in body
+    assert f"id: {routes._runner_sse_event_id('run-1', 'run-1:6')}" in body
     assert 'data: {"content": "hello"}' in body
     assert "event: stream_end" in body
     assert "STREAMS" not in routes._stream_runner_run_events.__code__.co_names

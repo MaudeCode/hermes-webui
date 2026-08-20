@@ -7,6 +7,8 @@ import re
 import time
 import urllib.error
 
+import pytest
+
 import api.gateway_chat as gateway_chat
 import api.models as models
 import api.streaming as streaming
@@ -1647,6 +1649,254 @@ def test_gateway_runs_api_body_includes_session_id():
     finally:
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
+
+
+def test_gateway_runs_regeneration_sends_retained_user_once(monkeypatch):
+    import threading
+    from types import SimpleNamespace
+
+    captured = {}
+    calls = [0]
+    stream_id = "runs-regeneration-stream"
+    retained_token = f"{stream_id}:20"
+    session = SimpleNamespace(
+        context_messages=[
+            {"role": "user", "content": "older"},
+            {"role": "assistant", "content": "older answer"},
+            {
+                "role": "user",
+                "content": "latest",
+                "_active_turn_token": retained_token,
+            },
+        ]
+    )
+
+    class FakeResponse:
+        def __init__(self, *, start=False):
+            self.start = start
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size=65536):
+            return b'{"run_id":"replacement-run"}'
+
+        def __iter__(self):
+            return iter(
+                [
+                    b'data: {"choices":[{"delta":{"content":"replacement"}}]}\n',
+                    b'data: [DONE]\n',
+                ]
+            )
+
+    def fake_urlopen(req, timeout=0):
+        calls[0] += 1
+        if calls[0] == 1:
+            captured["body"] = json.loads(req.data.decode("utf-8"))
+            captured["session_key"] = req.get_header("X-hermes-session-key")
+            return FakeResponse(start=True)
+        return FakeResponse()
+
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+    final_text, _usage = gateway_chat._run_gateway_runs_api_streaming(
+        "session-regeneration",
+        "latest",
+        "model",
+        "/tmp",
+        stream_id,
+        "http://gateway.local",
+        "secret",
+        [],
+        {},
+        put_gateway_event=lambda *_args: None,
+        cancel_event=threading.Event(),
+        session=session,
+        regeneration=True,
+    )
+
+    assert final_text == "replacement"
+    assert captured["body"]["conversation_history"] == [
+        {"role": "user", "content": "older"},
+        {"role": "assistant", "content": "older answer"},
+    ]
+    assert captured["body"]["input"] == "latest"
+    assert captured["session_key"] == (
+        f"webui:session-regeneration:regeneration:{stream_id}"
+    )
+
+
+@pytest.mark.parametrize("context_retains_user", [True, False])
+def test_gateway_regeneration_persists_retained_user_once(
+    tmp_path,
+    monkeypatch,
+    context_retains_user,
+):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"replacement"}}]}\n\n'
+            yield b"data: [DONE]\n\n"
+
+    def fake_urlopen(req, timeout=0):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        captured["session_key"] = req.get_header("X-hermes-session-key")
+        return FakeResponse()
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "secret")
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda _cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []})
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda _ctx, _cfg: [])
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+
+    s = new_session()
+    stream_id = "legacy-regeneration-stream"
+    token = f"{stream_id}:20"
+    s.messages = [
+        {"role": "user", "content": "older", "timestamp": 10.0},
+        {"role": "assistant", "content": "older answer", "timestamp": 11.0},
+        {"role": "user", "content": "latest", "timestamp": 20.0, "_pending": True, "_active_turn_token": token},
+    ]
+    s.context_messages = [
+        {"role": "user", "content": "older", "timestamp": 10.0},
+        {"role": "assistant", "content": "older answer", "timestamp": 11.0},
+    ]
+    if context_retains_user:
+        s.context_messages.append(
+            {
+                "role": "user",
+                "content": "latest",
+                "timestamp": 20.0,
+                "_active_turn_token": token,
+            }
+        )
+    s.active_stream_id = stream_id
+    s.pending_user_message = "latest"
+    s.pending_started_at = 20.0
+    s.pending_attachments = []
+    s.save()
+    STREAMS[stream_id] = create_stream_channel()
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "latest",
+        "model",
+        str(tmp_path),
+        stream_id,
+        [],
+        regeneration=True,
+    )
+
+    saved = models.get_session(s.session_id)
+    request_conversation = [
+        row["content"]
+        for row in captured["body"]["messages"]
+        if row.get("role") in {"user", "assistant"}
+    ]
+    assert request_conversation == [
+        "older",
+        "older answer",
+        "latest",
+    ]
+    assert captured["session_key"] == (
+        f"webui:{s.session_id}:regeneration:{stream_id}"
+    )
+    assert [row["content"] for row in saved.context_messages] == [
+        "older",
+        "older answer",
+        "latest",
+        "replacement",
+    ]
+    assert [row["content"] for row in saved.messages] == [
+        "older",
+        "older answer",
+        "latest",
+        "replacement",
+    ]
+
+
+@pytest.mark.parametrize("context_retains_user", [True, False])
+def test_gateway_regeneration_error_keeps_selected_user_in_context(
+    tmp_path,
+    monkeypatch,
+    context_retains_user,
+):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    s = new_session()
+    stream_id = "regeneration-error-stream"
+    token = f"{stream_id}:20"
+    s.messages = [
+        {"role": "user", "content": "older", "timestamp": 10.0},
+        {"role": "assistant", "content": "older answer", "timestamp": 11.0},
+        {
+            "role": "user",
+            "content": "latest",
+            "timestamp": 20.0,
+            "_pending": True,
+            "_active_turn_token": token,
+        },
+    ]
+    s.context_messages = [
+        {"role": "user", "content": "older", "timestamp": 10.0},
+        {"role": "assistant", "content": "older answer", "timestamp": 11.0},
+    ]
+    if context_retains_user:
+        s.context_messages.append(
+            {
+                "role": "user",
+                "content": "latest",
+                "timestamp": 20.0,
+                "_active_turn_token": token,
+            }
+        )
+    s.active_stream_id = stream_id
+    s.pending_user_message = "latest"
+    s.pending_started_at = 20.0
+    s.pending_attachments = []
+    s.save()
+
+    payload = gateway_chat._settle_gateway_terminal_error(
+        s.session_id,
+        stream_id,
+        str(tmp_path),
+        "model",
+        "provider",
+        "regeneration failed",
+        regeneration=True,
+    )
+
+    assert payload is not None
+    saved = models.get_session(s.session_id)
+    assert [row["content"] for row in saved.context_messages] == [
+        "older",
+        "older answer",
+        "latest",
+    ]
+    assert [row["content"] for row in saved.messages[:3]] == [
+        "older",
+        "older answer",
+        "latest",
+    ]
+    assert saved.messages[-1].get("_error") is True
 
 
 def test_gateway_runs_api_classifies_terminal_provider_error(tmp_path, monkeypatch):
