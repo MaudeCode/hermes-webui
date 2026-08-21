@@ -189,7 +189,7 @@ def test_active_request_scope_prefers_profile_key_over_process_env_for_custom_pr
     monkeypatch.setenv("ISSUE_3957_CUSTOM_KEY", "from-process-env")
     monkeypatch.setattr(
         config,
-        "get_config",
+        "get_config_snapshot",
         lambda: {
             "custom_providers": [
                 {"name": "Team", "api_key": "${ISSUE_3957_CUSTOM_KEY}"}
@@ -507,7 +507,7 @@ def test_detached_worker_prefers_profile_key_for_custom_provider(monkeypatch, tm
     monkeypatch.setenv("ISSUE_3957_CUSTOM_KEY", "from-process-env")
     monkeypatch.setattr(
         config,
-        "get_config",
+        "get_config_snapshot",
         lambda: {
             "custom_providers": [
                 {"name": "team", "api_key": "${ISSUE_3957_CUSTOM_KEY}"}

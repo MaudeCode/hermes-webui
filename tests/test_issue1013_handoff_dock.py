@@ -3,9 +3,12 @@
 import json
 import time
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 import sys
 import types
+from types import SimpleNamespace
+from urllib.parse import urlparse
 
 import pytest
 
@@ -108,6 +111,28 @@ def test_handoff_delete_clears_local_storage_markers():
     assert "deletedIds.forEach(_teardownDeletedSessionBrowserOwners);" in SESSIONS_JS
 
 
+def test_handoff_catch_surfaces_400_message_verbatim():
+    """Finding #5 (handoff UI): a 400 from the summary endpoint carries an
+    actionable message (e.g. an ambiguous custom-provider slug collision). The
+    catch must surface it verbatim instead of the generic 'try again' text."""
+    assert "e && e.status === 400 && e.message" in SESSIONS_JS
+    # The generic 'try again' text must no longer be the sole error message.
+    assert "errorText," in SESSIONS_JS
+
+
+def test_model_save_catches_surface_error_and_abort():
+    """Finding #5 (settings UI): aux + default model saves must surface the
+    server's actionable message and abort (retain dirty state) rather than
+    swallowing it into a generic failure / 'settings saved'."""
+    panels_js = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    # Default-model save no longer degrades to "settings saved" after a failure.
+    assert "Failed to update default model — settings saved" not in panels_js
+    # It surfaces the server message and aborts.
+    assert "const _msg=(_modelErr&&_modelErr.message)?_modelErr.message:''" in panels_js
+    # Aux save surfaces the server message too.
+    assert "const _base=t('settings_aux_save_failed')||'Failed to save auxiliary model';" in panels_js
+
+
 def test_handoff_summary_renders_as_transcript_card_not_dock_card():
     assert "function setHandoffUi" in SESSIONS_JS or "function setHandoffUi" in (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
     ui_js = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
@@ -156,6 +181,124 @@ def test_handoff_summary_prompt_uses_you_and_你():
     assert "用“你”" in prompt_body
     assert "the user" not in prompt_body.lower()
     assert "用户" not in prompt_body
+
+
+def test_handoff_summary_route_binds_active_request_profile_env(monkeypatch):
+    """Provider endpoint and credentials must resolve from one request profile."""
+    import api.profiles as profiles
+    import api.routes as routes
+
+    scope = {"active": False, "purposes": []}
+
+    @contextmanager
+    def profile_scope(purpose, logger_override=None):
+        scope["purposes"].append(purpose)
+        scope["active"] = True
+        try:
+            yield
+        finally:
+            scope["active"] = False
+
+    def handoff_handler(_handler, body):
+        assert scope["active"] is True
+        assert body == {"session_id": "profile-session"}
+        return {"ok": True}
+
+    monkeypatch.setattr(profiles, "profile_env_for_active_request_readonly", profile_scope)
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_csrf_exempt_path", lambda _path: False)
+    monkeypatch.setattr(routes, "_handle_extension_sidecar_proxy", lambda *_a, **_k: False)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": "profile-session"})
+    monkeypatch.setattr(routes, "_handle_handoff_summary", handoff_handler)
+
+    response = routes.handle_post(
+        SimpleNamespace(command="POST", headers={}),
+        urlparse("/api/session/handoff-summary"),
+    )
+
+    assert response == {"ok": True}
+    assert scope["purposes"] == ["/api/session/handoff-summary"]
+    assert scope["active"] is False
+
+
+def test_state_db_only_handoff_uses_active_request_profile(monkeypatch, tmp_path):
+    """Missing JSON sidecars must not demote a named request to default config."""
+    import api.config as cfg
+    import api.models as models
+    import api.profiles as profiles
+    import api.routes as routes
+
+    monkeypatch.setattr(routes, "require", lambda body, *keys: None)
+    monkeypatch.setattr(routes, "bad", lambda _handler, msg, status=400: {"error": msg})
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
+    monkeypatch.setattr(
+        models,
+        "count_conversation_rounds",
+        lambda sid, since=None: models.CONVERSATION_ROUND_THRESHOLD,
+    )
+    monkeypatch.setattr(
+        models,
+        "get_cli_session_messages",
+        lambda sid: [
+            {"role": "user", "content": "What remains?", "timestamp": 1.0},
+            {"role": "assistant", "content": "One task.", "timestamp": 2.0},
+        ],
+    )
+    monkeypatch.setattr(
+        models,
+        "get_session",
+        lambda sid: (_ for _ in ()).throw(KeyError(sid)),
+    )
+
+    calls = {"homes": [], "scopes": [], "configs": []}
+    profile_cfg = {
+        "model": {"default": "profile-model", "provider": "openrouter"},
+    }
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "work")
+    monkeypatch.setattr(
+        profiles,
+        "get_hermes_home_for_profile",
+        lambda name: calls["homes"].append(name) or (tmp_path / name),
+    )
+
+    @contextmanager
+    def profile_scope(name, purpose="", logger_override=None):
+        calls["scopes"].append(name)
+        yield
+
+    monkeypatch.setattr(profiles, "profile_env_for_background_worker", profile_scope)
+    monkeypatch.setattr(cfg, "get_config_for_profile_home", lambda home: profile_cfg)
+
+    def resolve_model(model_id=None, **kwargs):
+        calls["configs"].append(kwargs.get("config_data"))
+        return "profile-model", "openrouter", None
+
+    monkeypatch.setattr(cfg, "resolve_model_provider", resolve_model)
+
+    fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+    fake_runtime_module.resolve_runtime_provider = lambda requested=None: {
+        "api_key": "",
+        "provider": requested,
+        "base_url": None,
+    }
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    fake_hermes_cli.__path__ = []
+    fake_hermes_cli.runtime_provider = fake_runtime_module
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = object
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    response = routes._handle_handoff_summary(
+        object(),
+        {"session_id": "state-db-only-session"},
+    )
+
+    assert response["fallback"] is True
+    assert calls["homes"] == ["work"]
+    assert calls["scopes"] == ["work"]
+    assert calls["configs"] == [profile_cfg]
 
 
 def test_generating_handoff_summary_marks_session_as_handled():
@@ -227,7 +370,11 @@ def test_no_api_key_handoff_summary_persists_fallback_summary(monkeypatch):
             {"role": "assistant", "content": "I'll help you", "timestamp": 2.0},
         ],
     )
-    monkeypatch.setattr(cfg, "resolve_model_provider", lambda resolved_model=None: ("gpt-test", "openrouter", None))
+    monkeypatch.setattr(
+        cfg,
+        "resolve_model_provider",
+        lambda resolved_model=None, **_kwargs: ("gpt-test", "openrouter", None),
+    )
 
     fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
     fake_runtime_module.resolve_runtime_provider = lambda requested=None: {"api_key": "", "provider": "openrouter", "base_url": None}
@@ -336,7 +483,11 @@ def test_exception_handoff_summary_persists_fallback_summary(monkeypatch):
             {"role": "assistant", "content": "Sure, I can help", "timestamp": 2.0},
         ],
     )
-    monkeypatch.setattr(cfg, "resolve_model_provider", lambda resolved_model=None: ("gpt-test", "openrouter", None))
+    monkeypatch.setattr(
+        cfg,
+        "resolve_model_provider",
+        lambda resolved_model=None, **_kwargs: ("gpt-test", "openrouter", None),
+    )
 
     fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
     fake_runtime_module.resolve_runtime_provider = lambda requested=None: {
@@ -396,6 +547,83 @@ def test_exception_handoff_summary_persists_fallback_summary(monkeypatch):
     assert persisted[0]["rounds"] == models.CONVERSATION_ROUND_THRESHOLD
 
 
+def test_ambiguous_custom_provider_handoff_returns_400_not_fallback(monkeypatch):
+    """Finding #4: a custom-provider slug collision on a handoff must surface as a
+    400 with the actionable rename message — NOT a 200 local fallback.
+
+    Previously AmbiguousCustomProviderError fell into the generic ``except
+    Exception`` handler that returns 200 with a ``warning`` the UI ignores,
+    marking the handoff handled and hiding the fix from the user.
+    """
+    import api.routes as routes
+    import api.config as cfg
+    import api.models as models
+
+    monkeypatch.setattr(routes, "require", lambda body, *keys: None)
+    monkeypatch.setattr(
+        routes, "j",
+        lambda _handler, payload, status=200, extra_headers=None: {**payload, "_status": status},
+    )
+    monkeypatch.setattr(
+        routes, "bad",
+        lambda _handler, msg, status=400: {"ok": False, "error": msg, "_status": status},
+    )
+
+    persisted = []
+    monkeypatch.setattr(
+        routes, "_persist_handoff_summary",
+        lambda sid, summary, channel, rounds, fallback=False: persisted.append(sid) or {"ok": True},
+    )
+
+    monkeypatch.setattr(models, "count_conversation_rounds", lambda sid, since=None: models.CONVERSATION_ROUND_THRESHOLD)
+    monkeypatch.setattr(
+        models, "get_cli_session_messages",
+        lambda sid: [
+            {"role": "user", "content": "Could you check this?", "timestamp": 1.0},
+            {"role": "assistant", "content": "Sure, I can help", "timestamp": 2.0},
+        ],
+    )
+
+    # require_ai_agent_class() imports run_agent and hermes_cli.runtime_provider
+    # before model resolution; stub them so execution reaches resolve_model_provider.
+    fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+    fake_runtime_module.resolve_runtime_provider = lambda requested=None: {
+        "api_key": "x", "provider": "openrouter", "base_url": None,
+    }
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    fake_hermes_cli.__path__ = []
+    fake_hermes_cli.runtime_provider = fake_runtime_module
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
+
+    class _DummyAgent:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = _DummyAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    rename_msg = (
+        "Custom providers ['Foo (Bar)', 'foo-bar'] all normalize to the same "
+        "provider slug 'foo-bar'; rename one so each has a unique slug."
+    )
+
+    def _raise_ambiguous(*args, **kwargs):
+        raise cfg.AmbiguousCustomProviderError(rename_msg)
+
+    monkeypatch.setattr(cfg, "resolve_model_provider", _raise_ambiguous)
+
+    response = routes._handle_handoff_summary(object(), {"session_id": "session-ambiguous"})
+
+    assert response.get("_status") == 400, response
+    assert response.get("type") == "custom_provider_ambiguous", response
+    assert response.get("error") == rename_msg
+    # Must NOT have silently degraded to a persisted fallback summary.
+    assert persisted == [], "ambiguity must not persist a 200 fallback summary"
+    assert "summary" not in response
+
+
 def test_handoff_summary_retries_once_when_length_limit_reached(monkeypatch):
     """finish_reason='length' should trigger one retry with larger budget."""
     import api.routes as routes
@@ -430,7 +658,11 @@ def test_handoff_summary_retries_once_when_length_limit_reached(monkeypatch):
             {"role": "assistant", "content": "Step 1 is done, step 2 is pending.", "timestamp": 4.0},
         ],
     )
-    monkeypatch.setattr(cfg, "resolve_model_provider", lambda resolved_model=None: ("gpt-test", "openrouter", None))
+    monkeypatch.setattr(
+        cfg,
+        "resolve_model_provider",
+        lambda resolved_model=None, **_kwargs: ("gpt-test", "openrouter", None),
+    )
 
     completion_calls = []
 
@@ -544,7 +776,7 @@ def test_handoff_summary_codex_output_cap_matches_provider_compatibility(
     monkeypatch.setattr(
         cfg,
         "resolve_model_provider",
-        lambda resolved_model=None: ("gpt-test", provider, base_url),
+        lambda resolved_model=None, **_kwargs: ("gpt-test", provider, base_url),
     )
     monkeypatch.setattr(
         routes,
@@ -636,7 +868,11 @@ def test_handoff_summary_falls_back_when_retry_still_incomplete(monkeypatch):
             {"role": "assistant", "content": "Yes, one more check is needed.", "timestamp": 4.0},
         ],
     )
-    monkeypatch.setattr(cfg, "resolve_model_provider", lambda resolved_model=None: ("gpt-test", "openrouter", None))
+    monkeypatch.setattr(
+        cfg,
+        "resolve_model_provider",
+        lambda resolved_model=None, **_kwargs: ("gpt-test", "openrouter", None),
+    )
 
     class _Client:
         class completions:

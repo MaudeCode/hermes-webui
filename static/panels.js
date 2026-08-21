@@ -12921,7 +12921,13 @@ async function _applyAuxModels(){
     saved++;
    }catch(e){
     console.warn('[settings] failed to save aux task',task.task,e);
-    if(typeof showToast==='function') showToast(t('settings_aux_save_failed')||'Failed to save auxiliary model');
+    // Surface the server's actionable message (e.g. an ambiguous custom-provider
+    // slug collision: rename one provider so its slug is unique) instead of a
+    // generic failure, and abort the loop so the dirty selection is retained for
+    // the user to fix and retry — the reload that would clear it is skipped.
+    const _msg=(e&&e.message)?e.message:'';
+    const _base=t('settings_aux_save_failed')||'Failed to save auxiliary model';
+    if(typeof showToast==='function') showToast(_msg?(_base+': '+_msg):_base,6000,'error');
     return;
    }
   }
@@ -12929,6 +12935,20 @@ async function _applyAuxModels(){
  if(typeof showToast==='function') showToast(saved?(t('settings_aux_saved')||'Auxiliary models updated'):(t('settings_aux_no_changes')||'No changes to apply'));
  // Reload to refresh state
  _loadAuxiliaryModels();
+}
+
+async function _finalizePasswordSettingsSave(saved,body,settingsUiState){
+  _applySavedSettingsUi(saved,body,settingsUiState);
+  const cpField=$('settingsCurrentPassword'); if(cpField) cpField.value='';
+  const pwField=$('settingsPassword'); if(pwField) pwField.value='';
+  _settingsPasswordAuthEnabled=!!saved.password_auth_enabled;
+  _updateCurrentPasswordVisibility();
+  try{
+    const authStatus=await api('/api/auth/status');
+    _renderSettingsAuthStatus(authStatus);
+    _updateAuthWarningBadge(authStatus);
+    _updateAuthDisabledWarning(authStatus);
+  }catch(e){}
 }
 
 async function saveSettings(andClose){
@@ -13021,6 +13041,7 @@ async function saveSettings(andClose){
   body.auto_title_refresh_every=(($('settingsAutoTitleRefresh')||{}).value||'0');
   const botName=(($('settingsBotName')||{}).value||'').trim();
   body.bot_name=botName||'Hermes';
+  const settingsUiState={sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize};
   // Password: only act if the field has content; blank = leave auth unchanged
   if(pw && pw.trim()){
     const currentPwField=$('settingsCurrentPassword');
@@ -13036,25 +13057,27 @@ async function saveSettings(andClose){
       const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
       if(modelChanged && model){
         try{
-          await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
-          body.default_model=model;
-          body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;
+        await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
+        body.default_model=model;
+        body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;
         }catch(_modelErr){
-          if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
+          // The settings request, including the password change, already
+          // committed. Apply that response and clear the password fields before
+          // leaving the model selection dirty for a retry.
+          await _finalizePasswordSettingsSave(saved,body,settingsUiState);
+          _settingsDirty=true;
+          _showSettingsUnsavedBar();
+          const _msg=(_modelErr&&_modelErr.message)?_modelErr.message:'';
+          if(typeof showToast==='function') showToast(
+            t(saved.auth_just_enabled?'settings_saved_pw':'settings_saved_pw_updated')+'. Failed to update default model'+(_msg?(': '+_msg):''),
+            6000,
+            'error'
+          );
+          return;
         }
       }
-      _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
+      await _finalizePasswordSettingsSave(saved,body,settingsUiState);
       showToast(t(saved.auth_just_enabled?'settings_saved_pw':'settings_saved_pw_updated'));
-      const cpField=$('settingsCurrentPassword'); if(cpField) cpField.value='';
-      const pwField=$('settingsPassword'); if(pwField) pwField.value='';
-      _settingsPasswordAuthEnabled=!!saved.password_auth_enabled;
-      _updateCurrentPasswordVisibility();
-      try{
-        const authStatus=await api('/api/auth/status');
-        _renderSettingsAuthStatus(authStatus);
-        _updateAuthWarningBadge(authStatus);
-        _updateAuthDisabledWarning(authStatus);
-      }catch(e){}
       _settingsDirty=false;
       _resetSettingsPanelState();
       if(!andClose) _pendingSettingsTargetPanel = null;
@@ -13069,11 +13092,17 @@ async function saveSettings(andClose){
         await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
         body.default_model=model;
         body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;
-      }catch(_modelErr){
-        if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
-      }
+        }catch(_modelErr){
+          // A 400 here (e.g. an ambiguous custom-provider slug collision: rename
+          // one provider) is user-fixable, not a partial success. Surface the
+          // message, abort before "settings saved", and retain dirty state so the
+          // user can fix and retry instead of the error being swallowed.
+          const _msg=(_modelErr&&_modelErr.message)?_modelErr.message:'';
+          if(typeof showToast==='function') showToast('Failed to update default model'+(_msg?(': '+_msg):''),6000,'error');
+          return;
+        }
     }
-    _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
+    _applySavedSettingsUi(saved,body,settingsUiState);
     showToast(t('settings_saved'));
     _settingsDirty=false;
     _resetSettingsPanelState();

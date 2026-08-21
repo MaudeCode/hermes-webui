@@ -1,3 +1,6 @@
+import json
+import subprocess
+import textwrap
 from pathlib import Path
 
 SESSIONS_JS = Path("static/sessions.js").read_text(encoding="utf-8")
@@ -186,6 +189,68 @@ def test_save_settings_syncs_default_model_provider_with_saved_model():
     assert "(modelState.model_provider||null)!==(_settingsHermesDefaultModelProviderOnOpen||null)" in autosave_block
     assert "_captureModelDropdownSelection(modelSel)||{model:String((modelSel&&modelSel.value)||''),model_provider:null}" in panels_js
     assert "_captureModelDropdownSelection($('settingsModel'))||{model:String(model||''),model_provider:null}" in save_block
+
+
+def test_password_settings_finalizer_applies_committed_save_and_refreshes_auth():
+    panels_js = Path("static/panels.js").read_text(encoding="utf-8")
+    helper = _extract_function(panels_js, "async function _finalizePasswordSettingsSave")
+    script = textwrap.dedent(
+        f"""
+        const events=[];
+        const fields={{
+          settingsCurrentPassword:{{value:'old-password'}},
+          settingsPassword:{{value:'new-password'}},
+        }};
+        const $=(id)=>fields[id]||null;
+        let _settingsPasswordAuthEnabled=false;
+        const _applySavedSettingsUi=(saved,body,uiState)=>events.push(['apply',saved,body,uiState]);
+        const _updateCurrentPasswordVisibility=()=>events.push(['visibility']);
+        const api=async(path)=>{{ events.push(['api',path]); return {{auth_enabled:true}}; }};
+        const _renderSettingsAuthStatus=(status)=>events.push(['render',status]);
+        const _updateAuthWarningBadge=(status)=>events.push(['badge',status]);
+        const _updateAuthDisabledWarning=(status)=>events.push(['warning',status]);
+        {helper}
+        (async()=>{{
+          await _finalizePasswordSettingsSave(
+            {{password_auth_enabled:true}},
+            {{theme:'dark'}},
+            {{theme:'dark'}}
+          );
+          console.log(JSON.stringify({{
+            events,
+            current:fields.settingsCurrentPassword.value,
+            next:fields.settingsPassword.value,
+            enabled:_settingsPasswordAuthEnabled,
+          }}));
+        }})().catch((err)=>{{ console.error(err); process.exit(1); }});
+        """
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert payload["current"] == ""
+    assert payload["next"] == ""
+    assert payload["enabled"] is True
+    assert payload["events"][0][0] == "apply"
+    assert ["api", "/api/auth/status"] in payload["events"]
+
+
+def test_password_model_partial_failure_uses_committed_settings_finalizer():
+    panels_js = Path("static/panels.js").read_text(encoding="utf-8")
+    save_block = _extract_function(panels_js, "async function saveSettings")
+    password_branch = save_block[save_block.index("if(pw && pw.trim())"):]
+    failure = password_branch.index("Failed to update default model")
+    before_failure = password_branch[:failure]
+
+    assert "await _finalizePasswordSettingsSave(saved,body,settingsUiState);" in before_failure
+    assert "_settingsDirty=true;" in before_failure
+    assert "_showSettingsUnsavedBar();" in before_failure
+    assert "t(saved.auth_just_enabled?'settings_saved_pw':'settings_saved_pw_updated')" in password_branch[failure - 500:failure + 500]
 
 
 def test_changelog_mentions_new_chat_default_model_provider_sync():
