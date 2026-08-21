@@ -26127,7 +26127,7 @@ function _i18nProcessedElapsed(prefix, duration) {
   return duration ? `${prefix} ${duration}` : prefix;
 }
 function _i18nProcessedElapsedEn(duration) {
-  return _i18nProcessedElapsed('Processed', duration);
+  return duration ? `Worked for ${duration}` : 'Worked';
 }
 function _i18nProcessedElapsedRu(duration) {
   return _i18nProcessedElapsed('Обработано', duration);

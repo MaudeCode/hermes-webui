@@ -487,6 +487,7 @@ def _activity_snapshot(page) -> dict:
           const turn = document.querySelector('#liveAssistantTurn') ||
             Array.from(document.querySelectorAll('.assistant-turn')).pop() || null;
           const groups = turn ? Array.from(turn.querySelectorAll('[data-anchor-scene-owner="1"]')) : [];
+          const sequences = turn ? Array.from(turn.querySelectorAll('[data-activity-sequence-group="1"]')) : [];
           const rows = turn ? Array.from(turn.querySelectorAll('[data-anchor-scene-row="1"]')) : [];
           const sceneRows = assistants.flatMap(message =>
             message && message._anchor_activity_scene && Array.isArray(message._anchor_activity_scene.activity_rows)
@@ -511,6 +512,13 @@ def _activity_snapshot(page) -> dict:
               sessionId: (typeof S !== 'undefined' && S.session && S.session.session_id) || null,
             },
             groupCount: groups.length,
+            sequences: sequences.map(group => ({
+              label: (group.querySelector(':scope > .tool-worklog-summary .tool-worklog-label') || {}).textContent || '',
+              collapsed: group.classList.contains('tool-call-group-collapsed'),
+              active: group.getAttribute('data-live-activity-current') === '1',
+              expanded: (group.querySelector(':scope > .tool-worklog-summary') || {})
+                .getAttribute?.('aria-expanded') || '',
+            })),
             summary: groups.map(group => ({
               label: (group.querySelector('.tool-worklog-label,.tool-call-group-label') || {}).textContent || '',
               duration: (group.querySelector('.tool-call-group-duration') || {}).textContent || '',
@@ -567,6 +575,12 @@ def _expand_settled_worklog(page) -> None:
           ) {
             _materializeDeferredWorklogRows(group);
           }
+          group.querySelectorAll('[data-activity-sequence-group="1"]').forEach(sequence => {
+            const sequenceSummary = sequence.querySelector(':scope > .tool-worklog-summary');
+            if (sequence.classList.contains('tool-call-group-collapsed') && sequenceSummary) {
+              _toggleActivityGroup(sequenceSummary);
+            }
+          });
           return Boolean(group.querySelector('[data-anchor-scene-row="1"]'));
         }""",
         timeout=10000,
@@ -628,6 +642,10 @@ def _assert_no_running_tool_rows(rows: list[dict]) -> None:
 def _assert_live_activity(snapshot: dict) -> None:
     assert snapshot["live"], snapshot
     assert snapshot["groupCount"] == 1, snapshot
+    assert snapshot["sequences"], snapshot
+    assert all(sequence["collapsed"] for sequence in snapshot["sequences"]), snapshot
+    assert sum(sequence["active"] for sequence in snapshot["sequences"]) == 1, snapshot
+    assert snapshot["sequences"][-1]["active"], snapshot
     roles = [row["role"] for row in snapshot["rows"]]
     assert roles.count("thinking") == 1, snapshot
     assert roles.count("tool") == 1, snapshot
@@ -636,12 +654,13 @@ def _assert_live_activity(snapshot: dict) -> None:
     _assert_no_running_tool_rows(tool_rows)
     assert any(REASONING_TEXT in row["text"] for row in snapshot["rows"]), snapshot
     assert all(FINAL_TEXT not in text for text in snapshot["visibleFinal"]), snapshot
-    assert any(character.isdigit() for character in snapshot["summary"][0]["label"]), snapshot
 
 
 def _assert_settled(snapshot: dict, scenario: str) -> None:
     assert not snapshot["live"], snapshot
     assert snapshot["groupCount"] == 1, snapshot
+    assert snapshot["sequences"] and all(not sequence["collapsed"] for sequence in snapshot["sequences"]), snapshot
+    assert snapshot["summary"][0]["label"].startswith("Worked"), snapshot
     roles = [row["role"] for row in snapshot["rows"]]
     assert "thinking" in roles and "tool" in roles, snapshot
     tool_rows = _tool_rows(snapshot)
@@ -851,8 +870,8 @@ def main() -> int:
             """({reasoning, tool}) => {
               const turn = document.querySelector('#liveAssistantTurn');
               if (!turn) return false;
-              const text = turn.innerText || '';
-              return text.includes(reasoning) &&
+              return Boolean(turn.querySelector('[data-activity-sequence-group="1"]')) &&
+                Boolean(turn.querySelector('[data-anchor-row-role="thinking"]')) &&
                 Boolean(turn.querySelector(`[data-anchor-row-role="tool"][data-tool-name="${tool}"]`));
             }""",
             arg={"reasoning": REASONING_TEXT, "tool": TOOL_NAME},
@@ -1082,6 +1101,17 @@ def main() -> int:
                 assert any(
                     isinstance(row, dict) and row.get("role") == "terminal" for row in scene_rows
                 ), scene
+        page.wait_for_function(
+            """() => {
+              const group = Array.from(document.querySelectorAll(
+                '.assistant-turn [data-anchor-settled-scene-owner="1"]'
+              )).pop();
+              const label = group && group.querySelector(':scope > .tool-worklog-summary .tool-worklog-label');
+              return Boolean(group && group.classList.contains('tool-call-group-collapsed') &&
+                label && label.textContent.trim().startsWith('Worked'));
+            }""",
+            timeout=10000,
+        )
         _expand_settled_worklog(page)
         page.wait_for_selector(
             '.assistant-turn [data-anchor-settled-scene-owner="1"] [data-anchor-scene-row="1"]',

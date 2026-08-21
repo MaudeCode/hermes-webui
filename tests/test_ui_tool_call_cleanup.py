@@ -645,13 +645,11 @@ class TestToolCallGroupingStatic:
         )
         reset_fn = _function_body(MESSAGES_JS, "_resetAssistantSegment")
         assert "assistantRow=null" in reset_fn and "assistantBody=null" in reset_fn
-        assert "function closeCurrentLiveActivityGroup()" in UI_JS, (
-            "Visible interim assistant progress needs a shared helper to close the current Activity burst."
-        )
         interim_match = re.search(r"source\.addEventListener\('interim_assistant',e=>\{(.*?)\n\s*\}\);", MESSAGES_JS, re.S)
-        assert interim_match and "closeCurrentLiveActivityGroup()" in interim_match.group(1), (
-            "Visible interim assistant progress is timeline content and must split the current Activity burst."
+        assert interim_match and "recordActivityBoundary()" in interim_match.group(1), (
+            "Visible interim assistant progress must seal the current activity sequence."
         )
+        assert "closeCurrentLiveActivityGroup" not in UI_JS
         assert interim_match and "ensureAssistantRow(true)" in interim_match.group(1), (
             "Visible interim assistant progress must create a visible assistant timeline segment."
         )
@@ -746,18 +744,13 @@ class TestToolCallGroupingStatic:
             "before the next segment starts."
         )
 
-    def test_live_compression_card_splits_current_tool_activity_burst(self):
+    def test_live_compression_stays_inside_current_activity_sequence(self):
         compression_fn = _function_body(UI_JS, "appendLiveCompressionCard")
-        close_fn = _function_body(UI_JS, "closeCurrentLiveActivityGroup")
-        assert "closeCurrentLiveActivityGroup();" in compression_fn, (
-            "Auto-compression cards should close the current live Activity burst so later tools start a fresh group."
-        )
-        assert "data-live-activity-current" in close_fn, (
-            "The live compression boundary helper must clear the current Activity marker."
-        )
-        assert "removeAttribute('data-live-activity-current')" in close_fn, (
-            "Closing a live Activity burst should leave the row rendered but stop later tools from reusing it."
-        )
+        render_fn = _function_body(UI_JS, "_renderAnchorSceneRowsIntoWorklog")
+        direct_fn = _function_body(UI_JS, "_activitySequenceDirectNode")
+        assert "closeCurrentLiveActivityGroup" not in compression_fn
+        assert "row.role==='lifecycle'" in render_fn
+        assert "compression-card-row" in direct_fn
 
 
 class TestToolCardDesignTokens:

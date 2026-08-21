@@ -219,13 +219,12 @@ class TestInterimAssistantHandlerFlush:
             "segment, synchronously flush it, then reset for the next segment"
         )
 
-    def test_interim_handler_closes_activity_after_visible_progress_boundary(self):
+    def test_interim_handler_records_activity_boundary_after_visible_progress(self):
         src = read("static/messages.js")
         fn = _extract_handler(src, "interim_assistant")
         flush_pos = fn.index("_flushPendingSegmentRender({force:true})")
-        close_pos = fn.index("closeCurrentLiveActivityGroup()", flush_pos)
-        reset_pos = fn.index("_resetAssistantSegment()", close_pos)
-        assert flush_pos < close_pos < reset_pos, (
-            "visible interim assistant progress is timeline content; it must "
-            "close the current live Activity burst before later tools append"
+        boundary_pos = fn.index("recordActivityBoundary()", flush_pos)
+        reset_pos = fn.index("_resetAssistantSegment()", boundary_pos)
+        assert flush_pos < boundary_pos < reset_pos, (
+            "visible interim prose must seal the current activity sequence before later tools append"
         )

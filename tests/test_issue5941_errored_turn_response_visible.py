@@ -63,22 +63,10 @@ def _extract(src: str, name: str) -> str:
     return f"{sig}{{{body}}}"
 
 
-def test_render_gate_wires_errored_terminal_state_into_collapse_decision():
-    """Structural lock: the settled-scene collapse decision must honor the
-    errored-terminal-state predicate, not just keepSettledWorklogOpen."""
+def test_render_gate_collapses_completed_work_even_for_terminal_errors():
     body = _function_body(UI_JS, "_renderSettledAnchorSceneForMessage")
-    # The predicate is computed for this turn's scene...
-    assert "_anchorSceneHasErroredTerminalState(scene)" in body, (
-        "render gate must classify the scene's terminal_state"
-    )
-    # ...an explicit user-collapsed worklog is still respected...
-    assert "_readActivityDisclosureState(activityKey)!=='closed'" in body, (
-        "default-open must not override an explicit user collapse"
-    )
-    # ...and it feeds the collapsed:! decision alongside keepSettledWorklogOpen.
-    assert "collapsed:!(keepSettledWorklogOpen||erroredWorklogKeepOpen)" in body, (
-        "errored-turn keep-open must flow into the worklog collapsed flag"
-    )
+    assert "_anchorSceneHasErroredTerminalState(scene)" not in body
+    assert "collapsed:!keepSettledWorklogOpen" in body
     # The worklog-worthiness guard is still the entry gate (empty errored turns
     # never reach the collapse decision → they keep their bare error card).
     assert "_anchorSceneSceneHasWorklogWorthyRows(message._anchor_activity_scene)" in body
@@ -139,36 +127,15 @@ def test_errored_terminal_states_keep_content_visible_completed_does_not():
 
 @pytest.mark.skipif(NODE is None, reason="node required for behavioral test")
 def test_errored_worklog_keep_open_decision_matrix():
-    """End-to-end of the exact collapse expression the render gate evaluates:
-
-      erroredWorklogKeepOpen = hasErroredTerminalState(scene)
-                               && savedDisclosure !== 'closed'
-      collapsed = !(keepSettledWorklogOpen || erroredWorklogKeepOpen)
-
-    Encodes the #5941 invariant plus its guards:
-      * errored + content-bearing (default disclosure)      -> visible (not collapsed)
-      * errored + content-bearing, user explicitly collapsed -> collapsed (respected)
-      * completed + content-bearing                          -> collapsed (unchanged)
-    """
-    predicate = _extract(UI_JS, "_anchorSceneHasErroredTerminalState")
-    set_line_start = UI_JS.index("const _ANCHOR_SCENE_ERRORED_TERMINAL_STATES=new Set([")
-    set_line_end = UI_JS.index("]);", set_line_start) + len("]);")
-    set_decl = UI_JS[set_line_start:set_line_end]
+    """Every settled run gets a new collapsed Worked wrapper."""
     harness = textwrap.dedent(f"""
-        {set_decl}
-        {predicate}
         function decide(scene, savedDisclosure, keepSettledWorklogOpen) {{
-          const erroredWorklogKeepOpen =
-            _anchorSceneHasErroredTerminalState(scene) && savedDisclosure !== 'closed';
-          const collapsed = !(keepSettledWorklogOpen || erroredWorklogKeepOpen);
-          return collapsed;
+          return !keepSettledWorklogOpen;
         }}
         const out = {{}};
-        // Errored turn that produced content, no explicit user disclosure → VISIBLE.
+        // Errored and completed turns both collapse after the transient settle frame.
         out.errored_default = decide({{ terminal_state: 'error' }}, null, false);
-        // Same errored turn, but the user explicitly collapsed it → stays collapsed.
         out.errored_user_collapsed = decide({{ terminal_state: 'error' }}, 'closed', false);
-        // Errored turn the user explicitly opened → visible.
         out.errored_user_open = decide({{ terminal_state: 'no_response' }}, 'open', false);
         // A normal completed turn collapses as before.
         out.completed_default = decide({{ terminal_state: 'completed' }}, null, false);
@@ -177,13 +144,4 @@ def test_errored_worklog_keep_open_decision_matrix():
     res = subprocess.run([NODE, "-e", harness], capture_output=True, text=True, timeout=30)
     assert res.returncode == 0, res.stderr
     out = json.loads(res.stdout.strip())
-    assert out["errored_default"] is False, (
-        "an errored turn that produced content must render its worklog EXPANDED (visible) by default"
-    )
-    assert out["errored_user_collapsed"] is True, (
-        "a worklog the user explicitly collapsed must stay collapsed even on an errored turn"
-    )
-    assert out["errored_user_open"] is False, "a user-opened errored worklog stays visible"
-    assert out["completed_default"] is True, (
-        "a normal completed turn must keep its default-collapsed worklog (no behavior change)"
-    )
+    assert all(out.values())

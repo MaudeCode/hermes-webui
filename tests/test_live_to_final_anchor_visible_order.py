@@ -675,9 +675,36 @@ def test_scene_renderer_allows_prose_tool_prose_tool_interleaving():
     render = _function_body(UI_JS, "_renderAnchorSceneRowsIntoWorklog")
 
     assert "currentTools=null;" in render
-    assert render.index("if(row.role==='tool')") < render.index("}else{")
-    assert render.index("currentTools=null;") < render.index("desired.push(node);")
+    assert "const belongsToSequence=row.role==='thinking'||row.role==='tool'||row.role==='lifecycle';" in render
+    assert "currentSequence=null;" in render
+    assert "desired.push(currentSequence);" in render
     assert "_reconcileAnchorSceneCompactChildren(list,desired,true);" in render
+
+
+def test_activity_sequences_are_collapsed_inside_visible_prose_and_preserve_open_state():
+    create = _function_body(UI_JS, "_createActivitySequenceGroup")
+    render = _function_body(UI_JS, "_renderAnchorSceneRowsIntoWorklog")
+    reconcile = _function_body(UI_JS, "_reconcileAnchorSceneCompactChildren")
+    summary = _function_body(UI_JS, "_syncActivitySequenceSummary")
+    settled_summary = _function_body(UI_JS, "_syncToolCallGroupSummary")
+
+    assert "tool-call-group-collapsed" in create
+    assert "data-activity-sequence-group" in create
+    assert "data-activity-disclosure-key" in create
+    assert "aria-controls" in create
+    assert " hidden" in create
+    assert "currentSequenceList.appendChild" in render
+    assert "desired.push(node);" in render
+    assert "if(opts&&opts.live&&currentSequence)" in render
+    assert "existing.getAttribute('data-activity-sequence-group')==='1'" in reconcile
+    assert "actual=existing" in reconcile
+    assert "data-reasoning-titles" in summary
+    assert "_toolWorklogSummary" in summary
+    assert "t('processed_elapsed',durationText)" in settled_summary
+    assert '.activity-sequence-group[data-live-activity-current="1"] > .tool-worklog-summary .tool-worklog-label' in STYLE_CSS
+    assert '[data-anchor-scene-live-owner="1"] [data-anchor-scene-owner="1"] > .tool-worklog-summary{display:none!important;}' in STYLE_CSS
+    interim = _event_listener_body(MESSAGES_JS, "interim_assistant")
+    assert "closeCurrentLiveActivityGroup" not in interim
 
 
 def test_anchor_tool_preview_slot_stays_empty_for_result_text():
@@ -707,7 +734,7 @@ def test_anchor_tool_rows_are_action_labeled_iconed_and_single_line():
     assert "skill_view" in icon and "book-open" in icon
     assert "tool-worklog-tool-group-icon" not in sync
     assert "rows.forEach(row=>tools.appendChild(row))" in sync
-    assert "data-anchor-scene-owner')!=='1'" not in summary
+    assert "_syncActivitySequenceGroups(group,true)" in summary
     assert "if(group.getAttribute('data-tool-worklog-group')==='1') _syncToolWorklogToolGroup(group);" in summary
 
     assert ".tool-worklog-list .tool-card-icon" in STYLE_CSS
@@ -1615,15 +1642,18 @@ def test_settled_anchor_scene_hides_prior_process_segments_not_final_answer():
     assert "data-turn-duration" in group
 
 
-def test_anchor_scene_worklog_summary_uses_natural_activity_title():
+def test_live_sequences_use_natural_titles_and_settled_outer_group_uses_worked_duration():
     summary = _function_body(UI_JS, "_syncToolCallGroupSummary")
+    sequence = _function_body(UI_JS, "_syncActivitySequenceSummary")
     live = _function_body(UI_JS, "renderLiveAnchorActivityScene")
 
     assert "_activityProcessedElapsedLabel(group)" not in summary
-    assert "_toolWorklogSummary(cards,{live:isLiveWorklog,toolCount})" in summary
-    assert "thinkingLabel&&thinkingLabel.textContent.trim()||t('thinking')" in summary
+    assert "t('processed_elapsed',durationText)" in summary
+    assert "data-anchor-settled-scene-owner" in summary
+    assert "data-completed-run-group" in summary
+    assert "data-reasoning-titles" in sequence
+    assert "_toolWorklogSummary" in sequence
     assert "durationEl.textContent='';" in summary
-    assert "else if(isWorklogGroup)" in summary
     assert "collapsed:false" in live
     assert ".tool-worklog-group[data-tool-worklog-group=\"1\"]:not([data-run-activity-group=\"1\"]) .tool-worklog-summary" in STYLE_CSS
 
@@ -1645,41 +1675,27 @@ def test_processed_time_anchor_uses_lightweight_summary_style():
     assert "opacity:.82" in label_rule
 
 
-def test_legacy_settled_worklog_summary_uses_natural_activity_title_too():
+def test_legacy_settled_worklog_is_marked_as_completed_run():
     summary = _function_body(UI_JS, "_syncToolCallGroupSummary")
+    render = _function_body(UI_JS, "renderMessages")
 
-    assert "const processedLabel=isLiveWorklog" not in summary
-    assert "_toolWorklogSummary(cards,{live:isLiveWorklog,toolCount})" in summary
+    assert "group.setAttribute('data-completed-run-group','1')" in render
+    assert "data-completed-run-group" in summary
+    assert "_syncActivitySequenceGroups(group,false)" in summary
+    assert "t('processed_elapsed',durationText)" in summary
     assert ".tool-worklog-group[data-tool-worklog-group=\"1\"]:not([data-run-activity-group=\"1\"]) .tool-worklog-summary" in STYLE_CSS
 
 
-def test_live_processed_anchor_is_clickable_while_streaming():
+def test_live_sequence_headers_are_clickable_while_technical_host_stays_open():
     toggle = _function_body(UI_JS, "_toggleActivityGroup")
-    ensure = _function_body(UI_JS, "ensureActivityGroup")
-    finalize = _function_body(UI_JS, "_finalizeLiveActivityDisclosureGroup")
-    close = _function_body(UI_JS, "closeCurrentLiveActivityGroup")
+    host = _function_body(UI_JS, "_anchorSceneWorklogGroup")
+    create = _function_body(UI_JS, "_createActivitySequenceGroup")
 
-    assert "data-live-activity-current')==='1'" not in toggle
     assert "_writeActivityDisclosureState(group.getAttribute('data-activity-disclosure-key'), !collapsed);" in toggle
-    assert "_onLiveActivityToggle(group)" in toggle
-    assert "summary.setAttribute('data-live-summary-static','1')" not in ensure
-    assert "summary.setAttribute('aria-disabled','true')" not in ensure
-    assert "summary.disabled=true" not in ensure
-    assert "summary.removeAttribute('data-live-summary-static')" in ensure
-    assert "summary.removeAttribute('aria-disabled')" in ensure
-    assert "summary.disabled=false" in ensure
-    assert "group.removeAttribute('data-live-tool-call-group')" in finalize
-    assert "group.removeAttribute('data-live-tool-worklog-group')" in finalize
-    assert "_liveActivityUserExpanded===true" in finalize
-    assert ".tool-card.open,.thinking-card.open" not in finalize
-    assert "group.classList.toggle('tool-call-group-collapsed', !keepOpen)" in finalize
-    assert "if(keepOpen&&disclosureKey) _writeActivityDisclosureState(disclosureKey, true);" in finalize
-    assert "summary.removeAttribute('data-live-summary-static')" in finalize
-    assert "summary.disabled=false" in finalize
-    assert "summary.setAttribute('aria-expanded',keepOpen?'true':'false')" in finalize
-    assert "_finalizeLiveActivityDisclosureGroup(group)" in close
-    assert ".tool-worklog-summary[data-live-summary-static=\"1\"]" not in STYLE_CSS
-    assert ".tool-worklog-group[data-live-tool-call-group=\"1\"][data-live-activity-current=\"1\"] .tool-call-group-chevron" not in STYLE_CSS
+    assert "group.classList.remove('tool-call-group-collapsed')" in host
+    assert "group.classList.add('open')" in host
+    assert "tool-call-group-collapsed" in create
+    assert "closeCurrentLiveActivityGroup" not in UI_JS
 
 
 @pytest.mark.skipif(NODE is None, reason="node is required for live disclosure behavior tests")
@@ -1737,6 +1753,7 @@ let collapsed = false;
 let open = true;
 let wrote = null;
 let liveExpanded = null;
+const body = {{ hidden: false }};
 function _writeActivityDisclosureState(key, value) {{ wrote = [key, value]; }}
 function _onLiveActivityToggle(group) {{ liveExpanded = !group.classList.contains('tool-call-group-collapsed'); }}
 const group = {{
@@ -1746,6 +1763,7 @@ const group = {{
     'data-activity-disclosure-key': 'live:stream-1'
   }},
   getAttribute(name) {{ return this.attrs[name] || ''; }},
+  querySelector() {{ return body; }},
   classList: {{
     toggle(name, force) {{
       if (name === 'tool-call-group-collapsed') {{
@@ -1779,6 +1797,7 @@ assert.strictEqual(open, false);
 assert.deepStrictEqual(wrote, ['live:stream-1', false]);
 assert.strictEqual(liveExpanded, false);
 assert.strictEqual(summary.attrs['aria-expanded'], 'false');
+assert.strictEqual(body.hidden, true);
     console.log(JSON.stringify({{ok:true}}));
 """
     _run_node_script(script)

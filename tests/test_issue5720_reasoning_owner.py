@@ -306,6 +306,10 @@ class FakeElement {
       delete this.dataset[dataKey];
     }
   }
+  toggleAttribute(name,force){
+    if(force) this.setAttribute(name,'');
+    else this.removeAttribute(name);
+  }
   appendChild(child){
     if(child.tagName==='#FRAGMENT'){
       child.children.slice().forEach(node=>this.appendChild(node));
@@ -436,6 +440,18 @@ global._moveLiveRunStatusToTurnEnd=()=>{};
 global._messageUserUnpinned=false;
 global._syncTransparentEventControls=()=>{};
 global._syncToolCallGroupSummary=()=>{};
+global._activitySequenceNodeKey=node=>node.getAttribute('data-anchor-row-id')||'sequence';
+global._createActivitySequenceGroup=(key,live)=>{
+  const sequence=new FakeElement('div');
+  sequence.className='activity-sequence-group tool-worklog-group tool-call-group-collapsed';
+  sequence.setAttribute('data-activity-sequence-group','1');
+  sequence.setAttribute('data-activity-sequence-key',key);
+  const list=new FakeElement('div');
+  list.className='tool-worklog-list';
+  sequence.appendChild(list);
+  return sequence;
+};
+global._syncActivitySequenceSummary=()=>{};
 global._captureWorklogDetailDisclosureState=()=>null;
 global._restoreWorklogDetailDisclosureState=()=>{};
 global._startActivityElapsedTimer=()=>{};

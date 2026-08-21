@@ -11564,7 +11564,7 @@ function _applyWorklogDetailsExpandedDefault(root){
     if(summary) summary.setAttribute('aria-expanded', String(open));
   });
 }
-const _worklogDetailDisclosureSelector='.thinking-card,.tool-card,.tool-group[data-tool-worklog-tool-group="1"],.tool-worklog-tool-group';
+const _worklogDetailDisclosureSelector='.thinking-card,.tool-card,.tool-group[data-tool-worklog-tool-group="1"],.tool-worklog-tool-group,[data-activity-sequence-group="1"]';
 function _worklogDetailTextKey(text, maxLen){
   return String(text||'').replace(/\s+/g,' ').trim().slice(0,maxLen||160);
 }
@@ -11622,6 +11622,9 @@ function _worklogDetailBaseKey(el){
       'group';
     return `tool-group:${scope}:${stable}`;
   }
+  if(el.matches&&el.matches('[data-activity-sequence-group="1"]')){
+    return `activity-sequence:${scope}:${el.getAttribute('data-activity-sequence-key')||'sequence'}`;
+  }
   return '';
 }
 function _worklogDetailDisclosureIsOpen(el){
@@ -11650,6 +11653,13 @@ function _setWorklogDetailDisclosureOpen(el, open){
     el.classList.toggle('tool-worklog-tool-group-collapsed', !open);
     const summary=el.querySelector('.tool-group-head,.tool-worklog-tool-group-head');
     if(summary) summary.setAttribute('aria-expanded', String(!!open));
+  }
+  if(el.matches&&el.matches('[data-activity-sequence-group="1"]')){
+    el.classList.toggle('tool-call-group-collapsed', !open);
+    const summary=el.querySelector(':scope > .tool-worklog-summary,:scope > .tool-call-group-summary');
+    if(summary) summary.setAttribute('aria-expanded', String(!!open));
+    const body=el.querySelector(':scope > .tool-worklog-body,:scope > .tool-call-group-body');
+    if(body) body.hidden=!open;
   }
 }
 function _toggleToolCardDisclosure(header){
@@ -11738,6 +11748,8 @@ function _ensureReasoningTitleRotation(){
       const next=(Number(row.getAttribute('data-reasoning-title-index')||0)+1)%titles.length;
       const label=row.querySelector('.thinking-card-label');
       if(label) label.textContent=titles[next];
+      const sequence=row.closest&&row.closest('[data-activity-sequence-group="1"]');
+      if(sequence) _syncActivitySequenceSummary(sequence);
       row.setAttribute('data-reasoning-title-index',String(next));
     });
   },1500);
@@ -11749,7 +11761,7 @@ function _applyReasoningTitles(row, value, active){
   if(!titles.length){
     row.removeAttribute('data-reasoning-titles');
     row.removeAttribute('data-reasoning-title-index');
-    row.removeAttribute('data-reasoning-active');
+    row.setAttribute('data-reasoning-active',active?'1':'0');
     if(label) label.textContent=t('thinking');
     return;
   }
@@ -12899,6 +12911,8 @@ function _toggleActivityGroup(summary){
   const collapsed=group.classList.toggle('tool-call-group-collapsed');
   group.classList.toggle('open',!collapsed);
   summary.setAttribute('aria-expanded',String(!collapsed));
+  const body=group.querySelector(':scope > .tool-call-group-body,:scope > .tool-worklog-body');
+  if(body) body.hidden=collapsed;
   _writeActivityDisclosureState(group.getAttribute('data-activity-disclosure-key'), !collapsed);
   // Build deferred settled rows only when the user opens the Worklog.
   if(!collapsed){
@@ -12916,30 +12930,6 @@ function _toggleToolWorklogGroup(summary){
     return;
   }
   return _toggleActivityGroup(summary);
-}
-function _finalizeLiveActivityDisclosureGroup(group){
-  if(!group) return;
-  // Internal tool-card expansion is transient streaming UI, not user intent.
-  // Carry the whole Worklog open only when the user explicitly opened it (or
-  // explicitly configured Worklogs to open by default).
-  const keepOpen=_liveActivityUserExpanded===true
-    || (_liveActivityUserExpanded===undefined&&window._worklogDetailsExpandedByDefault===true);
-  const disclosureKey=group.getAttribute('data-activity-disclosure-key')||group.getAttribute('data-tool-worklog-key')||'';
-  group.removeAttribute('data-live-activity-current');
-  group.removeAttribute('data-live-tool-call-group');
-  group.removeAttribute('data-live-tool-worklog-group');
-  group.removeAttribute('data-live-anchor-scene-owner');
-  group.classList.toggle('tool-call-group-collapsed', !keepOpen);
-  group.classList.toggle('open', keepOpen);
-  if(keepOpen&&disclosureKey) _writeActivityDisclosureState(disclosureKey, true);
-  const summary=group.querySelector&&group.querySelector('.tool-worklog-summary,.tool-call-group-summary');
-  if(summary){
-    summary.removeAttribute('data-live-summary-static');
-    summary.removeAttribute('aria-disabled');
-    summary.disabled=false;
-    summary.setAttribute('aria-expanded',keepOpen?'true':'false');
-  }
-  if(typeof _syncToolCallGroupSummary==='function') _syncToolCallGroupSummary(group);
 }
 function _worklogReasonHtmlFromAnchor(anchor, textOverride){
   if(!anchor||!anchor.matches||!anchor.matches('.assistant-segment')) return '';
@@ -13595,7 +13585,84 @@ function _anchorSceneWorklogGroup(blocks, opts){
   if(opts&&opts.streamId) group.setAttribute('data-anchor-stream-id',String(opts.streamId));
   if(opts&&opts.turnDuration!==undefined&&opts.turnDuration!==null) group.setAttribute('data-turn-duration',String(opts.turnDuration));
   if(opts&&opts.turnStartedAt!==undefined&&opts.turnStartedAt!==null) group.setAttribute('data-turn-started-at',String(opts.turnStartedAt));
+  if(live){
+    group.classList.remove('tool-call-group-collapsed');
+    group.classList.add('open');
+    const summary=group.querySelector(':scope > .tool-worklog-summary,:scope > .tool-call-group-summary');
+    if(summary) summary.setAttribute('aria-expanded','true');
+  }
   return group;
+}
+function _activitySequenceNodeKey(node, index){
+  if(!node||!node.getAttribute) return `sequence:${Number(index)||0}`;
+  const anchorKey=node.getAttribute('data-anchor-row-id');
+  if(anchorKey) return `anchor:${anchorKey}`;
+  const thinking=node.matches&&node.matches('[data-thinking-key],[data-live-thinking-key]')
+    ? node
+    : node.querySelector&&node.querySelector('[data-thinking-key],[data-live-thinking-key]');
+  if(thinking){
+    const key=thinking.getAttribute('data-thinking-key')||thinking.getAttribute('data-live-thinking-key');
+    if(key) return `thinking:${key}`;
+  }
+  const tool=node.matches&&node.matches('.tool-card-row')?node:node.querySelector&&node.querySelector('.tool-card-row');
+  const toolKey=tool&&(tool.getAttribute('data-tool-disclosure-key')||tool.getAttribute('data-live-tid'));
+  return toolKey?`tool:${toolKey}`:`sequence:${Number(index)||0}`;
+}
+let _activitySequenceBodyID=0;
+function _createActivitySequenceGroup(key, live, open){
+  const group=document.createElement('div');
+  const bodyId=`activity-sequence-${_worklogDetailHashKey(key||'sequence')}-${++_activitySequenceBodyID}`;
+  group.className='agent-activity-group tool-worklog-group activity activity-sequence-group'+(open?' open':' tool-call-group-collapsed');
+  group.setAttribute('data-activity-sequence-group','1');
+  group.setAttribute('data-activity-sequence-key',String(key||'sequence'));
+  group.setAttribute('data-activity-disclosure-key',`activity-sequence:${String(key||'sequence')}`);
+  if(live) group.setAttribute('data-live-activity-sequence','1');
+  group.innerHTML=`<button type="button" class="tool-call-group-summary tool-worklog-summary activity-summary" aria-expanded="${open?'true':'false'}" aria-controls="${bodyId}" onclick="_toggleActivityGroup(this)"><span class="as-dot"></span><span class="tool-call-group-label tool-worklog-label as-text">${typeof t==='function'?t('thinking'):'Thinking'}</span><span class="tool-call-group-chevron as-caret">${li('chevron-right',12)}</span></button><div id="${bodyId}" class="tool-call-group-body tool-worklog-body activity-body"${open?'':' hidden'}><div class="worklog"><div class="tool-worklog-list"></div></div></div>`;
+  return group;
+}
+function _syncActivitySequenceSummary(group){
+  if(!group) return;
+  const label=group.querySelector(':scope > .tool-worklog-summary .tool-worklog-label');
+  if(!label) return;
+  const titled=Array.from(group.querySelectorAll('.agent-activity-thinking[data-reasoning-titles] .thinking-card-label')).pop();
+  const cards=Array.from(group.querySelectorAll('.tool-card-row .tool-card,.tool-card-row.tl'));
+  label.textContent=(titled&&titled.textContent.trim())
+    || (cards.length?_toolWorklogSummary(cards,{live:group.getAttribute('data-live-activity-current')==='1',toolCount:cards.length}):(typeof t==='function'?t('thinking'):'Thinking'));
+  label.setAttribute('data-sweep-label',label.textContent);
+}
+function _activitySequenceDirectNode(node){
+  return !!(node&&node.classList&&(
+    node.classList.contains('agent-activity-thinking')||
+    node.classList.contains('wl-step-tools')||
+    node.classList.contains('tool-card-row')||
+    node.classList.contains('compression-card-row')
+  ));
+}
+function _syncActivitySequenceGroups(worklog, live){
+  const list=_toolWorklogListEl(worklog);
+  if(!list) return;
+  let sequence=null;
+  Array.from(list.children).forEach((node,index)=>{
+    if(node.getAttribute&&node.getAttribute('data-activity-sequence-group')==='1'){
+      sequence=node;
+      sequence.removeAttribute('data-live-activity-current');
+      return;
+    }
+    if(_activitySequenceDirectNode(node)){
+      if(!sequence){
+        const key=_activitySequenceNodeKey(node,index);
+        sequence=_createActivitySequenceGroup(key,!!live,false);
+        list.insertBefore(sequence,node);
+      }
+      _toolWorklogListEl(sequence).appendChild(node);
+    }else{
+      sequence=null;
+    }
+  });
+  const groups=Array.from(list.querySelectorAll(':scope > [data-activity-sequence-group="1"]'));
+  groups.forEach(group=>group.removeAttribute('data-live-activity-current'));
+  if(live&&sequence) sequence.setAttribute('data-live-activity-current','1');
+  groups.forEach(_syncActivitySequenceSummary);
 }
 function _anchorSceneCompactRowKey(node, index){
   if(!node||!node.getAttribute) return `row:${Number(index)||0}`;
@@ -13610,6 +13677,8 @@ function _anchorSceneCompactRowKey(node, index){
 }
 function _anchorSceneCompactTopLevelKey(node, index){
   if(!node||!node.getAttribute) return `section:${Number(index)||0}`;
+  const sequenceKey=node.getAttribute('data-activity-sequence-key');
+  if(sequenceKey) return `activity-sequence:${sequenceKey}`;
   const liveEdge=node.getAttribute('data-live-anchor-window-edge');
   if(liveEdge) return `live:${liveEdge}-steps`;
   if(node.getAttribute('data-worklog-tools')==='1'){
@@ -13647,7 +13716,21 @@ function _reconcileAnchorSceneCompactChildren(parent, desiredNodes, topLevel){
       topLevel&&existing&&candidate&&existing.getAttribute&&candidate.getAttribute&&
       existing.getAttribute('data-worklog-tools')==='1'&&candidate.getAttribute('data-worklog-tools')==='1'
     );
-    if(toolSection){
+    const activitySequence=!!(
+      topLevel&&existing&&candidate&&existing.getAttribute&&candidate.getAttribute&&
+      existing.getAttribute('data-activity-sequence-group')==='1'&&candidate.getAttribute('data-activity-sequence-group')==='1'
+    );
+    if(activitySequence){
+      const existingList=_toolWorklogListEl(existing);
+      const candidateList=_toolWorklogListEl(candidate);
+      if(existingList&&candidateList){
+        _reconcileAnchorSceneCompactChildren(existingList,Array.from(candidateList.children||[]),true);
+      }
+      existing.toggleAttribute('data-live-activity-current',candidate.getAttribute('data-live-activity-current')==='1');
+      _syncActivitySequenceSummary(existing);
+      actual=existing;
+      reused.add(existing);
+    }else if(toolSection){
       _reconcileAnchorSceneCompactChildren(existing,Array.from(candidate.children||[]),false);
       actual=existing;
       reused.add(existing);
@@ -13665,6 +13748,8 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   if(!group||!list) return false;
   const desired=[];
   let wrote=false;
+  let currentSequence=null;
+  let currentSequenceList=null;
   let currentTools=null;
   const beforeNode=opts&&(opts.beforeNode||opts.earlierNode);
   if(beforeNode){
@@ -13674,15 +13759,27 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   for(const row of rows){
     const node=_anchorSceneNodeForRow(row,opts);
     if(!node) continue;
+    const belongsToSequence=row.role==='thinking'||row.role==='tool'||row.role==='lifecycle';
+    if(belongsToSequence&&!currentSequence){
+      const key=_activitySequenceNodeKey(node,desired.length);
+      currentSequence=_createActivitySequenceGroup(key,!!(opts&&opts.live),false);
+      currentSequenceList=_toolWorklogListEl(currentSequence);
+      desired.push(currentSequence);
+    }
     if(row.role==='tool'){
       if(!currentTools){
         currentTools=document.createElement('div');
         currentTools.className='wl-step-tools tool-worklog-tools';
         currentTools.setAttribute('data-worklog-tools','1');
-        desired.push(currentTools);
+        currentSequenceList.appendChild(currentTools);
       }
       currentTools.appendChild(node);
+    }else if(belongsToSequence){
+      currentTools=null;
+      currentSequenceList.appendChild(node);
     }else{
+      currentSequence=null;
+      currentSequenceList=null;
       currentTools=null;
       desired.push(node);
     }
@@ -13692,6 +13789,11 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
     desired.push(opts.afterNode);
     wrote=true;
   }
+  desired.filter(node=>node.getAttribute&&node.getAttribute('data-activity-sequence-group')==='1')
+    .forEach(node=>node.removeAttribute('data-live-activity-current'));
+  if(opts&&opts.live&&currentSequence) currentSequence.setAttribute('data-live-activity-current','1');
+  desired.filter(node=>node.getAttribute&&node.getAttribute('data-activity-sequence-group')==='1')
+    .forEach(_syncActivitySequenceSummary);
   _reconcileAnchorSceneCompactChildren(list,desired,true);
   if(wrote){
     _syncToolCallGroupSummary(group);
@@ -14224,8 +14326,15 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   // one ensureActivityGroup just reconciled. Apply live disclosure intent to
   // the group that is actually left on screen, after ownership is resolved.
   if(visibleGroup&&typeof _applyLiveActivityDisclosureIntent==='function'){
-    const visibleKey=visibleGroup.getAttribute('data-activity-disclosure-key')||`live:${streamId||S.activeStreamId||'anchor'}`;
-    _applyLiveActivityDisclosureIntent(visibleGroup,{live:true,collapsed:false},_readActivityDisclosureState(visibleKey));
+    if(visibleGroup.getAttribute('data-live-anchor-scene-owner')==='1'){
+      visibleGroup.classList.remove('tool-call-group-collapsed');
+      visibleGroup.classList.add('open');
+      const summary=visibleGroup.querySelector(':scope > .tool-worklog-summary,:scope > .tool-call-group-summary');
+      if(summary) summary.setAttribute('aria-expanded','true');
+    }else{
+      const visibleKey=visibleGroup.getAttribute('data-activity-disclosure-key')||`live:${streamId||S.activeStreamId||'anchor'}`;
+      _applyLiveActivityDisclosureIntent(visibleGroup,{live:true,collapsed:false},_readActivityDisclosureState(visibleKey));
+    }
   }
   if(typeof _moveLiveRunStatusToTurnEnd==='function') _moveLiveRunStatusToTurnEnd();
   // Read scroll geometry on the next animation frame, after this mutation batch
@@ -15000,7 +15109,7 @@ function _collapseJustSettledWorklogInPlace(streamId){
   if(ownerHasVisibleSegment===null) return false;
   const rows=_deferredWorklogRowsFromGroup(group);
   if(!rows||!rows.length) return false;
-  // A normal completed turn always folds Processed once its visible final
+  // A normal completed turn always folds Worked once its visible final
   // answer arrives. Keep it open only when there is no final answer to replace
   // the live activity (including error/no-response diagnostics).
   const keepOpen=!ownerHasVisibleSegment;
@@ -15078,8 +15187,6 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   // still shows only its error card, no phantom empty body. A user who has
   // explicitly collapsed THIS turn's worklog (saved 'closed' disclosure state)
   // is still respected, so the default-open never fights an intentional collapse.
-  const erroredWorklogKeepOpen=_anchorSceneHasErroredTerminalState(scene)
-    && _readActivityDisclosureState(activityKey)!=='closed';
   // keepSettledWorklogOpen forces collapsed:false for the ONE height-stable settle
   // render of the just-settled turn (no STREAM_DONE shrink jump) for both pinned
   // followers AND unpinned mid-turn readers. The keep-open is made genuinely
@@ -15091,7 +15198,7 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   // (_isKeepSettledWorklogOpenArmed), so it never persists across restores.
   const group=_anchorSceneWorklogGroup(blocks,{
     live:false,
-    collapsed:!(keepSettledWorklogOpen||erroredWorklogKeepOpen),
+    collapsed:!keepSettledWorklogOpen,
     beforeAnchor:true,
     anchor:segment,
     activityKey,
@@ -15105,7 +15212,7 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   // eagerly materializing them for every historical turn balloons the DOM and a
   // later synchronous layout (e.g. opening a dropdown) tips the tab into a
   // multi-GB freeze. The summary chip renders from data-turn-duration, not the
-  // rows, so a deferred worklog still shows its "Processed in Xs" label. On
+  // rows, so a deferred worklog still shows its "Worked for X" label. On
   // expand, _toggleActivityGroup materializes the stashed rows exactly once.
   const collapsed=group.classList.contains('tool-call-group-collapsed');
   if(collapsed){
@@ -15469,14 +15576,6 @@ function ensureRunActivityForCurrentTurn(){
   // Phase C: disabled — top live run Activity card removed
   return null;
 }
-function closeCurrentLiveActivityGroup(){
-  const turn=$('liveAssistantTurn');
-  if(!turn) return;
-  turn.querySelectorAll('.tool-worklog-group[data-live-tool-call-group="1"][data-live-activity-current="1"],.tool-call-group[data-live-tool-call-group="1"][data-live-activity-current="1"]').forEach(group=>{
-    group.removeAttribute('data-live-activity-current');
-    _finalizeLiveActivityDisclosureGroup(group);
-  });
-}
 function _compressionStateForCurrentSession(){
   const state=window._compressionUi;
   if(!state||!S.session||state.sessionId!==S.session.session_id) return null;
@@ -15657,7 +15756,6 @@ function appendLiveCompressionCard(state){
   }
   const inner=_assistantTurnBlocks(turn);
   if(!inner){ if(scrollRebuildGuard.release) scrollRebuildGuard.release(); return false; }
-  closeCurrentLiveActivityGroup();
   if(state.automatic){
     const group=ensureLiveWorklogContainer(inner,{activityKey:_activityKeyForLiveTurn()});
     const list=_toolWorklogListEl(group);
@@ -18495,6 +18593,8 @@ function renderMessages(options){
             segmentSeq:segmentSeq||'',
             turnDuration:includeTurnDuration?_turnDurationForAnchor(anchorRow):undefined,
           });
+          if(!group) continue;
+          group.setAttribute('data-completed-run-group','1');
           const list=_toolWorklogListEl(group);
           if(!list) continue;
           list.innerHTML='';
@@ -19623,6 +19723,11 @@ function _toggleToolDiff(btn){
 
 function _syncToolCallGroupSummary(group){
   if(!group) return;
+  if(group.classList&&group.classList.contains('live-worklog')&&group.getAttribute('data-anchor-scene-owner')!=='1'){
+    _syncActivitySequenceGroups(group,true);
+  }else if(group.getAttribute('data-completed-run-group')==='1'){
+    _syncActivitySequenceGroups(group,false);
+  }
   if(group.getAttribute('data-tool-worklog-group')==='1') _syncToolWorklogToolGroup(group);
   const cards=Array.from((_toolWorklogListEl(group)||group).querySelectorAll('.tool-card-row .tool-card,.tool-card-row.tl'));
   const deferredCards=Array.isArray(group._deferredRegularWorklogCards)
@@ -19640,7 +19745,10 @@ function _syncToolCallGroupSummary(group){
   }
   const durationEl=group.querySelector('.tool-call-group-duration');
   if(label){
-    if(group.getAttribute('data-run-activity-group')==='1'){
+    if(group.getAttribute('data-anchor-settled-scene-owner')==='1'||group.getAttribute('data-completed-run-group')==='1'){
+      const durationText=_formatTurnDuration(group.dataset.turnDuration);
+      label.textContent=t('processed_elapsed',durationText);
+    }else if(group.getAttribute('data-run-activity-group')==='1'){
       label.textContent=toolCount?_toolWorklogSummary(cards,{live:isLiveWorklog, toolCount}):'Running';
     }else if(isWorklogGroup){
       const thinkingLabel=group.querySelector('.agent-activity-thinking .thinking-card-label');

@@ -6350,7 +6350,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           ensureAssistantRow(true);
           _flushPendingSegmentRender({force:true});
           if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
-          if(typeof closeCurrentLiveActivityGroup==='function') closeCurrentLiveActivityGroup();
           recordActivityBoundary();
         }
         _resetAssistantSegment();
@@ -6369,7 +6368,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(assistantRow) assistantRow.setAttribute('data-interim','1');
       _flushPendingSegmentRender({force:true,skipAnchorProcessProse:true});
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
-      if(typeof closeCurrentLiveActivityGroup==='function') closeCurrentLiveActivityGroup();
       _applyToAnchor('interim_assistant',d,e);
       // Collapse old interim notes once more than INTERIM_COLLAPSE_THRESHOLD accumulate.
       const INTERIM_COLLAPSE_THRESHOLD=3;

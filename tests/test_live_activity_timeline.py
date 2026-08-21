@@ -87,6 +87,8 @@ def test_active_rows_use_text_glow_without_spinner_or_progress_bar():
     assert '[data-reasoning-active="1"] .thinking-card-label' in STYLE_CSS
     assert ".tool-card-running .tool-card-name-label" in STYLE_CSS
     assert "prefers-reduced-motion:reduce" in STYLE_CSS
+    apply_titles = UI_JS.split("function _applyReasoningTitles(row, value, active)", 1)[1].split("function isSimplifiedToolCalling", 1)[0]
+    assert "row.setAttribute('data-reasoning-active',active?'1':'0')" in apply_titles
 
 
 def test_settled_activity_render_keeps_tools_bound_to_progress_bursts():
