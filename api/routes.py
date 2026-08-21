@@ -4985,10 +4985,15 @@ def _anchor_scene_row_key(row) -> str:
     if row.get("role") == "thinking":
         thinking = row.get("thinking") if isinstance(row.get("thinking"), dict) else {}
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        text = str(row.get("text") or "")
+        text_key = _anchor_scene_text_key(text)
         if "titles" in thinking or "titles" in payload:
             titles = thinking.get("titles") if "titles" in thinking else payload.get("titles")
-            return "thinking_titles:" + json.dumps(titles if isinstance(titles, list) else [])
-        return f"thinking:{_anchor_scene_text_key(row.get('text'))}"
+            clean_titles = titles if isinstance(titles, list) else []
+            if text_key and clean_titles == normalize_reasoning_titles(text, stable=True):
+                return f"thinking:{text_key}"
+            return "thinking_titles:" + json.dumps(clean_titles)
+        return f"thinking:{text_key}"
     if row.get("role") == "prose":
         return f"prose:{_anchor_scene_text_key(row.get('text'))}"
     if row.get("role") == "lifecycle":
