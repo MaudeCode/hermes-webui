@@ -93,9 +93,8 @@ def normalize_reasoning_titles(
 ) -> list[str]:
     """Return an ordered title snapshot without guessing from partial prose."""
 
-    explicit = _unique_titles(explicit_titles, explicit=True)
-    if explicit:
-        return explicit
+    if explicit_titles is not None:
+        return _unique_titles(explicit_titles, explicit=True)
 
     raw = str(text or "")
     lines = _reasoning_lines(raw)
@@ -136,6 +135,6 @@ def reasoning_event_payload(
         explicit_titles=explicit_titles,
         stable=stable,
     )
-    if titles:
+    if titles or explicit_titles is not None:
         payload["titles"] = titles
     return payload

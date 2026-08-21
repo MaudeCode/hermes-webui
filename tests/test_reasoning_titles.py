@@ -22,6 +22,19 @@ def test_explicit_titles_override_derived_titles():
     ) == ["Gateway title", "Second title"]
 
 
+def test_explicit_empty_titles_clear_the_snapshot_without_deriving_fallback():
+    assert normalize_reasoning_titles(
+        "Derived fallback",
+        explicit_titles=[],
+        stable=True,
+    ) == []
+    assert reasoning_event_payload(
+        "later delta",
+        "Derived fallback\nlater delta",
+        explicit_titles=[],
+    ) == {"text": "later delta", "titles": []}
+
+
 def test_complete_bold_titles_are_ordered_and_deduplicated_while_streaming():
     text = "**Planning implementation**\nnotes\n**Running tests**\n**Planning implementation**"
     assert normalize_reasoning_titles(text) == ["Planning implementation", "Running tests"]
@@ -110,6 +123,10 @@ def test_gateway_bridge_accepts_future_explicit_titles():
         "text": "**Derived title**",
         "titles": ["Gateway title"],
     }) == ("reasoning", {"text": "**Derived title**", "titles": ["Gateway title"]})
+    assert _gateway_tool_progress_event({
+        "event": "reasoning.available",
+        "titles": [],
+    }) == ("reasoning", {"text": "", "titles": []})
 
 
 def test_persisted_thinking_row_carries_titles_additively():
@@ -138,6 +155,8 @@ def test_browser_consumes_titles_without_reimplementing_the_parser():
     anchors = (ROOT / "static" / "assistant_turn_anchors.js").read_text(encoding="utf-8")
     ui = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
     assert "Array.isArray(d.titles)" in messages
+    assert "const hasTitles=Array.isArray(d.titles);" in messages
+    assert "if(hasTitles)" in messages
     assert "titles:Object.freeze(titles)" in anchors
     assert "function _applyReasoningTitles" in ui
     assert "1500" in ui

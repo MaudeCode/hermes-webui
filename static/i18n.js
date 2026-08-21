@@ -26179,11 +26179,13 @@ function _i18nToolActionLabelZhHant(kind, state, target, display, failed) {
   }
   return _i18nToolActionLabelFromMap(_I18N_TOOL_ACTION_TEXT_ZH_HANT, kind, state, target, display, failed);
 }
-function _i18nToolWorklogSummaryFromMap(map, kind, state, count) {
+function _i18nToolWorklogSummaryFromMap(map, kind, state, count, countFreeMap) {
   const n = Math.max(1, Number(count) || 1);
   const form = (map[kind] || map.unknown || _I18N_TOOL_SUMMARY_TEXT_EN.unknown)[state] || map.unknown.running;
   const picked = n === 1 ? form[0] : form[1];
-  return (picked.includes('{n}') ? form[0] : picked).trim();
+  if (!picked.includes('{n}')) return picked.trim();
+  const countFree = countFreeMap && (countFreeMap[kind] || countFreeMap.unknown);
+  return ((countFree && (countFree[state] || countFree.running)) || form[0]).trim();
 }
 function _i18nToolWorklogSummaryEn(kind, state, count) {
   return _i18nToolWorklogSummaryFromMap(_I18N_TOOL_SUMMARY_TEXT_EN, kind, state, count);
@@ -26280,6 +26282,18 @@ const _I18N_TOOL_SUMMARY_TEXT_PL = {
     delegate: { running: ['Delegowanie zadania', 'Delegowanie {n} zadań'], done: ['Delegowano zadanie', 'Delegowano {n} zadań'] },
     unknown: { running: ['Uruchamianie narzędzia', 'Uruchamianie {n} narzędzi'], done: ['Uruchomiono narzędzie', 'Uruchomiono {n} narzędzi'] },
 };
+const _I18N_TOOL_SUMMARY_TEXT_PL_COUNT_FREE = {
+    shell: { running: 'Uruchamianie poleceń', done: 'Uruchomiono polecenia' },
+    read: { running: 'Odczytywanie plików', done: 'Odczytano pliki' },
+    list: { running: 'Listowanie plików', done: 'Wylistowano pliki' },
+    search: { running: 'Wielokrotne przeszukiwanie obszaru roboczego', done: 'Wielokrotnie przeszukano obszar roboczy' },
+    web: { running: 'Sprawdzanie stron', done: 'Sprawdzono strony' },
+    write: { running: 'Zapisywanie plików', done: 'Zapisano pliki' },
+    skill: { running: 'Wczytywanie umiejętności', done: 'Wczytano umiejętności' },
+    memory: { running: 'Zapisywanie wpisów pamięci', done: 'Zapisano wpisy pamięci' },
+    delegate: { running: 'Delegowanie zadań', done: 'Delegowano zadania' },
+    unknown: { running: 'Uruchamianie narzędzi', done: 'Uruchomiono narzędzia' },
+};
 function _i18nProcessedElapsedPl(duration) {
   return _i18nProcessedElapsed('Przetworzono', duration);
 }
@@ -26290,7 +26304,13 @@ function _i18nToolActionLabelPl(kind, state, target, display, failed) {
   return `${verbs[state] || verbs.running} ${object}`;
 }
 function _i18nToolWorklogSummaryPl(kind, state, count) {
-  return _i18nToolWorklogSummaryFromMap(_I18N_TOOL_SUMMARY_TEXT_PL, kind, state, count);
+  return _i18nToolWorklogSummaryFromMap(
+    _I18N_TOOL_SUMMARY_TEXT_PL,
+    kind,
+    state,
+    count,
+    _I18N_TOOL_SUMMARY_TEXT_PL_COUNT_FREE,
+  );
 }
 function _i18nToolSummaryJoinPl(parts) {
   return Array.isArray(parts) ? parts.filter(Boolean).join(', ') : '';
@@ -26330,6 +26350,18 @@ const _I18N_TOOL_SUMMARY_TEXT_CS = {
     delegate: { running: ['Delegování úkolu', 'Delegování {n} úkolů'], done: ['Delegován úkol', 'Delegováno {n} úkolů'] },
     unknown: { running: ['Spouštění nástroje', 'Spouštění {n} nástrojů'], done: ['Spuštěn nástroj', 'Spuštěno {n} nástrojů'] },
 };
+const _I18N_TOOL_SUMMARY_TEXT_CS_COUNT_FREE = {
+    shell: { running: 'Spouštění příkazů', done: 'Spuštěny příkazy' },
+    read: { running: 'Čtení souborů', done: 'Přečteny soubory' },
+    list: { running: 'Výpis souborů', done: 'Vypsány soubory' },
+    search: { running: 'Opakované prohledávání prac. prostoru', done: 'Prac. prostor opakovaně prohledán' },
+    web: { running: 'Opakovaná kontrola webu', done: 'Web opakovaně zkontrolován' },
+    write: { running: 'Aktualizace souborů', done: 'Aktualizovány soubory' },
+    skill: { running: 'Načítání dovedností', done: 'Načteny dovednosti' },
+    memory: { running: 'Ukládání záznamů paměti', done: 'Uloženy záznamy paměti' },
+    delegate: { running: 'Delegování úkolů', done: 'Delegovány úkoly' },
+    unknown: { running: 'Spouštění nástrojů', done: 'Spuštěny nástroje' },
+};
 function _i18nProcessedElapsedCs(duration) {
   return _i18nProcessedElapsed('Zpracováno', duration);
 }
@@ -26340,7 +26372,13 @@ function _i18nToolActionLabelCs(kind, state, target, display, failed) {
   return `${verbs[state] || verbs.running} ${object}`;
 }
 function _i18nToolWorklogSummaryCs(kind, state, count) {
-  return _i18nToolWorklogSummaryFromMap(_I18N_TOOL_SUMMARY_TEXT_CS, kind, state, count);
+  return _i18nToolWorklogSummaryFromMap(
+    _I18N_TOOL_SUMMARY_TEXT_CS,
+    kind,
+    state,
+    count,
+    _I18N_TOOL_SUMMARY_TEXT_CS_COUNT_FREE,
+  );
 }
 function _i18nToolSummaryJoinCs(parts) {
   return Array.isArray(parts) ? parts.filter(Boolean).join(', ') : '';

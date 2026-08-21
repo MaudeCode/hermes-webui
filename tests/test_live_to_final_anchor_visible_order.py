@@ -800,7 +800,7 @@ console.log(JSON.stringify({{ok:true}}));
 def test_count_free_specialized_summaries_are_grammatical():
     locale_source = I18N_JS[
         I18N_JS.index("const _I18N_TOOL_SUMMARY_TEXT_EN"):
-        I18N_JS.index("function _i18nToolSummaryJoinEn")
+        I18N_JS.index("// Active locale")
     ]
     script = f"""
 const assert=require('assert');
@@ -808,6 +808,8 @@ const assert=require('assert');
 assert.strictEqual(_i18nToolWorklogSummaryRu('shell','running',5),'Выполняются команды');
 assert.strictEqual(_i18nToolWorklogSummaryZh('shell','running',5),'正在运行命令');
 assert.strictEqual(_i18nToolWorklogSummaryZhHant('shell','running',5),'正在執行命令');
+assert.strictEqual(_i18nToolWorklogSummaryPl('read','running',5),'Odczytywanie plików');
+assert.strictEqual(_i18nToolWorklogSummaryCs('read','running',5),'Čtení souborů');
 console.log(JSON.stringify({{ok:true}}));
 """
     _run_node_script(script)

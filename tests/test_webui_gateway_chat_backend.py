@@ -863,6 +863,8 @@ def test_gateway_chat_worker_preserves_reasoning_delta_whitespace_and_persists_r
             yield b'event: reasoning.available\n'
             yield b'data: {"content":{"text":"safe","debug":{"note":"x"}}}\n\n'
             yield b'event: reasoning.available\n'
+            yield b'data: {"titles":[]}\n\n'
+            yield b'event: reasoning.available\n'
             yield b'data: {"preview":" more"}\n\n'
             yield b'data: {"choices":[{"delta":{"content":"lo"}}]}\n\n'
             yield b'data: [DONE]\n\n'
@@ -893,14 +895,20 @@ def test_gateway_chat_worker_preserves_reasoning_delta_whitespace_and_persists_r
     saved = models.get_session(s.session_id)
     assert saved.messages[-1]["content"] == "hello"
     assert saved.messages[-1]["reasoning"] == "Let me think more"
-    assert saved.messages[-1]["reasoning_titles"] == ["Gateway title"]
+    assert "reasoning_titles" not in saved.messages[-1]
     reasoning_events = []
     while not subscriber.empty():
         item = subscriber.get_nowait()
         if item[0] == "reasoning":
             reasoning_events.append(item[1])
-    assert [event["text"] for event in reasoning_events] == ["", "Let me", " think", " more"]
-    assert all(event["titles"] == ["Gateway title"] for event in reasoning_events)
+    assert [event["text"] for event in reasoning_events] == ["", "Let me", " think", "", " more"]
+    assert [event.get("titles") for event in reasoning_events] == [
+        ["Gateway title"],
+        ["Gateway title"],
+        ["Gateway title"],
+        [],
+        [],
+    ]
     assert not any("debug" in event["text"] for event in reasoning_events)
 
 

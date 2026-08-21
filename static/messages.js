@@ -6418,18 +6418,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!_ownsActiveStreamOrBackground()) return;
       const d=JSON.parse(e.data);
       const text=d.text||'';
-      const titles=Array.isArray(d.titles)
+      const hasTitles=Array.isArray(d.titles);
+      const titles=hasTitles
         ? d.titles.filter(title=>typeof title==='string'&&title.trim()).slice(0,8)
         : [];
       reasoningText += text;
       liveReasoningText += text;
-      if(titles.length){
+      if(hasTitles){
         reasoningTitles=titles;
         liveReasoningTitles=titles;
       }
       if(d.text&&S.session&&S.session.session_id===activeSid) _completeAutomaticCompressionOnLiveProgress(activeSid);
       syncInflightAssistantMessage();
-      if(text||titles.length) _scheduleReasoningRender();
+      if(text||hasTitles) _scheduleReasoningRender();
     });
 
     source.addEventListener('tool',e=>{
