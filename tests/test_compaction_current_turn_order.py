@@ -11,6 +11,8 @@ def _identity(prompt, current_turn_user_idx):
         "attachments": [],
         "current_turn_user_idx": current_turn_user_idx,
         "turn_id": "turn-current",
+        "agent_turn_boundary_resolved": True,
+        "agent_turn_boundary_source": "result",
     }
 
 
