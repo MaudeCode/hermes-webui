@@ -93,6 +93,16 @@ that breaks the page for everyone).
 
 ## Public conversation lifecycle gate
 
+Focused reasoning-title contract coverage runs through the repository test
+wrapper:
+
+```bash
+./scripts/test.sh tests/test_reasoning_titles.py -q
+```
+
+It covers explicit Gateway titles, conservative fallback derivation, legacy
+text-only payloads, and `activity_scene_v1` persistence.
+
 `tests/browser_conversation_lifecycle.py` adds a public deterministic
 multi-row lifecycle gate. It drives the real composer and real WebUI server in Chromium,
 while a localhost-only fixture supplies reasoning, tool, process, and final/error

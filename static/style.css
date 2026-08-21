@@ -3906,6 +3906,28 @@ body.resizing .sidebar{transition:none!important;}
   font-weight:400;
   letter-spacing:0;
 }
+@keyframes reasoning-title-glow{
+  from{background-position:180% 50%;}
+  to{background-position:-80% 50%;}
+}
+[data-reasoning-active="1"] .thinking-card-label,
+.tool-card-running .tool-card-name-label{
+  color:transparent;
+  background:linear-gradient(100deg,var(--muted) 30%,var(--text) 50%,var(--muted) 70%);
+  background-size:220% 100%;
+  background-clip:text;
+  -webkit-background-clip:text;
+  animation:reasoning-title-glow 2s linear infinite;
+}
+.transparent-event-progress{display:none!important;}
+@media (prefers-reduced-motion:reduce){
+  [data-reasoning-active="1"] .thinking-card-label,
+  .tool-card-running .tool-card-name-label{
+    color:var(--muted);
+    background:none;
+    animation:none;
+  }
+}
 .tool-worklog-list > .agent-activity-thinking .thinking-card-icon,
 .tool-worklog-list > .agent-activity-thinking .thinking-copy-btn,
 .tool-worklog-list > .agent-activity-thinking .thinking-card-toggle{

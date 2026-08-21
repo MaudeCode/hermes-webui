@@ -26032,16 +26032,16 @@ const _I18N_TOOL_ACTION_TEXT_EN = {
     unknown: { running: 'Running', done: 'Ran', fail: 'run', fallback: 'a tool' },
 };
 const _I18N_TOOL_SUMMARY_TEXT_EN = {
-    shell: { running: ['Running a command', 'Running {n} commands'], done: ['Ran a command', 'Ran {n} commands'] },
-    read: { running: ['Reading a file', 'Reading {n} files'], done: ['Read a file', 'Read {n} files'] },
-    list: { running: ['Listing files', 'Listing {n} items'], done: ['Listed files', 'Listed {n} files'] },
-    search: { running: ['Searching workspace', 'Searching workspace {n} times'], done: ['Searched workspace', 'Searched workspace {n} times'] },
-    web: { running: ['Checking web', 'Checking web {n} times'], done: ['Checked the web', 'Checked the web {n} times'] },
-    write: { running: ['Updating a file', 'Updating {n} files'], done: ['Updated a file', 'Updated {n} files'] },
-    skill: { running: ['Loading a skill', 'Loading {n} skills'], done: ['Loaded a skill', 'Loaded {n} skills'] },
-    memory: { running: ['Saving memory', 'Saving {n} memory updates'], done: ['Saved memory', 'Saved {n} memory updates'] },
-    delegate: { running: ['Delegating a task', 'Delegating {n} tasks'], done: ['Delegated a task', 'Delegated {n} tasks'] },
-    unknown: { running: ['Running a tool', 'Running {n} tools'], done: ['Ran a tool', 'Ran {n} tools'] },
+    shell: { running: ['Running a command', 'Running commands'], done: ['Ran a command', 'Ran commands'] },
+    read: { running: ['Reading a file', 'Reading files'], done: ['Read a file', 'Read files'] },
+    list: { running: ['Listing files', 'Listing files'], done: ['Listed files', 'Listed files'] },
+    search: { running: ['Searching workspace', 'Searching workspace'], done: ['Searched workspace', 'Searched workspace'] },
+    web: { running: ['Searching the web', 'Searching the web'], done: ['Searched the web', 'Searched the web'] },
+    write: { running: ['Editing a file', 'Editing files'], done: ['Edited a file', 'Edited files'] },
+    skill: { running: ['Loading a tool', 'Loading tools'], done: ['Loaded a tool', 'Loaded tools'] },
+    memory: { running: ['Saving memory', 'Saving memory'], done: ['Saved memory', 'Saved memory'] },
+    delegate: { running: ['Delegating a task', 'Delegating tasks'], done: ['Delegated a task', 'Delegated tasks'] },
+    unknown: { running: ['Calling a tool', 'Calling tools'], done: ['Called a tool', 'Called tools'] },
 };
 function _i18nRuPlural(n, one, few, many) {
   const value = Math.abs(Number(n) || 0);
@@ -26189,7 +26189,10 @@ function _i18nToolWorklogSummaryZhHant(kind, state, count) {
   return _i18nToolWorklogSummaryFromMap(_I18N_TOOL_SUMMARY_TEXT_ZH_HANT, kind, state, count);
 }
 function _i18nToolSummaryJoinEn(parts) {
-  return Array.isArray(parts) ? parts.filter(Boolean).join(', ') : '';
+  if (!Array.isArray(parts)) return '';
+  return parts.filter(Boolean).map((part, index) => (
+    index ? part.charAt(0).toLocaleLowerCase() + part.slice(1) : part
+  )).join(', ');
 }
 function _i18nToolSummaryJoinRu(parts) {
   return Array.isArray(parts) ? parts.filter(Boolean).join(', ') : '';

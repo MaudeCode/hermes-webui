@@ -41,6 +41,7 @@ from api.config import (
 from api.helpers import _redact_text, redact_session_data
 from api.models import clear_process_wakeup_pause, get_session, merge_session_messages_append_only
 from api.run_journal import RunJournalWriter, bound_run_journal_snapshot_args
+from api.reasoning_titles import normalize_reasoning_titles, reasoning_event_payload
 
 logger = logging.getLogger(__name__)
 
@@ -506,6 +507,19 @@ def _gateway_reasoning_delta(payload: dict) -> str:
     return ""
 
 
+def _gateway_reasoning_titles(payload: dict) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    for key in ("titles", "reasoning_titles", "summaries", "summary"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            value = [value]
+        titles = normalize_reasoning_titles("", explicit_titles=value)
+        if titles:
+            return titles
+    return []
+
+
 def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
     """Translate Hermes Gateway tool-progress SSE payloads to WebUI events."""
     if not isinstance(payload, dict):
@@ -513,17 +527,25 @@ def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
     event_type = str(payload.get("event") or "").strip().lower()
     if event_type == "reasoning.available":
         reason_delta = _gateway_reasoning_delta(payload)
-        if not reason_delta:
+        titles = _gateway_reasoning_titles(payload)
+        if not reason_delta and not titles:
             return None
-        return "reasoning", {"text": reason_delta}
+        event_payload = {"text": reason_delta}
+        if titles:
+            event_payload["titles"] = titles
+        return "reasoning", event_payload
     name = str(payload.get("tool") or payload.get("name") or payload.get("function_name") or "").strip()
     if not name:
         return None
     if name == "_thinking":
         reason_delta = _gateway_reasoning_delta(payload)
-        if not reason_delta:
+        titles = _gateway_reasoning_titles(payload)
+        if not reason_delta and not titles:
             return None
-        return "reasoning", {"text": reason_delta}
+        event_payload = {"text": reason_delta}
+        if titles:
+            event_payload["titles"] = titles
+        return "reasoning", event_payload
     if name.startswith("_"):
         return None
     status = str(payload.get("status") or "running").strip().lower()
@@ -833,7 +855,10 @@ def _run_gateway_runs_api_streaming(
             if reasoning_delta:
                 if stream_id in STREAM_REASONING_TEXT:
                     append_stream_text_chunk(STREAM_REASONING_TEXT, stream_id, reasoning_delta)
-                put_gateway_event("reasoning", {"text": reasoning_delta})
+                put_gateway_event("reasoning", {
+                    "text": reasoning_delta,
+                    "titles": _gateway_reasoning_titles(payload),
+                })
             delta = _gateway_sse_delta(payload)
             if delta:
                 final_chunks.append(delta)
@@ -1075,10 +1100,21 @@ def _run_gateway_chat_streaming(
 
     success_writeback_committed = False
     runs_api_pending_marked = True
+    reasoning_titles: list[str] = []
 
     def put_gateway_event(event, data):
+        nonlocal reasoning_titles
         if cancel_event.is_set() and not success_writeback_committed and event not in ("cancel", "error", "apperror"):
             return
+        if event == "reasoning" and isinstance(data, dict):
+            explicit = data.get("titles")
+            data = reasoning_event_payload(
+                data.get("text"),
+                stream_text_value(STREAM_REASONING_TEXT, stream_id),
+                explicit_titles=explicit,
+            )
+            if data.get("titles"):
+                reasoning_titles = list(data["titles"])
         if event == "apperror" and isinstance(data, dict):
             data = data.copy()
             data.setdefault("session_id", session_id)
@@ -1379,7 +1415,10 @@ def _run_gateway_chat_streaming(
                         if reason_delta:
                             if stream_id in STREAM_REASONING_TEXT:
                                 append_stream_text_chunk(STREAM_REASONING_TEXT, stream_id, reason_delta)
-                            put_gateway_event("reasoning", {"text": reason_delta})
+                            put_gateway_event("reasoning", {
+                                "text": reason_delta,
+                                "titles": _gateway_reasoning_titles(payload),
+                            })
                         sse_event = "message"
                         continue
                     last_payload = payload
@@ -1389,7 +1428,10 @@ def _run_gateway_chat_streaming(
                     if reasoning_delta:
                         if stream_id in STREAM_REASONING_TEXT:
                             append_stream_text_chunk(STREAM_REASONING_TEXT, stream_id, reasoning_delta)
-                        put_gateway_event("reasoning", {"text": reasoning_delta})
+                        put_gateway_event("reasoning", {
+                            "text": reasoning_delta,
+                            "titles": _gateway_reasoning_titles(payload),
+                        })
                     delta = _gateway_sse_delta(payload)
                     if delta:
                         final_chunks.append(delta)
@@ -1465,6 +1507,13 @@ def _run_gateway_chat_streaming(
             saved_reasoning = stream_text_value(STREAM_REASONING_TEXT, stream_id)
             if saved_reasoning:
                 assistant_msg["reasoning"] = saved_reasoning
+                saved_titles = normalize_reasoning_titles(
+                    saved_reasoning,
+                    explicit_titles=reasoning_titles,
+                    stable=True,
+                )
+                if saved_titles:
+                    assistant_msg["reasoning_titles"] = saved_titles
             previous_messages = list(getattr(s, "messages", None) or [])
             stored_context = getattr(s, "context_messages", None)
             previous_context = list(

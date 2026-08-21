@@ -273,10 +273,18 @@ Queue registry:
 SSE event types and their data shapes:
 
     token       {"text": "..."}                         LLM token delta
+    reasoning   {"text": "...", "titles": ["..."]}     Reasoning delta; titles optional
     tool        {"name": "...", "preview": "..."}       Tool invocation started
     approval    {"command": "...", "description": "...", "pattern_keys": [...]}
     done        {"session": {compact_fields + messages}} Agent finished successfully
     error       {"message": "...", "trace": "..."}       Agent threw exception
+
+`reasoning.titles` is an ordered snapshot of presentation labels known for the
+current reasoning segment. The backend preserves explicit Gateway titles when
+available and otherwise derives a conservative fallback from complete reasoning
+lines. Text-only events remain valid. The same optional list is persisted on the
+matching `activity_scene_v1` thinking row so browser and native clients do not
+reimplement the fallback parser.
 
 The SSE handler loop:
     - Blocks on queue.get(timeout=30)

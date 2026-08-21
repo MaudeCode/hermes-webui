@@ -11554,6 +11554,9 @@ function _applyWorklogDetailsExpandedDefault(root){
   scope.querySelectorAll('.thinking-card').forEach(card=>{
     card.classList.toggle('open', open);
   });
+  scope.querySelectorAll('.tool-card').forEach(card=>{
+    if(!card.classList.contains('tool-card-no-detail')) card.classList.toggle('open', open);
+  });
   scope.querySelectorAll('.tool-group[data-tool-worklog-tool-group="1"],.tool-worklog-tool-group').forEach(group=>{
     group.classList.toggle('open', open);
     group.classList.toggle('tool-worklog-tool-group-collapsed', !open);
@@ -11700,16 +11703,68 @@ function _thinkingCardHtml(text, open){
   const classes=`thinking-card${shouldOpen?' open':''}`;
   return `<div class="${classes}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-btn-row">${copyBtn}<span class="thinking-card-toggle">${li('chevron-right',12)}</span></span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
 }
+function _reasoningTitleList(value){
+  if(!Array.isArray(value)) return [];
+  const out=[];
+  const seen=new Set();
+  value.forEach(item=>{
+    const title=String(item||'').replace(/\s+/g,' ').trim();
+    const key=title.toLocaleLowerCase();
+    if(!title||seen.has(key)) return;
+    seen.add(key);
+    out.push(title);
+  });
+  return out.slice(0,8);
+}
+let _reasoningTitleRotationTimer=null;
+function _ensureReasoningTitleRotation(){
+  if(_reasoningTitleRotationTimer!==null||typeof document==='undefined') return;
+  _reasoningTitleRotationTimer=setInterval(()=>{
+    if(document.hidden) return;
+    document.querySelectorAll('[data-reasoning-active="1"][data-reasoning-titles]').forEach(row=>{
+      let titles=[];
+      try{titles=_reasoningTitleList(JSON.parse(row.getAttribute('data-reasoning-titles')||'[]'));}catch(_){return;}
+      if(titles.length<2) return;
+      const next=(Number(row.getAttribute('data-reasoning-title-index')||0)+1)%titles.length;
+      const label=row.querySelector('.thinking-card-label');
+      if(label) label.textContent=titles[next];
+      row.setAttribute('data-reasoning-title-index',String(next));
+    });
+  },1500);
+}
+function _applyReasoningTitles(row, value, active){
+  if(!row) return;
+  const titles=_reasoningTitleList(value);
+  const label=row.querySelector&&row.querySelector('.thinking-card-label');
+  if(!titles.length){
+    row.removeAttribute('data-reasoning-titles');
+    row.removeAttribute('data-reasoning-title-index');
+    row.removeAttribute('data-reasoning-active');
+    if(label) label.textContent=t('thinking');
+    return;
+  }
+  const current=label&&titles.indexOf(String(label.textContent||''));
+  const index=current>=0?current:titles.length-1;
+  row.setAttribute('data-reasoning-titles',JSON.stringify(titles));
+  row.setAttribute('data-reasoning-title-index',String(index));
+  row.setAttribute('data-reasoning-active',active?'1':'0');
+  if(label){
+    label.textContent=titles[index];
+    label.setAttribute('aria-live','off');
+  }
+  if(active&&titles.length>1) _ensureReasoningTitleRotation();
+}
 function isSimplifiedToolCalling(){
   return window._simplifiedToolCalling!==false;
 }
-function _thinkingActivityNode(text, open, disclosureKey){
+function _thinkingActivityNode(text, open, disclosureKey, titles, active){
   const row=document.createElement('div');
   row.className='agent-activity-thinking';
   row.setAttribute('data-worklog-thinking-card','1');
   if(disclosureKey) row.setAttribute('data-thinking-key', String(disclosureKey));
   row.innerHTML=_thinkingCardHtml(text, open);
   _renderThinkingInto(row,text);
+  if(typeof _applyReasoningTitles==='function') _applyReasoningTitles(row,titles,active);
   return row;
 }
 function chatActivityMode(){
@@ -12432,10 +12487,6 @@ function _decorateTransparentEventRow(row, opts){
       _wireTransparentHeaderToggle(header);
       _attachCopyButton(header);
     }
-    // Attach the 3D progress bar BEFORE the early return so tool rows
-    // also get the bottom bar (the function used to return before
-    // reaching the bar attachment, which left tool rows bar-less).
-    _attachProgressBar(row, opts);
     return row;
   }
   if(type==='thinking'){
@@ -12453,7 +12504,7 @@ function _decorateTransparentEventRow(row, opts){
       if(btnRow&&btnRow.parentNode===header&&!btnRow.children.length) btnRow.remove();
       header.style.flexDirection='row';
       const label=header.querySelector('.thinking-card-label');
-      if(label) label.textContent='Thinking';
+      if(label&&!row.getAttribute('data-reasoning-titles')) label.textContent=typeof t==='function'?t('thinking'):'Thinking';
       let preview=header.querySelector('.transparent-event-preview,.transparent-event-thinking-preview');
       const previewText=_transparentEventPreview(opts.preview||opts.text||row.textContent||'');
       if(previewText){
@@ -12473,7 +12524,6 @@ function _decorateTransparentEventRow(row, opts){
       _wireTransparentHeaderToggle(header);
       _attachCopyButton(header);
     }
-    _attachProgressBar(row, opts);
   }
   return row;
 }
@@ -13328,7 +13378,14 @@ function _anchorSceneNodeForRow(row, opts){
     if(window._showThinking===false) return null;
     const text=String(row.text||row.thinking&&row.thinking.text||'').trim();
     if(!text) return null;
-    node=_thinkingActivityNode(text, false, row.row_id||row.local_id||'anchor-thinking');
+    const titles=row.thinking&&Array.isArray(row.thinking.titles)?row.thinking.titles:row.payload&&row.payload.titles;
+    node=_thinkingActivityNode(
+      text,
+      false,
+      row.row_id||row.local_id||'anchor-thinking',
+      titles,
+      !settled&&(row.status==='running'||row.status==='pending'),
+    );
   }else if(row.role==='tool'){
     node=buildToolCard(_anchorSceneToolCallFromRow(row,opts));
   }else if(row.role==='lifecycle'){
@@ -13408,7 +13465,14 @@ function _anchorSceneTransparentNodeForRow(row, opts){
     if(window._showThinking===false) return null;
     const text=String(row.text||row.thinking&&row.thinking.text||'').trim();
     if(!text) return null;
-    node=_decorateTransparentEventRow(_thinkingActivityNode(text,false,row.row_id||row.local_id||'anchor-thinking'),{
+    const titles=row.thinking&&Array.isArray(row.thinking.titles)?row.thinking.titles:row.payload&&row.payload.titles;
+    node=_decorateTransparentEventRow(_thinkingActivityNode(
+      text,
+      false,
+      row.row_id||row.local_id||'anchor-thinking',
+      titles,
+      live&&(row.status==='running'||row.status==='pending'),
+    ),{
       type:'thinking',
       text,
       preview:text,
@@ -14363,6 +14427,15 @@ function _refreshTransparentThinkingLiveRow(existing, node){
       ts:nextStamp||undefined,
       live:true,
     });
+  }
+  if(typeof _applyReasoningTitles==='function'){
+    try{
+      _applyReasoningTitles(
+        existing,
+        JSON.parse(existing.getAttribute('data-reasoning-titles')||'[]'),
+        existing.getAttribute('data-reasoning-active')==='1',
+      );
+    }catch(_){ _applyReasoningTitles(existing,[],false); }
   }
   return true;
 }
@@ -19102,25 +19175,28 @@ function _toolWorklogSummaryLine(kind, state, count){
   const n=Math.max(1,Number(count)||1);
   return _toolI18n('tool_worklog_summary',(k,s,c)=>{
     const forms={
-      shell:{running:['Running a command','Running {n} commands'],done:['Ran a command','Ran {n} commands']},
-      read:{running:['Reading a file','Reading {n} files'],done:['Read a file','Read {n} files']},
-      list:{running:['Listing files','Listing {n} items'],done:['Listed files','Listed {n} files']},
-      search:{running:['Searching workspace','Searching workspace {n} times'],done:['Searched workspace','Searched workspace {n} times']},
-      web:{running:['Checking web','Checking web {n} times'],done:['Checked the web','Checked the web {n} times']},
-      write:{running:['Updating a file','Updating {n} files'],done:['Updated a file','Updated {n} files']},
-      skill:{running:['Loading a skill','Loading {n} skills'],done:['Loaded a skill','Loaded {n} skills']},
-      memory:{running:['Saving memory','Saving {n} memory updates'],done:['Saved memory','Saved {n} memory updates']},
-      delegate:{running:['Delegating a task','Delegating {n} tasks'],done:['Delegated a task','Delegated {n} tasks']},
-      unknown:{running:['Running a tool','Running {n} tools'],done:['Ran a tool','Ran {n} tools']},
+      shell:{running:['Running a command','Running commands'],done:['Ran a command','Ran commands']},
+      read:{running:['Reading a file','Reading files'],done:['Read a file','Read files']},
+      list:{running:['Listing files','Listing files'],done:['Listed files','Listed files']},
+      search:{running:['Searching workspace','Searching workspace'],done:['Searched workspace','Searched workspace']},
+      web:{running:['Searching the web','Searching the web'],done:['Searched the web','Searched the web']},
+      write:{running:['Editing a file','Editing files'],done:['Edited a file','Edited files']},
+      skill:{running:['Loading a tool','Loading tools'],done:['Loaded a tool','Loaded tools']},
+      memory:{running:['Saving memory','Saving memory'],done:['Saved memory','Saved memory']},
+      delegate:{running:['Delegating a task','Delegating tasks'],done:['Delegated a task','Delegated tasks']},
+      unknown:{running:['Calling a tool','Calling tools'],done:['Called a tool','Called tools']},
     };
     const pair=((forms[k]||forms.unknown)[s]||forms.unknown.running);
-    return (c===1?pair[0]:pair[1]).replace('{n}',String(c));
+    return c===1?pair[0]:pair[1];
   },kind,state,n);
 }
 function _toolWorklogJoin(lines){
   const parts=Array.from(lines||[]).filter(Boolean);
   if(parts.length<=1) return parts[0]||'';
-  return _toolI18n('tool_summary_join',(items)=>items.join(', '),parts);
+  return _toolI18n('tool_summary_join',(items)=>items.map((item,index)=>{
+    if(!index) return item;
+    return item.charAt(0).toLocaleLowerCase()+item.slice(1);
+  }).join(', '),parts);
 }
 function _toolWorklogActionParts(tc){
   if(tc&&tc.nodeType===1){
@@ -19168,7 +19244,7 @@ function _toolWorklogSummary(toolCalls, opts){
     return out;
   };
   const lines=[...emit(runningCounts,'running'),...emit(doneCounts,'done')];
-  if(failed) lines.push(`${failed} failed`);
+  if(failed) lines.push('Failed');
   return lines.length?_toolWorklogJoin(lines):_toolActionLabel(cards[0]);
 }
 function _toolWorklogListEl(group){
@@ -19228,33 +19304,11 @@ function _toolGroupIcon(rows){
 }
 function _syncToolRowsContainer(tools, isLiveWorklog){
   if(!tools) return;
-  const existingGroup=tools.querySelector(':scope > .tool-worklog-tool-group,:scope > .tool-group[data-tool-worklog-tool-group="1"]');
-  const wasOpen=!!(existingGroup&&existingGroup.classList&&existingGroup.classList.contains('open'));
   const rows=_directWorklogToolRows(tools);
   _unwrapNestedToolGroups(tools);
   rows.forEach(row=>{ if(row.parentElement) row.remove(); });
   tools.querySelectorAll(':scope > .tool-card-row').forEach(row=>row.remove());
-  const shouldGroup=tools.classList.contains('wl-step-tools') && rows.length>1;
-  if(!shouldGroup){
-    rows.forEach(row=>tools.appendChild(row));
-    return;
-  }
-  const shouldOpen=wasOpen||_worklogDetailsExpandedDefault();
-  const group=document.createElement('div');
-  group.className='tool-group'+(shouldOpen?' open':' tool-worklog-tool-group-collapsed');
-  group.setAttribute('data-tool-worklog-tool-group','1');
-  let groupKey='group';
-  if(tools.parentElement){
-    const steps=Array.from(tools.parentElement.children).filter(child=>child.classList&&child.classList.contains('wl-step-tools')&&child.getAttribute('data-worklog-tools')==='1');
-    const stepIdx=steps.indexOf(tools);
-    if(stepIdx>=0) groupKey=`step:${stepIdx}`;
-  }
-  group.setAttribute('data-tool-group-disclosure-key',groupKey);
-  const summary=_toolWorklogSummary(rows,{live:isLiveWorklog, toolCount:rows.length});
-  group.innerHTML=`<button type="button" class="tool-group-head tool-worklog-tool-group-head" aria-expanded="${shouldOpen?'true':'false'}" onclick="_toggleToolWorklogGroup(this)"><span class="tool-worklog-tool-group-icon tg-icon">${_toolGroupIcon(rows)}</span><span class="tg-sum tool-worklog-tool-group-label">${esc(summary)}</span><span class="tool-call-group-chevron tg-caret">${li('chevron-right',12)}</span></button><div class="tool-group-body tool-worklog-tool-group-body"><div class="tg-rows tool-worklog-tool-group-rows"></div></div>`;
-  const body=group.querySelector('.tg-rows');
-  rows.forEach(row=>body.appendChild(row));
-  tools.appendChild(group);
+  rows.forEach(row=>tools.appendChild(row));
 }
 function _syncToolWorklogToolGroup(group){
   const list=_toolWorklogListEl(group);
@@ -19419,10 +19473,9 @@ function buildToolCard(tc){
   const hasMore=tc.snippet&&tc.snippet.length>displaySnippet.length;
   const moreLabel=tc.is_diff?'Show diff':'Show more';
   const lessLabel=tc.is_diff?'Hide diff':'Show less';
-  const runIndicator=tc.done===false?'<span class="tool-card-running-dot"></span>':'';
   const isSubagent=tc.name==='subagent_progress';
   const isDelegation=tc.name==='delegate_task';
-  const openClass='';
+  const openClass=hasDetail&&typeof _worklogDetailsExpandedDefault==='function'&&_worklogDetailsExpandedDefault()?' open':'';
   const cardClass='tool-card'+(tc.done===false?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'')+(hasDetail?'':' tool-card-no-detail')+openClass;
   const headerClick=hasDetail?' onclick="this.closest(\'.tool-card\').classList.toggle(\'open\')"':'';
   // Clean up legacy subagent prefixes since the Lucide icon already shows it
@@ -19440,7 +19493,6 @@ function buildToolCard(tc){
   row.innerHTML=`
     <div class="${cardClass}">
       <div class="tool-card-header"${headerClick}>
-        ${runIndicator}
         <span class="tool-card-icon">${icon}</span>
         <span class="tool-card-name"><span class="tool-card-name-label">${esc(displayName)}</span><span class="tool-card-name-generic">${esc(genericName)}</span></span>
         <span class="tool-card-preview">${esc(previewText)}</span>
@@ -19563,10 +19615,10 @@ function _syncToolCallGroupSummary(group){
     if(group.getAttribute('data-run-activity-group')==='1'){
       label.textContent=toolCount?_toolWorklogSummary(cards,{live:isLiveWorklog, toolCount}):'Running';
     }else if(isWorklogGroup){
-      const processedLabel=isLiveWorklog
-        ? _activityProcessedElapsedLabel(group)
-        : _activitySettledProcessedLabel(group);
-      label.textContent=processedLabel||t('processed_elapsed','');
+      const thinkingLabel=group.querySelector('.agent-activity-thinking .thinking-card-label');
+      label.textContent=toolCount
+        ? _toolWorklogSummary(cards,{live:isLiveWorklog,toolCount})
+        : (thinkingLabel&&thinkingLabel.textContent.trim()||t('thinking'));
     }else{
       const rows=Array.from(group.querySelectorAll('.tool-card-row'));
       // Prefer the live _tcData classification; fall back to the durable data-*
@@ -20839,6 +20891,7 @@ function finalizeThinkingCard(){
       row.removeAttribute('id');
       row.removeAttribute('data-thinking-active');
       row.removeAttribute('data-live-thinking');
+      row.setAttribute('data-reasoning-active','0');
     }
     return;
   }
@@ -20862,6 +20915,7 @@ function finalizeThinkingCard(){
     }
     row.removeAttribute('id');
     row.removeAttribute('data-thinking-active');
+    row.setAttribute('data-reasoning-active','0');
     return;
   }
   const turn=$('liveAssistantTurn');
@@ -20872,6 +20926,7 @@ function finalizeThinkingCard(){
     turn.querySelectorAll('.agent-activity-thinking[data-thinking-active="1"]').forEach(active=>{
       active.removeAttribute('data-thinking-active');
       active.removeAttribute('data-live-thinking');
+      active.setAttribute('data-reasoning-active','0');
     });
     _syncToolCallGroupSummary(group);
   }
@@ -20911,6 +20966,7 @@ function appendThinking(text='', options){
     }
     row.setAttribute('data-thinking-active','1');
     _renderThinkingInto(row,text);
+    if(typeof _applyReasoningTitles==='function') _applyReasoningTitles(row,options.titles,true);
     if(typeof scrollIfPinned==='function') scrollIfPinned();
     return;
   }
@@ -20936,7 +20992,7 @@ function appendThinking(text='', options){
     if(isTransparentStream()){
       let row=blocks.querySelector(`.agent-activity-thinking[data-live-thinking="1"][data-live-thinking-key="${CSS.escape(thinkingKey)}"]`);
       if(!row){
-        row=_thinkingActivityNode(clean, false);
+        row=_thinkingActivityNode(clean, false, '', options.titles, true);
         row.id='thinkingRow';
         row.setAttribute('data-live-thinking','1');
         row.setAttribute('data-live-thinking-key',thinkingKey);
@@ -20955,6 +21011,7 @@ function appendThinking(text='', options){
         else blocks.appendChild(row);
       }else{
         _renderThinkingInto(row, clean);
+        if(typeof _applyReasoningTitles==='function') _applyReasoningTitles(row,options.titles,true);
       }
       row.id='thinkingRow';
       row.setAttribute('data-thinking-active','1');
@@ -20985,7 +21042,7 @@ function appendThinking(text='', options){
     if(list){
       let row=list.querySelector(`.agent-activity-thinking[data-live-thinking="1"][data-live-thinking-key="${CSS.escape(thinkingKey)}"]`);
       if(!row){
-        row=_thinkingActivityNode(clean, false, thinkingKey);
+        row=_thinkingActivityNode(clean, false, thinkingKey, options.titles, true);
         row.setAttribute('data-live-thinking','1');
         row.setAttribute('data-live-thinking-key',thinkingKey);
         if(segmentSeq) row.setAttribute('data-live-segment-seq',segmentSeq);
@@ -21000,6 +21057,7 @@ function appendThinking(text='', options){
         list.appendChild(row);
       }else{
         _renderThinkingInto(row, clean);
+        if(typeof _applyReasoningTitles==='function') _applyReasoningTitles(row,options.titles,true);
       }
       row.setAttribute('data-thinking-active','1');
       _syncToolCallGroupSummary(group);
@@ -21016,6 +21074,7 @@ function removeThinking(){
       row.removeAttribute('id');
       row.removeAttribute('data-thinking-active');
       row.removeAttribute('data-live-thinking');
+      row.setAttribute('data-reasoning-active','0');
     });
     if(liveTurn&&blocks&&!blocks.children.length) liveTurn.remove();
     return;

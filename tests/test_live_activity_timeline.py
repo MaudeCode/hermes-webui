@@ -53,7 +53,7 @@ def test_per_segment_tool_activity_does_not_include_run_metadata_rows():
     assert "Tool finished: ${toolName}" not in UI_JS
     assert "Running tool: ${toolName}" not in UI_JS
     assert "_worklogReasonNodeFromText(thinkingText" not in UI_JS
-    assert "_thinkingActivityNode(clean, false, thinkingKey)" in UI_JS
+    assert "_thinkingActivityNode(clean, false, thinkingKey, options.titles, true)" in UI_JS
     assert "data-live-thinking-key" in UI_JS
 
 
@@ -74,8 +74,19 @@ def test_tool_activity_uses_tool_cards_and_run_activity_owns_timer():
     assert "return !!(group&&group.getAttribute('data-run-activity-group')==='1');" in UI_JS
     live_summary_fn = UI_JS.split("function _syncToolCallGroupSummary(group)", 1)[1].split("function _activityProgressLabelForToolName", 1)[0]
     assert "_activityLiveProgressLabel(group)" not in live_summary_fn
-    assert "_activityProcessedElapsedLabel(group)" in live_summary_fn
+    assert "_activityProcessedElapsedLabel(group)" not in live_summary_fn
+    assert "_toolWorklogSummary(cards,{live:isLiveWorklog,toolCount})" in live_summary_fn
     assert "durationEl.textContent='';" in live_summary_fn
+
+
+def test_active_rows_use_text_glow_without_spinner_or_progress_bar():
+    build_fn = UI_JS.split("function buildToolCard(tc)", 1)[1].split("function _syncToolCallGroupSummary", 1)[0]
+    decorate_fn = UI_JS.split("function _decorateTransparentEventRow", 1)[1].split("function _attachProgressBar", 1)[0]
+    assert "tool-card-running-dot" not in build_fn
+    assert "_attachProgressBar(row, opts)" not in decorate_fn
+    assert '[data-reasoning-active="1"] .thinking-card-label' in STYLE_CSS
+    assert ".tool-card-running .tool-card-name-label" in STYLE_CSS
+    assert "prefers-reduced-motion:reduce" in STYLE_CSS
 
 
 def test_settled_activity_render_keeps_tools_bound_to_progress_bursts():

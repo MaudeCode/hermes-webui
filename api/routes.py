@@ -68,6 +68,7 @@ from api.session_events import (
 )
 from api.gateway_restart import restart_active_profile_gateway
 from api.shares import create_or_refresh_share, load_share, revoke_share
+from api.reasoning_titles import normalize_reasoning_titles
 
 logger = logging.getLogger(__name__)
 
@@ -4353,6 +4354,16 @@ def _anchor_scene_message_reasoning_text(message) -> str:
     return ""
 
 
+def _anchor_scene_message_reasoning_titles(message) -> list[str]:
+    if not isinstance(message, dict):
+        return []
+    return normalize_reasoning_titles(
+        _anchor_scene_message_reasoning_text(message),
+        explicit_titles=message.get("reasoning_titles"),
+        stable=True,
+    )
+
+
 def _anchor_scene_clean_text(value) -> str:
     return " ".join(str(value or "").split()).strip()
 
@@ -4577,7 +4588,7 @@ def _anchor_scene_prose_row(text, order_index, message_index, stream_id=""):
     return row
 
 
-def _anchor_scene_thinking_row(text, order_index, message_index, stream_id=""):
+def _anchor_scene_thinking_row(text, order_index, message_index, stream_id="", titles=None):
     row = _anchor_scene_row_base("thinking", "reasoning", "reasoning", order_index, message_index, stream_id)
     row["text"] = str(text or "")
     preview = _anchor_scene_clean_text(text)
@@ -4586,6 +4597,14 @@ def _anchor_scene_thinking_row(text, order_index, message_index, stream_id=""):
         "preview": (preview[:177] + "...") if len(preview) > 180 else preview,
         "dedupe_key": f"thinking:{preview.lower()}" if preview else "",
     }
+    normalized_titles = normalize_reasoning_titles(
+        text,
+        explicit_titles=titles,
+        stable=True,
+    )
+    if normalized_titles:
+        row["thinking"]["titles"] = normalized_titles
+        row["payload"]["titles"] = normalized_titles
     row["payload"]["text"] = row["text"]
     return row
 
@@ -4870,7 +4889,13 @@ def _anchor_scene_content_rows(message, order_index, message_index, stream_id=""
         if part_type in ("thinking", "reasoning"):
             text = _anchor_scene_content_text(part)
             if _anchor_scene_clean_text(text):
-                rows.append(_anchor_scene_thinking_row(text, order_index + len(rows), message_index, stream_id))
+                rows.append(_anchor_scene_thinking_row(
+                    text,
+                    order_index + len(rows),
+                    message_index,
+                    stream_id,
+                    part.get("titles") or part.get("reasoning_titles"),
+                ))
             continue
         if part_type == "tool_use":
             rows.append(
@@ -5110,7 +5135,13 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
             order += 1
         reasoning = _anchor_scene_message_reasoning_text(message)
         if _anchor_scene_clean_text(reasoning) and _anchor_scene_text_key(reasoning) != _anchor_scene_text_key(text):
-            push(_anchor_scene_thinking_row(reasoning, order, absolute_idx, stream_id))
+            push(_anchor_scene_thinking_row(
+                reasoning,
+                order,
+                absolute_idx,
+                stream_id,
+                _anchor_scene_message_reasoning_titles(message),
+            ))
             order += 1
         for key in ("tool_calls", "_partial_tool_calls"):
             calls = message.get(key)

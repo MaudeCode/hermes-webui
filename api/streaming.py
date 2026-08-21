@@ -90,6 +90,7 @@ from api.process_event_utils import (
     schedule_async_delegation_claim_retry,
     stamp_message_source,
 )
+from api.reasoning_titles import normalize_reasoning_titles, reasoning_event_payload
 
 
 _TERMINAL_SSE_VISIBLE_MESSAGE_LIMIT = 80
@@ -9801,10 +9802,14 @@ def _run_agent_streaming(
             _metering_last_emit = [time.monotonic() - 1]  # fire immediately on first token
             _reasoning_last_put = [0.0]
             _reasoning_buffer = ['']
+            _reasoning_titles_last_sent = [[]]
             _metering_output_deltas = [0]
             _metering_reasoning_deltas = [0]
 
-            def _flush_reasoning_buffer():
+            def _current_reasoning_text():
+                return stream_text_value(_reasoning_segments, _current_reasoning_idx)
+
+            def _flush_reasoning_buffer(*, stable=False):
                 # #4729: emit any coalesced-but-not-yet-flushed reasoning text immediately.
                 # The ~10 Hz throttle in on_reasoning leaves a sub-100ms tail in the buffer;
                 # the agent never calls reasoning_callback(None), and reasoning can transition
@@ -9812,8 +9817,20 @@ def _run_agent_streaming(
                 # closes or reorders the live reasoning stream — otherwise the tail is
                 # silently lost from the live Thinking view (the frontend appends deltas).
                 if _reasoning_buffer[0]:
-                    put('reasoning', {'text': _reasoning_buffer[0]})
+                    payload = reasoning_event_payload(
+                        _reasoning_buffer[0],
+                        _current_reasoning_text(),
+                        stable=stable,
+                    )
+                    put('reasoning', payload)
+                    if payload.get('titles'):
+                        _reasoning_titles_last_sent[0] = payload['titles']
                     _reasoning_buffer[0] = ''
+                elif stable:
+                    titles = normalize_reasoning_titles(_current_reasoning_text(), stable=True)
+                    if titles and titles != _reasoning_titles_last_sent[0]:
+                        put('reasoning', {'text': '', 'titles': titles})
+                        _reasoning_titles_last_sent[0] = titles
 
 
             def _emit_metering():
@@ -9887,7 +9904,7 @@ def _run_agent_streaming(
                     return  # end-of-stream sentinel
                 # #4729: visible output is starting — flush any buffered reasoning tail
                 # first so the live Thinking stream is complete before/at the transition.
-                _flush_reasoning_buffer()
+                _flush_reasoning_buffer(stable=True)
                 _token_sent = True
                 # Accumulate partial text so cancel_stream() can persist it (#893).
                 #
@@ -9926,7 +9943,7 @@ def _run_agent_streaming(
                 if text is None:
                     # Flush any remaining coalesced reasoning buffer so the last
                     # partial window is not lost when the reasoning phase ends.
-                    _flush_reasoning_buffer()
+                    _flush_reasoning_buffer(stable=True)
                     return
                 _tool_boundary_advanced = False
                 reasoning_delta = str(text)
@@ -9961,7 +9978,13 @@ def _run_agent_streaming(
                 now = time.monotonic()
                 if now - _reasoning_last_put[0] >= 0.1:
                     _reasoning_last_put[0] = now
-                    put('reasoning', {'text': _reasoning_buffer[0]})
+                    payload = reasoning_event_payload(
+                        _reasoning_buffer[0],
+                        _current_reasoning_text(),
+                    )
+                    put('reasoning', payload)
+                    if payload.get('titles'):
+                        _reasoning_titles_last_sent[0] = payload['titles']
                     _reasoning_buffer[0] = ''
                 # Track reasoning deltas in the meter so live TPS reflects all AI output.
                 _metering_reasoning_deltas[0] += 1
@@ -10041,7 +10064,7 @@ def _run_agent_streaming(
                 nonlocal _reasoning_segments, _current_reasoning_idx, _tool_boundary_advanced
                 # #4729: a tool boundary closes/reorders the live reasoning stream — flush
                 # any buffered reasoning tail first so it isn't stranded behind the tool event.
-                _flush_reasoning_buffer()
+                _flush_reasoning_buffer(stable=True)
                 event_type = None
                 name = None
                 preview = None
@@ -10079,7 +10102,13 @@ def _run_agent_streaming(
                         # Lock-free GIL-atomic mirror — see STREAMS_LOCK contract in on_token.
                         if stream_id in STREAM_REASONING_TEXT:
                             append_stream_text_chunk(STREAM_REASONING_TEXT, stream_id, reason_delta)
-                        put('reasoning', {'text': reason_delta})
+                        payload = reasoning_event_payload(
+                            reason_delta,
+                            stream_text_value(_reasoning_segments, _current_reasoning_idx),
+                        )
+                        put('reasoning', payload)
+                        if payload.get('titles'):
+                            _reasoning_titles_last_sent[0] = payload['titles']
                         _metering_reasoning_deltas[0] += 1
                         meter().record_reasoning(stream_id, _metering_reasoning_deltas[0])
                         _emit_metering()
@@ -11102,7 +11131,7 @@ def _run_agent_streaming(
             # buffer (the agent never calls reasoning_callback(None), and a turn can end on
             # reasoning with no trailing token/tool boundary to trigger a flush) so the last
             # sub-100ms window reaches the live Thinking view before the terminal done event.
-            _flush_reasoning_buffer()
+            _flush_reasoning_buffer(stable=True)
             if cancel_event.is_set():
                 if _checkpoint_stop is not None:
                     _checkpoint_stop.set()
@@ -12000,6 +12029,14 @@ def _run_agent_streaming(
                                 _rm['reasoning'] = _merged_reasoning
                         elif _existing_reasoning:
                             _rm['reasoning'] = _existing_reasoning
+                        if _rm.get('reasoning'):
+                            _reasoning_titles = normalize_reasoning_titles(
+                                _rm.get('reasoning'),
+                                explicit_titles=_rm.get('reasoning_titles'),
+                                stable=True,
+                            )
+                            if _reasoning_titles:
+                                _rm['reasoning_titles'] = _reasoning_titles
                 try:
                     _turn_duration_seconds = max(0.0, time.time() - float(_turn_started_at))
                 except Exception:
@@ -12686,7 +12723,7 @@ def _run_agent_streaming(
             # loses its last coalesced chunk. Runs before stream teardown; STREAM_REASONING_TEXT
             # already mirrors the full text for persistence regardless.
             try:
-                _flush_reasoning_buffer()
+                _flush_reasoning_buffer(stable=True)
             except Exception:
                 pass
             # Stop the live metering ticker
