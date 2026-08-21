@@ -13624,10 +13624,28 @@ function _syncActivitySequenceSummary(group){
   if(!group) return;
   const label=group.querySelector(':scope > .tool-worklog-summary .tool-worklog-label');
   if(!label) return;
+  const isActive=group.getAttribute('data-live-activity-current')==='1';
+  const activityRows=Array.from(group.querySelectorAll('.agent-activity-thinking,.tool-card-row'));
+  const current=activityRows[activityRows.length-1];
+  let currentLabel='';
+  if(isActive&&current){
+    if(current.classList.contains('agent-activity-thinking')){
+      const thinkingLabel=current.querySelector('.thinking-card-label');
+      if(thinkingLabel) currentLabel=thinkingLabel.textContent.trim();
+    }else{
+      currentLabel=current.getAttribute('data-tool-action-label')
+        || (current.querySelector('.tool-card-name-label')&&current.querySelector('.tool-card-name-label').textContent.trim());
+    }
+    if(currentLabel){
+      label.textContent=currentLabel;
+      label.setAttribute('data-sweep-label',label.textContent);
+      return;
+    }
+  }
   const titled=Array.from(group.querySelectorAll('.agent-activity-thinking[data-reasoning-titles] .thinking-card-label')).pop();
   const cards=Array.from(group.querySelectorAll('.tool-card-row .tool-card,.tool-card-row.tl'));
   label.textContent=(titled&&titled.textContent.trim())
-    || (cards.length?_toolWorklogSummary(cards,{live:group.getAttribute('data-live-activity-current')==='1',toolCount:cards.length}):(typeof t==='function'?t('thinking'):'Thinking'));
+    || (cards.length?_toolWorklogSummary(cards,{live:false,toolCount:cards.length}):(typeof t==='function'?t('thinking'):'Thinking'));
   label.setAttribute('data-sweep-label',label.textContent);
 }
 function _activitySequenceDirectNode(node){
@@ -19279,7 +19297,7 @@ function _toolActionLabelText(tc, opts){
       list:{running:'Listing',done:'Listed',fallback:'files'},
       search:{running:'Searching for',done:'Searched for',fallback:'workspace'},
       web:{running:'Checking',done:'Checked',fallback:'web data'},
-      write:{running:'Updating',done:'Updated',fallback:'a file'},
+      write:{running:'Editing',done:'Edited',fallback:'a file'},
       skill:{running:'Loading',done:'Loaded',fallback:'a skill'},
       memory:{running:'Saving',done:'Saved',fallback:'memory'},
       delegate:{running:'Delegating',done:'Delegated',fallback:'a task'},

@@ -700,11 +700,57 @@ def test_activity_sequences_are_collapsed_inside_visible_prose_and_preserve_open
     assert "actual=existing" in reconcile
     assert "data-reasoning-titles" in summary
     assert "_toolWorklogSummary" in summary
+    assert "const activityRows=Array.from(group.querySelectorAll('.agent-activity-thinking,.tool-card-row'))" in summary
+    assert "data-tool-action-label" in summary
+    assert "if(isActive&&current)" in summary
     assert "t('processed_elapsed',durationText)" in settled_summary
     assert '.activity-sequence-group[data-live-activity-current="1"] > .tool-worklog-summary .tool-worklog-label' in STYLE_CSS
     assert '[data-anchor-scene-live-owner="1"] [data-anchor-scene-owner="1"] > .tool-worklog-summary{display:none!important;}' in STYLE_CSS
     interim = _event_listener_body(MESSAGES_JS, "interim_assistant")
     assert "closeCurrentLiveActivityGroup" not in interim
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for activity-summary behavior")
+def test_active_sequence_summary_tracks_current_inner_row():
+    script = f"""
+const assert=require('assert');
+function _syncActivitySequenceSummary(group){{
+{_function_body(UI_JS, "_syncActivitySequenceSummary")}
+}}
+global.t=()=>"Thinking";
+global._toolWorklogSummary=()=>"Ran 1 command";
+const label={{textContent:'',setAttribute(){{}}}};
+const tool={{
+  classList:{{contains:()=>false}},
+  getAttribute:name=>name==='data-tool-action-label'?'Running git status':'',
+  querySelector:()=>null,
+}};
+const thinkingLabel={{textContent:'Inspecting repository'}};
+const thinking={{
+  classList:{{contains:name=>name==='agent-activity-thinking'}},
+  getAttribute:()=>'',
+  querySelector:selector=>selector==='.thinking-card-label'?thinkingLabel:null,
+}};
+let currentRows=[tool], titled=[], cards=[];
+const group={{
+  getAttribute:name=>name==='data-live-activity-current'?'1':'',
+  querySelector:()=>label,
+  querySelectorAll:selector=>selector==='.agent-activity-thinking,.tool-card-row'?currentRows:
+    selector.includes('data-reasoning-titles')?titled:cards,
+}};
+_syncActivitySequenceSummary(group);
+assert.strictEqual(label.textContent,'Running git status');
+currentRows=[thinking];
+_syncActivitySequenceSummary(group);
+assert.strictEqual(label.textContent,'Inspecting repository');
+group.getAttribute=()=>'';
+currentRows=[tool];
+cards=[{{}}];
+_syncActivitySequenceSummary(group);
+assert.strictEqual(label.textContent,'Ran 1 command');
+console.log(JSON.stringify({{ok:true}}));
+"""
+    _run_node_script(script)
 
 
 def test_anchor_tool_preview_slot_stays_empty_for_result_text():

@@ -26025,7 +26025,7 @@ const _I18N_TOOL_ACTION_TEXT_EN = {
     list: { running: 'Listing', done: 'Listed', fail: 'list', fallback: 'files' },
     search: { running: 'Searching', done: 'Searched', fail: 'search', fallback: 'workspace' },
     web: { running: 'Checking', done: 'Checked', fail: 'check', fallback: 'web data' },
-    write: { running: 'Updating', done: 'Updated', fail: 'update', fallback: 'a file' },
+    write: { running: 'Editing', done: 'Edited', fail: 'edit', fallback: 'a file' },
     skill: { running: 'Loading', done: 'Loaded', fail: 'load', fallback: 'a skill' },
     memory: { running: 'Saving', done: 'Saved', fail: 'save', fallback: 'memory' },
     delegate: { running: 'Delegating', done: 'Delegated', fail: 'delegate', fallback: 'a task' },
