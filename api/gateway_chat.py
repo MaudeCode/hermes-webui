@@ -24,6 +24,7 @@ from api.config import (
     STREAM_LIVE_TOOL_CALLS,
     STREAM_PARTIAL_TEXT,
     STREAM_REASONING_TEXT,
+    STREAM_REASONING_TITLES,
     append_stream_text_chunk,
     stream_text_value,
     set_stream_text_value,
@@ -41,6 +42,7 @@ from api.config import (
 from api.helpers import _redact_text, redact_session_data
 from api.models import clear_process_wakeup_pause, get_session, merge_session_messages_append_only
 from api.run_journal import RunJournalWriter, bound_run_journal_snapshot_args
+from api.reasoning_titles import normalize_reasoning_titles, reasoning_event_payload
 
 logger = logging.getLogger(__name__)
 
@@ -506,6 +508,25 @@ def _gateway_reasoning_delta(payload: dict) -> str:
     return ""
 
 
+def _gateway_reasoning_titles(payload: dict) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    for key in ("titles", "reasoning_titles", "summaries", "summary"):
+        if key not in payload:
+            continue
+        value = payload.get(key)
+        if isinstance(value, str):
+            value = [value]
+        return normalize_reasoning_titles("", explicit_titles=value)
+    return []
+
+
+def _gateway_has_reasoning_titles(payload: dict) -> bool:
+    return isinstance(payload, dict) and any(
+        key in payload for key in ("titles", "reasoning_titles", "summaries", "summary")
+    )
+
+
 def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
     """Translate Hermes Gateway tool-progress SSE payloads to WebUI events."""
     if not isinstance(payload, dict):
@@ -513,17 +534,27 @@ def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
     event_type = str(payload.get("event") or "").strip().lower()
     if event_type == "reasoning.available":
         reason_delta = _gateway_reasoning_delta(payload)
-        if not reason_delta:
+        titles = _gateway_reasoning_titles(payload)
+        has_titles = _gateway_has_reasoning_titles(payload)
+        if not reason_delta and not has_titles:
             return None
-        return "reasoning", {"text": reason_delta}
+        event_payload = {"text": reason_delta}
+        if has_titles:
+            event_payload["titles"] = titles
+        return "reasoning", event_payload
     name = str(payload.get("tool") or payload.get("name") or payload.get("function_name") or "").strip()
     if not name:
         return None
     if name == "_thinking":
         reason_delta = _gateway_reasoning_delta(payload)
-        if not reason_delta:
+        titles = _gateway_reasoning_titles(payload)
+        has_titles = _gateway_has_reasoning_titles(payload)
+        if not reason_delta and not has_titles:
             return None
-        return "reasoning", {"text": reason_delta}
+        event_payload = {"text": reason_delta}
+        if has_titles:
+            event_payload["titles"] = titles
+        return "reasoning", event_payload
     if name.startswith("_"):
         return None
     status = str(payload.get("status") or "running").strip().lower()
@@ -830,10 +861,14 @@ def _run_gateway_runs_api_streaming(
                 put_gateway_event("cancel", {"message": "Cancelled by gateway"})
                 return None, usage
             reasoning_delta = _gateway_sse_reasoning_delta(payload)
-            if reasoning_delta:
+            has_titles = _gateway_has_reasoning_titles(payload)
+            if reasoning_delta or has_titles:
                 if stream_id in STREAM_REASONING_TEXT:
                     append_stream_text_chunk(STREAM_REASONING_TEXT, stream_id, reasoning_delta)
-                put_gateway_event("reasoning", {"text": reasoning_delta})
+                reasoning_payload = {"text": reasoning_delta}
+                if has_titles:
+                    reasoning_payload["titles"] = _gateway_reasoning_titles(payload)
+                put_gateway_event("reasoning", reasoning_payload)
             delta = _gateway_sse_delta(payload)
             if delta:
                 final_chunks.append(delta)
@@ -1071,14 +1106,56 @@ def _run_gateway_chat_streaming(
         CANCEL_FLAGS[stream_id] = cancel_event
         STREAM_PARTIAL_TEXT[stream_id] = []
         STREAM_REASONING_TEXT[stream_id] = []
+        STREAM_REASONING_TITLES.pop(stream_id, None)
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
 
     success_writeback_committed = False
     runs_api_pending_marked = True
+    reasoning_titles: list[str] = []
+    explicit_reasoning_titles: list[str] = []
+    explicit_reasoning_titles_seen = False
+    reasoning_segment_chunks: list[str] = []
+    reasoning_segment_open = False
+    closing_reasoning_segment = False
 
     def put_gateway_event(event, data):
+        nonlocal reasoning_titles, explicit_reasoning_titles, explicit_reasoning_titles_seen
+        nonlocal reasoning_segment_open
+        if (
+            event in {"token", "interim_assistant", "tool", "tool_complete", "done", "cancel", "apperror", "error"}
+            and reasoning_segment_open
+            and not closing_reasoning_segment
+        ):
+            _close_gateway_reasoning_segment()
         if cancel_event.is_set() and not success_writeback_committed and event not in ("cancel", "error", "apperror"):
             return
+        if event == "reasoning" and isinstance(data, dict):
+            starts_new_segment = not reasoning_segment_open
+            reasoning_delta = str(data.get("text") or "")
+            if reasoning_delta:
+                reasoning_segment_chunks.append(reasoning_delta)
+            if reasoning_delta or "titles" in data:
+                reasoning_segment_open = True
+            if "titles" in data:
+                explicit_reasoning_titles_seen = True
+                explicit_reasoning_titles = normalize_reasoning_titles(
+                    "",
+                    explicit_titles=data.get("titles"),
+                )
+            data = reasoning_event_payload(
+                reasoning_delta,
+                "",
+                explicit_titles=(
+                    explicit_reasoning_titles
+                    if explicit_reasoning_titles_seen
+                    else None
+                ),
+            )
+            if starts_new_segment and "titles" not in data and stream_id in STREAM_REASONING_TITLES:
+                data["titles"] = []
+            if "titles" in data:
+                reasoning_titles = list(data["titles"])
+                STREAM_REASONING_TITLES[stream_id] = reasoning_titles
         if event == "apperror" and isinstance(data, dict):
             data = data.copy()
             data.setdefault("session_id", session_id)
@@ -1112,6 +1189,41 @@ def _run_gateway_chat_streaming(
             q.put_nowait(queue_item)
         except Exception:
             logger.debug("Failed to put gateway event to queue")
+
+    def _close_gateway_reasoning_segment():
+        nonlocal reasoning_titles, explicit_reasoning_titles, explicit_reasoning_titles_seen
+        nonlocal reasoning_segment_chunks, reasoning_segment_open, closing_reasoning_segment
+        if not reasoning_segment_open:
+            return
+        stable_payload = reasoning_event_payload(
+            "",
+            "".join(reasoning_segment_chunks),
+            explicit_titles=(
+                explicit_reasoning_titles
+                if explicit_reasoning_titles_seen
+                else None
+            ),
+            stable=True,
+        )
+        previous_titles = list(reasoning_titles)
+        titles_present = "titles" in stable_payload
+        if titles_present:
+            reasoning_titles = list(stable_payload["titles"])
+            STREAM_REASONING_TITLES[stream_id] = reasoning_titles
+        reasoning_segment_chunks = []
+        reasoning_segment_open = False
+        explicit_reasoning_titles = []
+        explicit_reasoning_titles_seen = False
+        if titles_present and reasoning_titles != previous_titles:
+            closing_reasoning_segment = True
+            try:
+                put_gateway_event("reasoning", stable_payload)
+            finally:
+                closing_reasoning_segment = False
+                reasoning_segment_chunks = []
+                reasoning_segment_open = False
+                explicit_reasoning_titles = []
+                explicit_reasoning_titles_seen = False
 
     s = None
     final_chunks: list[str] = []
@@ -1376,20 +1488,29 @@ def _run_gateway_chat_streaming(
                         continue
                     if sse_event == "reasoning.available":
                         reason_delta = _gateway_reasoning_delta(payload)
-                        if reason_delta:
+                        titles = _gateway_reasoning_titles(payload)
+                        has_titles = _gateway_has_reasoning_titles(payload)
+                        if reason_delta or has_titles:
                             if stream_id in STREAM_REASONING_TEXT:
                                 append_stream_text_chunk(STREAM_REASONING_TEXT, stream_id, reason_delta)
-                            put_gateway_event("reasoning", {"text": reason_delta})
+                            reasoning_payload = {"text": reason_delta}
+                            if has_titles:
+                                reasoning_payload["titles"] = titles
+                            put_gateway_event("reasoning", reasoning_payload)
                         sse_event = "message"
                         continue
                     last_payload = payload
                     if payload.get("error"):
                         terminal_error = str(payload["error"])
                     reasoning_delta = _gateway_sse_reasoning_delta(payload)
-                    if reasoning_delta:
+                    has_titles = _gateway_has_reasoning_titles(payload)
+                    if reasoning_delta or has_titles:
                         if stream_id in STREAM_REASONING_TEXT:
                             append_stream_text_chunk(STREAM_REASONING_TEXT, stream_id, reasoning_delta)
-                        put_gateway_event("reasoning", {"text": reasoning_delta})
+                        reasoning_payload = {"text": reasoning_delta}
+                        if has_titles:
+                            reasoning_payload["titles"] = _gateway_reasoning_titles(payload)
+                        put_gateway_event("reasoning", reasoning_payload)
                     delta = _gateway_sse_delta(payload)
                     if delta:
                         final_chunks.append(delta)
@@ -1398,6 +1519,7 @@ def _run_gateway_chat_streaming(
                         put_gateway_event("token", {"text": delta})
                     usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
             usage.update({k: v for k, v in _gateway_stream_usage(last_payload).items() if v})
+        _close_gateway_reasoning_segment()
         assistant_text = "".join(final_chunks).strip()
         if terminal_error:
             error_payload = _settle_gateway_terminal_error(
@@ -1465,6 +1587,18 @@ def _run_gateway_chat_streaming(
             saved_reasoning = stream_text_value(STREAM_REASONING_TEXT, stream_id)
             if saved_reasoning:
                 assistant_msg["reasoning"] = saved_reasoning
+            titles_snapshot_present = stream_id in STREAM_REASONING_TITLES
+            saved_titles = normalize_reasoning_titles(
+                saved_reasoning,
+                explicit_titles=(
+                    reasoning_titles
+                    if titles_snapshot_present
+                    else None
+                ),
+                stable=True,
+            )
+            if saved_titles or titles_snapshot_present:
+                assistant_msg["reasoning_titles"] = saved_titles
             previous_messages = list(getattr(s, "messages", None) or [])
             stored_context = getattr(s, "context_messages", None)
             previous_context = list(
@@ -1721,6 +1855,7 @@ def _run_gateway_chat_streaming(
             STREAM_GOAL_RELATED.pop(stream_id, None)
             STREAM_PARTIAL_TEXT.pop(stream_id, None)
             STREAM_REASONING_TEXT.pop(stream_id, None)
+            STREAM_REASONING_TITLES.pop(stream_id, None)
             STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)
             STREAM_LAST_EVENT_ID.pop(stream_id, None)
             STREAMS.pop(stream_id, None)

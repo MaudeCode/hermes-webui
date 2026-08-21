@@ -8,7 +8,7 @@
 > Prerequisites: SSH tunnel is active on port 8787. Open http://localhost:8787 in browser.
 > Server health check: curl http://127.0.0.1:8787/health should return {"status":"ok"}.
 >
-> Automated coverage: ~11,500 tests collected via `./scripts/test.sh tests/ --collect-only -q`. Tests run on every PR via GitHub Actions on Python 3.11, 3.12, and 3.13 (3 parallel shards each), alongside a ruff lint gate, a headless browser smoke test, and a Docker smoke test. The suite covers the bootstrap/static wizard, real provider config persistence (`config.yaml` + `.env`), the `/api/onboarding/*` backend, the onboarding skip/existing-config guard, CSS regression coverage for thinking/tool card animation, streaming session persistence, mobile layout breakpoints, locale parity across 14 languages, and hundreds of issue/PR-pinned regression tests.
+> Automated coverage: ~11,500 tests collected via `./scripts/test.sh tests/ --collect-only -q`. Tests run on every PR via GitHub Actions on Python 3.13 across five parallel shards, alongside a ruff lint gate, a headless browser smoke test, and a Docker smoke test. The suite covers the bootstrap/static wizard, real provider config persistence (`config.yaml` + `.env`), the `/api/onboarding/*` backend, the onboarding skip/existing-config guard, CSS regression coverage for thinking/tool card animation, streaming session persistence, mobile layout breakpoints, locale parity across 14 languages, and hundreds of issue/PR-pinned regression tests.
 > Run: `./scripts/test.sh`
 >
 > Local regression focus: verify that a previously closed workspace panel stays visually closed from first paint through boot completion on desktop refresh; there should be no brief open-then-close flash.
@@ -92,6 +92,18 @@ real model (it verifies the app *loads and initializes* cleanly — the brick cl
 that breaks the page for everyone).
 
 ## Public conversation lifecycle gate
+
+Focused reasoning-title contract coverage runs through the repository test
+wrapper:
+
+```bash
+./scripts/test.sh tests/test_reasoning_titles.py -q
+```
+
+It covers explicit Gateway title authority, title-only terminal persistence,
+conservative and bounded fallback derivation, sensitive-title rejection,
+legacy text-only payloads, Reduced Motion, tool-disclosure accessibility, and
+`activity_scene_v1` persistence.
 
 `tests/browser_conversation_lifecycle.py` adds a public deterministic
 multi-row lifecycle gate. It drives the real composer and real WebUI server in Chromium,

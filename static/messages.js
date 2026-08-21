@@ -2608,9 +2608,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       || (INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastReasoningText)
       || ''
     : '';
+  const _lastReasoningTitles = reconnecting
+    ? (_liveInflightAssistant&&Array.isArray(_liveInflightAssistant.reasoning_titles)
+      ? _liveInflightAssistant.reasoning_titles
+      : (INFLIGHT[activeSid]&&Array.isArray(INFLIGHT[activeSid].lastReasoningTitles)
+        ? INFLIGHT[activeSid].lastReasoningTitles
+        : []))
+    : [];
   assistantText = _lastLiveAssistant ? _lastLiveAssistant : '';
   reasoningText=_lastLiveReasoning ? _lastLiveReasoning : '';
   let liveReasoningText = reasoningText;
+  let reasoningTitles = _lastReasoningTitles.slice(0,8);
+  let liveReasoningTitles = reasoningTitles.slice();
   let visibleInterimSnippets=[];
   let _latestGoalStatus=null;
   let _pendingGoalContinuation=null;
@@ -2914,6 +2923,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!inflight) return;
     inflight.lastAssistantText=assistantText;
     inflight.lastReasoningText=reasoningText;
+    inflight.lastReasoningTitles=reasoningTitles.slice();
     if(!Array.isArray(inflight.messages)) inflight.messages=[];
     let assistantIdx=-1;
     for(let i=inflight.messages.length-1;i>=0;i--){
@@ -2929,11 +2939,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(assistantIdx>=0){
       inflight.messages[assistantIdx].content=split.content;
       inflight.messages[assistantIdx].reasoning=split.reasoning||undefined;
+      inflight.messages[assistantIdx].reasoning_titles=reasoningTitles.length?reasoningTitles.slice():undefined;
       inflight.messages[assistantIdx]._ts=inflight.messages[assistantIdx]._ts||ts;
       _throttledPersist();
       return;
     }
-    inflight.messages.push({role:'assistant',content:split.content,reasoning:split.reasoning||undefined,_live:true,_ts:ts});
+    inflight.messages.push({role:'assistant',content:split.content,reasoning:split.reasoning||undefined,reasoning_titles:reasoningTitles.length?reasoningTitles.slice():undefined,_live:true,_ts:ts});
     _throttledPersist();
   }
   function recordActivityBoundary(){
@@ -3494,7 +3505,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     row.payload={...row.payload,text:row.text};
     return row;
   }
-  function _anchorSceneThinkingRow(text, orderIndex, messageIndex){
+  function _anchorSceneThinkingRow(text, orderIndex, messageIndex, titles){
     const row=_anchorSceneRowBase('thinking','reasoning','reasoning',orderIndex,messageIndex);
     row.text=String(text||'');
     const preview=_anchorSceneCleanText(text);
@@ -3502,8 +3513,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       text:row.text,
       preview:preview.length>180?`${preview.slice(0,177)}...`:preview,
       dedupe_key:preview?`thinking:${preview.toLowerCase()}`:'',
+      titles:Array.isArray(titles)?titles.filter(value=>typeof value==='string'&&value.trim()).slice(0,8):[],
     };
-    row.payload={...row.payload,text:row.text};
+    row.payload={...row.payload,text:row.text,titles:row.thinking.titles};
     return row;
   }
   function _anchorSceneToolRowFromCall(tool, orderIndex, messageIndex){
@@ -3740,7 +3752,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       if(part.type==='thinking'||part.type==='reasoning'){
         const text=_anchorSceneContentText(part);
-        if(_anchorSceneCleanText(text)) rows.push(_anchorSceneThinkingRow(text,rows.length,messageIndex));
+        const titles=part.titles||part.reasoning_titles;
+        if(_anchorSceneCleanText(text)||(Array.isArray(titles)&&titles.length)) rows.push(_anchorSceneThinkingRow(
+          text,
+          rows.length,
+          messageIndex,
+          titles,
+        ));
         continue;
       }
       if(part.type==='tool_use'){
@@ -3856,8 +3874,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         pool.push({..._anchorSceneProseRow(text,0,idx),_phase:2,_encounter:encounter++});
       }
       const reasoning=_anchorSceneMessageReasoningText(message);
-      if(_anchorSceneCleanText(reasoning)&&_anchorSceneTextKey(reasoning)!==_anchorSceneTextKey(text)){
-        pool.push({..._anchorSceneThinkingRow(reasoning,0,idx),_phase:0,_encounter:encounter++});
+      const reasoningTitles=Array.isArray(message.reasoning_titles)?message.reasoning_titles:[];
+      if(
+        (_anchorSceneCleanText(reasoning)||reasoningTitles.length)
+        &&(!_anchorSceneCleanText(reasoning)||_anchorSceneTextKey(reasoning)!==_anchorSceneTextKey(text))
+      ){
+        pool.push({..._anchorSceneThinkingRow(reasoning,0,idx,message.reasoning_titles),_phase:0,_encounter:encounter++});
       }
       const messageTools=[];
       if(Array.isArray(message.tool_calls)) messageTools.push(...message.tool_calls);
@@ -4587,6 +4609,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _upsertAnchorReasoning(text, options={}){
     const clean=String(text||'').trim();
+    const titlesPresent=Array.isArray(options.titles);
+    const hasTitles=Array.isArray(options.titles)&&options.titles.length>0;
     const placement=_liveThinkingPlacement();
     const segmentSeq=Number(options.segmentSeq||placement.segmentSeq||_anchorSegmentSeq());
     const localId=String(options.localId||`live-reasoning:${streamId}:${segmentSeq}`);
@@ -4595,15 +4619,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       options.segmentSeq=segmentSeq;
       if(options.burstId===undefined) options.burstId=_currentActivityBurstId;
     }
-    if(!clean||!_anchorRegistry||window._showThinking===false) return null;
+    if(!_anchorRegistry||window._showThinking===false) return null;
     const existing=_findAnchorActivityEventByLocalId(localId,'reasoning');
+    if(!clean&&!hasTitles&&(!titlesPresent||!existing)) return null;
     if(existing){
+      const existingPayload=existing.payload&&typeof existing.payload==='object'?existing.payload:{};
+      const nextText=clean||String(existingPayload.text||'').trim();
       const replaced=_replaceAnchorActivityEventByLocalId(localId,'reasoning',{
         status:options.sealed?'completed':'running',
-        payload:{text:clean,activitySegmentSeq:segmentSeq,activityBurstId:_currentActivityBurstId},
+        payload:{text:nextText,titles:Array.isArray(options.titles)?options.titles:[],activitySegmentSeq:segmentSeq,activityBurstId:_currentActivityBurstId},
       });
       const turn=$('liveAssistantTurn');
-      if(turn&&typeof window._updateLiveAnchorReasoningRowForFallback==='function'&&window._updateLiveAnchorReasoningRowForFallback(turn,clean,{
+      if(turn&&typeof window._updateLiveAnchorReasoningRowForFallback==='function'&&window._updateLiveAnchorReasoningRowForFallback(turn,nextText,{
         ...options,
         anchorReasoningLocalId:localId,
         localId,
@@ -4620,6 +4647,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       local_id:localId,
       seq:_nextAnchorLocalSeq(),
       status:options.sealed?'completed':'running',
+      titles:Array.isArray(options.titles)?options.titles:[],
       activitySegmentSeq:segmentSeq,
       activityBurstId:_currentActivityBurstId,
     },null,renderOutcome);
@@ -4725,7 +4753,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!_isSessionCurrentPane(activeSid)||S.activeStreamId!==streamId) return;
     _reasoningRenderDirty=false;
     const liveThinkingText=_liveThinkingText();
-    const anchorReasoningFallback={};
+    const anchorReasoningFallback={
+      titles:typeof liveReasoningTitles==='undefined'?[]:liveReasoningTitles,
+    };
     if(!_upsertAnchorReasoning(liveThinkingText,anchorReasoningFallback)){
       _updateLiveThinkingCard(liveThinkingText,{
         ...anchorReasoningFallback,
@@ -4752,14 +4782,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       clearTimeout(_pendingReasoningRenderHandle);
       _pendingReasoningRenderHandle=null;
     }
-    if(_reasoningRenderDirty&&String(liveReasoningText||'').trim()) _paintPendingReasoning(true);
+    if(_reasoningRenderDirty) _paintPendingReasoning(true);
   }
   function _flushReasoningToAnchor(){
     _flushPendingReasoningRender();
-    if(_anchorReasoningFlushed||!reasoningText) return;
+    if(_anchorReasoningFlushed||(!reasoningText&&!reasoningTitles.length)) return;
     _anchorReasoningFlushed=true;
     if(_anchorHasReasoningEvents()) return;
-    _upsertAnchorReasoning(reasoningText,{sealed:true,localId:`live-reasoning:${streamId}:final`});
+    _upsertAnchorReasoning(reasoningText,{sealed:true,titles:reasoningTitles,localId:`live-reasoning:${streamId}:final`});
   }
   function _sourceEventTypeForSnapshotAnchorRow(row){
     const source=String(row&&row.source_event_type||'').trim();
@@ -6317,6 +6347,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(reasoningEcho) _stripLiveReasoningEcho(visible);
       _flushPendingReasoningRender();
       liveReasoningText='';
+      liveReasoningTitles=[];
       if(alreadyStreamed){
         if(!S.session||S.session.session_id!==activeSid){
           recordActivityBoundary();
@@ -6329,7 +6360,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           ensureAssistantRow(true);
           _flushPendingSegmentRender({force:true});
           if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
-          if(typeof closeCurrentLiveActivityGroup==='function') closeCurrentLiveActivityGroup();
           recordActivityBoundary();
         }
         _resetAssistantSegment();
@@ -6348,7 +6378,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(assistantRow) assistantRow.setAttribute('data-interim','1');
       _flushPendingSegmentRender({force:true,skipAnchorProcessProse:true});
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
-      if(typeof closeCurrentLiveActivityGroup==='function') closeCurrentLiveActivityGroup();
       _applyToAnchor('interim_assistant',d,e);
       // Collapse old interim notes once more than INTERIM_COLLAPSE_THRESHOLD accumulate.
       const INTERIM_COLLAPSE_THRESHOLD=3;
@@ -6394,11 +6423,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!_ownsActiveStreamOrBackground()) return;
       const d=JSON.parse(e.data);
       const text=d.text||'';
+      const hasTitles=Array.isArray(d.titles);
+      const titles=hasTitles
+        ? d.titles.filter(title=>typeof title==='string'&&title.trim()).slice(0,8)
+        : [];
       reasoningText += text;
       liveReasoningText += text;
+      if(hasTitles){
+        reasoningTitles=titles;
+        liveReasoningTitles=titles;
+      }
       if(d.text&&S.session&&S.session.session_id===activeSid) _completeAutomaticCompressionOnLiveProgress(activeSid);
       syncInflightAssistantMessage();
-      if(text) _scheduleReasoningRender();
+      if(text||hasTitles) _scheduleReasoningRender();
     });
 
     source.addEventListener('tool',e=>{
@@ -6422,6 +6459,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // tool cards. Close the current live card before appending a tool row.
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       liveReasoningText='';
+      liveReasoningTitles=[];
       const oldRow=$('toolRunningRow');if(oldRow)oldRow.remove();
       const pendingDisplayText=segmentStart===0
         ? (_parseStreamState().displayText||'')
@@ -6777,6 +6815,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // Persist reasoning trace for Worklog Thinking Cards; normal transcript
           // rendering keeps provider reasoning out of the final answer.
           if(reasoningText&&lastAsst&&!lastAsst.reasoning) lastAsst.reasoning=reasoningText;
+          if(reasoningTitles.length&&lastAsst) lastAsst.reasoning_titles=reasoningTitles.slice();
           // Strip any inline <think> blocks still embedded in the server-side
           // content (M3 OpenAI-compat doesn't separate reasoning). Move them
           // to m.reasoning so the persisted session stays compact and the

@@ -60,6 +60,8 @@ def _isolate_stream_state():
     # New shared dicts for §A and §B
     if hasattr(config, 'STREAM_REASONING_TEXT'):
         config.STREAM_REASONING_TEXT.clear()
+    if hasattr(config, 'STREAM_REASONING_TITLES'):
+        config.STREAM_REASONING_TITLES.clear()
     if hasattr(config, 'STREAM_LIVE_TOOL_CALLS'):
         config.STREAM_LIVE_TOOL_CALLS.clear()
     yield
@@ -73,6 +75,8 @@ def _isolate_stream_state():
     config.STREAM_PARTIAL_TEXT.clear()
     if hasattr(config, 'STREAM_REASONING_TEXT'):
         config.STREAM_REASONING_TEXT.clear()
+    if hasattr(config, 'STREAM_REASONING_TITLES'):
+        config.STREAM_REASONING_TITLES.clear()
     if hasattr(config, 'STREAM_LIVE_TOOL_CALLS'):
         config.STREAM_LIVE_TOOL_CALLS.clear()
 
@@ -504,7 +508,11 @@ class TestCancelWithReasoningOnlyNoText:
         assert hasattr(config, "STREAM_LIVE_TOOL_CALLS"), (
             "cancel payload test requires live tool capture"
         )
+        assert hasattr(config, "STREAM_REASONING_TITLES"), (
+            "cancel payload test requires reasoning-title capture"
+        )
         config.STREAM_REASONING_TEXT[stream_id] = "Important cancelled reasoning"
+        config.STREAM_REASONING_TITLES[stream_id] = ["Inspecting cancellation"]
         config.STREAM_LIVE_TOOL_CALLS[stream_id] = [
             {"name": "terminal", "args": {"command": "pytest -q"}, "done": False},
         ]
@@ -523,6 +531,7 @@ class TestCancelWithReasoningOnlyNoText:
         ]
         assert partials, f"Expected persisted partial in cancel SSE payload: {session_payload}"
         assert partials[-1]["reasoning"] == "Important cancelled reasoning"
+        assert partials[-1]["reasoning_titles"] == ["Inspecting cancellation"]
         assert partials[-1]["_partial_tool_calls"][0]["name"] == "terminal"
         assert any(
             isinstance(m, dict) and m.get("_error") and "Task cancelled" in str(m.get("content") or "")

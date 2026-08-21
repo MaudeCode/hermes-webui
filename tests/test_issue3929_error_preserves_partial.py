@@ -50,6 +50,8 @@ def _isolate_stream_state():
     config.STREAM_PARTIAL_TEXT.clear()
     if hasattr(config, 'STREAM_REASONING_TEXT'):
         config.STREAM_REASONING_TEXT.clear()
+    if hasattr(config, 'STREAM_REASONING_TITLES'):
+        config.STREAM_REASONING_TITLES.clear()
     if hasattr(config, 'STREAM_LIVE_TOOL_CALLS'):
         config.STREAM_LIVE_TOOL_CALLS.clear()
     yield
@@ -59,6 +61,8 @@ def _isolate_stream_state():
     config.STREAM_PARTIAL_TEXT.clear()
     if hasattr(config, 'STREAM_REASONING_TEXT'):
         config.STREAM_REASONING_TEXT.clear()
+    if hasattr(config, 'STREAM_REASONING_TITLES'):
+        config.STREAM_REASONING_TITLES.clear()
     if hasattr(config, 'STREAM_LIVE_TOOL_CALLS'):
         config.STREAM_LIVE_TOOL_CALLS.clear()
 

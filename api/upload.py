@@ -178,6 +178,9 @@ def _register_upload_rollback_receipt(session_id: str, target: Path, *, is_dir: 
             'is_dir': bool(is_dir),
             'device': stat.st_dev,
             'inode': stat.st_ino,
+            'size': stat.st_size,
+            'mtime_ns': stat.st_mtime_ns,
+            'ctime_ns': stat.st_ctime_ns,
             'created_at': now,
         }
     return token
@@ -211,7 +214,21 @@ def _rollback_upload_receipts(session_id: str, tokens: list[str]) -> dict:
             if not resolved_target.is_relative_to(root.resolve()):
                 raise ValueError('Invalid rollback target')
             current = target.stat(follow_symlinks=False)
-            if (current.st_dev, current.st_ino) != (receipt.get('device'), receipt.get('inode')):
+            current_identity = (
+                current.st_dev,
+                current.st_ino,
+                current.st_size,
+                current.st_mtime_ns,
+                current.st_ctime_ns,
+            )
+            receipt_identity = (
+                receipt.get('device'),
+                receipt.get('inode'),
+                receipt.get('size'),
+                receipt.get('mtime_ns'),
+                receipt.get('ctime_ns'),
+            )
+            if current_identity != receipt_identity:
                 raise ValueError('Upload target changed')
             if receipt.get('is_dir'):
                 rmtree_anchored(root, target)

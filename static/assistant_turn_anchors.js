@@ -902,10 +902,15 @@
       text
     );
     const preview=thinkingText?String(thinkingText).replace(/\s+/g,' ').trim():'';
+    const rawTitles=_own(payload,'titles');
+    const titles=Array.isArray(rawTitles)
+      ? rawTitles.map(value=>_cleanString(value)).filter(Boolean).slice(0,8)
+      : [];
     return Object.freeze({
       text:thinkingText||'',
       preview:preview.length>180?`${preview.slice(0,177)}...`:preview,
       dedupe_key:preview?`thinking:${preview.toLowerCase()}`:'',
+      titles:Object.freeze(titles),
     });
   }
 

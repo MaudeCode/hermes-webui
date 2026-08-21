@@ -308,7 +308,6 @@ class TestToolCallGroupingStatic:
         append_thinking_fn = _function_body(UI_JS, "appendThinking")
         append_step_fn = _function_body(UI_JS, "_appendWorklogStep")
         build_tool_fn = _function_body(UI_JS, "buildToolCard")
-        sync_tools_fn = _function_body(UI_JS, "_syncToolRowsContainer")
 
         thinking_branch = re.search(
             r"if\(el\.classList\.contains\('thinking-card'\)\)\{(?P<body>.*?)\n  \}\n  if\(el\.classList\.contains\('tool-card'\)\)",
@@ -323,7 +322,7 @@ class TestToolCallGroupingStatic:
         assert ".thinking-card-body pre" not in thinking_body and "textContent" not in thinking_body, (
             "Thinking-card disclosure keys must not depend on streaming body text."
         )
-        assert "_thinkingActivityNode(clean, false, thinkingKey)" in append_thinking_fn, (
+        assert "_thinkingActivityNode(clean, false, thinkingKey, options.titles, true)" in append_thinking_fn, (
             "Live streaming Thinking rows must stamp the stable thinking key at creation time."
         )
         assert "_thinkingActivityNode(thinkingText, false, thinkingDisclosureKey)" in append_step_fn, (
@@ -369,10 +368,6 @@ class TestToolCallGroupingStatic:
         assert "_worklogDetailTextKey" not in group_body and "textContent" not in group_body, (
             "Multi-tool Worklog group disclosure keys must not depend on changing summary text."
         )
-        assert "data-tool-group-disclosure-key" in sync_tools_fn and "stepIdx" in sync_tools_fn, (
-            "Grouped Worklog tool rows must stamp a stable per-step disclosure key."
-        )
-
     def test_live_tool_cards_use_grouping_only_when_simplified(self):
         live_fn = _function_body(UI_JS, "appendLiveToolCard")
         settled_fn = _function_body(UI_JS, "renderMessages")
@@ -457,13 +452,14 @@ class TestToolCallGroupingStatic:
 
     def test_live_activity_summary_shows_readable_progress_without_persisted_content(self):
         sync_fn = _function_body(UI_JS, "_syncToolCallGroupSummary")
+        elapsed_fn = _function_body(UI_JS, "_updateActiveActivityElapsedTimer")
         progress_fn = _function_body(UI_JS, "_activityProgressLabelForToolName")
         live_progress_fn = _function_body(UI_JS, "_activityLiveProgressLabel")
         assert "_activityLiveProgressLabel" not in sync_fn, (
             "Live compact Activity rows should no longer mix transient tool-progress text "
             "into the processed-time anchor."
         )
-        assert "_activityProcessedElapsedLabel(group)" in sync_fn and "durationEl.textContent='';" in sync_fn, (
+        assert "_activityProcessedElapsedLabel(group)" in elapsed_fn and "durationEl.textContent='';" in elapsed_fn, (
             "The Worklog summary should own the processed-time anchor while the old "
             "duration slot stays empty."
         )
@@ -618,7 +614,7 @@ class TestToolCallGroupingStatic:
         assert "_worklogReasonNodeFromText(thinkingText" not in live_thinking_fn, (
             "Provider reasoning should not render as live Worklog process prose."
         )
-        assert "_thinkingActivityNode(clean, false, thinkingKey)" in live_thinking_fn and "data-live-thinking" in live_thinking_fn, (
+        assert "_thinkingActivityNode(clean, false, thinkingKey, options.titles, true)" in live_thinking_fn and "data-live-thinking" in live_thinking_fn, (
             "Live provider thinking should render as a collapsed Worklog Thinking Card."
         )
         assert "ensureLiveWorklogContainer" in live_thinking_fn, (
@@ -645,13 +641,11 @@ class TestToolCallGroupingStatic:
         )
         reset_fn = _function_body(MESSAGES_JS, "_resetAssistantSegment")
         assert "assistantRow=null" in reset_fn and "assistantBody=null" in reset_fn
-        assert "function closeCurrentLiveActivityGroup()" in UI_JS, (
-            "Visible interim assistant progress needs a shared helper to close the current Activity burst."
-        )
         interim_match = re.search(r"source\.addEventListener\('interim_assistant',e=>\{(.*?)\n\s*\}\);", MESSAGES_JS, re.S)
-        assert interim_match and "closeCurrentLiveActivityGroup()" in interim_match.group(1), (
-            "Visible interim assistant progress is timeline content and must split the current Activity burst."
+        assert interim_match and "recordActivityBoundary()" in interim_match.group(1), (
+            "Visible interim assistant progress must seal the current activity sequence."
         )
+        assert "closeCurrentLiveActivityGroup" not in UI_JS
         assert interim_match and "ensureAssistantRow(true)" in interim_match.group(1), (
             "Visible interim assistant progress must create a visible assistant timeline segment."
         )
@@ -746,18 +740,13 @@ class TestToolCallGroupingStatic:
             "before the next segment starts."
         )
 
-    def test_live_compression_card_splits_current_tool_activity_burst(self):
+    def test_live_compression_stays_inside_current_activity_sequence(self):
         compression_fn = _function_body(UI_JS, "appendLiveCompressionCard")
-        close_fn = _function_body(UI_JS, "closeCurrentLiveActivityGroup")
-        assert "closeCurrentLiveActivityGroup();" in compression_fn, (
-            "Auto-compression cards should close the current live Activity burst so later tools start a fresh group."
-        )
-        assert "data-live-activity-current" in close_fn, (
-            "The live compression boundary helper must clear the current Activity marker."
-        )
-        assert "removeAttribute('data-live-activity-current')" in close_fn, (
-            "Closing a live Activity burst should leave the row rendered but stop later tools from reusing it."
-        )
+        render_fn = _function_body(UI_JS, "_renderAnchorSceneRowsIntoWorklog")
+        direct_fn = _function_body(UI_JS, "_activitySequenceDirectNode")
+        assert "closeCurrentLiveActivityGroup" not in compression_fn
+        assert "row.role==='lifecycle'" in render_fn
+        assert "compression-card-row" in direct_fn
 
 
 class TestToolCardDesignTokens:
@@ -862,8 +851,9 @@ class TestToolCardDesignTokens:
         assert "_toolActionLabelText(tc,{limit:112})" in build
         assert "_toolActionLabelText(tc,{generic:true,limit:112})" in build
         assert "(hasDetail?'':' tool-card-no-detail')" in build
-        assert "const headerClick=hasDetail?" in build
-        assert '<div class="tool-card-header"${headerClick}>' in build
+        assert '<button type="button" class="tool-card-header"' in build
+        assert "aria-expanded" in build and "aria-controls" in build
+        assert "hidden" in build
         assert "tool-card-name-label" in build and "tool-card-name-generic" in build
         assert "tool-card-detail-lead" in build
         assert "_toolDetailLeadText(toolKind,tc)" in build

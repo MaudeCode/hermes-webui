@@ -1082,6 +1082,7 @@ def test_activity_scene_projects_current_activity_events_for_both_render_modes()
         "text": "private thinking",
         "preview": "private thinking",
         "dedupe_key": "thinking:private thinking",
+        "titles": [],
     }
     assert compact_rows[2]["group"] == {
         "group_key": "segment:3",
@@ -1478,7 +1479,7 @@ def test_slice6_live_shadow_feed_wires_anchor_scene_for_visible_order_handoff():
         "function _scheduleReasoningRender", 1
     )[0]
     assert "const liveThinkingText=_liveThinkingText();" in reasoning_render_body
-    assert "const anchorReasoningFallback={};" in reasoning_render_body
+    assert "titles:typeof liveReasoningTitles==='undefined'?[]:liveReasoningTitles" in reasoning_render_body
     assert "if(!_upsertAnchorReasoning(liveThinkingText,anchorReasoningFallback))" in reasoning_render_body
     assert "_updateLiveThinkingCard(liveThinkingText,{" in reasoning_render_body
     assert "...anchorReasoningFallback" in reasoning_render_body

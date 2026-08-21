@@ -9,7 +9,7 @@
 
 > Current shipped build: `v0.51.792` (July 1, 2026).
 > Automated coverage: ~11,500 tests via `pytest tests/ --collect-only -q`. CI runs on
-> Python 3.11, 3.12, and 3.13 (3 parallel shards each) against every PR, plus a ruff
+> Python 3.13 across five parallel shards against every PR, plus a ruff
 > lint gate, a headless browser smoke test, and a Docker smoke test.
 >
 > Notable architecture state: the bootstrap and first-run onboarding flow own setup discovery; the default WebUI state directory is `~/.hermes/webui`; `ctl.sh` provides a daemon wrapper for homelab installs; chat streaming is still WebUI-owned SSE with stream-ownership guards, cancellation, async manual compression, and turn-journal audit plumbing; provider/model discovery is profile-aware with live-model cache invalidation and custom-provider scoping. (Version/test-count numbers above are a periodic snapshot — the authoritative source is the latest git tag and `pytest --collect-only`.)
@@ -273,10 +273,18 @@ Queue registry:
 SSE event types and their data shapes:
 
     token       {"text": "..."}                         LLM token delta
+    reasoning   {"text": "...", "titles": ["..."]}     Reasoning delta; titles optional
     tool        {"name": "...", "preview": "..."}       Tool invocation started
     approval    {"command": "...", "description": "...", "pattern_keys": [...]}
     done        {"session": {compact_fields + messages}} Agent finished successfully
     error       {"message": "...", "trace": "..."}       Agent threw exception
+
+`reasoning.titles` is an ordered snapshot of presentation labels known for the
+current reasoning segment. The backend preserves explicit Gateway titles when
+available and otherwise derives a conservative fallback from complete reasoning
+lines. Text-only events remain valid. The same optional list is persisted on the
+matching `activity_scene_v1` thinking row so browser and native clients do not
+reimplement the fallback parser.
 
 The SSE handler loop:
     - Blocks on queue.get(timeout=30)

@@ -65,6 +65,8 @@ class FakeNode{{
   set innerHTML(value){{if(value===''){{this.clearCount++;for(const child of this.children)child.parentNode=null;this.children=[];}}}}
   setAttribute(name,value){{this.attributes[name]=String(value);}}
   getAttribute(name){{return Object.prototype.hasOwnProperty.call(this.attributes,name)?this.attributes[name]:null;}}
+  removeAttribute(name){{delete this.attributes[name];}}
+  toggleAttribute(name,force){{if(force)this.setAttribute(name,'');else delete this.attributes[name];}}
   appendChild(child){{return this.insertBefore(child,null);}}
   insertBefore(child,ref){{
     if(child.parentNode){{const old=child.parentNode.children.indexOf(child);if(old>=0)child.parentNode.children.splice(old,1);}}
@@ -89,6 +91,16 @@ global._anchorSceneNodeForRow=row=>{{
   return node;
 }};
 global._syncToolCallGroupSummary=()=>{{}};
+global._activitySequenceNodeKey=node=>node.getAttribute('data-anchor-row-id')||'sequence';
+global._createActivitySequenceGroup=(key,live)=>{{
+  const sequence=new FakeNode('div');
+  sequence.setAttribute('data-activity-sequence-group','1');
+  sequence.setAttribute('data-activity-sequence-key',key);
+  sequence.list=new FakeNode('div');
+  sequence.appendChild(sequence.list);
+  return sequence;
+}};
+global._syncActivitySequenceSummary=()=>{{}};
 for(const name of [
   '_anchorSceneCompactRowKey','_anchorSceneCompactTopLevelKey',
   '_anchorSceneCompactNodesEqual','_reconcileAnchorSceneCompactChildren',
@@ -101,6 +113,7 @@ _renderAnchorSceneRowsIntoWorklog(group,[
   {{row_id:'status-1',role:'control',source_event_type:'status',text:'running'}},
 ],{{live:true}});
 const firstBefore=list.children[0];
+const thinkingBefore=firstBefore.list.children[0];
 const secondBefore=list.children[1];
 _renderAnchorSceneRowsIntoWorklog(group,[
   {{row_id:'reason-1',role:'thinking',source_event_type:'reasoning',text:'unchanged'}},
@@ -108,14 +121,16 @@ _renderAnchorSceneRowsIntoWorklog(group,[
 ],{{live:true}});
 process.stdout.write(JSON.stringify({{
   firstPreserved:list.children[0]===firstBefore,
+  thinkingPreserved:list.children[0].list.children[0]===thinkingBefore,
   changedReplaced:list.children[1]!==secondBefore,
   clearCount:list.clearCount,
-  order:list.children.map(x=>x.getAttribute('data-anchor-row-id')),
+  order:list.children.map(x=>x.getAttribute('data-activity-sequence-key')||x.getAttribute('data-anchor-row-id')),
 }}));
 """
     result = _run_node(script)
     assert result == {
         "firstPreserved": True,
+        "thinkingPreserved": True,
         "changedReplaced": True,
         "clearCount": 0,
         "order": ["reason-1", "status-1"],

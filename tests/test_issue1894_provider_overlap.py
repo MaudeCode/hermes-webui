@@ -63,8 +63,12 @@ def test_selected_opencode_go_wins_over_custom_provider_overlap():
     try:
         # model_with_provider_context strips the prefix when config_provider
         # equals the selected provider — deepseek-v4-pro is passed bare.
-        wrapped = model_with_provider_context('deepseek-v4-pro', 'opencode-go')
-        model, provider, base_url = resolve_model_provider(wrapped)
+        wrapped = model_with_provider_context(
+            'deepseek-v4-pro',
+            'opencode-go',
+            config_data=cfg_mod.cfg,
+        )
+        model, provider, base_url = resolve_model_provider(wrapped, config_data=cfg_mod.cfg)
         assert provider == 'opencode-go', (
             f'Expected provider=opencode-go, got provider={provider!r}. '
             f'WebUI was routed to custom provider instead.'
@@ -93,7 +97,10 @@ def test_selected_opencode_go_wins_direct_resolve():
         'models': {'deepseek-v4-pro': {}},
     }]
     try:
-        model, provider, base_url = resolve_model_provider('deepseek-v4-pro')
+        model, provider, base_url = resolve_model_provider(
+            'deepseek-v4-pro',
+            config_data=cfg_mod.cfg,
+        )
         assert provider == 'opencode-go', (
             f'Expected provider=opencode-go, got provider={provider!r}'
         )
@@ -118,7 +125,10 @@ def test_custom_only_model_still_routes_to_custom_provider():
         'models': {'my-private-model': {}},
     }]
     try:
-        model, provider, base_url = resolve_model_provider('my-private-model')
+        model, provider, base_url = resolve_model_provider(
+            'my-private-model',
+            config_data=cfg_mod.cfg,
+        )
         assert provider == 'custom:ds2api', (
             f'Expected provider=custom:ds2api, got provider={provider!r}'
         )
@@ -149,8 +159,12 @@ def test_openrouter_suffix_still_works():
         'default': 'claude-sonnet-4.6',
     })
     try:
-        wrapped = model_with_provider_context('tencent/hy3-preview:free', 'openrouter')
-        model, provider, _ = resolve_model_provider(wrapped)
+        wrapped = model_with_provider_context(
+            'tencent/hy3-preview:free',
+            'openrouter',
+            config_data=cfg_mod.cfg,
+        )
+        model, provider, _ = resolve_model_provider(wrapped, config_data=cfg_mod.cfg)
         assert provider == 'openrouter'
         assert model == 'tencent/hy3-preview:free'
     finally:

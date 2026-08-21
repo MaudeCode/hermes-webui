@@ -27,6 +27,9 @@ from urllib.parse import urlsplit
 
 PROMPT = "Exercise the public conversation lifecycle gate."
 REASONING_TEXT = "Checking the persistent assistant turn."
+REASONING_TITLE = "Checking lifecycle persistence"
+TITLE_ONLY = os.environ.get("LIFECYCLE_TITLE_ONLY", "").strip() == "1"
+TITLE_CLEAR = os.environ.get("LIFECYCLE_TITLE_CLEAR", "").strip() == "1"
 FINAL_TEXT = "Lifecycle gate final answer."
 FINAL_ACK_TEXT = "Lifecycle"
 FINAL_PREFIX = "Lifecycle gate "
@@ -198,6 +201,9 @@ def _anchor_projection_snapshot(page) -> dict:
               status: row && row.status || null,
               tool: row && row.tool && row.tool.name || null,
               text: row && row.text || '',
+              titles: row && row.thinking && Array.isArray(row.thinking.titles)
+                ? row.thinking.titles
+                : (row && row.payload && Array.isArray(row.payload.titles) ? row.payload.titles : []),
             })),
           };
         }"""
@@ -207,7 +213,7 @@ def _anchor_projection_snapshot(page) -> dict:
 def _wait_for_live_anchor_projection(page) -> dict:
     try:
         page.wait_for_function(
-            """({reasoning, tool}) => {
+            """({reasoning, title, titleOnly, titleClear, tool}) => {
               const streamId = (typeof S !== 'undefined' && S.activeStreamId) || '';
               const registries = window._liveAnchorRegistries;
               const registry = streamId && registries && typeof registries.get === 'function'
@@ -222,14 +228,26 @@ def _wait_for_live_anchor_projection(page) -> dict:
               });
               const rows = Array.isArray(scene && scene.activity_rows) ? scene.activity_rows : [];
               const hasThinking = rows.some(row =>
-                row && row.role === 'thinking' && String(row.text || '').includes(reasoning)
+                row && row.role === 'thinking' && (
+                  (titleClear && row.thinking && Array.isArray(row.thinking.titles) &&
+                    row.thinking.titles.length === 0) ||
+                  (titleOnly && !titleClear && row.thinking && Array.isArray(row.thinking.titles) &&
+                    row.thinking.titles.includes(title)) ||
+                  (!titleOnly && String(row.text || '').includes(reasoning))
+                )
               );
               const hasTool = rows.some(row =>
                 row && row.role === 'tool' && row.tool && row.tool.name === tool
               );
               return hasThinking && hasTool;
             }""",
-            arg={"reasoning": REASONING_TEXT, "tool": TOOL_NAME},
+            arg={
+                "reasoning": REASONING_TEXT,
+                "title": REASONING_TITLE,
+                "titleOnly": TITLE_ONLY,
+                "titleClear": TITLE_CLEAR,
+                "tool": TOOL_NAME,
+            },
             timeout=ANCHOR_SCENE_PROJECTION_TIMEOUT,
         )
     except Exception as exc:
@@ -350,8 +368,16 @@ class DeterministicGateway:
                 try:
                     self._event("reasoning.available", {
                         "event": "reasoning.available",
-                        "text": REASONING_TEXT,
+                        "text": "" if TITLE_ONLY else REASONING_TEXT,
+                        "titles": [REASONING_TITLE],
                     })
+                    if TITLE_CLEAR:
+                        time.sleep(0.1)
+                        self._event("reasoning.available", {
+                            "event": "reasoning.available",
+                            "text": "",
+                            "titles": [],
+                        })
                     if owner.scenario == "terminal-error":
                         self._event("message.delta", {
                             "event": "message.delta",
@@ -369,6 +395,7 @@ class DeterministicGateway:
                         "tool": TOOL_NAME,
                         "tool_call_id": TOOL_ID,
                         "status": "completed",
+                        "args": {"path": "README.md"},
                         "preview": "README fixture read",
                     })
                     owner.activity_ready.set()
@@ -487,6 +514,7 @@ def _activity_snapshot(page) -> dict:
           const turn = document.querySelector('#liveAssistantTurn') ||
             Array.from(document.querySelectorAll('.assistant-turn')).pop() || null;
           const groups = turn ? Array.from(turn.querySelectorAll('[data-anchor-scene-owner="1"]')) : [];
+          const sequences = turn ? Array.from(turn.querySelectorAll('[data-activity-sequence-group="1"]')) : [];
           const rows = turn ? Array.from(turn.querySelectorAll('[data-anchor-scene-row="1"]')) : [];
           const sceneRows = assistants.flatMap(message =>
             message && message._anchor_activity_scene && Array.isArray(message._anchor_activity_scene.activity_rows)
@@ -511,6 +539,13 @@ def _activity_snapshot(page) -> dict:
               sessionId: (typeof S !== 'undefined' && S.session && S.session.session_id) || null,
             },
             groupCount: groups.length,
+            sequences: sequences.map(group => ({
+              label: (group.querySelector(':scope > .tool-worklog-summary .tool-worklog-label') || {}).textContent || '',
+              collapsed: group.classList.contains('tool-call-group-collapsed'),
+              active: group.getAttribute('data-live-activity-current') === '1',
+              expanded: (group.querySelector(':scope > .tool-worklog-summary') || {})
+                .getAttribute?.('aria-expanded') || '',
+            })),
             summary: groups.map(group => ({
               label: (group.querySelector('.tool-worklog-label,.tool-call-group-label') || {}).textContent || '',
               duration: (group.querySelector('.tool-call-group-duration') || {}).textContent || '',
@@ -521,19 +556,31 @@ def _activity_snapshot(page) -> dict:
               expanded: (group.querySelector('.tool-worklog-summary,.tool-call-group-summary') || {})
                 .getAttribute?.('aria-expanded') || '',
             })),
-            rows: rows.map(row => ({
-              role: row.getAttribute('data-anchor-row-role'),
-              rowId: row.getAttribute('data-anchor-row-id') || '',
-              toolCallId: (sceneRows.find(sceneRow =>
-                String(sceneRow && (sceneRow.row_id || sceneRow.local_id) || '') ===
-                String(row.getAttribute('data-anchor-row-id') || '')
-              ) || {}).tool_call_id || '',
-              source: row.getAttribute('data-anchor-source-event-type'),
-              status: row.getAttribute('data-anchor-row-status'),
-              tool: row.getAttribute('data-tool-name'),
-              text: row.innerText.trim(),
-              classes: row.className,
-            })),
+            rows: rows.map(row => {
+              const thinkingTitle = row.querySelector('.thinking-card-label');
+              const thinkingBody = row.querySelector('.thinking-card-body pre');
+              const toolHeader = row.querySelector('.tool-card-header');
+              const toolDetail = row.querySelector('.tool-card-detail');
+              return {
+                role: row.getAttribute('data-anchor-row-role'),
+                rowId: row.getAttribute('data-anchor-row-id') || '',
+                toolCallId: (sceneRows.find(sceneRow =>
+                  String(sceneRow && (sceneRow.row_id || sceneRow.local_id) || '') ===
+                  String(row.getAttribute('data-anchor-row-id') || '')
+                ) || {}).tool_call_id || '',
+                source: row.getAttribute('data-anchor-source-event-type'),
+                status: row.getAttribute('data-anchor-row-status'),
+                tool: row.getAttribute('data-tool-name'),
+                text: row.innerText.trim(),
+                thinkingTitle: thinkingTitle ? thinkingTitle.textContent.trim() : '',
+                thinkingBody: thinkingBody ? thinkingBody.textContent.trim() : '',
+                toolExpanded: toolHeader ? toolHeader.getAttribute('aria-expanded') : null,
+                toolControls: toolHeader ? toolHeader.getAttribute('aria-controls') : null,
+                toolDetailId: toolDetail ? toolDetail.id : null,
+                toolDetailHidden: toolDetail ? toolDetail.hidden : null,
+                classes: row.className,
+              };
+            }),
             visibleFinal,
             assistantMessage: lastAssistant ? {
               turnDuration: lastAssistant._turnDuration,
@@ -571,6 +618,79 @@ def _expand_settled_worklog(page) -> None:
         }""",
         timeout=10000,
     )
+
+
+def _assert_tool_disclosure_accessibility(page) -> None:
+    state = page.evaluate(
+        """() => {
+          const row = buildToolCard({
+            name: 'terminal',
+            args: {command: 'pwd'},
+            done: true,
+            snippet: '/tmp',
+          });
+          document.body.appendChild(row);
+          const card = row.querySelector('.tool-card');
+          const header = row.querySelector('.tool-card-header');
+          const detail = row.querySelector('.tool-card-detail');
+          const before = {
+            expanded: header.getAttribute('aria-expanded'),
+            controls: header.getAttribute('aria-controls'),
+            detailId: detail.id,
+            hidden: detail.hidden,
+          };
+          _toggleToolCardDisclosure(header);
+          const after = {
+            expanded: header.getAttribute('aria-expanded'),
+            hidden: detail.hidden,
+          };
+          row.remove();
+          return {before, after};
+        }"""
+    )
+    assert state["before"] == {
+        "expanded": "false",
+        "controls": state["before"]["detailId"],
+        "detailId": state["before"]["detailId"],
+        "hidden": True,
+    }, state
+    assert state["before"]["detailId"], state
+    assert state["after"] == {"expanded": "true", "hidden": False}, state
+
+
+def _assert_thinking_disclosure_accessibility(page) -> None:
+    state = page.evaluate(
+        """() => {
+          const row = _thinkingActivityNode('private detail', false, 'a11y', ['Reasoning title'], false);
+          document.body.appendChild(row);
+          const card = row.querySelector('.thinking-card');
+          const header = row.querySelector('.thinking-card-header');
+          const detail = row.querySelector('.thinking-card-body');
+          const before = {
+            tag: header.tagName,
+            expanded: header.getAttribute('aria-expanded'),
+            controls: header.getAttribute('aria-controls'),
+            detailId: detail.id,
+            hidden: detail.hidden,
+          };
+          header.click();
+          const after = {
+            expanded: header.getAttribute('aria-expanded'),
+            hidden: detail.hidden,
+          };
+          row.remove();
+          return {before, after};
+        }"""
+    )
+    assert state["before"] == {
+        "tag": "BUTTON",
+        "expanded": "false",
+        "controls": state["before"]["detailId"],
+        "detailId": state["before"]["detailId"],
+        "hidden": True,
+    }, state
+    assert state["before"]["detailId"], state
+    assert state["after"] == {"expanded": "true", "hidden": False}, state
 
 
 def _terminal_rows(snapshot: dict) -> list[dict]:
@@ -628,26 +748,43 @@ def _assert_no_running_tool_rows(rows: list[dict]) -> None:
 def _assert_live_activity(snapshot: dict) -> None:
     assert snapshot["live"], snapshot
     assert snapshot["groupCount"] == 1, snapshot
+    assert snapshot["sequences"], snapshot
+    assert all(sequence["collapsed"] for sequence in snapshot["sequences"]), snapshot
+    assert sum(sequence["active"] for sequence in snapshot["sequences"]) == 1, snapshot
+    assert snapshot["sequences"][-1]["active"], snapshot
     roles = [row["role"] for row in snapshot["rows"]]
     assert roles.count("thinking") == 1, snapshot
     assert roles.count("tool") == 1, snapshot
     tool_rows = _tool_rows(snapshot)
     assert len(tool_rows) == 1 and tool_rows[0]["tool"] == TOOL_NAME, snapshot
     _assert_no_running_tool_rows(tool_rows)
-    assert any(REASONING_TEXT in row["text"] for row in snapshot["rows"]), snapshot
+    thinking_rows = [row for row in snapshot["rows"] if row["role"] == "thinking"]
+    expected_title = "Thinking" if TITLE_CLEAR else REASONING_TITLE
+    assert all(row["thinkingTitle"] == expected_title for row in thinking_rows), snapshot
+    if TITLE_ONLY or TITLE_CLEAR:
+        assert all(row["thinkingBody"] in {"", "Thinking…"} for row in thinking_rows), snapshot
+    else:
+        assert all(REASONING_TEXT in row["thinkingBody"] for row in thinking_rows), snapshot
     assert all(FINAL_TEXT not in text for text in snapshot["visibleFinal"]), snapshot
-    assert any(character.isdigit() for character in snapshot["summary"][0]["label"]), snapshot
 
 
 def _assert_settled(snapshot: dict, scenario: str) -> None:
     assert not snapshot["live"], snapshot
     assert snapshot["groupCount"] == 1, snapshot
+    assert snapshot["sequences"] and all(sequence["collapsed"] for sequence in snapshot["sequences"]), snapshot
+    assert snapshot["summary"][0]["label"].startswith("Worked"), snapshot
     roles = [row["role"] for row in snapshot["rows"]]
     assert "thinking" in roles and "tool" in roles, snapshot
     tool_rows = _tool_rows(snapshot)
     assert len(tool_rows) == 1 and tool_rows[0]["tool"] == TOOL_NAME, snapshot
     _assert_no_running_tool_rows(tool_rows)
-    assert any(REASONING_TEXT in row["text"] for row in snapshot["rows"]), snapshot
+    thinking_rows = [row for row in snapshot["rows"] if row["role"] == "thinking"]
+    expected_title = "Thinking" if TITLE_CLEAR else REASONING_TITLE
+    assert all(row["thinkingTitle"] == expected_title for row in thinking_rows), snapshot
+    if TITLE_ONLY or TITLE_CLEAR:
+        assert all(row["thinkingBody"] in {"", "Thinking…"} for row in thinking_rows), snapshot
+    else:
+        assert all(REASONING_TEXT in row["thinkingBody"] for row in thinking_rows), snapshot
     if scenario == "terminal-error":
         assert "terminal" in roles, snapshot
         terminal_rows = _terminal_rows(snapshot)
@@ -695,10 +832,14 @@ def _semantic_activity(snapshot: dict) -> list[dict]:
     semantic = []
     for row in snapshot["rows"]:
         if row["role"] == "thinking":
-            text = " ".join(row["text"].split())
-            if text.startswith("Thinking "):
-                text = text[len("Thinking ") :]
-            semantic.append({"role": "thinking", "text": text})
+            title = " ".join(row["thinkingTitle"].split())
+            body = " ".join(row["thinkingBody"].split())
+            if body == "Thinking…":
+                body = ""
+            semantic.append({
+                "role": "thinking",
+                "text": body or ("" if title == "Thinking" else title),
+            })
         elif row["role"] == "tool":
             semantic.append({"role": "tool", "tool": row["tool"]})
     return sorted(semantic, key=lambda item: json.dumps(item, sort_keys=True))
@@ -839,6 +980,8 @@ def main() -> int:
         errors = _capture_page_errors(page)
         page.goto("/", wait_until="domcontentloaded")
         page.wait_for_selector("#msg", state="visible", timeout=15000)
+        _assert_tool_disclosure_accessibility(page)
+        _assert_thinking_disclosure_accessibility(page)
         page.locator("#msg").fill(PROMPT)
         page.locator("#btnSend").click()
 
@@ -851,8 +994,8 @@ def main() -> int:
             """({reasoning, tool}) => {
               const turn = document.querySelector('#liveAssistantTurn');
               if (!turn) return false;
-              const text = turn.innerText || '';
-              return text.includes(reasoning) &&
+              return Boolean(turn.querySelector('[data-activity-sequence-group="1"]')) &&
+                Boolean(turn.querySelector('[data-anchor-row-role="thinking"]')) &&
                 Boolean(turn.querySelector(`[data-anchor-row-role="tool"][data-tool-name="${tool}"]`));
             }""",
             arg={"reasoning": REASONING_TEXT, "tool": TOOL_NAME},
@@ -1082,9 +1225,22 @@ def main() -> int:
                 assert any(
                     isinstance(row, dict) and row.get("role") == "terminal" for row in scene_rows
                 ), scene
+        page.wait_for_function(
+            """shouldCollapse => {
+              const group = Array.from(document.querySelectorAll(
+                '.assistant-turn [data-anchor-settled-scene-owner="1"]'
+              )).pop();
+              const label = group && group.querySelector(':scope > .tool-worklog-summary .tool-worklog-label');
+              return Boolean(group && group.classList.contains('tool-call-group-collapsed') === shouldCollapse &&
+                label && label.textContent.trim().startsWith('Worked'));
+            }""",
+            arg=scenario != "terminal-error",
+            timeout=10000,
+        )
         _expand_settled_worklog(page)
         page.wait_for_selector(
             '.assistant-turn [data-anchor-settled-scene-owner="1"] [data-anchor-scene-row="1"]',
+            state="attached",
             timeout=10000,
         )
         settled_snapshot = _activity_snapshot(page)
@@ -1109,6 +1265,7 @@ def main() -> int:
         _expand_settled_worklog(page)
         page.wait_for_selector(
             '.assistant-turn [data-anchor-settled-scene-owner="1"] [data-anchor-scene-row="1"]',
+            state="attached",
             timeout=2000 if TEST_BITE else 10000,
         )
         reloaded_snapshot = _activity_snapshot(page)

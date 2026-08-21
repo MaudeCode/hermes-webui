@@ -26025,23 +26025,23 @@ const _I18N_TOOL_ACTION_TEXT_EN = {
     list: { running: 'Listing', done: 'Listed', fail: 'list', fallback: 'files' },
     search: { running: 'Searching', done: 'Searched', fail: 'search', fallback: 'workspace' },
     web: { running: 'Checking', done: 'Checked', fail: 'check', fallback: 'web data' },
-    write: { running: 'Updating', done: 'Updated', fail: 'update', fallback: 'a file' },
+    write: { running: 'Editing', done: 'Edited', fail: 'edit', fallback: 'a file' },
     skill: { running: 'Loading', done: 'Loaded', fail: 'load', fallback: 'a skill' },
     memory: { running: 'Saving', done: 'Saved', fail: 'save', fallback: 'memory' },
     delegate: { running: 'Delegating', done: 'Delegated', fail: 'delegate', fallback: 'a task' },
     unknown: { running: 'Running', done: 'Ran', fail: 'run', fallback: 'a tool' },
 };
 const _I18N_TOOL_SUMMARY_TEXT_EN = {
-    shell: { running: ['Running a command', 'Running {n} commands'], done: ['Ran a command', 'Ran {n} commands'] },
-    read: { running: ['Reading a file', 'Reading {n} files'], done: ['Read a file', 'Read {n} files'] },
-    list: { running: ['Listing files', 'Listing {n} items'], done: ['Listed files', 'Listed {n} files'] },
-    search: { running: ['Searching workspace', 'Searching workspace {n} times'], done: ['Searched workspace', 'Searched workspace {n} times'] },
-    web: { running: ['Checking web', 'Checking web {n} times'], done: ['Checked the web', 'Checked the web {n} times'] },
-    write: { running: ['Updating a file', 'Updating {n} files'], done: ['Updated a file', 'Updated {n} files'] },
-    skill: { running: ['Loading a skill', 'Loading {n} skills'], done: ['Loaded a skill', 'Loaded {n} skills'] },
-    memory: { running: ['Saving memory', 'Saving {n} memory updates'], done: ['Saved memory', 'Saved {n} memory updates'] },
-    delegate: { running: ['Delegating a task', 'Delegating {n} tasks'], done: ['Delegated a task', 'Delegated {n} tasks'] },
-    unknown: { running: ['Running a tool', 'Running {n} tools'], done: ['Ran a tool', 'Ran {n} tools'] },
+    shell: { running: ['Running a command', 'Running commands'], done: ['Ran a command', 'Ran commands'] },
+    read: { running: ['Reading a file', 'Reading files'], done: ['Read a file', 'Read files'] },
+    list: { running: ['Listing files', 'Listing files'], done: ['Listed files', 'Listed files'] },
+    search: { running: ['Searching workspace', 'Searching workspace'], done: ['Searched workspace', 'Searched workspace'] },
+    web: { running: ['Searching the web', 'Searching the web'], done: ['Searched the web', 'Searched the web'] },
+    write: { running: ['Editing a file', 'Editing files'], done: ['Edited a file', 'Edited files'] },
+    skill: { running: ['Loading a tool', 'Loading tools'], done: ['Loaded a tool', 'Loaded tools'] },
+    memory: { running: ['Saving memory', 'Saving memory'], done: ['Saved memory', 'Saved memory'] },
+    delegate: { running: ['Delegating a task', 'Delegating tasks'], done: ['Delegated a task', 'Delegated tasks'] },
+    unknown: { running: ['Calling a tool', 'Calling tools'], done: ['Called a tool', 'Called tools'] },
 };
 function _i18nRuPlural(n, one, few, many) {
   const value = Math.abs(Number(n) || 0);
@@ -26074,6 +26074,18 @@ const _I18N_TOOL_SUMMARY_TEXT_RU = {
     memory: { running: ['Сохраняется память', 'Сохраняются {n} обновления памяти', 'Сохраняется {n} обновлений памяти'], done: ['Память сохранена', 'Сохранены {n} обновления памяти', 'Сохранено {n} обновлений памяти'] },
     delegate: { running: ['Делегируется задача', 'Делегируются {n} задачи', 'Делегируется {n} задач'], done: ['Задача делегирована', 'Делегированы {n} задачи', 'Делегировано {n} задач'] },
     unknown: { running: ['Выполняется инструмент', 'Выполняются {n} инструмента', 'Выполняется {n} инструментов'], done: ['Инструмент выполнен', 'Выполнены {n} инструмента', 'Выполнено {n} инструментов'] },
+};
+const _I18N_TOOL_SUMMARY_TEXT_RU_COUNT_FREE = {
+    shell: { running: 'Выполняются команды', done: 'Выполнены команды' },
+    read: { running: 'Читаются файлы', done: 'Прочитаны файлы' },
+    list: { running: 'Показываются списки файлов', done: 'Показаны списки файлов' },
+    search: { running: 'Идут поиски в рабочей области', done: 'Поиски в рабочей области выполнены' },
+    web: { running: 'Выполняются проверки веба', done: 'Проверки веба выполнены' },
+    write: { running: 'Обновляются файлы', done: 'Обновлены файлы' },
+    skill: { running: 'Загружаются навыки', done: 'Загружены навыки' },
+    memory: { running: 'Сохраняются обновления памяти', done: 'Сохранены обновления памяти' },
+    delegate: { running: 'Делегируются задачи', done: 'Задачи делегированы' },
+    unknown: { running: 'Выполняются инструменты', done: 'Инструменты выполнены' },
 };
 const _I18N_TOOL_ACTION_TEXT_ZH = {
     shell: { running: '正在运行', done: '已运行', fail: '运行', fallback: '命令' },
@@ -26127,7 +26139,7 @@ function _i18nProcessedElapsed(prefix, duration) {
   return duration ? `${prefix} ${duration}` : prefix;
 }
 function _i18nProcessedElapsedEn(duration) {
-  return _i18nProcessedElapsed('Processed', duration);
+  return duration ? `Worked for ${duration}` : 'Worked';
 }
 function _i18nProcessedElapsedRu(duration) {
   return _i18nProcessedElapsed('Обработано', duration);
@@ -26167,10 +26179,13 @@ function _i18nToolActionLabelZhHant(kind, state, target, display, failed) {
   }
   return _i18nToolActionLabelFromMap(_I18N_TOOL_ACTION_TEXT_ZH_HANT, kind, state, target, display, failed);
 }
-function _i18nToolWorklogSummaryFromMap(map, kind, state, count) {
+function _i18nToolWorklogSummaryFromMap(map, kind, state, count, countFreeMap) {
   const n = Math.max(1, Number(count) || 1);
   const form = (map[kind] || map.unknown || _I18N_TOOL_SUMMARY_TEXT_EN.unknown)[state] || map.unknown.running;
-  return (n === 1 ? form[0] : form[1]).replace('{n}', String(n));
+  const picked = n === 1 ? form[0] : form[1];
+  if (!picked.includes('{n}')) return picked.trim();
+  const countFree = countFreeMap && (countFreeMap[kind] || countFreeMap.unknown);
+  return ((countFree && (countFree[state] || countFree.running)) || form[0]).trim();
 }
 function _i18nToolWorklogSummaryEn(kind, state, count) {
   return _i18nToolWorklogSummaryFromMap(_I18N_TOOL_SUMMARY_TEXT_EN, kind, state, count);
@@ -26179,8 +26194,10 @@ function _i18nToolWorklogSummaryRu(kind, state, count) {
   const n = Math.max(1, Number(count) || 1);
   const form = (_I18N_TOOL_SUMMARY_TEXT_RU[kind] || _I18N_TOOL_SUMMARY_TEXT_RU.unknown)[state]
     || _I18N_TOOL_SUMMARY_TEXT_RU.unknown.running;
-  const picked = _i18nRuPlural(n, form[0], form[1], form[2]);
-  return picked.replace('{n}', String(n));
+  if (n === 1) return form[0];
+  const countFree = _I18N_TOOL_SUMMARY_TEXT_RU_COUNT_FREE[kind]
+    || _I18N_TOOL_SUMMARY_TEXT_RU_COUNT_FREE.unknown;
+  return countFree[state] || countFree.running;
 }
 function _i18nToolWorklogSummaryZh(kind, state, count) {
   return _i18nToolWorklogSummaryFromMap(_I18N_TOOL_SUMMARY_TEXT_ZH, kind, state, count);
@@ -26189,7 +26206,10 @@ function _i18nToolWorklogSummaryZhHant(kind, state, count) {
   return _i18nToolWorklogSummaryFromMap(_I18N_TOOL_SUMMARY_TEXT_ZH_HANT, kind, state, count);
 }
 function _i18nToolSummaryJoinEn(parts) {
-  return Array.isArray(parts) ? parts.filter(Boolean).join(', ') : '';
+  if (!Array.isArray(parts)) return '';
+  return parts.filter(Boolean).map((part, index) => (
+    index ? part.charAt(0).toLocaleLowerCase() + part.slice(1) : part
+  )).join(', ');
 }
 function _i18nToolSummaryJoinRu(parts) {
   return Array.isArray(parts) ? parts.filter(Boolean).join(', ') : '';
@@ -26262,6 +26282,18 @@ const _I18N_TOOL_SUMMARY_TEXT_PL = {
     delegate: { running: ['Delegowanie zadania', 'Delegowanie {n} zadań'], done: ['Delegowano zadanie', 'Delegowano {n} zadań'] },
     unknown: { running: ['Uruchamianie narzędzia', 'Uruchamianie {n} narzędzi'], done: ['Uruchomiono narzędzie', 'Uruchomiono {n} narzędzi'] },
 };
+const _I18N_TOOL_SUMMARY_TEXT_PL_COUNT_FREE = {
+    shell: { running: 'Uruchamianie poleceń', done: 'Uruchomiono polecenia' },
+    read: { running: 'Odczytywanie plików', done: 'Odczytano pliki' },
+    list: { running: 'Listowanie plików', done: 'Wylistowano pliki' },
+    search: { running: 'Wielokrotne przeszukiwanie obszaru roboczego', done: 'Wielokrotnie przeszukano obszar roboczy' },
+    web: { running: 'Sprawdzanie stron', done: 'Sprawdzono strony' },
+    write: { running: 'Zapisywanie plików', done: 'Zapisano pliki' },
+    skill: { running: 'Wczytywanie umiejętności', done: 'Wczytano umiejętności' },
+    memory: { running: 'Zapisywanie wpisów pamięci', done: 'Zapisano wpisy pamięci' },
+    delegate: { running: 'Delegowanie zadań', done: 'Delegowano zadania' },
+    unknown: { running: 'Uruchamianie narzędzi', done: 'Uruchomiono narzędzia' },
+};
 function _i18nProcessedElapsedPl(duration) {
   return _i18nProcessedElapsed('Przetworzono', duration);
 }
@@ -26272,7 +26304,13 @@ function _i18nToolActionLabelPl(kind, state, target, display, failed) {
   return `${verbs[state] || verbs.running} ${object}`;
 }
 function _i18nToolWorklogSummaryPl(kind, state, count) {
-  return _i18nToolWorklogSummaryFromMap(_I18N_TOOL_SUMMARY_TEXT_PL, kind, state, count);
+  return _i18nToolWorklogSummaryFromMap(
+    _I18N_TOOL_SUMMARY_TEXT_PL,
+    kind,
+    state,
+    count,
+    _I18N_TOOL_SUMMARY_TEXT_PL_COUNT_FREE,
+  );
 }
 function _i18nToolSummaryJoinPl(parts) {
   return Array.isArray(parts) ? parts.filter(Boolean).join(', ') : '';
@@ -26312,6 +26350,18 @@ const _I18N_TOOL_SUMMARY_TEXT_CS = {
     delegate: { running: ['Delegování úkolu', 'Delegování {n} úkolů'], done: ['Delegován úkol', 'Delegováno {n} úkolů'] },
     unknown: { running: ['Spouštění nástroje', 'Spouštění {n} nástrojů'], done: ['Spuštěn nástroj', 'Spuštěno {n} nástrojů'] },
 };
+const _I18N_TOOL_SUMMARY_TEXT_CS_COUNT_FREE = {
+    shell: { running: 'Spouštění příkazů', done: 'Spuštěny příkazy' },
+    read: { running: 'Čtení souborů', done: 'Přečteny soubory' },
+    list: { running: 'Výpis souborů', done: 'Vypsány soubory' },
+    search: { running: 'Opakované prohledávání prac. prostoru', done: 'Prac. prostor opakovaně prohledán' },
+    web: { running: 'Opakovaná kontrola webu', done: 'Web opakovaně zkontrolován' },
+    write: { running: 'Aktualizace souborů', done: 'Aktualizovány soubory' },
+    skill: { running: 'Načítání dovedností', done: 'Načteny dovednosti' },
+    memory: { running: 'Ukládání záznamů paměti', done: 'Uloženy záznamy paměti' },
+    delegate: { running: 'Delegování úkolů', done: 'Delegovány úkoly' },
+    unknown: { running: 'Spouštění nástrojů', done: 'Spuštěny nástroje' },
+};
 function _i18nProcessedElapsedCs(duration) {
   return _i18nProcessedElapsed('Zpracováno', duration);
 }
@@ -26322,7 +26372,13 @@ function _i18nToolActionLabelCs(kind, state, target, display, failed) {
   return `${verbs[state] || verbs.running} ${object}`;
 }
 function _i18nToolWorklogSummaryCs(kind, state, count) {
-  return _i18nToolWorklogSummaryFromMap(_I18N_TOOL_SUMMARY_TEXT_CS, kind, state, count);
+  return _i18nToolWorklogSummaryFromMap(
+    _I18N_TOOL_SUMMARY_TEXT_CS,
+    kind,
+    state,
+    count,
+    _I18N_TOOL_SUMMARY_TEXT_CS_COUNT_FREE,
+  );
 }
 function _i18nToolSummaryJoinCs(parts) {
   return Array.isArray(parts) ? parts.filter(Boolean).join(', ') : '';

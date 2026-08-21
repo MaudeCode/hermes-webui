@@ -539,7 +539,7 @@ def test_attach_copy_button_declares_local_button():
     end = UI_JS.index("\nfunction _transparentToolDetailHtml", start)
     copy_block = UI_JS[start:end]
 
-    assert "const btn=document.createElement('span');" in copy_block
+    assert "const btn=document.createElement('button');" in copy_block
     assert "\n  btn=document.createElement('span');" not in copy_block
 
 
@@ -637,8 +637,8 @@ def test_transparent_event_row_quiet_metadata_visual_rhythm():
     assert "box-shadow:none" in STYLE_CSS
 
     # Header: single flex line, low height, hover subtle.
-    # Compact rhythm: 19px header for tighter inline trace rows.
-    assert "min-height:19px" in STYLE_CSS
+    # Touch-safe compact rhythm retains a 44px disclosure target.
+    assert "min-height:44px" in STYLE_CSS
     assert "display:flex" in STYLE_CSS
 
     # Thinking rows no longer get a special accent gradient or bright border.

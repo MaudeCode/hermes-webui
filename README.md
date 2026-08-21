@@ -590,8 +590,8 @@ system/Homebrew interpreter.
 
 Tests run against an isolated server with a separate state directory.
 Production data and real cron jobs are never touched. Current snapshot:
-**~11,500 tests collected** across **~1,150 test files**, run in CI on Python 3.11,
-3.12, and 3.13 (3 parallel shards each).
+**~11,500 tests collected** across **~1,150 test files**, run in CI on Python 3.13
+across five parallel shards.
 
 ---
 

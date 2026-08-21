@@ -128,7 +128,7 @@ def test_compact_worklog_hides_bottom_live_footer_timer():
 def test_processed_elapsed_anchor_is_i18n_driven():
     assert "function _i18nProcessedElapsed(prefix, duration)" in I18N_JS
     assert "function _i18nProcessedElapsedEn(duration)" in I18N_JS
-    assert "return _i18nProcessedElapsed('Processed', duration);" in I18N_JS
+    assert "return duration ? `Worked for ${duration}` : 'Worked';" in I18N_JS
     assert "function _i18nProcessedElapsedZh(duration)" in I18N_JS
     assert "return _i18nProcessedElapsed('已处理', duration);" in I18N_JS
     assert "function _i18nProcessedElapsedZhHant(duration)" in I18N_JS
@@ -136,5 +136,5 @@ def test_processed_elapsed_anchor_is_i18n_driven():
     assert "processed_elapsed: _i18nProcessedElapsedEn" in I18N_JS
     assert "processed_elapsed: _i18nProcessedElapsedZh" in I18N_JS
     assert "processed_elapsed: _i18nProcessedElapsedZhHant" in I18N_JS
-    assert "t('processed_elapsed','')" in UI_JS
+    assert "t('processed_elapsed',durationText)" in UI_JS
     assert "`已处理 ${" not in UI_JS

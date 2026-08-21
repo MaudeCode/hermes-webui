@@ -32,7 +32,6 @@ jobs:
   live-to-final:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -40,18 +39,35 @@ jobs:
           - name: normal
             script: tests/browser_conversation_lifecycle.py
             scenario: normal
+            title_only: '0'
+            title_clear: '0'
+          - name: title-only-recovery
+            script: tests/browser_conversation_lifecycle.py
+            scenario: normal
+            title_only: '1'
+            title_clear: '0'
+          - name: title-clear-recovery
+            script: tests/browser_conversation_lifecycle.py
+            scenario: normal
+            title_only: '1'
+            title_clear: '1'
           - name: terminal-error
             script: tests/browser_conversation_lifecycle.py
             scenario: terminal-error
+            title_only: '0'
+            title_clear: '0'
           - name: historical-transcript-hydration
             script: tests/browser_historical_transcript_hydration.py
+            scenario: historical
+            title_only: '0'
+            title_clear: '0'
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.13'
           cache: 'pip'
           cache-dependency-path: |
             **/requirements*.txt
@@ -69,10 +85,12 @@ jobs:
           LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts
           HISTORICAL_HYDRATION_ARTIFACT_DIR: lifecycle-artifacts
           LIFECYCLE_SCENARIO: ${{ matrix.scenario }}
+          LIFECYCLE_TITLE_ONLY: ${{ matrix.title_only }}
+          LIFECYCLE_TITLE_CLEAR: ${{ matrix.title_clear }}
         run: python ${{ matrix.script }}
 
       - name: Run settlement frame proof
-        if: matrix.scenario == 'normal'
+        if: matrix.name == 'normal'
         env:
           LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts
           LIFECYCLE_SCENARIO: normal

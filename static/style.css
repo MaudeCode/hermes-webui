@@ -3906,6 +3906,32 @@ body.resizing .sidebar{transition:none!important;}
   font-weight:400;
   letter-spacing:0;
 }
+@keyframes reasoning-title-glow{
+  from{background-position:180% 50%;}
+  to{background-position:-80% 50%;}
+}
+[data-reasoning-active="1"] .thinking-card-label,
+.tool-card-running .tool-card-name-label,
+.activity-sequence-group[data-live-activity-current="1"] > .tool-worklog-summary .tool-worklog-label{
+  color:transparent;
+  background:linear-gradient(100deg,var(--muted) 30%,var(--text) 50%,var(--muted) 70%);
+  background-size:220% 100%;
+  background-clip:text;
+  -webkit-background-clip:text;
+  animation:reasoning-title-glow 2s linear infinite;
+}
+.transparent-event-progress{display:none!important;}
+@media (prefers-reduced-motion:reduce){
+  [data-reasoning-active="1"] .thinking-card-label,
+  .tool-card-running .tool-card-name-label,
+  .activity-sequence-group[data-live-activity-current="1"] > .tool-worklog-summary .tool-worklog-label{
+    color:var(--muted);
+    background:none;
+    animation:none;
+  }
+}
+[data-anchor-scene-live-owner="1"] [data-anchor-scene-owner="1"] > .tool-worklog-summary{display:none!important;}
+[data-anchor-scene-live-owner="1"] [data-anchor-scene-owner="1"] > .tool-worklog-body{padding-left:0;}
 .tool-worklog-list > .agent-activity-thinking .thinking-card-icon,
 .tool-worklog-list > .agent-activity-thinking .thinking-copy-btn,
 .tool-worklog-list > .agent-activity-thinking .thinking-card-toggle{
@@ -4040,7 +4066,8 @@ body.resizing .sidebar{transition:none!important;}
 .tool-card:hover,.tl:hover{border-color:transparent;background:transparent;}
 .tool-card-running,.tl.running{border-color:transparent;background:transparent;}
 .tool-card-row,.tool-card{width:100%;max-width:100%;box-sizing:border-box;min-width:0;}
-.tool-card-header,.tl-head{display:flex;align-items:center;gap:7px;padding:3px 8px;margin-left:-8px;border-radius:7px;cursor:pointer;user-select:none;color:var(--muted);font-size:var(--message-body-font-size);line-height:var(--message-body-line-height);min-width:0;}
+.tool-card-header,.tl-head{display:flex;align-items:center;gap:7px;min-height:44px;padding:3px 8px;margin-left:-8px;border-radius:7px;cursor:pointer;user-select:none;color:var(--muted);font-size:var(--message-body-font-size);line-height:var(--message-body-line-height);min-width:0;}
+button.tool-card-header{width:calc(100% + 8px);border:0;background:transparent;text-align:inherit;font:inherit;}
 .tool-card-header:hover,.tl-head:hover{background:var(--hover-bg);color:var(--text);}
 .tool-card-running .tool-card-header,.tl.running .tl-head{cursor:default;}
 .tool-card-no-detail .tool-card-header{cursor:default;}
@@ -4158,7 +4185,7 @@ body.resizing .sidebar{transition:none!important;}
   flex-direction:row;
   align-items:center;
   gap:5px;
-  min-height:19px;
+  min-height:44px;
   padding:1px 4px 1px 7px;
   margin-left:0;
   border-radius:0;
@@ -4293,6 +4320,16 @@ body.resizing .sidebar{transition:none!important;}
 }
 .transparent-event-copy:hover,
 .transparent-event-copy:focus-visible{opacity:1;color:var(--text);background:transparent;}
+.transparent-event-row .tool-card-has-external-copy{position:relative;}
+.transparent-event-row .tool-card-has-external-copy > .tool-card-header{padding-right:76px;}
+.transparent-event-row .tool-card-has-external-copy > .transparent-event-copy{
+  position:absolute;
+  z-index:1;
+  top:0;
+  right:24px;
+  width:44px;
+  height:44px;
+}
 .transparent-event-row .tool-card-toggle,
 .transparent-event-row .thinking-card-toggle{
   order:10;
@@ -4421,7 +4458,7 @@ body.resizing .sidebar{transition:none!important;}
   /* Larger header tap targets on mobile (the 19px desktop header is a poor
      touch target). (Trifecta finding V10.) */
   .transparent-event-row .tool-card-header,
-  .transparent-event-row .thinking-card-header{min-height:30px;padding:5px 8px;}
+  .transparent-event-row .thinking-card-header{min-height:44px;padding:5px 8px;}
   .transparent-detail-mode{padding:4px 6px 5px;}
 }
 /* ── Old-event fading (transparent mode: medium → low) ─────────────── */
@@ -6285,7 +6322,8 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
   border-color: var(--accent-hover);
   background: var(--accent-bg);
 }
-.thinking-card-header { display:flex; align-items:center; gap:8px; padding: 5px 10px; color: var(--accent-text); font-size: 12px; font-weight: 600; opacity: .85; }
+.thinking-card-head-row { display:flex; align-items:center; }
+.thinking-card-header { display:flex; align-items:center; gap:8px; flex:1; min-width:0; padding:5px 10px; border:0; background:transparent; color:var(--accent-text); font:inherit; font-size:12px; font-weight:600; text-align:left; opacity:.85; cursor:pointer; }
 .thinking-card-header:hover { opacity: 1; }
 .thinking-card-icon { opacity: .7; }
 .thinking-card-body {
@@ -6296,6 +6334,7 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
   border-top: 1px solid transparent;
   transition: max-height .22s ease, opacity .18s ease, padding .22s ease, border-top-color .22s ease;
 }
+.thinking-card-body[hidden] { display:none; }
 .thinking-card.open .thinking-card-body { max-height: 260px; overflow-y: auto; opacity: 1; padding: 8px 12px; border-top-color: var(--accent-bg-strong); }
 .thinking-card-body pre { font-family:var(--font-mono); font-size: 11px; line-height: 1.6; color: var(--muted); white-space: pre-wrap; word-break: break-word; margin: 0; }
 

@@ -22,6 +22,17 @@ def test_github_actions_quotes_pyyaml_version_specifier():
     assert "pip install pyyaml>=6.0" not in text
 
 
+def test_github_actions_use_python_313_only():
+    workflows = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (ROOT / ".github" / "workflows").glob("*.yml")
+    )
+
+    assert "python-version: ['3.13']" in workflows
+    assert "python-version: '3.11'" not in workflows
+    assert "python-version: '3.12'" not in workflows
+
+
 def test_pytest_integration_marker_is_registered():
     config = ROOT / "pytest.ini"
     text = config.read_text(encoding="utf-8")

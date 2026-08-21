@@ -42,7 +42,9 @@ def test_thinking_card_toggle_and_body_use_animation_friendly_state():
 def test_tool_card_toggle_uses_same_chevron_icon_markup_as_thinking_card():
     assert "<span class=\"thinking-card-toggle\">${li('chevron-right',12)}</span>" in UI_JS
     assert "<span class=\"tool-card-toggle\">${li('chevron-right',12)}</span>" in UI_JS
-    assert "<div class=\"${classes}\"><div class=\"thinking-card-header\" onclick=\"this.parentElement.classList.toggle('open')\"><span class=\"thinking-card-icon\">" in UI_JS
+    assert '<button type="button" class="thinking-card-header" onclick="_toggleThinkingCardDisclosure(this)">' in UI_JS
+    assert "function _syncThinkingCardDisclosureA11y(card,open)" in UI_JS
+    assert "detail.hidden=!open" in UI_JS
 
 
 def test_thinking_card_header_includes_copy_button_that_does_not_toggle_card():
@@ -54,13 +56,14 @@ def test_thinking_card_header_includes_copy_button_that_does_not_toggle_card():
     assert "btn.innerHTML=li('check',12);" in UI_JS
     assert ".thinking-copy-btn{" in COMPACT_CSS
     assert ".thinking-copy-btn:hover,.thinking-copy-btn:focus-visible{" in COMPACT_CSS
+    assert ":scope > .thinking-card-head-row > .thinking-copy-btn" in UI_JS
 
 
 def test_live_thinking_updates_existing_card_body_in_place():
-    assert "function _renderThinkingInto(row,text='')" in UI_JS
+    assert "function _renderThinkingInto(row,text='',titles)" in UI_JS
     assert "row.querySelector('.thinking-card-body pre')" in UI_JS
     assert "pre.textContent=clean" in UI_JS
-    assert "_renderThinkingInto(row,text);" in UI_JS
+    assert "_renderThinkingInto(row,text,options.titles);" in UI_JS
 
 
 def test_thinking_card_uses_panel_chrome_with_gold_palette():

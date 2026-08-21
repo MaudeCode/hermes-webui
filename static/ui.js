@@ -7642,6 +7642,28 @@ function _sanitizeThinkingDisplayText(text){
   const stripped=_stripXmlToolCallsDisplay(String(text||''));
   return stripped.trim();
 }
+function _reasoningBodyTextForDisplay(text,titles){
+  const clean=_sanitizeThinkingDisplayText(text);
+  const normalized=_reasoningTitleList(titles);
+  if(!clean||!normalized.length) return clean;
+  const lines=clean.split(/\r?\n/);
+  const normalizedKeys=normalized.map(title=>title.toLocaleLowerCase());
+  const remaining=lines.filter(line=>{
+    const rawLine=line.trim();
+    const isHeading=/^\*\*.*\*\*$/.test(rawLine)||/^(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)/.test(rawLine);
+    const candidate=rawLine
+      .replace(/^\*\*(.*?)\*\*$/,'$1')
+      .replace(/^(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)/,'')
+      .trim().toLocaleLowerCase();
+    if(!candidate) return true;
+    return !normalizedKeys.some(title=>candidate===title||(
+      candidate.startsWith(`${title} `)
+      && (isHeading||(title.length>=24&&candidate.length>80))
+    ));
+  });
+  const result=remaining.join('\n').trim();
+  return result||clean;
+}
 
 function _normalizeThinkingEchoCompare(text){
   return String(text||'').replace(/\s+/g,' ').trim();
@@ -9071,7 +9093,7 @@ function _copyThinkingText(btn){
   const card=btn&&btn.closest?btn.closest('.thinking-card'):null;
   if(!card)return;
   const pre=card.querySelector('.thinking-card-body pre');
-  const text=pre?pre.textContent:'';
+  const text=card._reasoningFullText||(pre?pre.textContent:'');
   if(!text)return;
   _copyText(text).then(()=>{
     const orig=btn.innerHTML;
@@ -11552,7 +11574,10 @@ function _applyWorklogDetailsExpandedDefault(root){
   const scope=root&&root.querySelectorAll?root:document;
   const open=_worklogDetailsExpandedDefault();
   scope.querySelectorAll('.thinking-card').forEach(card=>{
-    card.classList.toggle('open', open);
+    _setWorklogDetailDisclosureOpen(card,open);
+  });
+  scope.querySelectorAll('.tool-card').forEach(card=>{
+    if(!card.classList.contains('tool-card-no-detail')) _setWorklogDetailDisclosureOpen(card,open);
   });
   scope.querySelectorAll('.tool-group[data-tool-worklog-tool-group="1"],.tool-worklog-tool-group').forEach(group=>{
     group.classList.toggle('open', open);
@@ -11561,7 +11586,7 @@ function _applyWorklogDetailsExpandedDefault(root){
     if(summary) summary.setAttribute('aria-expanded', String(open));
   });
 }
-const _worklogDetailDisclosureSelector='.thinking-card,.tool-card,.tool-group[data-tool-worklog-tool-group="1"],.tool-worklog-tool-group';
+const _worklogDetailDisclosureSelector='.thinking-card,.tool-card,.tool-group[data-tool-worklog-tool-group="1"],.tool-worklog-tool-group,[data-activity-sequence-group="1"]';
 function _worklogDetailTextKey(text, maxLen){
   return String(text||'').replace(/\s+/g,' ').trim().slice(0,maxLen||160);
 }
@@ -11619,6 +11644,9 @@ function _worklogDetailBaseKey(el){
       'group';
     return `tool-group:${scope}:${stable}`;
   }
+  if(el.matches&&el.matches('[data-activity-sequence-group="1"]')){
+    return `activity-sequence:${scope}:${el.getAttribute('data-activity-sequence-key')||'sequence'}`;
+  }
   return '';
 }
 function _worklogDetailDisclosureIsOpen(el){
@@ -11627,6 +11655,39 @@ function _worklogDetailDisclosureIsOpen(el){
 function _worklogDetailScrollableBody(el){
   if(!el||!el.querySelector) return null;
   return el.querySelector('.thinking-card-body,.tool-card-detail');
+}
+function _syncToolCardDisclosureA11y(card,open){
+  if(!card||!card.querySelector) return;
+  const header=card.querySelector('.tool-card-header');
+  const detail=card.querySelector('.tool-card-detail');
+  if(!header||!detail) return;
+  let detailId=card.getAttribute('data-tool-detail-id')||detail.id;
+  if(!detailId){
+    _syncToolCardDisclosureA11y._detailPrefix=_syncToolCardDisclosureA11y._detailPrefix||Math.random().toString(36).slice(2,10);
+    _syncToolCardDisclosureA11y._detailID=(_syncToolCardDisclosureA11y._detailID||0)+1;
+    detailId=`tool-detail-fallback-${_syncToolCardDisclosureA11y._detailPrefix}-${_syncToolCardDisclosureA11y._detailID}`;
+  }
+  card.setAttribute('data-tool-detail-id',detailId);
+  detail.id=detailId;
+  detail.hidden=!open;
+  header.setAttribute('aria-controls',detailId);
+  header.setAttribute('aria-expanded',String(!!open));
+}
+function _syncThinkingCardDisclosureA11y(card,open){
+  if(!card||!card.querySelector) return;
+  const header=card.querySelector('.thinking-card-header');
+  const detail=card.querySelector('.thinking-card-body');
+  if(!header||!detail) return;
+  let detailId=card.getAttribute('data-thinking-detail-id')||detail.id;
+  if(!detailId){
+    _syncThinkingCardDisclosureA11y._detailID=(_syncThinkingCardDisclosureA11y._detailID||0)+1;
+    detailId=`thinking-detail-${_syncThinkingCardDisclosureA11y._detailID}`;
+  }
+  card.setAttribute('data-thinking-detail-id',detailId);
+  detail.id=detailId;
+  detail.hidden=!open;
+  header.setAttribute('aria-controls',detailId);
+  header.setAttribute('aria-expanded',String(!!open));
 }
 function _setWorklogDetailDisclosureOpen(el, open){
   if(!el||!el.classList) return;
@@ -11641,11 +11702,34 @@ function _setWorklogDetailDisclosureOpen(el, open){
     if(drow&&typeof _materializeTransparentToolDetail==='function') _materializeTransparentToolDetail(drow);
   }
   el.classList.toggle('open', !!open);
+  if(el.matches&&el.matches('.tool-card')) _syncToolCardDisclosureA11y(el,!!open);
+  if(el.matches&&el.matches('.thinking-card')) _syncThinkingCardDisclosureA11y(el,!!open);
+  const header=el.querySelector('.tool-card-header,.thinking-card-header');
+  if(header) header.setAttribute('aria-expanded', String(!!open));
   if(el.matches&&el.matches('.tool-group[data-tool-worklog-tool-group="1"],.tool-worklog-tool-group')){
     el.classList.toggle('tool-worklog-tool-group-collapsed', !open);
     const summary=el.querySelector('.tool-group-head,.tool-worklog-tool-group-head');
     if(summary) summary.setAttribute('aria-expanded', String(!!open));
   }
+  if(el.matches&&el.matches('[data-activity-sequence-group="1"]')){
+    el.classList.toggle('tool-call-group-collapsed', !open);
+    const summary=el.querySelector(':scope > .tool-worklog-summary,:scope > .tool-call-group-summary');
+    if(summary) summary.setAttribute('aria-expanded', String(!!open));
+    const body=el.querySelector(':scope > .tool-worklog-body,:scope > .tool-call-group-body');
+    if(body) body.hidden=!open;
+  }
+}
+function _toggleThinkingCardDisclosure(header){
+  const card=header&&header.closest?header.closest('.thinking-card'):null;
+  if(card) _setWorklogDetailDisclosureOpen(card,!card.classList.contains('open'));
+}
+function _toggleToolCardDisclosure(header){
+  const card=header&&header.closest?header.closest('.tool-card'):null;
+  if(!card) return;
+  const open=!card.classList.contains('open');
+  const row=card.closest&&card.closest('.transparent-event-row');
+  if(row&&typeof _setTransparentCardOpen==='function') _setTransparentCardOpen(card,open);
+  else _setWorklogDetailDisclosureOpen(card,open);
 }
 function _worklogDetailDisclosureKeyForElement(el, counts){
   const base=_worklogDetailBaseKey(el);
@@ -11698,18 +11782,76 @@ function _thinkingCardHtml(text, open){
   const copyBtn=`<button class="thinking-copy-btn" onclick="event.stopPropagation();_copyThinkingText(this)" title="${t('copy')}" aria-label="${t('copy')}">${li('copy',12)}</button>`;
   const shouldOpen=!!open||_worklogDetailsExpandedDefault();
   const classes=`thinking-card${shouldOpen?' open':''}`;
-  return `<div class="${classes}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-btn-row">${copyBtn}<span class="thinking-card-toggle">${li('chevron-right',12)}</span></span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
+  return `<div class="${classes}"><div class="thinking-card-head-row"><button type="button" class="thinking-card-header" onclick="_toggleThinkingCardDisclosure(this)"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></button>${copyBtn}</div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
+}
+function _reasoningTitleList(value){
+  if(!Array.isArray(value)) return [];
+  const out=[];
+  const seen=new Set();
+  value.forEach(item=>{
+    const title=String(item||'').replace(/\s+/g,' ').trim();
+    const key=title.toLocaleLowerCase();
+    if(!title||seen.has(key)) return;
+    seen.add(key);
+    out.push(title);
+  });
+  return out.slice(0,8);
+}
+let _reasoningTitleRotationTimer=null;
+function _ensureReasoningTitleRotation(){
+  if(_reasoningTitleRotationTimer!==null||typeof document==='undefined') return;
+  if(typeof window!=='undefined'&&window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  _reasoningTitleRotationTimer=setInterval(()=>{
+    if(document.hidden) return;
+    if(typeof window!=='undefined'&&window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    document.querySelectorAll('[data-reasoning-active="1"][data-reasoning-titles]').forEach(row=>{
+      let titles=[];
+      try{titles=_reasoningTitleList(JSON.parse(row.getAttribute('data-reasoning-titles')||'[]'));}catch(_){return;}
+      if(titles.length<2) return;
+      const next=(Number(row.getAttribute('data-reasoning-title-index')||0)+1)%titles.length;
+      const label=row.querySelector('.thinking-card-label');
+      if(label) label.textContent=titles[next];
+      const sequence=row.closest&&row.closest('[data-activity-sequence-group="1"]');
+      if(sequence) _syncActivitySequenceSummary(sequence);
+      row.setAttribute('data-reasoning-title-index',String(next));
+    });
+  },1500);
+}
+function _applyReasoningTitles(row, value, active){
+  if(!row) return;
+  const titles=_reasoningTitleList(value);
+  const label=row.querySelector&&row.querySelector('.thinking-card-label');
+  if(!titles.length){
+    row.removeAttribute('data-reasoning-titles');
+    row.removeAttribute('data-reasoning-title-index');
+    row.setAttribute('data-reasoning-active',active?'1':'0');
+    if(label) label.textContent=t('thinking');
+    return;
+  }
+  const current=label&&titles.indexOf(String(label.textContent||''));
+  const index=current>=0?current:titles.length-1;
+  row.setAttribute('data-reasoning-titles',JSON.stringify(titles));
+  row.setAttribute('data-reasoning-title-index',String(index));
+  row.setAttribute('data-reasoning-active',active?'1':'0');
+  if(label){
+    label.textContent=titles[index];
+    label.setAttribute('aria-live','off');
+  }
+  if(active&&titles.length>1) _ensureReasoningTitleRotation();
 }
 function isSimplifiedToolCalling(){
   return window._simplifiedToolCalling!==false;
 }
-function _thinkingActivityNode(text, open, disclosureKey){
+function _thinkingActivityNode(text, open, disclosureKey, titles, active){
   const row=document.createElement('div');
   row.className='agent-activity-thinking';
   row.setAttribute('data-worklog-thinking-card','1');
   if(disclosureKey) row.setAttribute('data-thinking-key', String(disclosureKey));
   row.innerHTML=_thinkingCardHtml(text, open);
-  _renderThinkingInto(row,text);
+  const card=row.querySelector('.thinking-card');
+  if(card) _setWorklogDetailDisclosureOpen(card,card.classList.contains('open'));
+  _renderThinkingInto(row,text,titles);
+  if(typeof _applyReasoningTitles==='function') _applyReasoningTitles(row,titles,active);
   return row;
 }
 function chatActivityMode(){
@@ -11979,8 +12121,10 @@ function _attachCopyButton(header){
     const feedbackState=row&&row._transparentCopiedFeedback;
     const feedbackActive=!!(feedbackState&&Number(feedbackState.expiresAt)>Date.now());
     btn.classList.add('transparent-event-copy');
-    btn.setAttribute('role','button');
-    btn.setAttribute('tabindex','0');
+    if(String(btn.tagName||'').toLowerCase()!=='button'){
+      btn.setAttribute('role','button');
+      btn.setAttribute('tabindex','0');
+    }
     btn.setAttribute('data-transparent-copy','1');
     if(!btn._transparentCopiedFeedback&&!feedbackActive){
       btn.setAttribute('aria-label',t('copy')||'Copy');
@@ -12004,12 +12148,18 @@ function _attachCopyButton(header){
   // added by this function AND the legacy .thinking-copy-btn baked into the
   // thinking-card template). Returning the existing one prevents the
   // duplicate copy buttons that appeared in thinking boxes.
-  const existing=header.querySelector('.transparent-event-copy,.thinking-copy-btn');
+  const card=header.closest?header.closest('.tool-card,.thinking-card'):null;
+  const headerIsButton=String(header.tagName||'').toLowerCase()==='button';
+  const existing=header.querySelector('.transparent-event-copy,.thinking-copy-btn')
+    || (headerIsButton&&card&&card.querySelector(
+      ':scope > .thinking-card-head-row > .thinking-copy-btn,:scope > .transparent-event-copy'
+    ));
   if(existing){
     // Normalise the class so CSS treats them identically.
     return bindCopyButton(existing);
   }
-  const btn=document.createElement('span');
+  const btn=document.createElement('button');
+  btn.type='button';
   btn.className='transparent-event-copy';
   btn.innerHTML=`<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
   bindCopyButton(btn);
@@ -12017,9 +12167,15 @@ function _attachCopyButton(header){
   // whether a toggle or status badge is present: always right before
   // the toggle. The CSS uses flexbox order to keep it visually stable
   // even if other elements are inserted between header and toggle.
-  const toggle=header.querySelector('.tool-card-toggle,.thinking-card-toggle');
-  if(toggle&&toggle.parentNode===header) header.insertBefore(btn,toggle);
-  else header.appendChild(btn);
+  if(headerIsButton&&card){
+    card.classList.add('tool-card-has-external-copy');
+    if(header.nextSibling) card.insertBefore(btn,header.nextSibling);
+    else card.appendChild(btn);
+  }else{
+    const toggle=header.querySelector('.tool-card-toggle,.thinking-card-toggle');
+    if(toggle&&toggle.parentNode===header) header.insertBefore(btn,toggle);
+    else header.appendChild(btn);
+  }
   const row=header.closest?header.closest('.transparent-event-row'):null;
   if(typeof _showTransparentCopiedFeedback==='function') _showTransparentCopiedFeedback(btn,row,{rehydrate:true});
   return btn;
@@ -12049,6 +12205,7 @@ function _setTransparentCardOpen(card, open){
   }
   card.classList.toggle('open',expanded);
   if(row) row.setAttribute('data-expanded',expanded?'1':'0');
+  _syncToolCardDisclosureA11y(card,expanded);
   const header=card.querySelector('.tool-card-header,.thinking-card-header');
   if(header) header.setAttribute('aria-expanded',expanded?'true':'false');
 }
@@ -12118,6 +12275,7 @@ function _materializeTransparentToolDetail(row){
       requestAnimationFrame(()=>{ try{ _postProcessWithAnchorSuppression(card); }catch(_){ } });
     }
   }
+  _syncToolCardDisclosureA11y(card,card.classList.contains('open'));
   return true;
 }
 // Recover a tool call for a deferred row whose _deferredToolCall JS property was
@@ -12153,6 +12311,7 @@ function _transparentToolCallFromRowDataset(row){
 }
 function _wireTransparentHeaderToggle(header){
   if(!header) return;
+  const nativeButton=String(header.tagName||'').toLowerCase()==='button';
   header.setAttribute('data-transparent-toggle-bound','1');
   header.onclick=function(ev){
     const target=ev&&ev.target;
@@ -12160,14 +12319,16 @@ function _wireTransparentHeaderToggle(header){
     const card=this.closest('.tool-card,.thinking-card');
     _setTransparentCardOpen(card,!(card&&card.classList.contains('open')));
   };
-  header.onkeydown=function(ev){
+  header.onkeydown=nativeButton?null:function(ev){
     if(ev.key!=='Enter'&&ev.key!==' ') return;
     ev.preventDefault();
     const card=this.closest('.tool-card,.thinking-card');
     _setTransparentCardOpen(card,!(card&&card.classList.contains('open')));
   };
-  header.setAttribute('role','button');
-  header.setAttribute('tabindex','0');
+  if(!nativeButton){
+    header.setAttribute('role','button');
+    header.setAttribute('tabindex','0');
+  }
 }
 function _transparentToolDetailHtml(tc, status){
   const args=tc&&tc.args&&typeof tc.args==='object'?tc.args:{};
@@ -12432,10 +12593,6 @@ function _decorateTransparentEventRow(row, opts){
       _wireTransparentHeaderToggle(header);
       _attachCopyButton(header);
     }
-    // Attach the 3D progress bar BEFORE the early return so tool rows
-    // also get the bottom bar (the function used to return before
-    // reaching the bar attachment, which left tool rows bar-less).
-    _attachProgressBar(row, opts);
     return row;
   }
   if(type==='thinking'){
@@ -12453,9 +12610,13 @@ function _decorateTransparentEventRow(row, opts){
       if(btnRow&&btnRow.parentNode===header&&!btnRow.children.length) btnRow.remove();
       header.style.flexDirection='row';
       const label=header.querySelector('.thinking-card-label');
-      if(label) label.textContent='Thinking';
+      if(label&&!row.getAttribute('data-reasoning-titles')) label.textContent=typeof t==='function'?t('thinking'):'Thinking';
       let preview=header.querySelector('.transparent-event-preview,.transparent-event-thinking-preview');
-      const previewText=_transparentEventPreview(opts.preview||opts.text||row.textContent||'');
+      let previewSource=opts.preview||opts.text||row.textContent||'';
+      if(row.getAttribute('data-reasoning-titles')){
+        try{ previewSource=_reasoningBodyTextForDisplay(previewSource,JSON.parse(row.getAttribute('data-reasoning-titles'))); }catch(_){ }
+      }
+      const previewText=_transparentEventPreview(previewSource);
       if(previewText){
         if(!preview){
           preview=document.createElement('span');
@@ -12473,7 +12634,6 @@ function _decorateTransparentEventRow(row, opts){
       _wireTransparentHeaderToggle(header);
       _attachCopyButton(header);
     }
-    _attachProgressBar(row, opts);
   }
   return row;
 }
@@ -12824,6 +12984,8 @@ function _toggleActivityGroup(summary){
   const collapsed=group.classList.toggle('tool-call-group-collapsed');
   group.classList.toggle('open',!collapsed);
   summary.setAttribute('aria-expanded',String(!collapsed));
+  const body=group.querySelector(':scope > .tool-call-group-body,:scope > .tool-worklog-body');
+  if(body) body.hidden=collapsed;
   _writeActivityDisclosureState(group.getAttribute('data-activity-disclosure-key'), !collapsed);
   // Build deferred settled rows only when the user opens the Worklog.
   if(!collapsed){
@@ -12841,30 +13003,6 @@ function _toggleToolWorklogGroup(summary){
     return;
   }
   return _toggleActivityGroup(summary);
-}
-function _finalizeLiveActivityDisclosureGroup(group){
-  if(!group) return;
-  // Internal tool-card expansion is transient streaming UI, not user intent.
-  // Carry the whole Worklog open only when the user explicitly opened it (or
-  // explicitly configured Worklogs to open by default).
-  const keepOpen=_liveActivityUserExpanded===true
-    || (_liveActivityUserExpanded===undefined&&window._worklogDetailsExpandedByDefault===true);
-  const disclosureKey=group.getAttribute('data-activity-disclosure-key')||group.getAttribute('data-tool-worklog-key')||'';
-  group.removeAttribute('data-live-activity-current');
-  group.removeAttribute('data-live-tool-call-group');
-  group.removeAttribute('data-live-tool-worklog-group');
-  group.removeAttribute('data-live-anchor-scene-owner');
-  group.classList.toggle('tool-call-group-collapsed', !keepOpen);
-  group.classList.toggle('open', keepOpen);
-  if(keepOpen&&disclosureKey) _writeActivityDisclosureState(disclosureKey, true);
-  const summary=group.querySelector&&group.querySelector('.tool-worklog-summary,.tool-call-group-summary');
-  if(summary){
-    summary.removeAttribute('data-live-summary-static');
-    summary.removeAttribute('aria-disabled');
-    summary.disabled=false;
-    summary.setAttribute('aria-expanded',keepOpen?'true':'false');
-  }
-  if(typeof _syncToolCallGroupSummary==='function') _syncToolCallGroupSummary(group);
 }
 function _worklogReasonHtmlFromAnchor(anchor, textOverride){
   if(!anchor||!anchor.matches||!anchor.matches('.assistant-segment')) return '';
@@ -13159,7 +13297,7 @@ function _anchorSceneRowsForRendering(scene, opts){
     if(row.role==='terminal'&&row.source_event_type==='done') continue;
     if(_anchorSceneIsSettledSuccessfulCompression(row,settled)) continue;
     const text=String(row.text||'').trim();
-    if((row.role==='prose'||row.role==='thinking')&&!text) continue;
+    if(row.role==='prose'&&!text) continue;
     const key=keyFor(row);
     if(byKey.has(key)){
       const index=byKey.get(key);
@@ -13327,8 +13465,14 @@ function _anchorSceneNodeForRow(row, opts){
   }else if(row.role==='thinking'){
     if(window._showThinking===false) return null;
     const text=String(row.text||row.thinking&&row.thinking.text||'').trim();
-    if(!text) return null;
-    node=_thinkingActivityNode(text, false, row.row_id||row.local_id||'anchor-thinking');
+    const titles=row.thinking&&Array.isArray(row.thinking.titles)?row.thinking.titles:row.payload&&row.payload.titles;
+    node=_thinkingActivityNode(
+      text,
+      false,
+      row.row_id||row.local_id||'anchor-thinking',
+      titles,
+      !settled&&(row.status==='running'||row.status==='pending'),
+    );
   }else if(row.role==='tool'){
     node=buildToolCard(_anchorSceneToolCallFromRow(row,opts));
   }else if(row.role==='lifecycle'){
@@ -13407,8 +13551,14 @@ function _anchorSceneTransparentNodeForRow(row, opts){
   }else if(row.role==='thinking'){
     if(window._showThinking===false) return null;
     const text=String(row.text||row.thinking&&row.thinking.text||'').trim();
-    if(!text) return null;
-    node=_decorateTransparentEventRow(_thinkingActivityNode(text,false,row.row_id||row.local_id||'anchor-thinking'),{
+    const titles=row.thinking&&Array.isArray(row.thinking.titles)?row.thinking.titles:row.payload&&row.payload.titles;
+    node=_decorateTransparentEventRow(_thinkingActivityNode(
+      text,
+      false,
+      row.row_id||row.local_id||'anchor-thinking',
+      titles,
+      live&&(row.status==='running'||row.status==='pending'),
+    ),{
       type:'thinking',
       text,
       preview:text,
@@ -13506,7 +13656,102 @@ function _anchorSceneWorklogGroup(blocks, opts){
   if(opts&&opts.streamId) group.setAttribute('data-anchor-stream-id',String(opts.streamId));
   if(opts&&opts.turnDuration!==undefined&&opts.turnDuration!==null) group.setAttribute('data-turn-duration',String(opts.turnDuration));
   if(opts&&opts.turnStartedAt!==undefined&&opts.turnStartedAt!==null) group.setAttribute('data-turn-started-at',String(opts.turnStartedAt));
+  if(live){
+    group.classList.remove('tool-call-group-collapsed');
+    group.classList.add('open');
+    const summary=group.querySelector(':scope > .tool-worklog-summary,:scope > .tool-call-group-summary');
+    if(summary) summary.setAttribute('aria-expanded','true');
+  }
   return group;
+}
+function _activitySequenceNodeKey(node, index){
+  if(!node||!node.getAttribute) return `sequence:${Number(index)||0}`;
+  const anchorKey=node.getAttribute('data-anchor-row-id');
+  if(anchorKey) return `anchor:${anchorKey}`;
+  const thinking=node.matches&&node.matches('[data-thinking-key],[data-live-thinking-key]')
+    ? node
+    : node.querySelector&&node.querySelector('[data-thinking-key],[data-live-thinking-key]');
+  if(thinking){
+    const key=thinking.getAttribute('data-thinking-key')||thinking.getAttribute('data-live-thinking-key');
+    if(key) return `thinking:${key}`;
+  }
+  const tool=node.matches&&node.matches('.tool-card-row')?node:node.querySelector&&node.querySelector('.tool-card-row');
+  const toolKey=tool&&(tool.getAttribute('data-tool-disclosure-key')||tool.getAttribute('data-live-tid'));
+  return toolKey?`tool:${toolKey}`:`sequence:${Number(index)||0}`;
+}
+let _activitySequenceBodyID=0;
+function _createActivitySequenceGroup(key, live, open){
+  const group=document.createElement('div');
+  const bodyId=`activity-sequence-${_worklogDetailHashKey(key||'sequence')}-${++_activitySequenceBodyID}`;
+  group.className='agent-activity-group tool-worklog-group activity activity-sequence-group'+(open?' open':' tool-call-group-collapsed');
+  group.setAttribute('data-activity-sequence-group','1');
+  group.setAttribute('data-activity-sequence-key',String(key||'sequence'));
+  group.setAttribute('data-activity-disclosure-key',`activity-sequence:${String(key||'sequence')}`);
+  if(live) group.setAttribute('data-live-activity-sequence','1');
+  group.innerHTML=`<button type="button" class="tool-call-group-summary tool-worklog-summary activity-summary" aria-expanded="${open?'true':'false'}" aria-controls="${bodyId}" onclick="_toggleActivityGroup(this)"><span class="as-dot"></span><span class="tool-call-group-label tool-worklog-label as-text">${typeof t==='function'?t('thinking'):'Thinking'}</span><span class="tool-call-group-chevron as-caret">${li('chevron-right',12)}</span></button><div id="${bodyId}" class="tool-call-group-body tool-worklog-body activity-body"${open?'':' hidden'}><div class="worklog"><div class="tool-worklog-list"></div></div></div>`;
+  return group;
+}
+function _syncActivitySequenceSummary(group){
+  if(!group) return;
+  const label=group.querySelector(':scope > .tool-worklog-summary .tool-worklog-label');
+  if(!label) return;
+  const isActive=group.getAttribute('data-live-activity-current')==='1';
+  const activityRows=Array.from(group.querySelectorAll('.agent-activity-thinking,.tool-card-row'));
+  const current=activityRows[activityRows.length-1];
+  let currentLabel='';
+  if(isActive&&current){
+    if(current.classList.contains('agent-activity-thinking')){
+      const thinkingLabel=current.querySelector('.thinking-card-label');
+      if(thinkingLabel) currentLabel=thinkingLabel.textContent.trim();
+    }else{
+      currentLabel=current.getAttribute('data-tool-action-label')
+        || (current.querySelector('.tool-card-name-label')&&current.querySelector('.tool-card-name-label').textContent.trim());
+    }
+    if(currentLabel){
+      label.textContent=currentLabel;
+      label.setAttribute('data-sweep-label',label.textContent);
+      return;
+    }
+  }
+  const titled=Array.from(group.querySelectorAll('.agent-activity-thinking[data-reasoning-titles] .thinking-card-label')).pop();
+  const cards=Array.from(group.querySelectorAll('.tool-card-row .tool-card,.tool-card-row.tl'));
+  label.textContent=(titled&&titled.textContent.trim())
+    || (cards.length?_toolWorklogSummary(cards,{live:false,toolCount:cards.length}):(typeof t==='function'?t('thinking'):'Thinking'));
+  label.setAttribute('data-sweep-label',label.textContent);
+}
+function _activitySequenceDirectNode(node){
+  return !!(node&&node.classList&&(
+    node.classList.contains('agent-activity-thinking')||
+    node.classList.contains('wl-step-tools')||
+    node.classList.contains('tool-card-row')||
+    node.classList.contains('compression-card-row')
+  ));
+}
+function _syncActivitySequenceGroups(worklog, live){
+  const list=_toolWorklogListEl(worklog);
+  if(!list) return;
+  let sequence=null;
+  Array.from(list.children).forEach((node,index)=>{
+    if(node.getAttribute&&node.getAttribute('data-activity-sequence-group')==='1'){
+      sequence=node;
+      sequence.removeAttribute('data-live-activity-current');
+      return;
+    }
+    if(_activitySequenceDirectNode(node)){
+      if(!sequence){
+        const key=_activitySequenceNodeKey(node,index);
+        sequence=_createActivitySequenceGroup(key,!!live,false);
+        list.insertBefore(sequence,node);
+      }
+      _toolWorklogListEl(sequence).appendChild(node);
+    }else{
+      sequence=null;
+    }
+  });
+  const groups=Array.from(list.querySelectorAll(':scope > [data-activity-sequence-group="1"]'));
+  groups.forEach(group=>group.removeAttribute('data-live-activity-current'));
+  if(live&&sequence) sequence.setAttribute('data-live-activity-current','1');
+  groups.forEach(_syncActivitySequenceSummary);
 }
 function _anchorSceneCompactRowKey(node, index){
   if(!node||!node.getAttribute) return `row:${Number(index)||0}`;
@@ -13521,6 +13766,8 @@ function _anchorSceneCompactRowKey(node, index){
 }
 function _anchorSceneCompactTopLevelKey(node, index){
   if(!node||!node.getAttribute) return `section:${Number(index)||0}`;
+  const sequenceKey=node.getAttribute('data-activity-sequence-key');
+  if(sequenceKey) return `activity-sequence:${sequenceKey}`;
   const liveEdge=node.getAttribute('data-live-anchor-window-edge');
   if(liveEdge) return `live:${liveEdge}-steps`;
   if(node.getAttribute('data-worklog-tools')==='1'){
@@ -13558,7 +13805,21 @@ function _reconcileAnchorSceneCompactChildren(parent, desiredNodes, topLevel){
       topLevel&&existing&&candidate&&existing.getAttribute&&candidate.getAttribute&&
       existing.getAttribute('data-worklog-tools')==='1'&&candidate.getAttribute('data-worklog-tools')==='1'
     );
-    if(toolSection){
+    const activitySequence=!!(
+      topLevel&&existing&&candidate&&existing.getAttribute&&candidate.getAttribute&&
+      existing.getAttribute('data-activity-sequence-group')==='1'&&candidate.getAttribute('data-activity-sequence-group')==='1'
+    );
+    if(activitySequence){
+      const existingList=_toolWorklogListEl(existing);
+      const candidateList=_toolWorklogListEl(candidate);
+      if(existingList&&candidateList){
+        _reconcileAnchorSceneCompactChildren(existingList,Array.from(candidateList.children||[]),true);
+      }
+      existing.toggleAttribute('data-live-activity-current',candidate.getAttribute('data-live-activity-current')==='1');
+      _syncActivitySequenceSummary(existing);
+      actual=existing;
+      reused.add(existing);
+    }else if(toolSection){
       _reconcileAnchorSceneCompactChildren(existing,Array.from(candidate.children||[]),false);
       actual=existing;
       reused.add(existing);
@@ -13576,6 +13837,8 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   if(!group||!list) return false;
   const desired=[];
   let wrote=false;
+  let currentSequence=null;
+  let currentSequenceList=null;
   let currentTools=null;
   const beforeNode=opts&&(opts.beforeNode||opts.earlierNode);
   if(beforeNode){
@@ -13585,15 +13848,27 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   for(const row of rows){
     const node=_anchorSceneNodeForRow(row,opts);
     if(!node) continue;
+    const belongsToSequence=row.role==='thinking'||row.role==='tool'||row.role==='lifecycle';
+    if(belongsToSequence&&!currentSequence){
+      const key=_activitySequenceNodeKey(node,desired.length);
+      currentSequence=_createActivitySequenceGroup(key,!!(opts&&opts.live),false);
+      currentSequenceList=_toolWorklogListEl(currentSequence);
+      desired.push(currentSequence);
+    }
     if(row.role==='tool'){
       if(!currentTools){
         currentTools=document.createElement('div');
         currentTools.className='wl-step-tools tool-worklog-tools';
         currentTools.setAttribute('data-worklog-tools','1');
-        desired.push(currentTools);
+        currentSequenceList.appendChild(currentTools);
       }
       currentTools.appendChild(node);
+    }else if(belongsToSequence){
+      currentTools=null;
+      currentSequenceList.appendChild(node);
     }else{
+      currentSequence=null;
+      currentSequenceList=null;
       currentTools=null;
       desired.push(node);
     }
@@ -13603,6 +13878,11 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
     desired.push(opts.afterNode);
     wrote=true;
   }
+  desired.filter(node=>node.getAttribute&&node.getAttribute('data-activity-sequence-group')==='1')
+    .forEach(node=>node.removeAttribute('data-live-activity-current'));
+  if(opts&&opts.live&&currentSequence) currentSequence.setAttribute('data-live-activity-current','1');
+  desired.filter(node=>node.getAttribute&&node.getAttribute('data-activity-sequence-group')==='1')
+    .forEach(_syncActivitySequenceSummary);
   _reconcileAnchorSceneCompactChildren(list,desired,true);
   if(wrote){
     _syncToolCallGroupSummary(group);
@@ -13785,7 +14065,7 @@ function _updateLiveAnchorReasoningRowForFallback(turn, text, opts){
     const group=row.closest&&row.closest('.tool-worklog-group,.tool-call-group,.live-worklog');
     if(group&&typeof _syncToolCallGroupSummary==='function') _syncToolCallGroupSummary(group);
   }else if(row.classList&&row.classList.contains('transparent-event-row')){
-    _renderThinkingInto(row, clean);
+    _renderThinkingInto(row, clean, opts&&opts.titles);
     const eventAt=row.getAttribute&&row.getAttribute('data-event-at');
     const nextTs=typeof _firstValidTimestampSeconds==='function'
       ? _firstValidTimestampSeconds(opts&&opts.ts, opts&&opts.timestamp, opts&&opts.created_at, eventAt)
@@ -13802,7 +14082,7 @@ function _updateLiveAnchorReasoningRowForFallback(turn, text, opts){
       });
     }
   }else{
-    _renderThinkingInto(row, clean);
+    _renderThinkingInto(row, clean, opts&&opts.titles);
   }
   if(turn&&typeof _syncTransparentEventControls==='function') _syncTransparentEventControls(turn);
   if(typeof scrollIfPinned==='function') scrollIfPinned();
@@ -14135,8 +14415,15 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   // one ensureActivityGroup just reconciled. Apply live disclosure intent to
   // the group that is actually left on screen, after ownership is resolved.
   if(visibleGroup&&typeof _applyLiveActivityDisclosureIntent==='function'){
-    const visibleKey=visibleGroup.getAttribute('data-activity-disclosure-key')||`live:${streamId||S.activeStreamId||'anchor'}`;
-    _applyLiveActivityDisclosureIntent(visibleGroup,{live:true,collapsed:false},_readActivityDisclosureState(visibleKey));
+    if(visibleGroup.getAttribute('data-live-anchor-scene-owner')==='1'){
+      visibleGroup.classList.remove('tool-call-group-collapsed');
+      visibleGroup.classList.add('open');
+      const summary=visibleGroup.querySelector(':scope > .tool-worklog-summary,:scope > .tool-call-group-summary');
+      if(summary) summary.setAttribute('aria-expanded','true');
+    }else{
+      const visibleKey=visibleGroup.getAttribute('data-activity-disclosure-key')||`live:${streamId||S.activeStreamId||'anchor'}`;
+      _applyLiveActivityDisclosureIntent(visibleGroup,{live:true,collapsed:false},_readActivityDisclosureState(visibleKey));
+    }
   }
   if(typeof _moveLiveRunStatusToTurnEnd==='function') _moveLiveRunStatusToTurnEnd();
   // Read scroll geometry on the next animation frame, after this mutation batch
@@ -14345,6 +14632,9 @@ function _refreshTransparentThinkingLiveRow(existing, node){
   const existingPre = existing.querySelector('.thinking-card-body pre');
   const nodePre = node.querySelector('.thinking-card-body pre');
   if(!existingPre || !nodePre) return false;
+  const existingCard=existing.querySelector('.thinking-card');
+  const nodeCard=node.querySelector('.thinking-card');
+  if(existingCard&&nodeCard&&nodeCard._reasoningFullText) existingCard._reasoningFullText=nodeCard._reasoningFullText;
   const nextText = String(nodePre.textContent || '');
   if(existingPre.textContent !== nextText) existingPre.textContent = nextText;
   const nodePreview = node.querySelector('.transparent-event-thinking-preview');
@@ -14363,6 +14653,15 @@ function _refreshTransparentThinkingLiveRow(existing, node){
       ts:nextStamp||undefined,
       live:true,
     });
+  }
+  if(typeof _applyReasoningTitles==='function'){
+    try{
+      _applyReasoningTitles(
+        existing,
+        JSON.parse(existing.getAttribute('data-reasoning-titles')||'[]'),
+        existing.getAttribute('data-reasoning-active')==='1',
+      );
+    }catch(_){ _applyReasoningTitles(existing,[],false); }
   }
   return true;
 }
@@ -14902,7 +15201,7 @@ function _collapseJustSettledWorklogInPlace(streamId){
   if(ownerHasVisibleSegment===null) return false;
   const rows=_deferredWorklogRowsFromGroup(group);
   if(!rows||!rows.length) return false;
-  // A normal completed turn always folds Processed once its visible final
+  // A normal completed turn always folds Worked once its visible final
   // answer arrives. Keep it open only when there is no final answer to replace
   // the live activity (including error/no-response diagnostics).
   const keepOpen=!ownerHasVisibleSegment;
@@ -14969,6 +15268,9 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   if(streamId&&!_readActivityDisclosureState(activityKey)){
     _copyActivityDisclosureState(`live:${streamId}`, activityKey);
   }
+  const savedDisclosure=_readActivityDisclosureState(activityKey);
+  const keepErroredResponseVisible=_anchorSceneHasErroredTerminalState(scene)
+    && savedDisclosure!=='closed';
   // #5941: an errored turn that produced assistant content (tool calls /
   // reasoning) must not hide that content behind a collapsed header — the user
   // reads a lone error card as "nothing came back". When the settled scene's
@@ -14980,8 +15282,6 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   // still shows only its error card, no phantom empty body. A user who has
   // explicitly collapsed THIS turn's worklog (saved 'closed' disclosure state)
   // is still respected, so the default-open never fights an intentional collapse.
-  const erroredWorklogKeepOpen=_anchorSceneHasErroredTerminalState(scene)
-    && _readActivityDisclosureState(activityKey)!=='closed';
   // keepSettledWorklogOpen forces collapsed:false for the ONE height-stable settle
   // render of the just-settled turn (no STREAM_DONE shrink jump) for both pinned
   // followers AND unpinned mid-turn readers. The keep-open is made genuinely
@@ -14993,7 +15293,7 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   // (_isKeepSettledWorklogOpenArmed), so it never persists across restores.
   const group=_anchorSceneWorklogGroup(blocks,{
     live:false,
-    collapsed:!(keepSettledWorklogOpen||erroredWorklogKeepOpen),
+    collapsed:!keepSettledWorklogOpen&&!keepErroredResponseVisible,
     beforeAnchor:true,
     anchor:segment,
     activityKey,
@@ -15007,7 +15307,7 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   // eagerly materializing them for every historical turn balloons the DOM and a
   // later synchronous layout (e.g. opening a dropdown) tips the tab into a
   // multi-GB freeze. The summary chip renders from data-turn-duration, not the
-  // rows, so a deferred worklog still shows its "Processed in Xs" label. On
+  // rows, so a deferred worklog still shows its "Worked for X" label. On
   // expand, _toggleActivityGroup materializes the stashed rows exactly once.
   const collapsed=group.classList.contains('tool-call-group-collapsed');
   if(collapsed){
@@ -15371,14 +15671,6 @@ function ensureRunActivityForCurrentTurn(){
   // Phase C: disabled — top live run Activity card removed
   return null;
 }
-function closeCurrentLiveActivityGroup(){
-  const turn=$('liveAssistantTurn');
-  if(!turn) return;
-  turn.querySelectorAll('.tool-worklog-group[data-live-tool-call-group="1"][data-live-activity-current="1"],.tool-call-group[data-live-tool-call-group="1"][data-live-activity-current="1"]').forEach(group=>{
-    group.removeAttribute('data-live-activity-current');
-    _finalizeLiveActivityDisclosureGroup(group);
-  });
-}
 function _compressionStateForCurrentSession(){
   const state=window._compressionUi;
   if(!state||!S.session||state.sessionId!==S.session.session_id) return null;
@@ -15559,7 +15851,6 @@ function appendLiveCompressionCard(state){
   }
   const inner=_assistantTurnBlocks(turn);
   if(!inner){ if(scrollRebuildGuard.release) scrollRebuildGuard.release(); return false; }
-  closeCurrentLiveActivityGroup();
   if(state.automatic){
     const group=ensureLiveWorklogContainer(inner,{activityKey:_activityKeyForLiveTurn()});
     const list=_toolWorklogListEl(group);
@@ -18397,6 +18688,8 @@ function renderMessages(options){
             segmentSeq:segmentSeq||'',
             turnDuration:includeTurnDuration?_turnDurationForAnchor(anchorRow):undefined,
           });
+          if(!group) continue;
+          group.setAttribute('data-completed-run-group','1');
           const list=_toolWorklogListEl(group);
           if(!list) continue;
           list.innerHTML='';
@@ -19081,7 +19374,7 @@ function _toolActionLabelText(tc, opts){
       list:{running:'Listing',done:'Listed',fallback:'files'},
       search:{running:'Searching for',done:'Searched for',fallback:'workspace'},
       web:{running:'Checking',done:'Checked',fallback:'web data'},
-      write:{running:'Updating',done:'Updated',fallback:'a file'},
+      write:{running:'Editing',done:'Edited',fallback:'a file'},
       skill:{running:'Loading',done:'Loaded',fallback:'a skill'},
       memory:{running:'Saving',done:'Saved',fallback:'memory'},
       delegate:{running:'Delegating',done:'Delegated',fallback:'a task'},
@@ -19102,25 +19395,28 @@ function _toolWorklogSummaryLine(kind, state, count){
   const n=Math.max(1,Number(count)||1);
   return _toolI18n('tool_worklog_summary',(k,s,c)=>{
     const forms={
-      shell:{running:['Running a command','Running {n} commands'],done:['Ran a command','Ran {n} commands']},
-      read:{running:['Reading a file','Reading {n} files'],done:['Read a file','Read {n} files']},
-      list:{running:['Listing files','Listing {n} items'],done:['Listed files','Listed {n} files']},
-      search:{running:['Searching workspace','Searching workspace {n} times'],done:['Searched workspace','Searched workspace {n} times']},
-      web:{running:['Checking web','Checking web {n} times'],done:['Checked the web','Checked the web {n} times']},
-      write:{running:['Updating a file','Updating {n} files'],done:['Updated a file','Updated {n} files']},
-      skill:{running:['Loading a skill','Loading {n} skills'],done:['Loaded a skill','Loaded {n} skills']},
-      memory:{running:['Saving memory','Saving {n} memory updates'],done:['Saved memory','Saved {n} memory updates']},
-      delegate:{running:['Delegating a task','Delegating {n} tasks'],done:['Delegated a task','Delegated {n} tasks']},
-      unknown:{running:['Running a tool','Running {n} tools'],done:['Ran a tool','Ran {n} tools']},
+      shell:{running:['Running a command','Running commands'],done:['Ran a command','Ran commands']},
+      read:{running:['Reading a file','Reading files'],done:['Read a file','Read files']},
+      list:{running:['Listing files','Listing files'],done:['Listed files','Listed files']},
+      search:{running:['Searching workspace','Searching workspace'],done:['Searched workspace','Searched workspace']},
+      web:{running:['Searching the web','Searching the web'],done:['Searched the web','Searched the web']},
+      write:{running:['Editing a file','Editing files'],done:['Edited a file','Edited files']},
+      skill:{running:['Loading a tool','Loading tools'],done:['Loaded a tool','Loaded tools']},
+      memory:{running:['Saving memory','Saving memory'],done:['Saved memory','Saved memory']},
+      delegate:{running:['Delegating a task','Delegating tasks'],done:['Delegated a task','Delegated tasks']},
+      unknown:{running:['Calling a tool','Calling tools'],done:['Called a tool','Called tools']},
     };
     const pair=((forms[k]||forms.unknown)[s]||forms.unknown.running);
-    return (c===1?pair[0]:pair[1]).replace('{n}',String(c));
+    return c===1?pair[0]:pair[1];
   },kind,state,n);
 }
 function _toolWorklogJoin(lines){
   const parts=Array.from(lines||[]).filter(Boolean);
   if(parts.length<=1) return parts[0]||'';
-  return _toolI18n('tool_summary_join',(items)=>items.join(', '),parts);
+  return _toolI18n('tool_summary_join',(items)=>items.map((item,index)=>{
+    if(!index) return item;
+    return item.charAt(0).toLocaleLowerCase()+item.slice(1);
+  }).join(', '),parts);
 }
 function _toolWorklogActionParts(tc){
   if(tc&&tc.nodeType===1){
@@ -19147,7 +19443,7 @@ function _toolWorklogSummary(toolCalls, opts){
   if(cards.length===1){
     const part=_toolWorklogActionParts(cards[0]);
     const line=_toolWorklogSummaryLine(part.kind,part.isDone?'done':'running',1);
-    return part.isErr?`${line}, 1 failed`:line;
+    return part.isErr?`${line}, failed`:line;
   }
   const order=['shell','read','search','write','skill','memory','web','list','delegate','unknown'];
   const runningCounts={}, doneCounts={};
@@ -19168,7 +19464,7 @@ function _toolWorklogSummary(toolCalls, opts){
     return out;
   };
   const lines=[...emit(runningCounts,'running'),...emit(doneCounts,'done')];
-  if(failed) lines.push(`${failed} failed`);
+  if(failed) lines.push('Failed');
   return lines.length?_toolWorklogJoin(lines):_toolActionLabel(cards[0]);
 }
 function _toolWorklogListEl(group){
@@ -19228,33 +19524,11 @@ function _toolGroupIcon(rows){
 }
 function _syncToolRowsContainer(tools, isLiveWorklog){
   if(!tools) return;
-  const existingGroup=tools.querySelector(':scope > .tool-worklog-tool-group,:scope > .tool-group[data-tool-worklog-tool-group="1"]');
-  const wasOpen=!!(existingGroup&&existingGroup.classList&&existingGroup.classList.contains('open'));
   const rows=_directWorklogToolRows(tools);
   _unwrapNestedToolGroups(tools);
   rows.forEach(row=>{ if(row.parentElement) row.remove(); });
   tools.querySelectorAll(':scope > .tool-card-row').forEach(row=>row.remove());
-  const shouldGroup=tools.classList.contains('wl-step-tools') && rows.length>1;
-  if(!shouldGroup){
-    rows.forEach(row=>tools.appendChild(row));
-    return;
-  }
-  const shouldOpen=wasOpen||_worklogDetailsExpandedDefault();
-  const group=document.createElement('div');
-  group.className='tool-group'+(shouldOpen?' open':' tool-worklog-tool-group-collapsed');
-  group.setAttribute('data-tool-worklog-tool-group','1');
-  let groupKey='group';
-  if(tools.parentElement){
-    const steps=Array.from(tools.parentElement.children).filter(child=>child.classList&&child.classList.contains('wl-step-tools')&&child.getAttribute('data-worklog-tools')==='1');
-    const stepIdx=steps.indexOf(tools);
-    if(stepIdx>=0) groupKey=`step:${stepIdx}`;
-  }
-  group.setAttribute('data-tool-group-disclosure-key',groupKey);
-  const summary=_toolWorklogSummary(rows,{live:isLiveWorklog, toolCount:rows.length});
-  group.innerHTML=`<button type="button" class="tool-group-head tool-worklog-tool-group-head" aria-expanded="${shouldOpen?'true':'false'}" onclick="_toggleToolWorklogGroup(this)"><span class="tool-worklog-tool-group-icon tg-icon">${_toolGroupIcon(rows)}</span><span class="tg-sum tool-worklog-tool-group-label">${esc(summary)}</span><span class="tool-call-group-chevron tg-caret">${li('chevron-right',12)}</span></button><div class="tool-group-body tool-worklog-tool-group-body"><div class="tg-rows tool-worklog-tool-group-rows"></div></div>`;
-  const body=group.querySelector('.tg-rows');
-  rows.forEach(row=>body.appendChild(row));
-  tools.appendChild(group);
+  rows.forEach(row=>tools.appendChild(row));
 }
 function _syncToolWorklogToolGroup(group){
   const list=_toolWorklogListEl(group);
@@ -19401,6 +19675,9 @@ function buildToolCard(tc){
   row.dataset.toolError=String(!!(tc&&tc.is_error));
   row.dataset.toolActionLabel=typeof _toolActionLabelText==='function'?_toolActionLabelText(tc):_toolDisplayName(tc);
   const disclosureKey=typeof _toolDisclosureIdentity==='function'?_toolDisclosureIdentity(tc):'';
+  buildToolCard._detailPrefix=buildToolCard._detailPrefix||Math.random().toString(36).slice(2,10);
+  buildToolCard._detailID=(buildToolCard._detailID||0)+1;
+  const detailId=`tool-detail-${buildToolCard._detailPrefix}-${buildToolCard._detailID}`;
   if(disclosureKey) row.setAttribute('data-tool-disclosure-key', disclosureKey);
   const icon=toolIcon(tc.name);
   const hasRawDetail=!!(tc.snippet)||(tc.args&&Object.keys(tc.args).length>0);
@@ -19419,12 +19696,14 @@ function buildToolCard(tc){
   const hasMore=tc.snippet&&tc.snippet.length>displaySnippet.length;
   const moreLabel=tc.is_diff?'Show diff':'Show more';
   const lessLabel=tc.is_diff?'Hide diff':'Show less';
-  const runIndicator=tc.done===false?'<span class="tool-card-running-dot"></span>':'';
   const isSubagent=tc.name==='subagent_progress';
   const isDelegation=tc.name==='delegate_task';
-  const openClass='';
+  const openClass=hasDetail&&typeof _worklogDetailsExpandedDefault==='function'&&_worklogDetailsExpandedDefault()?' open':'';
   const cardClass='tool-card'+(tc.done===false?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'')+(hasDetail?'':' tool-card-no-detail')+openClass;
-  const headerClick=hasDetail?' onclick="this.closest(\'.tool-card\').classList.toggle(\'open\')"':'';
+  const headerStart=hasDetail
+    ? `<button type="button" class="tool-card-header" aria-expanded="${openClass?'true':'false'}" aria-controls="${detailId}" onclick="_toggleToolCardDisclosure(this)">`
+    : '<div class="tool-card-header">';
+  const headerEnd=hasDetail?'</button>':'</div>';
   // Clean up legacy subagent prefixes since the Lucide icon already shows it
   let displayName=typeof _toolActionLabelText==='function'?_toolActionLabelText(tc,{limit:112}):_toolDisplayName(tc);
   let genericName=typeof _toolActionLabelText==='function'?_toolActionLabelText(tc,{generic:true,limit:112}):_toolDisplayName(tc);
@@ -19438,15 +19717,14 @@ function buildToolCard(tc){
   const argsEntries=tc.args&&Object.keys(tc.args).length?Object.entries(tc.args):[];
   const visibleArgs=(detailLeadText&&toolKind==='shell')?[]:argsEntries;
   row.innerHTML=`
-    <div class="${cardClass}">
-      <div class="tool-card-header"${headerClick}>
-        ${runIndicator}
+    <div class="${cardClass}"${hasDetail?` data-tool-detail-id="${detailId}"`:''}>
+      ${headerStart}
         <span class="tool-card-icon">${icon}</span>
         <span class="tool-card-name"><span class="tool-card-name-label">${esc(displayName)}</span><span class="tool-card-name-generic">${esc(genericName)}</span></span>
         <span class="tool-card-preview">${esc(previewText)}</span>
         ${hasDetail?`<span class="tool-card-toggle">${li('chevron-right',12)}</span>`:''}
-      </div>
-      ${hasDetail?`<div class="tool-card-detail">
+      ${headerEnd}
+      ${hasDetail?`<div id="${detailId}" class="tool-card-detail"${openClass?'':' hidden'}>
         ${detailLead}
         ${visibleArgs.length?`<div class="tool-card-args">${
           visibleArgs.map(([k,v])=>{
@@ -19543,6 +19821,11 @@ function _toggleToolDiff(btn){
 
 function _syncToolCallGroupSummary(group){
   if(!group) return;
+  if(group.classList&&group.classList.contains('live-worklog')&&group.getAttribute('data-anchor-scene-owner')!=='1'){
+    _syncActivitySequenceGroups(group,true);
+  }else if(group.getAttribute('data-completed-run-group')==='1'){
+    _syncActivitySequenceGroups(group,false);
+  }
   if(group.getAttribute('data-tool-worklog-group')==='1') _syncToolWorklogToolGroup(group);
   const cards=Array.from((_toolWorklogListEl(group)||group).querySelectorAll('.tool-card-row .tool-card,.tool-card-row.tl'));
   const deferredCards=Array.isArray(group._deferredRegularWorklogCards)
@@ -19560,13 +19843,16 @@ function _syncToolCallGroupSummary(group){
   }
   const durationEl=group.querySelector('.tool-call-group-duration');
   if(label){
-    if(group.getAttribute('data-run-activity-group')==='1'){
+    if(group.getAttribute('data-anchor-settled-scene-owner')==='1'||group.getAttribute('data-completed-run-group')==='1'){
+      const durationText=_formatTurnDuration(group.dataset.turnDuration);
+      label.textContent=t('processed_elapsed',durationText);
+    }else if(group.getAttribute('data-run-activity-group')==='1'){
       label.textContent=toolCount?_toolWorklogSummary(cards,{live:isLiveWorklog, toolCount}):'Running';
     }else if(isWorklogGroup){
-      const processedLabel=isLiveWorklog
-        ? _activityProcessedElapsedLabel(group)
-        : _activitySettledProcessedLabel(group);
-      label.textContent=processedLabel||t('processed_elapsed','');
+      const thinkingLabel=group.querySelector('.agent-activity-thinking .thinking-card-label');
+      label.textContent=toolCount
+        ? _toolWorklogSummary(cards,{live:isLiveWorklog,toolCount})
+        : (thinkingLabel&&thinkingLabel.textContent.trim()||t('thinking'));
     }else{
       const rows=Array.from(group.querySelectorAll('.tool-card-row'));
       // Prefer the live _tcData classification; fall back to the durable data-*
@@ -20809,22 +21095,43 @@ function _thinkingMarkup(text=''){
   const clean=_sanitizeThinkingDisplayText(text);
   const openClass=_worklogDetailsExpandedDefault()?' open':'';
   return (clean&&String(clean).trim())
-    ? `<div class="thinking-card${openClass}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(clean).trim())}</pre></div></div>`
+    ? `<div class="thinking-card${openClass}"><button type="button" class="thinking-card-header" onclick="_toggleThinkingCardDisclosure(this)"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></button><div class="thinking-card-body"><pre>${esc(String(clean).trim())}</pre></div></div>`
     : `<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
 }
-function _renderThinkingInto(row,text=''){
+function _renderThinkingInto(row,text='',titles){
   if(!row) return;
-  const clean=_sanitizeThinkingDisplayText(text);
-  if(!clean){
-    row.innerHTML=_thinkingMarkup(text);
+  const raw=_sanitizeThinkingDisplayText(text);
+  let activeTitles=titles;
+  if(activeTitles===undefined&&row.getAttribute){
+    try{activeTitles=JSON.parse(row.getAttribute('data-reasoning-titles')||'[]');}catch(_){activeTitles=[];}
+  }
+  if(!raw){
+    row.innerHTML=(row.matches&&row.matches('.agent-activity-thinking'))||_reasoningTitleList(activeTitles).length
+      ? _thinkingCardHtml('',false)
+      : _thinkingMarkup(text);
+    const card=row.querySelector&&row.querySelector('.thinking-card');
+    if(card&&typeof _syncThinkingCardDisclosureA11y==='function') _syncThinkingCardDisclosureA11y(card,false);
     return;
   }
-  const pre=row.querySelector('.thinking-card-body pre');
+  const clean=_reasoningBodyTextForDisplay(raw,activeTitles);
+  let pre=row.querySelector('.thinking-card-body pre');
   if(pre){
     pre.textContent=clean;
+    const card=row.matches&&row.matches('.thinking-card')?row:row.querySelector('.thinking-card');
+    if(card){
+      card._reasoningFullText=raw;
+      if(typeof _syncThinkingCardDisclosureA11y==='function') _syncThinkingCardDisclosureA11y(card,card.classList.contains('open'));
+    }
     return;
   }
-  row.innerHTML=_thinkingMarkup(text);
+  row.innerHTML=_thinkingMarkup(raw);
+  pre=row.querySelector('.thinking-card-body pre');
+  if(pre) pre.textContent=clean;
+  const card=row.matches&&row.matches('.thinking-card')?row:row.querySelector('.thinking-card');
+  if(card){
+    card._reasoningFullText=raw;
+    if(typeof _syncThinkingCardDisclosureA11y==='function') _syncThinkingCardDisclosureA11y(card,card.classList.contains('open'));
+  }
 }
 function finalizeThinkingCard(){
   // Guard: only finalize thinking card if we're looking at the session that started it.
@@ -20839,6 +21146,7 @@ function finalizeThinkingCard(){
       row.removeAttribute('id');
       row.removeAttribute('data-thinking-active');
       row.removeAttribute('data-live-thinking');
+      row.setAttribute('data-reasoning-active','0');
     }
     return;
   }
@@ -20862,6 +21170,7 @@ function finalizeThinkingCard(){
     }
     row.removeAttribute('id');
     row.removeAttribute('data-thinking-active');
+    row.setAttribute('data-reasoning-active','0');
     return;
   }
   const turn=$('liveAssistantTurn');
@@ -20872,6 +21181,7 @@ function finalizeThinkingCard(){
     turn.querySelectorAll('.agent-activity-thinking[data-thinking-active="1"]').forEach(active=>{
       active.removeAttribute('data-thinking-active');
       active.removeAttribute('data-live-thinking');
+      active.setAttribute('data-reasoning-active','0');
     });
     _syncToolCallGroupSummary(group);
   }
@@ -20910,7 +21220,8 @@ function appendThinking(text='', options){
       if(inner) inner.appendChild(row);
     }
     row.setAttribute('data-thinking-active','1');
-    _renderThinkingInto(row,text);
+    _renderThinkingInto(row,text,options.titles);
+    if(typeof _applyReasoningTitles==='function') _applyReasoningTitles(row,options.titles,true);
     if(typeof scrollIfPinned==='function') scrollIfPinned();
     return;
   }
@@ -20936,7 +21247,7 @@ function appendThinking(text='', options){
     if(isTransparentStream()){
       let row=blocks.querySelector(`.agent-activity-thinking[data-live-thinking="1"][data-live-thinking-key="${CSS.escape(thinkingKey)}"]`);
       if(!row){
-        row=_thinkingActivityNode(clean, false);
+        row=_thinkingActivityNode(clean, false, '', options.titles, true);
         row.id='thinkingRow';
         row.setAttribute('data-live-thinking','1');
         row.setAttribute('data-live-thinking-key',thinkingKey);
@@ -20954,7 +21265,8 @@ function appendThinking(text='', options){
         if(liveFooter&&liveFooter.parentElement===blocks) blocks.insertBefore(row,liveFooter);
         else blocks.appendChild(row);
       }else{
-        _renderThinkingInto(row, clean);
+        _renderThinkingInto(row, clean, options.titles);
+        if(typeof _applyReasoningTitles==='function') _applyReasoningTitles(row,options.titles,true);
       }
       row.id='thinkingRow';
       row.setAttribute('data-thinking-active','1');
@@ -20985,7 +21297,7 @@ function appendThinking(text='', options){
     if(list){
       let row=list.querySelector(`.agent-activity-thinking[data-live-thinking="1"][data-live-thinking-key="${CSS.escape(thinkingKey)}"]`);
       if(!row){
-        row=_thinkingActivityNode(clean, false, thinkingKey);
+        row=_thinkingActivityNode(clean, false, thinkingKey, options.titles, true);
         row.setAttribute('data-live-thinking','1');
         row.setAttribute('data-live-thinking-key',thinkingKey);
         if(segmentSeq) row.setAttribute('data-live-segment-seq',segmentSeq);
@@ -20999,7 +21311,8 @@ function appendThinking(text='', options){
         row.setAttribute('data-thinking-active','1');
         list.appendChild(row);
       }else{
-        _renderThinkingInto(row, clean);
+        _renderThinkingInto(row, clean, options.titles);
+        if(typeof _applyReasoningTitles==='function') _applyReasoningTitles(row,options.titles,true);
       }
       row.setAttribute('data-thinking-active','1');
       _syncToolCallGroupSummary(group);
@@ -21016,6 +21329,7 @@ function removeThinking(){
       row.removeAttribute('id');
       row.removeAttribute('data-thinking-active');
       row.removeAttribute('data-live-thinking');
+      row.setAttribute('data-reasoning-active','0');
     });
     if(liveTurn&&blocks&&!blocks.children.length) liveTurn.remove();
     return;

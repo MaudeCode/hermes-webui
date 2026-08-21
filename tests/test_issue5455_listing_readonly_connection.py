@@ -43,6 +43,9 @@ def _make_db(path, *, with_index=True):
     )
     if with_index:
         conn.execute("CREATE INDEX idx_messages_session ON messages(session_id, timestamp)")
+        conn.execute(
+            "CREATE INDEX idx_messages_session_user ON messages(session_id) WHERE role = 'user'"
+        )
     conn.commit()
     conn.close()
 

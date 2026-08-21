@@ -112,7 +112,7 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.13'
 
       - name: Install ruff
         if: needs.changes.outputs.docs_only != 'true'
@@ -177,12 +177,12 @@ jobs:
     if: ${{ always() }}
     runs-on: ubuntu-latest
     strategy:
-      # Don't cancel the other shards/versions when one fails — we want the full
-      # failure picture across the matrix in a single run.
+      # Don't cancel the other shards when one fails — we want the full failure
+      # picture across the suite in a single run.
       fail-fast: false
       matrix:
-        python-version: ['3.11', '3.12', '3.13']
-        # Split the suite across 5 parallel shards per Python version. pytest-shard
+        python-version: ['3.13']
+        # Split the suite across 5 parallel shards. pytest-shard
         # partitions tests deterministically by test-id hash; the suite was made
         # shard-safe (no cross-test state leakage) so every shard passes
         # independently. See docs/agent-memory note on test-suite shard-safety.
