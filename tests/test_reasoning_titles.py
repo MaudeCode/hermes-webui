@@ -11,7 +11,12 @@ import api.reasoning_titles as reasoning_titles
 
 from api.reasoning_titles import normalize_reasoning_titles, reasoning_event_payload
 from api.gateway_chat import _gateway_tool_progress_event
-from api.routes import _anchor_scene_thinking_row
+from api.routes import (
+    _anchor_scene_content_rows,
+    _anchor_scene_message_reasoning_titles,
+    _anchor_scene_thinking_row,
+    _complete_hydrated_anchor_scene,
+)
 from api.streaming import _build_partial_message
 
 
@@ -54,6 +59,83 @@ def test_explicit_empty_titles_clear_the_snapshot_without_deriving_fallback():
     ) == {"text": "later delta", "titles": []}
     partial = _build_partial_message("", "Derived fallback", [], [])
     assert partial["reasoning_titles"] == []
+
+
+def test_present_malformed_title_snapshots_fail_closed():
+    assert _anchor_scene_message_reasoning_titles({
+        "reasoning": "Derived fallback",
+        "reasoning_titles": None,
+    }) == []
+    rows = _anchor_scene_content_rows(
+        {
+            "content": [
+                {"type": "reasoning", "text": "Derived fallback", "titles": None},
+                {"type": "tool_use", "id": "call-1", "name": "read_file"},
+            ]
+        },
+        0,
+        1,
+    )
+    thinking = next(row for row in rows if row["role"] == "thinking")
+    assert thinking["thinking"]["titles"] == []
+
+
+def test_hydration_prefers_authoritative_segmented_title_rows():
+    messages = [
+        {"role": "user", "content": "question"},
+        {
+            "role": "assistant",
+            "content": "answer",
+            "reasoning": "first detail\nsecond detail",
+            "reasoning_titles": ["Repeated title"],
+        },
+    ]
+    scene = {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "activity_rows": [
+            {
+                "row_id": "reasoning-1",
+                "local_id": "reasoning-1",
+                "role": "thinking",
+                "kind": "reasoning",
+                "source_event_type": "reasoning",
+                "status": "completed",
+                "text": "first detail",
+                "group": {"group_key": "segment:1", "activity_segment_seq": 1},
+                "thinking": {"text": "first detail", "titles": ["Repeated title"]},
+                "payload": {"text": "first detail", "titles": ["Repeated title"]},
+            },
+            {
+                "row_id": "tool-1",
+                "local_id": "tool-1",
+                "role": "tool",
+                "kind": "tool_completed",
+                "source_event_type": "tool_complete",
+                "status": "completed",
+                "tool_call_id": "call-1",
+                "tool": {"id": "call-1", "name": "read_file", "done": True},
+                "payload": {"id": "call-1", "name": "read_file"},
+            },
+            {
+                "row_id": "reasoning-2",
+                "local_id": "reasoning-2",
+                "role": "thinking",
+                "kind": "reasoning",
+                "source_event_type": "reasoning",
+                "status": "completed",
+                "text": "second detail",
+                "group": {"group_key": "segment:2", "activity_segment_seq": 2},
+                "thinking": {"text": "second detail", "titles": ["Repeated title"]},
+                "payload": {"text": "second detail", "titles": ["Repeated title"]},
+            },
+        ],
+    }
+    hydrated = _complete_hydrated_anchor_scene(messages, scene, 1)
+    assert [row["role"] for row in hydrated["activity_rows"]] == ["thinking", "tool", "thinking"]
+    assert [
+        row["text"] for row in hydrated["activity_rows"] if row["role"] == "thinking"
+    ] == ["first detail", "second detail"]
 
 
 def test_complete_bold_titles_are_ordered_and_deduplicated_while_streaming():

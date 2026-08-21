@@ -4395,9 +4395,15 @@ def _anchor_scene_message_reasoning_text(message) -> str:
 def _anchor_scene_message_reasoning_titles(message) -> list[str]:
     if not isinstance(message, dict):
         return []
+    titles_present = "reasoning_titles" in message
+    explicit_titles = message.get("reasoning_titles")
     return normalize_reasoning_titles(
         _anchor_scene_message_reasoning_text(message),
-        explicit_titles=message.get("reasoning_titles"),
+        explicit_titles=(
+            explicit_titles
+            if not titles_present or isinstance(explicit_titles, (list, tuple))
+            else []
+        ),
         stable=True,
     )
 
@@ -4942,7 +4948,11 @@ def _anchor_scene_content_rows(message, order_index, message_index, stream_id=""
             )
             titles = normalize_reasoning_titles(
                 text,
-                explicit_titles=explicit_titles if titles_present else None,
+                explicit_titles=(
+                    explicit_titles
+                    if not titles_present or isinstance(explicit_titles, (list, tuple))
+                    else []
+                ),
                 stable=True,
             )
             if _anchor_scene_clean_text(text) or titles or titles_present:
@@ -4992,7 +5002,15 @@ def _anchor_scene_row_key(row) -> str:
             clean_titles = titles if isinstance(titles, list) else []
             if text_key and clean_titles == normalize_reasoning_titles(text, stable=True):
                 return f"thinking:{text_key}"
-            return "thinking_titles:" + json.dumps(clean_titles)
+            group = row.get("group") if isinstance(row.get("group"), dict) else {}
+            segment_identity = str(
+                group.get("group_key")
+                or group.get("activity_segment_seq")
+                or row.get("local_id")
+                or row.get("row_id")
+                or text_key
+            )
+            return "thinking_titles:" + json.dumps([clean_titles, segment_identity])
         return f"thinking:{text_key}"
     if row.get("role") == "prose":
         return f"prose:{_anchor_scene_text_key(row.get('text'))}"
@@ -5068,6 +5086,15 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
     final_key = _anchor_scene_text_key(final_answer)
     rows = []
     seen = {}
+    scene_has_titled_thinking = any(
+        isinstance(row, dict)
+        and row.get("role") == "thinking"
+        and (
+            isinstance(row.get("thinking"), dict) and "titles" in row["thinking"]
+            or isinstance(row.get("payload"), dict) and "titles" in row["payload"]
+        )
+        for row in (scene.get("activity_rows") or [])
+    )
 
     def merge_duplicate_tool_row(existing, incoming, *, prefer_incoming_body=False):
         if not isinstance(existing, dict) or not isinstance(incoming, dict):
@@ -5191,6 +5218,8 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         id_flexible_content_tool_indexes = set()
         if content_rows:
             for row in content_rows:
+                if scene_has_titled_thinking and row.get("role") == "thinking":
+                    continue
                 previous_len = len(rows)
                 push(row)
                 if row.get("role") == "tool" and len(rows) > previous_len:
@@ -5207,6 +5236,8 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         reasoning_titles = _anchor_scene_message_reasoning_titles(message)
         reasoning_titles_present = "reasoning_titles" in message
         if (
+            not scene_has_titled_thinking
+            and
             (_anchor_scene_clean_text(reasoning) or reasoning_titles or reasoning_titles_present)
             and (
                 not _anchor_scene_clean_text(reasoning)
