@@ -16,7 +16,6 @@ These are source-structure assertions on the on_reasoning closure in api/streami
 coalescing contract can't silently regress to the drop-based version.
 """
 import pathlib
-import re
 
 REPO = pathlib.Path(__file__).parent.parent
 STREAMING = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
@@ -116,6 +115,31 @@ def test_reasoning_buffer_flushed_at_every_boundary():
     assert STREAMING.count("_flush_reasoning_buffer(stable=True)") >= 5, (
         "expected flush at on_token, on_reasoning(None), on_tool, post-run, and the finally"
     )
+
+
+def test_reasoning_title_dedup_resets_for_each_segment():
+    interim = STREAMING[
+        STREAMING.index("def on_interim_assistant"):
+        STREAMING.index("def on_tool(*cb_args")
+    ]
+    tool = STREAMING[
+        STREAMING.index("# (#3587) Advance reasoning index at tool-call boundaries."):
+        STREAMING.index("args_snap = _tool_args_snapshot")
+    ]
+    assert "_current_reasoning_idx += 1" in interim
+    assert "_reset_reasoning_title_segment()" in interim
+    assert "_current_reasoning_idx += 1" in tool
+    assert "_reset_reasoning_title_segment()" in tool
+
+
+def test_unstable_local_reasoning_events_do_not_materialize_the_segment():
+    body = _on_reasoning_body()
+    flush = STREAMING[
+        STREAMING.index("def _flush_reasoning_buffer(*, stable=False):"):
+        STREAMING.index("def _emit_metering()")
+    ]
+    assert 'reasoning_event_payload(\n                        _reasoning_buffer[0],\n                        "",' in body
+    assert '_current_reasoning_text() if stable else ""' in flush
 
 
 

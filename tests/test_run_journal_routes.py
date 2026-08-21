@@ -435,6 +435,84 @@ def test_live_journal_snapshot_reconstructs_visible_progress_and_tool_aliases(mo
     assert tool["args"]["extra"] == "x" * 200
 
 
+def test_live_journal_snapshot_recovers_reasoning_title_snapshots(monkeypatch):
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: {
+            "session_id": "session_1",
+            "run_id": stream_id,
+            "last_seq": 2,
+            "last_event_id": f"{stream_id}:2",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_event_tail",
+        lambda _session_id, run_id: {
+            "events": [
+                {
+                    "seq": 1,
+                    "event": "reasoning",
+                    "payload": {"text": "private detail", "titles": ["Gateway title"]},
+                    "event_id": f"{run_id}:1",
+                },
+                {
+                    "seq": 2,
+                    "event": "token",
+                    "payload": {"text": "answer"},
+                    "event_id": f"{run_id}:2",
+                },
+            ]
+        },
+    )
+
+    snapshot = routes._run_journal_live_snapshot("run_1")
+    assert snapshot["messages"][0]["reasoning_titles"] == ["Gateway title"]
+    thinking = next(
+        row
+        for row in snapshot["anchor_activity_scene"]["activity_rows"]
+        if row["role"] == "thinking"
+    )
+    assert thinking["thinking"]["titles"] == ["Gateway title"]
+    assert thinking["payload"]["titles"] == ["Gateway title"]
+
+
+def test_live_journal_snapshot_recovers_title_only_reasoning(monkeypatch):
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: {
+            "session_id": "session_1",
+            "run_id": stream_id,
+            "last_seq": 1,
+            "last_event_id": f"{stream_id}:1",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_event_tail",
+        lambda _session_id, run_id: {
+            "events": [{
+                "seq": 1,
+                "event": "reasoning",
+                "payload": {"text": "", "titles": ["Gateway title"]},
+                "event_id": f"{run_id}:1",
+            }]
+        },
+    )
+
+    snapshot = routes._run_journal_live_snapshot("run_1")
+    assert snapshot["messages"][0]["reasoning_titles"] == ["Gateway title"]
+    thinking = snapshot["anchor_activity_scene"]["activity_rows"][0]
+    assert thinking["role"] == "thinking"
+    assert thinking["thinking"]["titles"] == ["Gateway title"]
+
+
 def test_runtime_snapshot_transport_projection_dedupes_live_tool_payloads_without_mutation():
     import api.routes as routes
 

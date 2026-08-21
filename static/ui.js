@@ -7647,15 +7647,17 @@ function _reasoningBodyTextForDisplay(text,titles){
   const normalized=_reasoningTitleList(titles);
   if(!clean||!normalized.length) return clean;
   const lines=clean.split(/\r?\n/);
-  const index=lines.findIndex(line=>line.trim());
-  if(index<0) return clean;
-  const candidate=lines[index].trim()
-    .replace(/^\*\*(.*?)\*\*$/,'$1')
-    .replace(/^(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)/,'')
-    .trim().toLocaleLowerCase();
-  if(!normalized.some(title=>title.toLocaleLowerCase()===candidate)) return clean;
-  lines.splice(index,1);
-  return lines.join('\n').trim();
+  const normalizedKeys=normalized.map(title=>title.toLocaleLowerCase());
+  const remaining=lines.filter(line=>{
+    const candidate=line.trim()
+      .replace(/^\*\*(.*?)\*\*$/,'$1')
+      .replace(/^(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)/,'')
+      .trim().toLocaleLowerCase();
+    if(!candidate) return true;
+    return !normalizedKeys.some(title=>candidate===title||candidate.startsWith(`${title} `));
+  });
+  const result=remaining.join('\n').trim();
+  return result||clean;
 }
 
 function _normalizeThinkingEchoCompare(text){
@@ -11567,7 +11569,7 @@ function _applyWorklogDetailsExpandedDefault(root){
   const scope=root&&root.querySelectorAll?root:document;
   const open=_worklogDetailsExpandedDefault();
   scope.querySelectorAll('.thinking-card').forEach(card=>{
-    card.classList.toggle('open', open);
+    _setWorklogDetailDisclosureOpen(card,open);
   });
   scope.querySelectorAll('.tool-card').forEach(card=>{
     if(!card.classList.contains('tool-card-no-detail')) _setWorklogDetailDisclosureOpen(card,open);
@@ -11666,6 +11668,22 @@ function _syncToolCardDisclosureA11y(card,open){
   header.setAttribute('aria-controls',detailId);
   header.setAttribute('aria-expanded',String(!!open));
 }
+function _syncThinkingCardDisclosureA11y(card,open){
+  if(!card||!card.querySelector) return;
+  const header=card.querySelector('.thinking-card-header');
+  const detail=card.querySelector('.thinking-card-body');
+  if(!header||!detail) return;
+  let detailId=card.getAttribute('data-thinking-detail-id')||detail.id;
+  if(!detailId){
+    _syncThinkingCardDisclosureA11y._detailID=(_syncThinkingCardDisclosureA11y._detailID||0)+1;
+    detailId=`thinking-detail-${_syncThinkingCardDisclosureA11y._detailID}`;
+  }
+  card.setAttribute('data-thinking-detail-id',detailId);
+  detail.id=detailId;
+  detail.hidden=!open;
+  header.setAttribute('aria-controls',detailId);
+  header.setAttribute('aria-expanded',String(!!open));
+}
 function _setWorklogDetailDisclosureOpen(el, open){
   if(!el||!el.classList) return;
   // #5966 (Codex F2 r2): restoring an OPEN state on a settled Transparent Stream
@@ -11680,6 +11698,7 @@ function _setWorklogDetailDisclosureOpen(el, open){
   }
   el.classList.toggle('open', !!open);
   if(el.matches&&el.matches('.tool-card')) _syncToolCardDisclosureA11y(el,!!open);
+  if(el.matches&&el.matches('.thinking-card')) _syncThinkingCardDisclosureA11y(el,!!open);
   const header=el.querySelector('.tool-card-header,.thinking-card-header');
   if(header) header.setAttribute('aria-expanded', String(!!open));
   if(el.matches&&el.matches('.tool-group[data-tool-worklog-tool-group="1"],.tool-worklog-tool-group')){
@@ -11694,6 +11713,10 @@ function _setWorklogDetailDisclosureOpen(el, open){
     const body=el.querySelector(':scope > .tool-worklog-body,:scope > .tool-call-group-body');
     if(body) body.hidden=!open;
   }
+}
+function _toggleThinkingCardDisclosure(header){
+  const card=header&&header.closest?header.closest('.thinking-card'):null;
+  if(card) _setWorklogDetailDisclosureOpen(card,!card.classList.contains('open'));
 }
 function _toggleToolCardDisclosure(header){
   const card=header&&header.closest?header.closest('.tool-card'):null;
@@ -11754,7 +11777,7 @@ function _thinkingCardHtml(text, open){
   const copyBtn=`<button class="thinking-copy-btn" onclick="event.stopPropagation();_copyThinkingText(this)" title="${t('copy')}" aria-label="${t('copy')}">${li('copy',12)}</button>`;
   const shouldOpen=!!open||_worklogDetailsExpandedDefault();
   const classes=`thinking-card${shouldOpen?' open':''}`;
-  return `<div class="${classes}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-btn-row">${copyBtn}<span class="thinking-card-toggle">${li('chevron-right',12)}</span></span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
+  return `<div class="${classes}"><div class="thinking-card-head-row"><button type="button" class="thinking-card-header" onclick="_toggleThinkingCardDisclosure(this)"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></button>${copyBtn}</div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
 }
 function _reasoningTitleList(value){
   if(!Array.isArray(value)) return [];
@@ -11820,6 +11843,8 @@ function _thinkingActivityNode(text, open, disclosureKey, titles, active){
   row.setAttribute('data-worklog-thinking-card','1');
   if(disclosureKey) row.setAttribute('data-thinking-key', String(disclosureKey));
   row.innerHTML=_thinkingCardHtml(text, open);
+  const card=row.querySelector('.thinking-card');
+  if(card) _setWorklogDetailDisclosureOpen(card,card.classList.contains('open'));
   _renderThinkingInto(row,text,titles);
   if(typeof _applyReasoningTitles==='function') _applyReasoningTitles(row,titles,active);
   return row;
@@ -13265,7 +13290,13 @@ function _anchorSceneRowsForRendering(scene, opts){
     if(row.role==='terminal'&&row.source_event_type==='done') continue;
     if(_anchorSceneIsSettledSuccessfulCompression(row,settled)) continue;
     const text=String(row.text||'').trim();
-    if((row.role==='prose'||row.role==='thinking')&&!text) continue;
+    if(row.role==='prose'&&!text) continue;
+    if(row.role==='thinking'&&!text){
+      const titles=row.thinking&&Array.isArray(row.thinking.titles)
+        ? row.thinking.titles
+        : row.payload&&row.payload.titles;
+      if(!(Array.isArray(titles)&&titles.length)) continue;
+    }
     const key=keyFor(row);
     if(byKey.has(key)){
       const index=byKey.get(key);
@@ -13436,7 +13467,7 @@ function _anchorSceneNodeForRow(row, opts){
     const titles=row.thinking&&Array.isArray(row.thinking.titles)?row.thinking.titles:row.payload&&row.payload.titles;
     if(!text&&!(Array.isArray(titles)&&titles.length)) return null;
     node=_thinkingActivityNode(
-      text||(titles[titles.length-1]||''),
+      text,
       false,
       row.row_id||row.local_id||'anchor-thinking',
       titles,
@@ -15238,6 +15269,9 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   if(streamId&&!_readActivityDisclosureState(activityKey)){
     _copyActivityDisclosureState(`live:${streamId}`, activityKey);
   }
+  const savedDisclosure=_readActivityDisclosureState(activityKey);
+  const keepErroredResponseVisible=_anchorSceneHasErroredTerminalState(scene)
+    && savedDisclosure!=='closed';
   // #5941: an errored turn that produced assistant content (tool calls /
   // reasoning) must not hide that content behind a collapsed header — the user
   // reads a lone error card as "nothing came back". When the settled scene's
@@ -15260,7 +15294,7 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   // (_isKeepSettledWorklogOpenArmed), so it never persists across restores.
   const group=_anchorSceneWorklogGroup(blocks,{
     live:false,
-    collapsed:!keepSettledWorklogOpen,
+    collapsed:!keepSettledWorklogOpen&&!keepErroredResponseVisible,
     beforeAnchor:true,
     anchor:segment,
     activityKey,
@@ -21062,33 +21096,43 @@ function _thinkingMarkup(text=''){
   const clean=_sanitizeThinkingDisplayText(text);
   const openClass=_worklogDetailsExpandedDefault()?' open':'';
   return (clean&&String(clean).trim())
-    ? `<div class="thinking-card${openClass}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(clean).trim())}</pre></div></div>`
+    ? `<div class="thinking-card${openClass}"><button type="button" class="thinking-card-header" onclick="_toggleThinkingCardDisclosure(this)"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></button><div class="thinking-card-body"><pre>${esc(String(clean).trim())}</pre></div></div>`
     : `<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
 }
 function _renderThinkingInto(row,text='',titles){
   if(!row) return;
   const raw=_sanitizeThinkingDisplayText(text);
-  if(!raw){
-    row.innerHTML=_thinkingMarkup(text);
-    return;
-  }
   let activeTitles=titles;
   if(activeTitles===undefined&&row.getAttribute){
     try{activeTitles=JSON.parse(row.getAttribute('data-reasoning-titles')||'[]');}catch(_){activeTitles=[];}
+  }
+  if(!raw){
+    row.innerHTML=_reasoningTitleList(activeTitles).length
+      ? _thinkingCardHtml('',false)
+      : _thinkingMarkup(text);
+    const card=row.querySelector&&row.querySelector('.thinking-card');
+    if(card&&typeof _syncThinkingCardDisclosureA11y==='function') _syncThinkingCardDisclosureA11y(card,false);
+    return;
   }
   const clean=_reasoningBodyTextForDisplay(raw,activeTitles);
   let pre=row.querySelector('.thinking-card-body pre');
   if(pre){
     pre.textContent=clean;
     const card=row.matches&&row.matches('.thinking-card')?row:row.querySelector('.thinking-card');
-    if(card) card._reasoningFullText=raw;
+    if(card){
+      card._reasoningFullText=raw;
+      if(typeof _syncThinkingCardDisclosureA11y==='function') _syncThinkingCardDisclosureA11y(card,card.classList.contains('open'));
+    }
     return;
   }
   row.innerHTML=_thinkingMarkup(raw);
   pre=row.querySelector('.thinking-card-body pre');
   if(pre) pre.textContent=clean;
   const card=row.matches&&row.matches('.thinking-card')?row:row.querySelector('.thinking-card');
-  if(card) card._reasoningFullText=raw;
+  if(card){
+    card._reasoningFullText=raw;
+    if(typeof _syncThinkingCardDisclosureA11y==='function') _syncThinkingCardDisclosureA11y(card,card.classList.contains('open'));
+  }
 }
 function finalizeThinkingCard(){
   // Guard: only finalize thinking card if we're looking at the session that started it.

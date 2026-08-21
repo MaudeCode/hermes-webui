@@ -63,10 +63,11 @@ def _extract(src: str, name: str) -> str:
     return f"{sig}{{{body}}}"
 
 
-def test_render_gate_collapses_completed_work_even_for_terminal_errors():
+def test_render_gate_keeps_errored_content_visible_by_default():
     body = _function_body(UI_JS, "_renderSettledAnchorSceneForMessage")
-    assert "_anchorSceneHasErroredTerminalState(scene)" not in body
-    assert "collapsed:!keepSettledWorklogOpen" in body
+    assert "_anchorSceneHasErroredTerminalState(scene)" in body
+    assert "savedDisclosure!=='closed'" in body
+    assert "collapsed:!keepSettledWorklogOpen&&!keepErroredResponseVisible" in body
     # The worklog-worthiness guard is still the entry gate (empty errored turns
     # never reach the collapse decision → they keep their bare error card).
     assert "_anchorSceneSceneHasWorklogWorthyRows(message._anchor_activity_scene)" in body
@@ -127,21 +128,28 @@ def test_errored_terminal_states_keep_content_visible_completed_does_not():
 
 @pytest.mark.skipif(NODE is None, reason="node required for behavioral test")
 def test_errored_worklog_keep_open_decision_matrix():
-    """Every settled run gets a new collapsed Worked wrapper."""
-    harness = textwrap.dedent(f"""
-        function decide(scene, savedDisclosure, keepSettledWorklogOpen) {{
-          return !keepSettledWorklogOpen;
-        }}
-        const out = {{}};
-        // Errored and completed turns both collapse after the transient settle frame.
-        out.errored_default = decide({{ terminal_state: 'error' }}, null, false);
-        out.errored_user_collapsed = decide({{ terminal_state: 'error' }}, 'closed', false);
-        out.errored_user_open = decide({{ terminal_state: 'no_response' }}, 'open', false);
+    """Errored content is visible unless the user explicitly collapsed it."""
+    harness = textwrap.dedent("""
+        function decide(scene, savedDisclosure, keepSettledWorklogOpen) {
+          const errored = new Set(['error', 'no_response']).has(scene.terminal_state);
+          const keepErroredResponseVisible = errored && savedDisclosure !== 'closed';
+          return !keepSettledWorklogOpen && !keepErroredResponseVisible;
+        }
+        const out = {};
+        // Errored turns default open; an explicit close still wins.
+        out.errored_default = decide({ terminal_state: 'error' }, null, false);
+        out.errored_user_collapsed = decide({ terminal_state: 'error' }, 'closed', false);
+        out.errored_user_open = decide({ terminal_state: 'no_response' }, 'open', false);
         // A normal completed turn collapses as before.
-        out.completed_default = decide({{ terminal_state: 'completed' }}, null, false);
+        out.completed_default = decide({ terminal_state: 'completed' }, null, false);
         console.log(JSON.stringify(out));
     """)
     res = subprocess.run([NODE, "-e", harness], capture_output=True, text=True, timeout=30)
     assert res.returncode == 0, res.stderr
     out = json.loads(res.stdout.strip())
-    assert all(out.values())
+    assert out == {
+        "errored_default": False,
+        "errored_user_collapsed": True,
+        "errored_user_open": False,
+        "completed_default": True,
+    }

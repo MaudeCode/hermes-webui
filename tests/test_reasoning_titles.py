@@ -1,5 +1,8 @@
 """Reasoning-title contract shared by local and Gateway-backed chat."""
 
+import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -9,9 +12,25 @@ import api.reasoning_titles as reasoning_titles
 from api.reasoning_titles import normalize_reasoning_titles, reasoning_event_payload
 from api.gateway_chat import _gateway_tool_progress_event
 from api.routes import _anchor_scene_thinking_row
+from api.streaming import _build_partial_message
 
 
 ROOT = Path(__file__).resolve().parents[1]
+NODE = shutil.which("node")
+
+
+def _js_function(source: str, name: str) -> str:
+    start = source.index(f"function {name}")
+    brace = source.index("{", start)
+    depth = 0
+    for index in range(brace, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:index + 1]
+    raise AssertionError(f"function {name} body not found")
 
 
 def test_explicit_titles_override_derived_titles():
@@ -33,6 +52,8 @@ def test_explicit_empty_titles_clear_the_snapshot_without_deriving_fallback():
         "Derived fallback\nlater delta",
         explicit_titles=[],
     ) == {"text": "later delta", "titles": []}
+    partial = _build_partial_message("", "Derived fallback", [], [])
+    assert partial["reasoning_titles"] == []
 
 
 def test_complete_bold_titles_are_ordered_and_deduplicated_while_streaming():
@@ -148,6 +169,47 @@ def test_persisted_thinking_row_carries_titles_additively():
     )
     assert title_only["text"] == ""
     assert title_only["thinking"]["titles"] == ["Gateway title"]
+
+    explicit_clear = _anchor_scene_thinking_row(
+        "Fallback title",
+        0,
+        1,
+        "stream-1",
+        [],
+        titles_present=True,
+    )
+    assert explicit_clear["thinking"]["titles"] == []
+    assert explicit_clear["payload"]["titles"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node required")
+def test_reasoning_body_removes_all_promoted_headings_without_becoming_empty():
+    ui = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+    function = _js_function(ui, "_reasoningBodyTextForDisplay")
+    long_heading = "Long heading " + "detail " * 20
+    long_title = normalize_reasoning_titles(long_heading, stable=True)[0]
+    script = f"""
+const _sanitizeThinkingDisplayText = value => String(value || '').trim();
+const _reasoningTitleList = value => Array.isArray(value) ? value : [];
+{function}
+const out = {{
+  multiple: _reasoningBodyTextForDisplay(
+    '**Planning**\\nplan detail\\n**Executing**\\nexecution detail',
+    ['Planning', 'Executing']
+  ),
+      long: _reasoningBodyTextForDisplay(
+        '**' + 'Long heading ' + 'detail '.repeat(20) + '**\\nbody detail',
+        [{json.dumps(long_title)}]
+  ),
+  single: _reasoningBodyTextForDisplay('Only title', ['Only title']),
+}};
+console.log(JSON.stringify(out));
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=True)
+    out = json.loads(result.stdout)
+    assert out["multiple"] == "plan detail\nexecution detail"
+    assert out["long"] == "body detail"
+    assert out["single"] == "Only title"
 
 
 def test_browser_consumes_titles_without_reimplementing_the_parser():

@@ -895,7 +895,7 @@ def test_gateway_chat_worker_preserves_reasoning_delta_whitespace_and_persists_r
     saved = models.get_session(s.session_id)
     assert saved.messages[-1]["content"] == "hello"
     assert saved.messages[-1]["reasoning"] == "Let me think more"
-    assert "reasoning_titles" not in saved.messages[-1]
+    assert saved.messages[-1]["reasoning_titles"] == []
     reasoning_events = []
     while not subscriber.empty():
         item = subscriber.get_nowait()
@@ -960,6 +960,128 @@ def test_gateway_chat_worker_persists_title_only_reasoning_metadata(tmp_path, mo
     assert saved.messages[-1]["reasoning_titles"] == ["Gateway title"]
 
 
+def test_gateway_reasoning_titles_reset_at_tool_boundaries(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'event: reasoning.available\n'
+            yield b'data: {"text":"First detail","titles":["First segment"]}\n\n'
+            yield b'event: hermes.tool.progress\n'
+            yield b'data: {"event":"tool.started","tool":"read_file","tool_call_id":"call-1"}\n\n'
+            yield b'event: hermes.tool.progress\n'
+            yield b'data: {"event":"tool.completed","tool":"read_file","tool_call_id":"call-1"}\n\n'
+            yield b'event: reasoning.available\n'
+            yield b'data: {"text":"Second segment\\n"}\n\n'
+            yield b'event: hermes.tool.progress\n'
+            yield b'data: {"event":"tool.started","tool":"terminal","tool_call_id":"call-2"}\n\n'
+            yield b'event: hermes.tool.progress\n'
+            yield b'data: {"event":"tool.completed","tool":"terminal","tool_call_id":"call-2"}\n\n'
+            yield b'event: reasoning.available\n'
+            yield b'data: {"text":"$ rm -rf tmp"}\n\n'
+            yield b'data: {"choices":[{"delta":{"content":"answer"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+
+    session = new_session()
+    stream_id = "stream-gateway-segment-title-test"
+    session.active_stream_id = stream_id
+    session.pending_user_message = "Run a tool"
+    session.pending_attachments = []
+    session.pending_started_at = 123
+    session.save()
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(
+        session.session_id,
+        "Run a tool",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    reasoning_events = []
+    while not subscriber.empty():
+        event, payload, *_ = subscriber.get_nowait()
+        if event == "reasoning":
+            reasoning_events.append(payload)
+    assert reasoning_events[0]["titles"] == ["First segment"]
+    assert any(event.get("titles") == ["Second segment"] for event in reasoning_events)
+    assert reasoning_events[-1]["titles"] == []
+    assert reasoning_events[-1]["titles"] != ["First segment"]
+    saved = models.get_session(session.session_id)
+    assert saved.messages[-1]["reasoning_titles"] == []
+
+
+def test_gateway_reasoning_hot_path_does_not_join_cumulative_buffer(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            for _ in range(5_000):
+                yield b'event: reasoning.available\n'
+                yield b'data: {"text":"x"}\n\n'
+            yield b'data: {"choices":[{"delta":{"content":"answer"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    joins = 0
+    real_stream_text_value = gateway_chat.stream_text_value
+
+    def counted_stream_text_value(*args, **kwargs):
+        nonlocal joins
+        joins += 1
+        return real_stream_text_value(*args, **kwargs)
+
+    monkeypatch.setattr(gateway_chat, "stream_text_value", counted_stream_text_value)
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+
+    session = new_session()
+    stream_id = "stream-gateway-linear-reasoning-test"
+    session.active_stream_id = stream_id
+    session.pending_user_message = "Answer"
+    session.pending_attachments = []
+    session.pending_started_at = 123
+    session.save()
+    STREAMS[stream_id] = create_stream_channel()
+
+    gateway_chat._run_gateway_chat_streaming(
+        session.session_id,
+        "Answer",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    assert joins <= 2
+
+
 def test_gateway_chat_worker_reads_reasoning_content_deltas_from_chat_completions(tmp_path, monkeypatch):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
@@ -1010,7 +1132,7 @@ def test_gateway_chat_worker_reads_reasoning_content_deltas_from_chat_completion
         item = subscriber.get_nowait()
         if item[0] == "reasoning":
             reasoning_events.append(item[1]["text"])
-    assert reasoning_events == ["Let me ", "think"]
+    assert [text for text in reasoning_events if text] == ["Let me ", "think"]
 
 
 def test_gateway_chat_worker_emits_goal_continue_for_goal_related_turn(tmp_path, monkeypatch):

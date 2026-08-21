@@ -4609,6 +4609,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _upsertAnchorReasoning(text, options={}){
     const clean=String(text||'').trim();
+    const hasTitles=Array.isArray(options.titles)&&options.titles.length>0;
     const placement=_liveThinkingPlacement();
     const segmentSeq=Number(options.segmentSeq||placement.segmentSeq||_anchorSegmentSeq());
     const localId=String(options.localId||`live-reasoning:${streamId}:${segmentSeq}`);
@@ -4617,7 +4618,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       options.segmentSeq=segmentSeq;
       if(options.burstId===undefined) options.burstId=_currentActivityBurstId;
     }
-    if(!clean||!_anchorRegistry||window._showThinking===false) return null;
+    if((!clean&&!hasTitles)||!_anchorRegistry||window._showThinking===false) return null;
     const existing=_findAnchorActivityEventByLocalId(localId,'reasoning');
     if(existing){
       const replaced=_replaceAnchorActivityEventByLocalId(localId,'reasoning',{
@@ -4777,11 +4778,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       clearTimeout(_pendingReasoningRenderHandle);
       _pendingReasoningRenderHandle=null;
     }
-    if(_reasoningRenderDirty&&String(liveReasoningText||'').trim()) _paintPendingReasoning(true);
+    if(_reasoningRenderDirty&&(String(liveReasoningText||'').trim()||liveReasoningTitles.length)) _paintPendingReasoning(true);
   }
   function _flushReasoningToAnchor(){
     _flushPendingReasoningRender();
-    if(_anchorReasoningFlushed||!reasoningText) return;
+    if(_anchorReasoningFlushed||(!reasoningText&&!reasoningTitles.length)) return;
     _anchorReasoningFlushed=true;
     if(_anchorHasReasoningEvents()) return;
     _upsertAnchorReasoning(reasoningText,{sealed:true,titles:reasoningTitles,localId:`live-reasoning:${streamId}:final`});

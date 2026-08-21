@@ -32,7 +32,6 @@ jobs:
   live-to-final:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -40,11 +39,19 @@ jobs:
           - name: normal
             script: tests/browser_conversation_lifecycle.py
             scenario: normal
+            title_only: '0'
+          - name: title-only-recovery
+            script: tests/browser_conversation_lifecycle.py
+            scenario: normal
+            title_only: '1'
           - name: terminal-error
             script: tests/browser_conversation_lifecycle.py
             scenario: terminal-error
+            title_only: '0'
           - name: historical-transcript-hydration
             script: tests/browser_historical_transcript_hydration.py
+            scenario: historical
+            title_only: '0'
     steps:
       - uses: actions/checkout@v4
 
@@ -69,10 +76,11 @@ jobs:
           LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts
           HISTORICAL_HYDRATION_ARTIFACT_DIR: lifecycle-artifacts
           LIFECYCLE_SCENARIO: ${{ matrix.scenario }}
+          LIFECYCLE_TITLE_ONLY: ${{ matrix.title_only }}
         run: python ${{ matrix.script }}
 
       - name: Run settlement frame proof
-        if: matrix.scenario == 'normal'
+        if: matrix.name == 'normal'
         env:
           LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts
           LIFECYCLE_SCENARIO: normal

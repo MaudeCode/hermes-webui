@@ -3373,6 +3373,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
 
     assistant_text = ""
     reasoning_text = ""
+    reasoning_titles: list[str] | None = None
     messages: list[dict] = []
     tool_calls: list[dict] = []
     activity_burst_anchors: list[dict] = []
@@ -3471,6 +3472,11 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             continue
         if event_name == "reasoning":
             text = str(payload.get("text") or "")
+            if "titles" in payload:
+                reasoning_titles = normalize_reasoning_titles(
+                    "",
+                    explicit_titles=payload.get("titles"),
+                )
             if text and reasoning_first_tool_count is None:
                 reasoning_first_tool_count = len(tool_calls)
             reasoning_text += text
@@ -3518,7 +3524,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             update_completed_tool(payload)
             fresh_segment = True
 
-    if assistant_text or reasoning_text:
+    if assistant_text or reasoning_text or reasoning_titles:
         message = {
             "role": "assistant",
             "content": assistant_text,
@@ -3528,6 +3534,8 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         }
         if reasoning_text:
             message["reasoning"] = reasoning_text
+        if reasoning_titles is not None:
+            message["reasoning_titles"] = reasoning_titles
         if last_ts is not None:
             message["_ts"] = last_ts
         messages.append(message)
@@ -3590,7 +3598,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
 
     def scene_thinking_row(text: str, *, status: str) -> dict | None:
         clean = str(text or "").strip()
-        if not clean:
+        if not clean and not reasoning_titles:
             return None
         preview = " ".join(clean.split())
         local_id = f"live-thinking:{stream_id}:1"
@@ -3625,11 +3633,13 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 "text": clean,
                 "preview": (preview[:177] + "...") if len(preview) > 180 else preview,
                 "dedupe_key": f"thinking:{preview.lower()}" if preview else "",
+                **({"titles": reasoning_titles} if reasoning_titles is not None else {}),
             },
             "tool_call_id": "",
             "tool": None,
             "payload": {
                 "text": clean,
+                **({"titles": reasoning_titles} if reasoning_titles is not None else {}),
             },
         }
 
@@ -4588,7 +4598,15 @@ def _anchor_scene_prose_row(text, order_index, message_index, stream_id=""):
     return row
 
 
-def _anchor_scene_thinking_row(text, order_index, message_index, stream_id="", titles=None):
+def _anchor_scene_thinking_row(
+    text,
+    order_index,
+    message_index,
+    stream_id="",
+    titles=None,
+    *,
+    titles_present=False,
+):
     row = _anchor_scene_row_base("thinking", "reasoning", "reasoning", order_index, message_index, stream_id)
     row["text"] = str(text or "")
     preview = _anchor_scene_clean_text(text)
@@ -4602,7 +4620,7 @@ def _anchor_scene_thinking_row(text, order_index, message_index, stream_id="", t
         explicit_titles=titles,
         stable=True,
     )
-    if normalized_titles:
+    if normalized_titles or titles_present:
         row["thinking"]["titles"] = normalized_titles
         row["payload"]["titles"] = normalized_titles
     row["payload"]["text"] = row["text"]
@@ -4888,18 +4906,25 @@ def _anchor_scene_content_rows(message, order_index, message_index, stream_id=""
             continue
         if part_type in ("thinking", "reasoning"):
             text = _anchor_scene_content_text(part)
+            titles_present = "titles" in part or "reasoning_titles" in part
+            explicit_titles = (
+                part.get("titles")
+                if "titles" in part
+                else part.get("reasoning_titles")
+            )
             titles = normalize_reasoning_titles(
                 text,
-                explicit_titles=part.get("titles") or part.get("reasoning_titles"),
+                explicit_titles=explicit_titles if titles_present else None,
                 stable=True,
             )
-            if _anchor_scene_clean_text(text) or titles:
+            if _anchor_scene_clean_text(text) or titles or titles_present:
                 rows.append(_anchor_scene_thinking_row(
                     text,
                     order_index + len(rows),
                     message_index,
                     stream_id,
                     titles,
+                    titles_present=titles_present,
                 ))
             continue
         if part_type == "tool_use":
@@ -5140,8 +5165,9 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
             order += 1
         reasoning = _anchor_scene_message_reasoning_text(message)
         reasoning_titles = _anchor_scene_message_reasoning_titles(message)
+        reasoning_titles_present = "reasoning_titles" in message
         if (
-            (_anchor_scene_clean_text(reasoning) or reasoning_titles)
+            (_anchor_scene_clean_text(reasoning) or reasoning_titles or reasoning_titles_present)
             and (
                 not _anchor_scene_clean_text(reasoning)
                 or _anchor_scene_text_key(reasoning) != _anchor_scene_text_key(text)
@@ -5153,6 +5179,7 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
                 absolute_idx,
                 stream_id,
                 reasoning_titles,
+                titles_present=reasoning_titles_present,
             ))
             order += 1
         for key in ("tool_calls", "_partial_tool_calls"):

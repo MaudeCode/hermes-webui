@@ -27,6 +27,8 @@ from urllib.parse import urlsplit
 
 PROMPT = "Exercise the public conversation lifecycle gate."
 REASONING_TEXT = "Checking the persistent assistant turn."
+REASONING_TITLE = "Checking lifecycle persistence"
+TITLE_ONLY = os.environ.get("LIFECYCLE_TITLE_ONLY", "").strip() == "1"
 FINAL_TEXT = "Lifecycle gate final answer."
 FINAL_ACK_TEXT = "Lifecycle"
 FINAL_PREFIX = "Lifecycle gate "
@@ -198,6 +200,9 @@ def _anchor_projection_snapshot(page) -> dict:
               status: row && row.status || null,
               tool: row && row.tool && row.tool.name || null,
               text: row && row.text || '',
+              titles: row && row.thinking && Array.isArray(row.thinking.titles)
+                ? row.thinking.titles
+                : (row && row.payload && Array.isArray(row.payload.titles) ? row.payload.titles : []),
             })),
           };
         }"""
@@ -207,7 +212,7 @@ def _anchor_projection_snapshot(page) -> dict:
 def _wait_for_live_anchor_projection(page) -> dict:
     try:
         page.wait_for_function(
-            """({reasoning, tool}) => {
+            """({reasoning, title, titleOnly, tool}) => {
               const streamId = (typeof S !== 'undefined' && S.activeStreamId) || '';
               const registries = window._liveAnchorRegistries;
               const registry = streamId && registries && typeof registries.get === 'function'
@@ -222,14 +227,23 @@ def _wait_for_live_anchor_projection(page) -> dict:
               });
               const rows = Array.isArray(scene && scene.activity_rows) ? scene.activity_rows : [];
               const hasThinking = rows.some(row =>
-                row && row.role === 'thinking' && String(row.text || '').includes(reasoning)
+                row && row.role === 'thinking' && (
+                  (titleOnly && row.thinking && Array.isArray(row.thinking.titles) &&
+                    row.thinking.titles.includes(title)) ||
+                  (!titleOnly && String(row.text || '').includes(reasoning))
+                )
               );
               const hasTool = rows.some(row =>
                 row && row.role === 'tool' && row.tool && row.tool.name === tool
               );
               return hasThinking && hasTool;
             }""",
-            arg={"reasoning": REASONING_TEXT, "tool": TOOL_NAME},
+            arg={
+                "reasoning": REASONING_TEXT,
+                "title": REASONING_TITLE,
+                "titleOnly": TITLE_ONLY,
+                "tool": TOOL_NAME,
+            },
             timeout=ANCHOR_SCENE_PROJECTION_TIMEOUT,
         )
     except Exception as exc:
@@ -350,7 +364,8 @@ class DeterministicGateway:
                 try:
                     self._event("reasoning.available", {
                         "event": "reasoning.available",
-                        "text": REASONING_TEXT,
+                        "text": "" if TITLE_ONLY else REASONING_TEXT,
+                        "titles": [REASONING_TITLE],
                     })
                     if owner.scenario == "terminal-error":
                         self._event("message.delta", {
@@ -632,6 +647,41 @@ def _assert_tool_disclosure_accessibility(page) -> None:
     assert state["after"] == {"expanded": "true", "hidden": False}, state
 
 
+def _assert_thinking_disclosure_accessibility(page) -> None:
+    state = page.evaluate(
+        """() => {
+          const row = _thinkingActivityNode('private detail', false, 'a11y', ['Reasoning title'], false);
+          document.body.appendChild(row);
+          const card = row.querySelector('.thinking-card');
+          const header = row.querySelector('.thinking-card-header');
+          const detail = row.querySelector('.thinking-card-body');
+          const before = {
+            tag: header.tagName,
+            expanded: header.getAttribute('aria-expanded'),
+            controls: header.getAttribute('aria-controls'),
+            detailId: detail.id,
+            hidden: detail.hidden,
+          };
+          header.click();
+          const after = {
+            expanded: header.getAttribute('aria-expanded'),
+            hidden: detail.hidden,
+          };
+          row.remove();
+          return {before, after};
+        }"""
+    )
+    assert state["before"] == {
+        "tag": "BUTTON",
+        "expanded": "false",
+        "controls": state["before"]["detailId"],
+        "detailId": state["before"]["detailId"],
+        "hidden": True,
+    }, state
+    assert state["before"]["detailId"], state
+    assert state["after"] == {"expanded": "true", "hidden": False}, state
+
+
 def _terminal_rows(snapshot: dict) -> list[dict]:
     return [row for row in snapshot["rows"] if row["role"] == "terminal"]
 
@@ -698,7 +748,11 @@ def _assert_live_activity(snapshot: dict) -> None:
     assert len(tool_rows) == 1 and tool_rows[0]["tool"] == TOOL_NAME, snapshot
     _assert_no_running_tool_rows(tool_rows)
     thinking_rows = [row for row in snapshot["rows"] if row["role"] == "thinking"]
-    assert any(REASONING_TEXT in (row["thinkingBody"] or row["thinkingTitle"]) for row in thinking_rows), snapshot
+    assert all(row["thinkingTitle"] == REASONING_TITLE for row in thinking_rows), snapshot
+    if TITLE_ONLY:
+        assert all(row["thinkingBody"] in {"", "Thinking…"} for row in thinking_rows), snapshot
+    else:
+        assert all(REASONING_TEXT in row["thinkingBody"] for row in thinking_rows), snapshot
     assert all(FINAL_TEXT not in text for text in snapshot["visibleFinal"]), snapshot
 
 
@@ -713,8 +767,11 @@ def _assert_settled(snapshot: dict, scenario: str) -> None:
     assert len(tool_rows) == 1 and tool_rows[0]["tool"] == TOOL_NAME, snapshot
     _assert_no_running_tool_rows(tool_rows)
     thinking_rows = [row for row in snapshot["rows"] if row["role"] == "thinking"]
-    assert any(REASONING_TEXT in (row["thinkingBody"] or row["thinkingTitle"]) for row in thinking_rows), snapshot
-    assert all(not (row["thinkingTitle"] == REASONING_TEXT and row["thinkingBody"] == REASONING_TEXT) for row in thinking_rows), snapshot
+    assert all(row["thinkingTitle"] == REASONING_TITLE for row in thinking_rows), snapshot
+    if TITLE_ONLY:
+        assert all(row["thinkingBody"] in {"", "Thinking…"} for row in thinking_rows), snapshot
+    else:
+        assert all(REASONING_TEXT in row["thinkingBody"] for row in thinking_rows), snapshot
     if scenario == "terminal-error":
         assert "terminal" in roles, snapshot
         terminal_rows = _terminal_rows(snapshot)
@@ -764,6 +821,8 @@ def _semantic_activity(snapshot: dict) -> list[dict]:
         if row["role"] == "thinking":
             title = " ".join(row["thinkingTitle"].split())
             body = " ".join(row["thinkingBody"].split())
+            if body == "Thinking…":
+                body = ""
             semantic.append({
                 "role": "thinking",
                 "text": body or ("" if title == "Thinking" else title),
@@ -909,6 +968,7 @@ def main() -> int:
         page.goto("/", wait_until="domcontentloaded")
         page.wait_for_selector("#msg", state="visible", timeout=15000)
         _assert_tool_disclosure_accessibility(page)
+        _assert_thinking_disclosure_accessibility(page)
         page.locator("#msg").fill(PROMPT)
         page.locator("#btnSend").click()
 
@@ -1153,14 +1213,15 @@ def main() -> int:
                     isinstance(row, dict) and row.get("role") == "terminal" for row in scene_rows
                 ), scene
         page.wait_for_function(
-            """() => {
+            """shouldCollapse => {
               const group = Array.from(document.querySelectorAll(
                 '.assistant-turn [data-anchor-settled-scene-owner="1"]'
               )).pop();
               const label = group && group.querySelector(':scope > .tool-worklog-summary .tool-worklog-label');
-              return Boolean(group && group.classList.contains('tool-call-group-collapsed') &&
+              return Boolean(group && group.classList.contains('tool-call-group-collapsed') === shouldCollapse &&
                 label && label.textContent.trim().startsWith('Worked'));
             }""",
+            arg=scenario != "terminal-error",
             timeout=10000,
         )
         _expand_settled_worklog(page)
