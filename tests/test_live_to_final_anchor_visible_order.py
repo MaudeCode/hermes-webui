@@ -705,9 +705,8 @@ def test_anchor_tool_rows_are_action_labeled_iconed_and_single_line():
     assert "previewText===argPreview" in build
     assert "previewText==='Completed'||previewText==='Running'||previewText==='Failed'" in build
     assert "skill_view" in icon and "book-open" in icon
-    assert "tool-worklog-tool-group-icon" in sync
-    assert "_toolGroupIcon(rows)" in sync
-    assert "wasOpen||_worklogDetailsExpandedDefault()" in sync
+    assert "tool-worklog-tool-group-icon" not in sync
+    assert "rows.forEach(row=>tools.appendChild(row))" in sync
     assert "data-anchor-scene-owner')!=='1'" not in summary
     assert "if(group.getAttribute('data-tool-worklog-group')==='1') _syncToolWorklogToolGroup(group);" in summary
 
@@ -1616,13 +1615,13 @@ def test_settled_anchor_scene_hides_prior_process_segments_not_final_answer():
     assert "data-turn-duration" in group
 
 
-def test_anchor_scene_worklog_summary_is_processed_time_anchor():
+def test_anchor_scene_worklog_summary_uses_natural_activity_title():
     summary = _function_body(UI_JS, "_syncToolCallGroupSummary")
     live = _function_body(UI_JS, "renderLiveAnchorActivityScene")
 
-    assert "_activityProcessedElapsedLabel(group)" in summary
-    assert "_activitySettledProcessedLabel(group)" in summary
-    assert "label.textContent=processedLabel||t('processed_elapsed','')" in summary
+    assert "_activityProcessedElapsedLabel(group)" not in summary
+    assert "_toolWorklogSummary(cards,{live:isLiveWorklog,toolCount})" in summary
+    assert "thinkingLabel&&thinkingLabel.textContent.trim()||t('thinking')" in summary
     assert "durationEl.textContent='';" in summary
     assert "else if(isWorklogGroup)" in summary
     assert "collapsed:false" in live
@@ -1646,12 +1645,11 @@ def test_processed_time_anchor_uses_lightweight_summary_style():
     assert "opacity:.82" in label_rule
 
 
-def test_legacy_settled_worklog_summary_uses_processed_anchor_too():
+def test_legacy_settled_worklog_summary_uses_natural_activity_title_too():
     summary = _function_body(UI_JS, "_syncToolCallGroupSummary")
 
-    assert "const processedLabel=isLiveWorklog" in summary
-    assert ": _activitySettledProcessedLabel(group)" in summary
-    assert "_toolWorklogSummary(cards,{live:isLiveWorklog, toolCount, labelOnly:!toolCount&&isLiveWorklog})" not in summary
+    assert "const processedLabel=isLiveWorklog" not in summary
+    assert "_toolWorklogSummary(cards,{live:isLiveWorklog,toolCount})" in summary
     assert ".tool-worklog-group[data-tool-worklog-group=\"1\"]:not([data-run-activity-group=\"1\"]) .tool-worklog-summary" in STYLE_CSS
 
 

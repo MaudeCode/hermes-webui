@@ -26170,7 +26170,7 @@ function _i18nToolActionLabelZhHant(kind, state, target, display, failed) {
 function _i18nToolWorklogSummaryFromMap(map, kind, state, count) {
   const n = Math.max(1, Number(count) || 1);
   const form = (map[kind] || map.unknown || _I18N_TOOL_SUMMARY_TEXT_EN.unknown)[state] || map.unknown.running;
-  return (n === 1 ? form[0] : form[1]).replace('{n}', String(n));
+  return (n === 1 ? form[0] : form[1]).replace('{n}', '').replace(/\s+/g, ' ').trim();
 }
 function _i18nToolWorklogSummaryEn(kind, state, count) {
   return _i18nToolWorklogSummaryFromMap(_I18N_TOOL_SUMMARY_TEXT_EN, kind, state, count);
@@ -26180,7 +26180,7 @@ function _i18nToolWorklogSummaryRu(kind, state, count) {
   const form = (_I18N_TOOL_SUMMARY_TEXT_RU[kind] || _I18N_TOOL_SUMMARY_TEXT_RU.unknown)[state]
     || _I18N_TOOL_SUMMARY_TEXT_RU.unknown.running;
   const picked = _i18nRuPlural(n, form[0], form[1], form[2]);
-  return picked.replace('{n}', String(n));
+  return picked.replace('{n}', '').replace(/\s+/g, ' ').trim();
 }
 function _i18nToolWorklogSummaryZh(kind, state, count) {
   return _i18nToolWorklogSummaryFromMap(_I18N_TOOL_SUMMARY_TEXT_ZH, kind, state, count);

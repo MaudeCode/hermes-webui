@@ -8,7 +8,11 @@ import re
 
 _BOLD_LINE = re.compile(r"^\s*\*\*(.+?)\*\*\s*$")
 _COMMAND_LINE = re.compile(
-    r"^(?:\$\s*|sudo\b|git\b|cd\b|ls\b|cat\b|python\b|node\b|curl\b|wget\b|rg\b|grep\b)",
+    r"^(?:[$>]\s*|(?:\.{0,2}/)|(?:sudo|env|git|cd|ls|cat|python|node|curl|wget|rg|grep|npm|npx|pnpm|yarn|bun|deno|make|cmake|docker|podman|kubectl|helm|terraform|ansible|xcodebuild|xcrun|swift|go|cargo|rustc|pip|pip3|pytest|bash|sh|zsh|fish|rm|cp|mv|chmod|chown|sed|awk)\b)",
+    re.IGNORECASE,
+)
+_TOOL_ARGUMENT_LINE = re.compile(
+    r"^(?:--[\w-]+(?:\s|=)|[A-Za-z_][A-Za-z0-9_]*\s*=\s*\S+|(?:args?|arguments?|input|params?)\s*[:=]\s*[\[{])",
     re.IGNORECASE,
 )
 _MARKDOWN_PREFIX = re.compile(r"^\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)")
@@ -21,7 +25,7 @@ def _clean_title(value: object, *, explicit: bool = False) -> str:
     title = _MARKDOWN_PREFIX.sub("", title).strip()
     if not title or title.startswith(("```", "~~~", "<", "{", "[")):
         return ""
-    if _COMMAND_LINE.match(title):
+    if _COMMAND_LINE.match(title) or _TOOL_ARGUMENT_LINE.match(title):
         return ""
     if not explicit:
         try:
@@ -54,6 +58,23 @@ def _unique_titles(values: object, *, explicit: bool = False) -> list[str]:
     return out
 
 
+def _reasoning_lines(raw: str) -> list[tuple[str, bool]]:
+    lines: list[tuple[str, bool]] = []
+    fence: str | None = None
+    for line in raw.splitlines(keepends=True):
+        stripped = line.lstrip()
+        marker = stripped[:3] if stripped.startswith(("```", "~~~")) else ""
+        if marker:
+            if fence is None:
+                fence = marker
+            elif marker == fence:
+                fence = None
+            lines.append((line, False))
+            continue
+        lines.append((line, fence is None))
+    return lines
+
+
 def normalize_reasoning_titles(
     text: object,
     *,
@@ -67,8 +88,11 @@ def normalize_reasoning_titles(
         return explicit
 
     raw = str(text or "")
+    lines = _reasoning_lines(raw)
     bold = []
-    for line in raw.splitlines():
+    for line, is_safe in lines:
+        if not is_safe:
+            continue
         match = _BOLD_LINE.match(line)
         if match:
             bold.append(match.group(1))
@@ -76,10 +100,11 @@ def normalize_reasoning_titles(
     if titles:
         return titles
 
-    lines = raw.splitlines(keepends=True)
-    for index, line in enumerate(lines):
+    for index, (line, is_safe) in enumerate(lines):
         if not line.strip():
             continue
+        if not is_safe:
+            return []
         complete = line.endswith(("\n", "\r")) or stable or index < len(lines) - 1
         if not complete:
             return []

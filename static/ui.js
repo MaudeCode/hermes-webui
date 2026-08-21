@@ -11555,7 +11555,7 @@ function _applyWorklogDetailsExpandedDefault(root){
     card.classList.toggle('open', open);
   });
   scope.querySelectorAll('.tool-card').forEach(card=>{
-    if(!card.classList.contains('tool-card-no-detail')) card.classList.toggle('open', open);
+    if(!card.classList.contains('tool-card-no-detail')) _setWorklogDetailDisclosureOpen(card,open);
   });
   scope.querySelectorAll('.tool-group[data-tool-worklog-tool-group="1"],.tool-worklog-tool-group').forEach(group=>{
     group.classList.toggle('open', open);
@@ -11644,11 +11644,21 @@ function _setWorklogDetailDisclosureOpen(el, open){
     if(drow&&typeof _materializeTransparentToolDetail==='function') _materializeTransparentToolDetail(drow);
   }
   el.classList.toggle('open', !!open);
+  const header=el.querySelector('.tool-card-header,.thinking-card-header');
+  if(header) header.setAttribute('aria-expanded', String(!!open));
   if(el.matches&&el.matches('.tool-group[data-tool-worklog-tool-group="1"],.tool-worklog-tool-group')){
     el.classList.toggle('tool-worklog-tool-group-collapsed', !open);
     const summary=el.querySelector('.tool-group-head,.tool-worklog-tool-group-head');
     if(summary) summary.setAttribute('aria-expanded', String(!!open));
   }
+}
+function _toggleToolCardDisclosure(header){
+  const card=header&&header.closest?header.closest('.tool-card'):null;
+  if(!card) return;
+  const open=!card.classList.contains('open');
+  const row=card.closest&&card.closest('.transparent-event-row');
+  if(row&&typeof _setTransparentCardOpen==='function') _setTransparentCardOpen(card,open);
+  else _setWorklogDetailDisclosureOpen(card,open);
 }
 function _worklogDetailDisclosureKeyForElement(el, counts){
   const base=_worklogDetailBaseKey(el);
@@ -12034,8 +12044,10 @@ function _attachCopyButton(header){
     const feedbackState=row&&row._transparentCopiedFeedback;
     const feedbackActive=!!(feedbackState&&Number(feedbackState.expiresAt)>Date.now());
     btn.classList.add('transparent-event-copy');
-    btn.setAttribute('role','button');
-    btn.setAttribute('tabindex','0');
+    if(String(btn.tagName||'').toLowerCase()!=='button'){
+      btn.setAttribute('role','button');
+      btn.setAttribute('tabindex','0');
+    }
     btn.setAttribute('data-transparent-copy','1');
     if(!btn._transparentCopiedFeedback&&!feedbackActive){
       btn.setAttribute('aria-label',t('copy')||'Copy');
@@ -12059,12 +12071,16 @@ function _attachCopyButton(header){
   // added by this function AND the legacy .thinking-copy-btn baked into the
   // thinking-card template). Returning the existing one prevents the
   // duplicate copy buttons that appeared in thinking boxes.
-  const existing=header.querySelector('.transparent-event-copy,.thinking-copy-btn');
+  const card=header.closest?header.closest('.tool-card,.thinking-card'):null;
+  const headerIsButton=String(header.tagName||'').toLowerCase()==='button';
+  const existing=header.querySelector('.transparent-event-copy,.thinking-copy-btn')
+    || (headerIsButton&&card&&card.querySelector(':scope > .transparent-event-copy'));
   if(existing){
     // Normalise the class so CSS treats them identically.
     return bindCopyButton(existing);
   }
-  const btn=document.createElement('span');
+  const btn=document.createElement('button');
+  btn.type='button';
   btn.className='transparent-event-copy';
   btn.innerHTML=`<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
   bindCopyButton(btn);
@@ -12072,9 +12088,15 @@ function _attachCopyButton(header){
   // whether a toggle or status badge is present: always right before
   // the toggle. The CSS uses flexbox order to keep it visually stable
   // even if other elements are inserted between header and toggle.
-  const toggle=header.querySelector('.tool-card-toggle,.thinking-card-toggle');
-  if(toggle&&toggle.parentNode===header) header.insertBefore(btn,toggle);
-  else header.appendChild(btn);
+  if(headerIsButton&&card){
+    card.classList.add('tool-card-has-external-copy');
+    if(header.nextSibling) card.insertBefore(btn,header.nextSibling);
+    else card.appendChild(btn);
+  }else{
+    const toggle=header.querySelector('.tool-card-toggle,.thinking-card-toggle');
+    if(toggle&&toggle.parentNode===header) header.insertBefore(btn,toggle);
+    else header.appendChild(btn);
+  }
   const row=header.closest?header.closest('.transparent-event-row'):null;
   if(typeof _showTransparentCopiedFeedback==='function') _showTransparentCopiedFeedback(btn,row,{rehydrate:true});
   return btn;
@@ -12208,6 +12230,7 @@ function _transparentToolCallFromRowDataset(row){
 }
 function _wireTransparentHeaderToggle(header){
   if(!header) return;
+  const nativeButton=String(header.tagName||'').toLowerCase()==='button';
   header.setAttribute('data-transparent-toggle-bound','1');
   header.onclick=function(ev){
     const target=ev&&ev.target;
@@ -12215,14 +12238,16 @@ function _wireTransparentHeaderToggle(header){
     const card=this.closest('.tool-card,.thinking-card');
     _setTransparentCardOpen(card,!(card&&card.classList.contains('open')));
   };
-  header.onkeydown=function(ev){
+  header.onkeydown=nativeButton?null:function(ev){
     if(ev.key!=='Enter'&&ev.key!==' ') return;
     ev.preventDefault();
     const card=this.closest('.tool-card,.thinking-card');
     _setTransparentCardOpen(card,!(card&&card.classList.contains('open')));
   };
-  header.setAttribute('role','button');
-  header.setAttribute('tabindex','0');
+  if(!nativeButton){
+    header.setAttribute('role','button');
+    header.setAttribute('tabindex','0');
+  }
 }
 function _transparentToolDetailHtml(tc, status){
   const args=tc&&tc.args&&typeof tc.args==='object'?tc.args:{};
@@ -19223,7 +19248,7 @@ function _toolWorklogSummary(toolCalls, opts){
   if(cards.length===1){
     const part=_toolWorklogActionParts(cards[0]);
     const line=_toolWorklogSummaryLine(part.kind,part.isDone?'done':'running',1);
-    return part.isErr?`${line}, 1 failed`:line;
+    return part.isErr?`${line}, failed`:line;
   }
   const order=['shell','read','search','write','skill','memory','web','list','delegate','unknown'];
   const runningCounts={}, doneCounts={};
@@ -19477,7 +19502,10 @@ function buildToolCard(tc){
   const isDelegation=tc.name==='delegate_task';
   const openClass=hasDetail&&typeof _worklogDetailsExpandedDefault==='function'&&_worklogDetailsExpandedDefault()?' open':'';
   const cardClass='tool-card'+(tc.done===false?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'')+(hasDetail?'':' tool-card-no-detail')+openClass;
-  const headerClick=hasDetail?' onclick="this.closest(\'.tool-card\').classList.toggle(\'open\')"':'';
+  const headerStart=hasDetail
+    ? `<button type="button" class="tool-card-header" aria-expanded="${openClass?'true':'false'}" onclick="_toggleToolCardDisclosure(this)">`
+    : '<div class="tool-card-header">';
+  const headerEnd=hasDetail?'</button>':'</div>';
   // Clean up legacy subagent prefixes since the Lucide icon already shows it
   let displayName=typeof _toolActionLabelText==='function'?_toolActionLabelText(tc,{limit:112}):_toolDisplayName(tc);
   let genericName=typeof _toolActionLabelText==='function'?_toolActionLabelText(tc,{generic:true,limit:112}):_toolDisplayName(tc);
@@ -19492,12 +19520,12 @@ function buildToolCard(tc){
   const visibleArgs=(detailLeadText&&toolKind==='shell')?[]:argsEntries;
   row.innerHTML=`
     <div class="${cardClass}">
-      <div class="tool-card-header"${headerClick}>
+      ${headerStart}
         <span class="tool-card-icon">${icon}</span>
         <span class="tool-card-name"><span class="tool-card-name-label">${esc(displayName)}</span><span class="tool-card-name-generic">${esc(genericName)}</span></span>
         <span class="tool-card-preview">${esc(previewText)}</span>
         ${hasDetail?`<span class="tool-card-toggle">${li('chevron-right',12)}</span>`:''}
-      </div>
+      ${headerEnd}
       ${hasDetail?`<div class="tool-card-detail">
         ${detailLead}
         ${visibleArgs.length?`<div class="tool-card-args">${

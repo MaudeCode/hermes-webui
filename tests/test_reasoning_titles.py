@@ -38,9 +38,20 @@ def test_unsafe_or_unusable_lines_do_not_become_titles():
         "<tool_call><arg>secret</arg></tool_call>",
         "x" * 500,
         "   ",
+        "npm test -- --runInBand",
+        "./scripts/test.sh tests/test_reasoning_titles.py",
+        "API_KEY=secret pytest -q",
     ]
     for text in rejected:
         assert normalize_reasoning_titles(text, stable=True) == []
+
+
+def test_bold_commands_inside_code_fences_are_not_titles():
+    text = """```bash
+**npm test -- --runInBand**
+```
+"""
+    assert normalize_reasoning_titles(text, stable=True) == []
 
 
 def test_reasoning_event_payload_keeps_legacy_text_and_adds_optional_snapshot():
@@ -82,3 +93,20 @@ def test_browser_consumes_titles_without_reimplementing_the_parser():
     assert "function _applyReasoningTitles" in ui
     assert "1500" in ui
     assert "normalize_reasoning_titles" not in messages + anchors + ui
+
+
+def test_tool_disclosures_are_semantic_and_count_free_in_every_locale():
+    ui = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+    css = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    build_tool = ui.split("function buildToolCard(tc)", 1)[1].split("function _colorDiffLines", 1)[0]
+    summary = ui.split("function _toolWorklogSummary(toolCalls, opts)", 1)[1].split("function _toolWorklogListEl", 1)[0]
+    locale_summary = i18n.split("function _i18nToolWorklogSummaryFromMap", 1)[1].split("function _i18nToolWorklogSummaryEn", 1)[0]
+    russian_summary = i18n.split("function _i18nToolWorklogSummaryRu", 1)[1].split("function _i18nToolWorklogSummaryZh", 1)[0]
+
+    assert "<button" in build_tool and "aria-expanded" in build_tool
+    assert "_toggleToolCardDisclosure(this)" in build_tool
+    assert "1 failed" not in summary
+    assert "replace('{n}', '')" in locale_summary
+    assert "replace('{n}', '')" in russian_summary
+    assert ".tool-card-header" in css and "min-height:44px" in css

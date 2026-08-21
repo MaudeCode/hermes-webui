@@ -4062,7 +4062,8 @@ body.resizing .sidebar{transition:none!important;}
 .tool-card:hover,.tl:hover{border-color:transparent;background:transparent;}
 .tool-card-running,.tl.running{border-color:transparent;background:transparent;}
 .tool-card-row,.tool-card{width:100%;max-width:100%;box-sizing:border-box;min-width:0;}
-.tool-card-header,.tl-head{display:flex;align-items:center;gap:7px;padding:3px 8px;margin-left:-8px;border-radius:7px;cursor:pointer;user-select:none;color:var(--muted);font-size:var(--message-body-font-size);line-height:var(--message-body-line-height);min-width:0;}
+.tool-card-header,.tl-head{display:flex;align-items:center;gap:7px;min-height:44px;padding:3px 8px;margin-left:-8px;border-radius:7px;cursor:pointer;user-select:none;color:var(--muted);font-size:var(--message-body-font-size);line-height:var(--message-body-line-height);min-width:0;}
+button.tool-card-header{width:calc(100% + 8px);border:0;background:transparent;text-align:inherit;font:inherit;}
 .tool-card-header:hover,.tl-head:hover{background:var(--hover-bg);color:var(--text);}
 .tool-card-running .tool-card-header,.tl.running .tl-head{cursor:default;}
 .tool-card-no-detail .tool-card-header{cursor:default;}
@@ -4180,7 +4181,7 @@ body.resizing .sidebar{transition:none!important;}
   flex-direction:row;
   align-items:center;
   gap:5px;
-  min-height:19px;
+  min-height:44px;
   padding:1px 4px 1px 7px;
   margin-left:0;
   border-radius:0;
@@ -4315,6 +4316,16 @@ body.resizing .sidebar{transition:none!important;}
 }
 .transparent-event-copy:hover,
 .transparent-event-copy:focus-visible{opacity:1;color:var(--text);background:transparent;}
+.transparent-event-row .tool-card-has-external-copy{position:relative;}
+.transparent-event-row .tool-card-has-external-copy > .tool-card-header{padding-right:76px;}
+.transparent-event-row .tool-card-has-external-copy > .transparent-event-copy{
+  position:absolute;
+  z-index:1;
+  top:0;
+  right:24px;
+  width:44px;
+  height:44px;
+}
 .transparent-event-row .tool-card-toggle,
 .transparent-event-row .thinking-card-toggle{
   order:10;
@@ -4443,7 +4454,7 @@ body.resizing .sidebar{transition:none!important;}
   /* Larger header tap targets on mobile (the 19px desktop header is a poor
      touch target). (Trifecta finding V10.) */
   .transparent-event-row .tool-card-header,
-  .transparent-event-row .thinking-card-header{min-height:30px;padding:5px 8px;}
+  .transparent-event-row .thinking-card-header{min-height:44px;padding:5px 8px;}
   .transparent-detail-mode{padding:4px 6px 5px;}
 }
 /* ── Old-event fading (transparent mode: medium → low) ─────────────── */
