@@ -4609,6 +4609,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _upsertAnchorReasoning(text, options={}){
     const clean=String(text||'').trim();
+    const titlesPresent=Array.isArray(options.titles);
     const hasTitles=Array.isArray(options.titles)&&options.titles.length>0;
     const placement=_liveThinkingPlacement();
     const segmentSeq=Number(options.segmentSeq||placement.segmentSeq||_anchorSegmentSeq());
@@ -4618,15 +4619,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       options.segmentSeq=segmentSeq;
       if(options.burstId===undefined) options.burstId=_currentActivityBurstId;
     }
-    if((!clean&&!hasTitles)||!_anchorRegistry||window._showThinking===false) return null;
+    if(!_anchorRegistry||window._showThinking===false) return null;
     const existing=_findAnchorActivityEventByLocalId(localId,'reasoning');
+    if(!clean&&!hasTitles&&(!titlesPresent||!existing)) return null;
     if(existing){
+      const existingPayload=existing.payload&&typeof existing.payload==='object'?existing.payload:{};
+      const nextText=clean||String(existingPayload.text||'').trim();
       const replaced=_replaceAnchorActivityEventByLocalId(localId,'reasoning',{
         status:options.sealed?'completed':'running',
-        payload:{text:clean,titles:Array.isArray(options.titles)?options.titles:[],activitySegmentSeq:segmentSeq,activityBurstId:_currentActivityBurstId},
+        payload:{text:nextText,titles:Array.isArray(options.titles)?options.titles:[],activitySegmentSeq:segmentSeq,activityBurstId:_currentActivityBurstId},
       });
       const turn=$('liveAssistantTurn');
-      if(turn&&typeof window._updateLiveAnchorReasoningRowForFallback==='function'&&window._updateLiveAnchorReasoningRowForFallback(turn,clean,{
+      if(turn&&typeof window._updateLiveAnchorReasoningRowForFallback==='function'&&window._updateLiveAnchorReasoningRowForFallback(turn,nextText,{
         ...options,
         anchorReasoningLocalId:localId,
         localId,
@@ -4778,7 +4782,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       clearTimeout(_pendingReasoningRenderHandle);
       _pendingReasoningRenderHandle=null;
     }
-    if(_reasoningRenderDirty&&(String(liveReasoningText||'').trim()||liveReasoningTitles.length)) _paintPendingReasoning(true);
+    if(_reasoningRenderDirty) _paintPendingReasoning(true);
   }
   function _flushReasoningToAnchor(){
     _flushPendingReasoningRender();

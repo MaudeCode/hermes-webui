@@ -513,6 +513,62 @@ def test_live_journal_snapshot_recovers_title_only_reasoning(monkeypatch):
     assert thinking["thinking"]["titles"] == ["Gateway title"]
 
 
+def test_live_journal_snapshot_keeps_reasoning_titles_segment_scoped(monkeypatch):
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: {
+            "session_id": "session_1",
+            "run_id": stream_id,
+            "last_seq": 4,
+            "last_event_id": f"{stream_id}:4",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_event_tail",
+        lambda _session_id, run_id: {
+            "events": [
+                {
+                    "seq": 1,
+                    "event": "reasoning",
+                    "payload": {"text": "first detail", "titles": ["First segment"]},
+                    "event_id": f"{run_id}:1",
+                },
+                {
+                    "seq": 2,
+                    "event": "tool",
+                    "payload": {"name": "read_file", "tool_call_id": "call-1"},
+                    "event_id": f"{run_id}:2",
+                },
+                {
+                    "seq": 3,
+                    "event": "tool_complete",
+                    "payload": {"name": "read_file", "tool_call_id": "call-1"},
+                    "event_id": f"{run_id}:3",
+                },
+                {
+                    "seq": 4,
+                    "event": "reasoning",
+                    "payload": {"text": "second detail", "titles": ["Second segment"]},
+                    "event_id": f"{run_id}:4",
+                },
+            ]
+        },
+    )
+
+    snapshot = routes._run_journal_live_snapshot("run_1")
+    rows = snapshot["anchor_activity_scene"]["activity_rows"]
+    assert [row["role"] for row in rows] == ["thinking", "tool", "thinking"]
+    thinking = [row for row in rows if row["role"] == "thinking"]
+    assert [(row["text"], row["thinking"]["titles"]) for row in thinking] == [
+        ("first detail", ["First segment"]),
+        ("second detail", ["Second segment"]),
+    ]
+
+
 def test_runtime_snapshot_transport_projection_dedupes_live_tool_payloads_without_mutation():
     import api.routes as routes
 

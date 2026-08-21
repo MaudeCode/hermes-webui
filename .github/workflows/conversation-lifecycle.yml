@@ -40,18 +40,27 @@ jobs:
             script: tests/browser_conversation_lifecycle.py
             scenario: normal
             title_only: '0'
+            title_clear: '0'
           - name: title-only-recovery
             script: tests/browser_conversation_lifecycle.py
             scenario: normal
             title_only: '1'
+            title_clear: '0'
+          - name: title-clear-recovery
+            script: tests/browser_conversation_lifecycle.py
+            scenario: normal
+            title_only: '1'
+            title_clear: '1'
           - name: terminal-error
             script: tests/browser_conversation_lifecycle.py
             scenario: terminal-error
             title_only: '0'
+            title_clear: '0'
           - name: historical-transcript-hydration
             script: tests/browser_historical_transcript_hydration.py
             scenario: historical
             title_only: '0'
+            title_clear: '0'
     steps:
       - uses: actions/checkout@v4
 
@@ -77,6 +86,7 @@ jobs:
           HISTORICAL_HYDRATION_ARTIFACT_DIR: lifecycle-artifacts
           LIFECYCLE_SCENARIO: ${{ matrix.scenario }}
           LIFECYCLE_TITLE_ONLY: ${{ matrix.title_only }}
+          LIFECYCLE_TITLE_CLEAR: ${{ matrix.title_clear }}
         run: python ${{ matrix.script }}
 
       - name: Run settlement frame proof

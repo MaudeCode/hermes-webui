@@ -7649,12 +7649,17 @@ function _reasoningBodyTextForDisplay(text,titles){
   const lines=clean.split(/\r?\n/);
   const normalizedKeys=normalized.map(title=>title.toLocaleLowerCase());
   const remaining=lines.filter(line=>{
-    const candidate=line.trim()
+    const rawLine=line.trim();
+    const isHeading=/^\*\*.*\*\*$/.test(rawLine)||/^(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)/.test(rawLine);
+    const candidate=rawLine
       .replace(/^\*\*(.*?)\*\*$/,'$1')
       .replace(/^(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)/,'')
       .trim().toLocaleLowerCase();
     if(!candidate) return true;
-    return !normalizedKeys.some(title=>candidate===title||candidate.startsWith(`${title} `));
+    return !normalizedKeys.some(title=>candidate===title||(
+      candidate.startsWith(`${title} `)
+      && (isHeading||(title.length>=24&&candidate.length>80))
+    ));
   });
   const result=remaining.join('\n').trim();
   return result||clean;
@@ -13291,12 +13296,6 @@ function _anchorSceneRowsForRendering(scene, opts){
     if(_anchorSceneIsSettledSuccessfulCompression(row,settled)) continue;
     const text=String(row.text||'').trim();
     if(row.role==='prose'&&!text) continue;
-    if(row.role==='thinking'&&!text){
-      const titles=row.thinking&&Array.isArray(row.thinking.titles)
-        ? row.thinking.titles
-        : row.payload&&row.payload.titles;
-      if(!(Array.isArray(titles)&&titles.length)) continue;
-    }
     const key=keyFor(row);
     if(byKey.has(key)){
       const index=byKey.get(key);
@@ -13465,7 +13464,6 @@ function _anchorSceneNodeForRow(row, opts){
     if(window._showThinking===false) return null;
     const text=String(row.text||row.thinking&&row.thinking.text||'').trim();
     const titles=row.thinking&&Array.isArray(row.thinking.titles)?row.thinking.titles:row.payload&&row.payload.titles;
-    if(!text&&!(Array.isArray(titles)&&titles.length)) return null;
     node=_thinkingActivityNode(
       text,
       false,
@@ -21107,7 +21105,7 @@ function _renderThinkingInto(row,text='',titles){
     try{activeTitles=JSON.parse(row.getAttribute('data-reasoning-titles')||'[]');}catch(_){activeTitles=[];}
   }
   if(!raw){
-    row.innerHTML=_reasoningTitleList(activeTitles).length
+    row.innerHTML=(row.matches&&row.matches('.agent-activity-thinking'))||_reasoningTitleList(activeTitles).length
       ? _thinkingCardHtml('',false)
       : _thinkingMarkup(text);
     const card=row.querySelector&&row.querySelector('.thinking-card');

@@ -29,6 +29,7 @@ PROMPT = "Exercise the public conversation lifecycle gate."
 REASONING_TEXT = "Checking the persistent assistant turn."
 REASONING_TITLE = "Checking lifecycle persistence"
 TITLE_ONLY = os.environ.get("LIFECYCLE_TITLE_ONLY", "").strip() == "1"
+TITLE_CLEAR = os.environ.get("LIFECYCLE_TITLE_CLEAR", "").strip() == "1"
 FINAL_TEXT = "Lifecycle gate final answer."
 FINAL_ACK_TEXT = "Lifecycle"
 FINAL_PREFIX = "Lifecycle gate "
@@ -212,7 +213,7 @@ def _anchor_projection_snapshot(page) -> dict:
 def _wait_for_live_anchor_projection(page) -> dict:
     try:
         page.wait_for_function(
-            """({reasoning, title, titleOnly, tool}) => {
+            """({reasoning, title, titleOnly, titleClear, tool}) => {
               const streamId = (typeof S !== 'undefined' && S.activeStreamId) || '';
               const registries = window._liveAnchorRegistries;
               const registry = streamId && registries && typeof registries.get === 'function'
@@ -228,7 +229,9 @@ def _wait_for_live_anchor_projection(page) -> dict:
               const rows = Array.isArray(scene && scene.activity_rows) ? scene.activity_rows : [];
               const hasThinking = rows.some(row =>
                 row && row.role === 'thinking' && (
-                  (titleOnly && row.thinking && Array.isArray(row.thinking.titles) &&
+                  (titleClear && row.thinking && Array.isArray(row.thinking.titles) &&
+                    row.thinking.titles.length === 0) ||
+                  (titleOnly && !titleClear && row.thinking && Array.isArray(row.thinking.titles) &&
                     row.thinking.titles.includes(title)) ||
                   (!titleOnly && String(row.text || '').includes(reasoning))
                 )
@@ -242,6 +245,7 @@ def _wait_for_live_anchor_projection(page) -> dict:
                 "reasoning": REASONING_TEXT,
                 "title": REASONING_TITLE,
                 "titleOnly": TITLE_ONLY,
+                "titleClear": TITLE_CLEAR,
                 "tool": TOOL_NAME,
             },
             timeout=ANCHOR_SCENE_PROJECTION_TIMEOUT,
@@ -367,6 +371,13 @@ class DeterministicGateway:
                         "text": "" if TITLE_ONLY else REASONING_TEXT,
                         "titles": [REASONING_TITLE],
                     })
+                    if TITLE_CLEAR:
+                        time.sleep(0.1)
+                        self._event("reasoning.available", {
+                            "event": "reasoning.available",
+                            "text": "",
+                            "titles": [],
+                        })
                     if owner.scenario == "terminal-error":
                         self._event("message.delta", {
                             "event": "message.delta",
@@ -748,8 +759,9 @@ def _assert_live_activity(snapshot: dict) -> None:
     assert len(tool_rows) == 1 and tool_rows[0]["tool"] == TOOL_NAME, snapshot
     _assert_no_running_tool_rows(tool_rows)
     thinking_rows = [row for row in snapshot["rows"] if row["role"] == "thinking"]
-    assert all(row["thinkingTitle"] == REASONING_TITLE for row in thinking_rows), snapshot
-    if TITLE_ONLY:
+    expected_title = "Thinking" if TITLE_CLEAR else REASONING_TITLE
+    assert all(row["thinkingTitle"] == expected_title for row in thinking_rows), snapshot
+    if TITLE_ONLY or TITLE_CLEAR:
         assert all(row["thinkingBody"] in {"", "Thinking…"} for row in thinking_rows), snapshot
     else:
         assert all(REASONING_TEXT in row["thinkingBody"] for row in thinking_rows), snapshot
@@ -767,8 +779,9 @@ def _assert_settled(snapshot: dict, scenario: str) -> None:
     assert len(tool_rows) == 1 and tool_rows[0]["tool"] == TOOL_NAME, snapshot
     _assert_no_running_tool_rows(tool_rows)
     thinking_rows = [row for row in snapshot["rows"] if row["role"] == "thinking"]
-    assert all(row["thinkingTitle"] == REASONING_TITLE for row in thinking_rows), snapshot
-    if TITLE_ONLY:
+    expected_title = "Thinking" if TITLE_CLEAR else REASONING_TITLE
+    assert all(row["thinkingTitle"] == expected_title for row in thinking_rows), snapshot
+    if TITLE_ONLY or TITLE_CLEAR:
         assert all(row["thinkingBody"] in {"", "Thinking…"} for row in thinking_rows), snapshot
     else:
         assert all(REASONING_TEXT in row["thinkingBody"] for row in thinking_rows), snapshot

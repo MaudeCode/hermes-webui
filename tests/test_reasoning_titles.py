@@ -202,6 +202,10 @@ const out = {{
         [{json.dumps(long_title)}]
   ),
   single: _reasoningBodyTextForDisplay('Only title', ['Only title']),
+  ordinary: _reasoningBodyTextForDisplay(
+    'Planning is important context.\\nKeep this detail.',
+    ['Planning']
+  ),
 }};
 console.log(JSON.stringify(out));
 """
@@ -210,6 +214,7 @@ console.log(JSON.stringify(out));
     assert out["multiple"] == "plan detail\nexecution detail"
     assert out["long"] == "body detail"
     assert out["single"] == "Only title"
+    assert out["ordinary"] == "Planning is important context.\nKeep this detail."
 
 
 def test_browser_consumes_titles_without_reimplementing_the_parser():

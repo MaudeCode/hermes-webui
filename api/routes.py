@@ -3374,13 +3374,14 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     assistant_text = ""
     reasoning_text = ""
     reasoning_titles: list[str] | None = None
+    reasoning_segments: list[dict] = []
+    current_reasoning_segment: dict | None = None
     messages: list[dict] = []
     tool_calls: list[dict] = []
     activity_burst_anchors: list[dict] = []
     current_activity_burst_id = 0
     fresh_segment = True
     last_ts = None
-    reasoning_first_tool_count: int | None = None
 
     def mark_boundary() -> int:
         nonlocal current_activity_burst_id
@@ -3452,12 +3453,17 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         return _compact_for_echo_compare(reasoning_text).endswith(candidate)
 
     def strip_reasoning_echo_tail(text: str) -> bool:
-        nonlocal reasoning_text, reasoning_first_tool_count
+        nonlocal reasoning_text
         next_reasoning, did_remove = _strip_compact_echo_suffix(reasoning_text, text)
         if did_remove:
             reasoning_text = next_reasoning
-            if not _compact_for_echo_compare(reasoning_text):
-                reasoning_first_tool_count = None
+            for segment in reversed(reasoning_segments):
+                segment_text = "".join(segment.get("chunks") or [])
+                next_segment, removed_segment = _strip_compact_echo_suffix(segment_text, text)
+                if not removed_segment:
+                    continue
+                segment["chunks"] = [next_segment] if next_segment else []
+                break
         return did_remove
 
     for event in events:
@@ -3469,16 +3475,28 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             if text:
                 assistant_text += text
                 fresh_segment = False
+                current_reasoning_segment = None
             continue
         if event_name == "reasoning":
             text = str(payload.get("text") or "")
+            if current_reasoning_segment is None:
+                current_reasoning_segment = {
+                    "chunks": [],
+                    "titles": None,
+                    "titles_present": False,
+                    "first_tool_count": len(tool_calls),
+                    "created_at": last_ts,
+                }
+                reasoning_segments.append(current_reasoning_segment)
             if "titles" in payload:
                 reasoning_titles = normalize_reasoning_titles(
                     "",
                     explicit_titles=payload.get("titles"),
                 )
-            if text and reasoning_first_tool_count is None:
-                reasoning_first_tool_count = len(tool_calls)
+                current_reasoning_segment["titles"] = reasoning_titles
+                current_reasoning_segment["titles_present"] = True
+            if text:
+                current_reasoning_segment["chunks"].append(text)
             reasoning_text += text
             continue
         if event_name == "interim_assistant":
@@ -3493,6 +3511,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                     assistant_text = f"{assistant_text}\n\n{visible}" if assistant_text else visible
                 mark_boundary()
                 fresh_segment = True
+                current_reasoning_segment = None
             continue
         if event_name == "tool":
             name = str(payload.get("name") or "").strip()
@@ -3519,10 +3538,12 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 call["activitySegmentSeq"] = boundary_id
             tool_calls.append(call)
             fresh_segment = True
+            current_reasoning_segment = None
             continue
         if event_name == "tool_complete":
             update_completed_tool(payload)
             fresh_segment = True
+            current_reasoning_segment = None
 
     if assistant_text or reasoning_text or reasoning_titles:
         message = {
@@ -3596,9 +3617,12 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             },
         }
 
-    def scene_thinking_row(text: str, *, status: str) -> dict | None:
+    def scene_thinking_row(segment: dict, *, status: str) -> dict | None:
+        text = "".join(segment.get("chunks") or [])
+        segment_titles = segment.get("titles")
+        titles_present = bool(segment.get("titles_present"))
         clean = str(text or "").strip()
-        if not clean and not reasoning_titles:
+        if not clean and not segment_titles and not titles_present:
             return None
         preview = " ".join(clean.split())
         local_id = f"live-thinking:{stream_id}:1"
@@ -3619,7 +3643,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "stream_id": stream_id,
             "seq": None,
             "status": status,
-            "created_at": last_ts,
+            "created_at": segment.get("created_at", last_ts),
             "identity": {
                 "event_id": None,
                 "local_id": local_id,
@@ -3633,13 +3657,13 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 "text": clean,
                 "preview": (preview[:177] + "...") if len(preview) > 180 else preview,
                 "dedupe_key": f"thinking:{preview.lower()}" if preview else "",
-                **({"titles": reasoning_titles} if reasoning_titles is not None else {}),
+                **({"titles": segment_titles} if titles_present else {}),
             },
             "tool_call_id": "",
             "tool": None,
             "payload": {
                 "text": clean,
-                **({"titles": reasoning_titles} if reasoning_titles is not None else {}),
+                **({"titles": segment_titles} if titles_present else {}),
             },
         }
 
@@ -3715,21 +3739,25 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         }
 
     anchor_activity_rows: list[dict] = []
-    thinking_row_inserted = False
+    thinking_rows_inserted: set[int] = set()
     tool_rows_rendered = 0
 
-    def append_thinking_row(*, force: bool = False) -> None:
-        nonlocal thinking_row_inserted
-        if thinking_row_inserted:
-            return
-        if not force and reasoning_first_tool_count and tool_rows_rendered < reasoning_first_tool_count:
-            return
-        row = scene_thinking_row(reasoning_text, status="running")
-        if not row:
-            return
-        row["order_index"] = len(anchor_activity_rows)
-        anchor_activity_rows.append(row)
-        thinking_row_inserted = True
+    def append_thinking_rows(*, force: bool = False) -> None:
+        for segment_index, segment in enumerate(reasoning_segments):
+            if segment_index in thinking_rows_inserted:
+                continue
+            if not force and tool_rows_rendered < int(segment.get("first_tool_count") or 0):
+                continue
+            row = scene_thinking_row(segment, status="running")
+            if not row:
+                thinking_rows_inserted.add(segment_index)
+                continue
+            row["order_index"] = len(anchor_activity_rows)
+            row["row_id"] = f"live-thinking:{stream_id}:{segment_index + 1}"
+            row["local_id"] = row["row_id"]
+            row["identity"]["local_id"] = row["row_id"]
+            anchor_activity_rows.append(row)
+            thinking_rows_inserted.add(segment_index)
 
     tool_rows_by_burst: dict[int, list[tuple[int, dict]]] = {}
     ungrouped_tool_rows: list[tuple[int, dict]] = []
@@ -3765,13 +3793,13 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         )
         if prose:
             anchor_activity_rows.append(prose)
-            append_thinking_row()
+            append_thinking_rows()
         for order, row in tool_rows_by_burst.get(burst_id or 0, []):
             row["order_index"] = len(anchor_activity_rows)
             anchor_activity_rows.append(row)
             consumed_tools.add(order)
             tool_rows_rendered += 1
-            append_thinking_row()
+            append_thinking_rows()
         text_start = max(text_start, text_end)
 
     if text_start < len(assistant_text):
@@ -3784,10 +3812,10 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         )
         if tail:
             anchor_activity_rows.append(tail)
-            append_thinking_row()
+            append_thinking_rows()
 
     if not assistant_text:
-        append_thinking_row()
+        append_thinking_rows()
 
     for order, row in sorted(ungrouped_tool_rows, key=lambda item: item[0]):
         if order in consumed_tools:
@@ -3795,9 +3823,9 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         row["order_index"] = len(anchor_activity_rows)
         anchor_activity_rows.append(row)
         tool_rows_rendered += 1
-        append_thinking_row()
+        append_thinking_rows()
 
-    append_thinking_row(force=True)
+    append_thinking_rows(force=True)
 
     # Keep a live anchor shell during session-switch replay even before the
     # journal has projected visible prose or tool rows from the first events.
@@ -4954,8 +4982,15 @@ def _anchor_scene_row_key(row) -> str:
             or row.get("row_id")
             or ""
         )
-    if row.get("role") in ("prose", "thinking"):
-        return f"{row.get('role')}:{_anchor_scene_text_key(row.get('text'))}"
+    if row.get("role") == "thinking":
+        thinking = row.get("thinking") if isinstance(row.get("thinking"), dict) else {}
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        if "titles" in thinking or "titles" in payload:
+            titles = thinking.get("titles") if "titles" in thinking else payload.get("titles")
+            return "thinking_titles:" + json.dumps(titles if isinstance(titles, list) else [])
+        return f"thinking:{_anchor_scene_text_key(row.get('text'))}"
+    if row.get("role") == "prose":
+        return f"prose:{_anchor_scene_text_key(row.get('text'))}"
     if row.get("role") == "lifecycle":
         source_type = str(row.get("source_event_type") or row.get("source") or "")
         if source_type in ("compressing", "compressed"):
