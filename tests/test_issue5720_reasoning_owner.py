@@ -515,7 +515,7 @@ for(const name of [
   '_transparentLiveRowKey','_transparentLiveRowsCompatible',
   '_transparentLiveRowAttributePairs','_transparentLiveRowInteractiveState',
   '_refreshTransparentThinkingLiveRow','_refreshTransparentLiveRow',
-  '_thinkingMarkup','_renderThinkingInto',
+  '_reasoningTitleList','_reasoningBodyTextForDisplay','_thinkingMarkup','_renderThinkingInto',
   '_resetMismatchedLiveAssistantTurnForSession',
   '_liveAnchorReasoningRowForFallback','_updateLiveAnchorReasoningRowForFallback',
   '_anchorSceneNodeForRow','_anchorSceneWorklogGroup',

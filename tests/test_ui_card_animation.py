@@ -57,10 +57,10 @@ def test_thinking_card_header_includes_copy_button_that_does_not_toggle_card():
 
 
 def test_live_thinking_updates_existing_card_body_in_place():
-    assert "function _renderThinkingInto(row,text='')" in UI_JS
+    assert "function _renderThinkingInto(row,text='',titles)" in UI_JS
     assert "row.querySelector('.thinking-card-body pre')" in UI_JS
     assert "pre.textContent=clean" in UI_JS
-    assert "_renderThinkingInto(row,text);" in UI_JS
+    assert "_renderThinkingInto(row,text,options.titles);" in UI_JS
 
 
 def test_thinking_card_uses_panel_chrome_with_gold_palette():

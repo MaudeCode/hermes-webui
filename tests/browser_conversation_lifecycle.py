@@ -369,6 +369,7 @@ class DeterministicGateway:
                         "tool": TOOL_NAME,
                         "tool_call_id": TOOL_ID,
                         "status": "completed",
+                        "args": {"path": "README.md"},
                         "preview": "README fixture read",
                     })
                     owner.activity_ready.set()
@@ -529,19 +530,31 @@ def _activity_snapshot(page) -> dict:
               expanded: (group.querySelector('.tool-worklog-summary,.tool-call-group-summary') || {})
                 .getAttribute?.('aria-expanded') || '',
             })),
-            rows: rows.map(row => ({
-              role: row.getAttribute('data-anchor-row-role'),
-              rowId: row.getAttribute('data-anchor-row-id') || '',
-              toolCallId: (sceneRows.find(sceneRow =>
-                String(sceneRow && (sceneRow.row_id || sceneRow.local_id) || '') ===
-                String(row.getAttribute('data-anchor-row-id') || '')
-              ) || {}).tool_call_id || '',
-              source: row.getAttribute('data-anchor-source-event-type'),
-              status: row.getAttribute('data-anchor-row-status'),
-              tool: row.getAttribute('data-tool-name'),
-              text: row.innerText.trim(),
-              classes: row.className,
-            })),
+            rows: rows.map(row => {
+              const thinkingTitle = row.querySelector('.thinking-card-label');
+              const thinkingBody = row.querySelector('.thinking-card-body pre');
+              const toolHeader = row.querySelector('.tool-card-header');
+              const toolDetail = row.querySelector('.tool-card-detail');
+              return {
+                role: row.getAttribute('data-anchor-row-role'),
+                rowId: row.getAttribute('data-anchor-row-id') || '',
+                toolCallId: (sceneRows.find(sceneRow =>
+                  String(sceneRow && (sceneRow.row_id || sceneRow.local_id) || '') ===
+                  String(row.getAttribute('data-anchor-row-id') || '')
+                ) || {}).tool_call_id || '',
+                source: row.getAttribute('data-anchor-source-event-type'),
+                status: row.getAttribute('data-anchor-row-status'),
+                tool: row.getAttribute('data-tool-name'),
+                text: row.innerText.trim(),
+                thinkingTitle: thinkingTitle ? thinkingTitle.textContent.trim() : '',
+                thinkingBody: thinkingBody ? thinkingBody.textContent.trim() : '',
+                toolExpanded: toolHeader ? toolHeader.getAttribute('aria-expanded') : null,
+                toolControls: toolHeader ? toolHeader.getAttribute('aria-controls') : null,
+                toolDetailId: toolDetail ? toolDetail.id : null,
+                toolDetailHidden: toolDetail ? toolDetail.hidden : null,
+                classes: row.className,
+              };
+            }),
             visibleFinal,
             assistantMessage: lastAssistant ? {
               turnDuration: lastAssistant._turnDuration,
@@ -575,16 +588,48 @@ def _expand_settled_worklog(page) -> None:
           ) {
             _materializeDeferredWorklogRows(group);
           }
-          group.querySelectorAll('[data-activity-sequence-group="1"]').forEach(sequence => {
-            const sequenceSummary = sequence.querySelector(':scope > .tool-worklog-summary');
-            if (sequence.classList.contains('tool-call-group-collapsed') && sequenceSummary) {
-              _toggleActivityGroup(sequenceSummary);
-            }
-          });
           return Boolean(group.querySelector('[data-anchor-scene-row="1"]'));
         }""",
         timeout=10000,
     )
+
+
+def _assert_tool_disclosure_accessibility(page) -> None:
+    state = page.evaluate(
+        """() => {
+          const row = buildToolCard({
+            name: 'terminal',
+            args: {command: 'pwd'},
+            done: true,
+            snippet: '/tmp',
+          });
+          document.body.appendChild(row);
+          const card = row.querySelector('.tool-card');
+          const header = row.querySelector('.tool-card-header');
+          const detail = row.querySelector('.tool-card-detail');
+          const before = {
+            expanded: header.getAttribute('aria-expanded'),
+            controls: header.getAttribute('aria-controls'),
+            detailId: detail.id,
+            hidden: detail.hidden,
+          };
+          _toggleToolCardDisclosure(header);
+          const after = {
+            expanded: header.getAttribute('aria-expanded'),
+            hidden: detail.hidden,
+          };
+          row.remove();
+          return {before, after};
+        }"""
+    )
+    assert state["before"] == {
+        "expanded": "false",
+        "controls": state["before"]["detailId"],
+        "detailId": state["before"]["detailId"],
+        "hidden": True,
+    }, state
+    assert state["before"]["detailId"], state
+    assert state["after"] == {"expanded": "true", "hidden": False}, state
 
 
 def _terminal_rows(snapshot: dict) -> list[dict]:
@@ -652,21 +697,24 @@ def _assert_live_activity(snapshot: dict) -> None:
     tool_rows = _tool_rows(snapshot)
     assert len(tool_rows) == 1 and tool_rows[0]["tool"] == TOOL_NAME, snapshot
     _assert_no_running_tool_rows(tool_rows)
-    assert any(REASONING_TEXT in row["text"] for row in snapshot["rows"]), snapshot
+    thinking_rows = [row for row in snapshot["rows"] if row["role"] == "thinking"]
+    assert any(REASONING_TEXT in (row["thinkingBody"] or row["thinkingTitle"]) for row in thinking_rows), snapshot
     assert all(FINAL_TEXT not in text for text in snapshot["visibleFinal"]), snapshot
 
 
 def _assert_settled(snapshot: dict, scenario: str) -> None:
     assert not snapshot["live"], snapshot
     assert snapshot["groupCount"] == 1, snapshot
-    assert snapshot["sequences"] and all(not sequence["collapsed"] for sequence in snapshot["sequences"]), snapshot
+    assert snapshot["sequences"] and all(sequence["collapsed"] for sequence in snapshot["sequences"]), snapshot
     assert snapshot["summary"][0]["label"].startswith("Worked"), snapshot
     roles = [row["role"] for row in snapshot["rows"]]
     assert "thinking" in roles and "tool" in roles, snapshot
     tool_rows = _tool_rows(snapshot)
     assert len(tool_rows) == 1 and tool_rows[0]["tool"] == TOOL_NAME, snapshot
     _assert_no_running_tool_rows(tool_rows)
-    assert any(REASONING_TEXT in row["text"] for row in snapshot["rows"]), snapshot
+    thinking_rows = [row for row in snapshot["rows"] if row["role"] == "thinking"]
+    assert any(REASONING_TEXT in (row["thinkingBody"] or row["thinkingTitle"]) for row in thinking_rows), snapshot
+    assert all(not (row["thinkingTitle"] == REASONING_TEXT and row["thinkingBody"] == REASONING_TEXT) for row in thinking_rows), snapshot
     if scenario == "terminal-error":
         assert "terminal" in roles, snapshot
         terminal_rows = _terminal_rows(snapshot)
@@ -714,10 +762,12 @@ def _semantic_activity(snapshot: dict) -> list[dict]:
     semantic = []
     for row in snapshot["rows"]:
         if row["role"] == "thinking":
-            text = " ".join(row["text"].split())
-            if text.startswith("Thinking "):
-                text = text[len("Thinking ") :]
-            semantic.append({"role": "thinking", "text": text})
+            title = " ".join(row["thinkingTitle"].split())
+            body = " ".join(row["thinkingBody"].split())
+            semantic.append({
+                "role": "thinking",
+                "text": body or ("" if title == "Thinking" else title),
+            })
         elif row["role"] == "tool":
             semantic.append({"role": "tool", "tool": row["tool"]})
     return sorted(semantic, key=lambda item: json.dumps(item, sort_keys=True))
@@ -858,6 +908,7 @@ def main() -> int:
         errors = _capture_page_errors(page)
         page.goto("/", wait_until="domcontentloaded")
         page.wait_for_selector("#msg", state="visible", timeout=15000)
+        _assert_tool_disclosure_accessibility(page)
         page.locator("#msg").fill(PROMPT)
         page.locator("#btnSend").click()
 
@@ -1115,6 +1166,7 @@ def main() -> int:
         _expand_settled_worklog(page)
         page.wait_for_selector(
             '.assistant-turn [data-anchor-settled-scene-owner="1"] [data-anchor-scene-row="1"]',
+            state="attached",
             timeout=10000,
         )
         settled_snapshot = _activity_snapshot(page)
@@ -1139,6 +1191,7 @@ def main() -> int:
         _expand_settled_worklog(page)
         page.wait_for_selector(
             '.assistant-turn [data-anchor-settled-scene-owner="1"] [data-anchor-scene-row="1"]',
+            state="attached",
             timeout=2000 if TEST_BITE else 10000,
         )
         reloaded_snapshot = _activity_snapshot(page)

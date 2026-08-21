@@ -100,8 +100,10 @@ wrapper:
 ./scripts/test.sh tests/test_reasoning_titles.py -q
 ```
 
-It covers explicit Gateway titles, conservative fallback derivation, legacy
-text-only payloads, and `activity_scene_v1` persistence.
+It covers explicit Gateway title authority, title-only terminal persistence,
+conservative and bounded fallback derivation, sensitive-title rejection,
+legacy text-only payloads, Reduced Motion, tool-disclosure accessibility, and
+`activity_scene_v1` persistence.
 
 `tests/browser_conversation_lifecycle.py` adds a public deterministic
 multi-row lifecycle gate. It drives the real composer and real WebUI server in Chromium,

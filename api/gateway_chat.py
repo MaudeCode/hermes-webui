@@ -24,6 +24,7 @@ from api.config import (
     STREAM_LIVE_TOOL_CALLS,
     STREAM_PARTIAL_TEXT,
     STREAM_REASONING_TEXT,
+    STREAM_REASONING_TITLES,
     append_stream_text_chunk,
     stream_text_value,
     set_stream_text_value,
@@ -1096,25 +1097,33 @@ def _run_gateway_chat_streaming(
         CANCEL_FLAGS[stream_id] = cancel_event
         STREAM_PARTIAL_TEXT[stream_id] = []
         STREAM_REASONING_TEXT[stream_id] = []
+        STREAM_REASONING_TITLES[stream_id] = []
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
 
     success_writeback_committed = False
     runs_api_pending_marked = True
     reasoning_titles: list[str] = []
+    explicit_reasoning_titles: list[str] = []
 
     def put_gateway_event(event, data):
-        nonlocal reasoning_titles
+        nonlocal reasoning_titles, explicit_reasoning_titles
         if cancel_event.is_set() and not success_writeback_committed and event not in ("cancel", "error", "apperror"):
             return
         if event == "reasoning" and isinstance(data, dict):
-            explicit = data.get("titles")
+            incoming_explicit = normalize_reasoning_titles(
+                "",
+                explicit_titles=data.get("titles"),
+            )
+            if incoming_explicit:
+                explicit_reasoning_titles = incoming_explicit
             data = reasoning_event_payload(
                 data.get("text"),
                 stream_text_value(STREAM_REASONING_TEXT, stream_id),
-                explicit_titles=explicit,
+                explicit_titles=explicit_reasoning_titles or None,
             )
             if data.get("titles"):
                 reasoning_titles = list(data["titles"])
+                STREAM_REASONING_TITLES[stream_id] = reasoning_titles
         if event == "apperror" and isinstance(data, dict):
             data = data.copy()
             data.setdefault("session_id", session_id)
@@ -1412,12 +1421,13 @@ def _run_gateway_chat_streaming(
                         continue
                     if sse_event == "reasoning.available":
                         reason_delta = _gateway_reasoning_delta(payload)
-                        if reason_delta:
+                        titles = _gateway_reasoning_titles(payload)
+                        if reason_delta or titles:
                             if stream_id in STREAM_REASONING_TEXT:
                                 append_stream_text_chunk(STREAM_REASONING_TEXT, stream_id, reason_delta)
                             put_gateway_event("reasoning", {
                                 "text": reason_delta,
-                                "titles": _gateway_reasoning_titles(payload),
+                                "titles": titles,
                             })
                         sse_event = "message"
                         continue
@@ -1507,13 +1517,13 @@ def _run_gateway_chat_streaming(
             saved_reasoning = stream_text_value(STREAM_REASONING_TEXT, stream_id)
             if saved_reasoning:
                 assistant_msg["reasoning"] = saved_reasoning
-                saved_titles = normalize_reasoning_titles(
-                    saved_reasoning,
-                    explicit_titles=reasoning_titles,
-                    stable=True,
-                )
-                if saved_titles:
-                    assistant_msg["reasoning_titles"] = saved_titles
+            saved_titles = normalize_reasoning_titles(
+                saved_reasoning,
+                explicit_titles=reasoning_titles,
+                stable=True,
+            )
+            if saved_titles:
+                assistant_msg["reasoning_titles"] = saved_titles
             previous_messages = list(getattr(s, "messages", None) or [])
             stored_context = getattr(s, "context_messages", None)
             previous_context = list(
@@ -1770,6 +1780,7 @@ def _run_gateway_chat_streaming(
             STREAM_GOAL_RELATED.pop(stream_id, None)
             STREAM_PARTIAL_TEXT.pop(stream_id, None)
             STREAM_REASONING_TEXT.pop(stream_id, None)
+            STREAM_REASONING_TITLES.pop(stream_id, None)
             STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)
             STREAM_LAST_EVENT_ID.pop(stream_id, None)
             STREAMS.pop(stream_id, None)

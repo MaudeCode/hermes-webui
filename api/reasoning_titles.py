@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import re
 
+from api.helpers import _redact_text
+
 
 _BOLD_LINE = re.compile(r"^\s*\*\*(.+?)\*\*\s*$")
 _COMMAND_LINE = re.compile(
@@ -16,6 +18,12 @@ _TOOL_ARGUMENT_LINE = re.compile(
     re.IGNORECASE,
 )
 _MARKDOWN_PREFIX = re.compile(r"^\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)")
+_SENSITIVE_TITLE = re.compile(
+    r"\b(?:password|passwd|credentials?|secret|ssn)\b|"
+    r"authorization\s*:|private\s+tool\s+output|"
+    r"\b\d{3}-\d{2}-\d{4}\b",
+    re.IGNORECASE,
+)
 
 
 def _clean_title(value: object, *, explicit: bool = False) -> str:
@@ -24,6 +32,8 @@ def _clean_title(value: object, *, explicit: bool = False) -> str:
         return ""
     title = _MARKDOWN_PREFIX.sub("", title).strip()
     if not title or title.startswith(("```", "~~~", "<", "{", "[")):
+        return ""
+    if _SENSITIVE_TITLE.search(title) or _redact_text(title, _enabled=True) != title:
         return ""
     if _COMMAND_LINE.match(title) or _TOOL_ARGUMENT_LINE.match(title):
         return ""
@@ -35,7 +45,7 @@ def _clean_title(value: object, *, explicit: bool = False) -> str:
             pass
     if len(title) <= 80:
         return title
-    shortened = title[:81].rsplit(" ", 1)[0].rstrip(" ,.;:-")
+    shortened = title[:80].rsplit(" ", 1)[0].rstrip(" ,.;:-")
     return shortened if len(shortened) >= 24 else ""
 
 
@@ -122,7 +132,7 @@ def reasoning_event_payload(
 ) -> dict:
     payload = {"text": str(delta or "")}
     titles = normalize_reasoning_titles(
-        cumulative_text,
+        cumulative_text if stable else delta,
         explicit_titles=explicit_titles,
         stable=stable,
     )

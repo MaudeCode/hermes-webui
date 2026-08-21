@@ -294,6 +294,7 @@ def test_inflight_snapshot_uses_incremental_parser_on_production_delta_path():
       }};
       let assistantText='';
       let reasoningText='';
+      let reasoningTitles=[];
       let persisted=0;
       const _throttledPersist=()=>{{persisted++;}};
       const _parseInflightThinkingStream=_createIncrementalInlineThinkingParser();

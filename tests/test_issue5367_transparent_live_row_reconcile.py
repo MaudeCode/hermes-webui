@@ -731,6 +731,7 @@ global.showToast = ()=>{};
 eval(extractFunc('_showTransparentCopiedFeedback'));
 eval(extractFunc('_copyEventToClipboard'));
 eval(extractFunc('_attachCopyButton'));
+eval(extractFunc('_syncToolCardDisclosureA11y'));
 eval(extractFunc('_setTransparentCardOpen'));
 eval(extractFunc('_wireTransparentHeaderToggle'));
 eval(extractFunc('_transparentLiveRowAttributePairs'));
@@ -969,6 +970,7 @@ function buildToolTemplate(row){
 }
 global.document = { createElement:(tag)=>new FakeElement(tag) };
 global.t = (key)=>key === 'copy' ? 'Copy' : key;
+eval(extractFunc('_syncToolCardDisclosureA11y'));
 eval(extractFunc('_setTransparentCardOpen'));
 eval(extractFunc('_attachCopyButton'));
 eval(extractFunc('_transparentLiveRowAttributePairs'));
@@ -1596,6 +1598,7 @@ global._assistantTurnBlocks = () => turn;
 global._anchorSceneTransparentNodeForRow = () => null;
 
 eval(extractFunc('_attachCopyButton'));
+eval(extractFunc('_syncToolCardDisclosureA11y'));
 eval(extractFunc('_setTransparentCardOpen'));
 eval(extractFunc('_wireTransparentHeaderToggle'));
 eval(extractFunc('_transparentLiveRowKey'));

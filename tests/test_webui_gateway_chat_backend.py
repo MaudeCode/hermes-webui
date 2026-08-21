@@ -789,7 +789,7 @@ def test_gateway_chat_worker_persists_reasoning_and_tool_state_on_terminal_error
             yield b'event: hermes.tool.progress\n'
             yield b'data: {"tool":"terminal","label":"terminal: pytest","toolCallId":"call-1","status":"running","arguments":{}}\n\n'
             yield b'event: reasoning.available\n'
-            yield b'data: {"text":"Preview reasoning"}\n\n'
+            yield b'data: {"text":"Preview reasoning","titles":["Inspecting failure"]}\n\n'
             yield f'data: {{"error":{json.dumps(error_text)}}}\n\n'.encode()
             yield b"data: [DONE]\n\n"
 
@@ -823,6 +823,7 @@ def test_gateway_chat_worker_persists_reasoning_and_tool_state_on_terminal_error
     assert partial_message.get("_partial") is True
     assert partial_message["content"] == "part"
     assert partial_message["reasoning"] == "Preview reasoning"
+    assert partial_message["reasoning_titles"] == ["Inspecting failure"]
     assert partial_message["_partial_tool_calls"] == [{
         "name": "terminal",
         "args": {},
@@ -832,6 +833,7 @@ def test_gateway_chat_worker_persists_reasoning_and_tool_state_on_terminal_error
     }]
     apperrors = [item[1] for item in events if item[0] == "apperror"]
     assert apperrors[-1]["session"]["messages"][-2]["reasoning"] == "Preview reasoning"
+    assert apperrors[-1]["session"]["messages"][-2]["reasoning_titles"] == ["Inspecting failure"]
     assert apperrors[-1]["session"]["messages"][-2]["_partial_tool_calls"][0]["name"] == "terminal"
     assert apperrors[-1]["session"]["messages"][-1]["_error"] is True
 
@@ -852,6 +854,8 @@ def test_gateway_chat_worker_preserves_reasoning_delta_whitespace_and_persists_r
 
         def __iter__(self):
             yield b'data: {"choices":[{"delta":{"content":"hel"}}]}\n\n'
+            yield b'event: reasoning.available\n'
+            yield b'data: {"titles":["Gateway title"]}\n\n'
             yield b'event: hermes.tool.progress\n'
             yield b'data: {"tool":"_thinking","text":"Let me"}\n\n'
             yield b'event: reasoning.available\n'
@@ -889,13 +893,63 @@ def test_gateway_chat_worker_preserves_reasoning_delta_whitespace_and_persists_r
     saved = models.get_session(s.session_id)
     assert saved.messages[-1]["content"] == "hello"
     assert saved.messages[-1]["reasoning"] == "Let me think more"
+    assert saved.messages[-1]["reasoning_titles"] == ["Gateway title"]
     reasoning_events = []
     while not subscriber.empty():
         item = subscriber.get_nowait()
         if item[0] == "reasoning":
-            reasoning_events.append(item[1]["text"])
-    assert reasoning_events == ["Let me", " think", " more"]
-    assert not any("debug" in text for text in reasoning_events)
+            reasoning_events.append(item[1])
+    assert [event["text"] for event in reasoning_events] == ["", "Let me", " think", " more"]
+    assert all(event["titles"] == ["Gateway title"] for event in reasoning_events)
+    assert not any("debug" in event["text"] for event in reasoning_events)
+
+
+def test_gateway_chat_worker_persists_title_only_reasoning_metadata(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'event: reasoning.available\n'
+            yield b'data: {"titles":["Gateway title"]}\n\n'
+            yield b'data: {"choices":[{"delta":{"content":"answer"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+
+    session = new_session()
+    stream_id = "stream-gateway-title-only-test"
+    session.active_stream_id = stream_id
+    session.pending_user_message = "Say hello"
+    session.pending_attachments = []
+    session.pending_started_at = 123
+    session.save()
+    channel = create_stream_channel()
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(
+        session.session_id,
+        "Say hello",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    saved = models.get_session(session.session_id)
+    assert saved.messages[-1]["content"] == "answer"
+    assert "reasoning" not in saved.messages[-1]
+    assert saved.messages[-1]["reasoning_titles"] == ["Gateway title"]
 
 
 def test_gateway_chat_worker_reads_reasoning_content_deltas_from_chat_completions(tmp_path, monkeypatch):

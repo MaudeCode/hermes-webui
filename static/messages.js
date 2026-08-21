@@ -3752,11 +3752,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       if(part.type==='thinking'||part.type==='reasoning'){
         const text=_anchorSceneContentText(part);
-        if(_anchorSceneCleanText(text)) rows.push(_anchorSceneThinkingRow(
+        const titles=part.titles||part.reasoning_titles;
+        if(_anchorSceneCleanText(text)||(Array.isArray(titles)&&titles.length)) rows.push(_anchorSceneThinkingRow(
           text,
           rows.length,
           messageIndex,
-          part.titles||part.reasoning_titles,
+          titles,
         ));
         continue;
       }
@@ -3873,7 +3874,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         pool.push({..._anchorSceneProseRow(text,0,idx),_phase:2,_encounter:encounter++});
       }
       const reasoning=_anchorSceneMessageReasoningText(message);
-      if(_anchorSceneCleanText(reasoning)&&_anchorSceneTextKey(reasoning)!==_anchorSceneTextKey(text)){
+      const reasoningTitles=Array.isArray(message.reasoning_titles)?message.reasoning_titles:[];
+      if(
+        (_anchorSceneCleanText(reasoning)||reasoningTitles.length)
+        &&(!_anchorSceneCleanText(reasoning)||_anchorSceneTextKey(reasoning)!==_anchorSceneTextKey(text))
+      ){
         pool.push({..._anchorSceneThinkingRow(reasoning,0,idx,message.reasoning_titles),_phase:0,_encounter:encounter++});
       }
       const messageTools=[];

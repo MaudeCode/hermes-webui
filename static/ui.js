@@ -7642,6 +7642,21 @@ function _sanitizeThinkingDisplayText(text){
   const stripped=_stripXmlToolCallsDisplay(String(text||''));
   return stripped.trim();
 }
+function _reasoningBodyTextForDisplay(text,titles){
+  const clean=_sanitizeThinkingDisplayText(text);
+  const normalized=_reasoningTitleList(titles);
+  if(!clean||!normalized.length) return clean;
+  const lines=clean.split(/\r?\n/);
+  const index=lines.findIndex(line=>line.trim());
+  if(index<0) return clean;
+  const candidate=lines[index].trim()
+    .replace(/^\*\*(.*?)\*\*$/,'$1')
+    .replace(/^(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)/,'')
+    .trim().toLocaleLowerCase();
+  if(!normalized.some(title=>title.toLocaleLowerCase()===candidate)) return clean;
+  lines.splice(index,1);
+  return lines.join('\n').trim();
+}
 
 function _normalizeThinkingEchoCompare(text){
   return String(text||'').replace(/\s+/g,' ').trim();
@@ -9071,7 +9086,7 @@ function _copyThinkingText(btn){
   const card=btn&&btn.closest?btn.closest('.thinking-card'):null;
   if(!card)return;
   const pre=card.querySelector('.thinking-card-body pre');
-  const text=pre?pre.textContent:'';
+  const text=card._reasoningFullText||(pre?pre.textContent:'');
   if(!text)return;
   _copyText(text).then(()=>{
     const orig=btn.innerHTML;
@@ -11634,6 +11649,23 @@ function _worklogDetailScrollableBody(el){
   if(!el||!el.querySelector) return null;
   return el.querySelector('.thinking-card-body,.tool-card-detail');
 }
+function _syncToolCardDisclosureA11y(card,open){
+  if(!card||!card.querySelector) return;
+  const header=card.querySelector('.tool-card-header');
+  const detail=card.querySelector('.tool-card-detail');
+  if(!header||!detail) return;
+  let detailId=card.getAttribute('data-tool-detail-id')||detail.id;
+  if(!detailId){
+    _syncToolCardDisclosureA11y._detailPrefix=_syncToolCardDisclosureA11y._detailPrefix||Math.random().toString(36).slice(2,10);
+    _syncToolCardDisclosureA11y._detailID=(_syncToolCardDisclosureA11y._detailID||0)+1;
+    detailId=`tool-detail-fallback-${_syncToolCardDisclosureA11y._detailPrefix}-${_syncToolCardDisclosureA11y._detailID}`;
+  }
+  card.setAttribute('data-tool-detail-id',detailId);
+  detail.id=detailId;
+  detail.hidden=!open;
+  header.setAttribute('aria-controls',detailId);
+  header.setAttribute('aria-expanded',String(!!open));
+}
 function _setWorklogDetailDisclosureOpen(el, open){
   if(!el||!el.classList) return;
   // #5966 (Codex F2 r2): restoring an OPEN state on a settled Transparent Stream
@@ -11647,6 +11679,7 @@ function _setWorklogDetailDisclosureOpen(el, open){
     if(drow&&typeof _materializeTransparentToolDetail==='function') _materializeTransparentToolDetail(drow);
   }
   el.classList.toggle('open', !!open);
+  if(el.matches&&el.matches('.tool-card')) _syncToolCardDisclosureA11y(el,!!open);
   const header=el.querySelector('.tool-card-header,.thinking-card-header');
   if(header) header.setAttribute('aria-expanded', String(!!open));
   if(el.matches&&el.matches('.tool-group[data-tool-worklog-tool-group="1"],.tool-worklog-tool-group')){
@@ -11739,8 +11772,10 @@ function _reasoningTitleList(value){
 let _reasoningTitleRotationTimer=null;
 function _ensureReasoningTitleRotation(){
   if(_reasoningTitleRotationTimer!==null||typeof document==='undefined') return;
+  if(typeof window!=='undefined'&&window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   _reasoningTitleRotationTimer=setInterval(()=>{
     if(document.hidden) return;
+    if(typeof window!=='undefined'&&window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
     document.querySelectorAll('[data-reasoning-active="1"][data-reasoning-titles]').forEach(row=>{
       let titles=[];
       try{titles=_reasoningTitleList(JSON.parse(row.getAttribute('data-reasoning-titles')||'[]'));}catch(_){return;}
@@ -11785,7 +11820,7 @@ function _thinkingActivityNode(text, open, disclosureKey, titles, active){
   row.setAttribute('data-worklog-thinking-card','1');
   if(disclosureKey) row.setAttribute('data-thinking-key', String(disclosureKey));
   row.innerHTML=_thinkingCardHtml(text, open);
-  _renderThinkingInto(row,text);
+  _renderThinkingInto(row,text,titles);
   if(typeof _applyReasoningTitles==='function') _applyReasoningTitles(row,titles,active);
   return row;
 }
@@ -12138,6 +12173,7 @@ function _setTransparentCardOpen(card, open){
   }
   card.classList.toggle('open',expanded);
   if(row) row.setAttribute('data-expanded',expanded?'1':'0');
+  _syncToolCardDisclosureA11y(card,expanded);
   const header=card.querySelector('.tool-card-header,.thinking-card-header');
   if(header) header.setAttribute('aria-expanded',expanded?'true':'false');
 }
@@ -12207,6 +12243,7 @@ function _materializeTransparentToolDetail(row){
       requestAnimationFrame(()=>{ try{ _postProcessWithAnchorSuppression(card); }catch(_){ } });
     }
   }
+  _syncToolCardDisclosureA11y(card,card.classList.contains('open'));
   return true;
 }
 // Recover a tool call for a deferred row whose _deferredToolCall JS property was
@@ -12543,7 +12580,11 @@ function _decorateTransparentEventRow(row, opts){
       const label=header.querySelector('.thinking-card-label');
       if(label&&!row.getAttribute('data-reasoning-titles')) label.textContent=typeof t==='function'?t('thinking'):'Thinking';
       let preview=header.querySelector('.transparent-event-preview,.transparent-event-thinking-preview');
-      const previewText=_transparentEventPreview(opts.preview||opts.text||row.textContent||'');
+      let previewSource=opts.preview||opts.text||row.textContent||'';
+      if(row.getAttribute('data-reasoning-titles')){
+        try{ previewSource=_reasoningBodyTextForDisplay(previewSource,JSON.parse(row.getAttribute('data-reasoning-titles'))); }catch(_){ }
+      }
+      const previewText=_transparentEventPreview(previewSource);
       if(previewText){
         if(!preview){
           preview=document.createElement('span');
@@ -13392,10 +13433,10 @@ function _anchorSceneNodeForRow(row, opts){
   }else if(row.role==='thinking'){
     if(window._showThinking===false) return null;
     const text=String(row.text||row.thinking&&row.thinking.text||'').trim();
-    if(!text) return null;
     const titles=row.thinking&&Array.isArray(row.thinking.titles)?row.thinking.titles:row.payload&&row.payload.titles;
+    if(!text&&!(Array.isArray(titles)&&titles.length)) return null;
     node=_thinkingActivityNode(
-      text,
+      text||(titles[titles.length-1]||''),
       false,
       row.row_id||row.local_id||'anchor-thinking',
       titles,
@@ -13479,10 +13520,10 @@ function _anchorSceneTransparentNodeForRow(row, opts){
   }else if(row.role==='thinking'){
     if(window._showThinking===false) return null;
     const text=String(row.text||row.thinking&&row.thinking.text||'').trim();
-    if(!text) return null;
     const titles=row.thinking&&Array.isArray(row.thinking.titles)?row.thinking.titles:row.payload&&row.payload.titles;
+    if(!text&&!(Array.isArray(titles)&&titles.length)) return null;
     node=_decorateTransparentEventRow(_thinkingActivityNode(
-      text,
+      text||(titles[titles.length-1]||''),
       false,
       row.row_id||row.local_id||'anchor-thinking',
       titles,
@@ -13994,7 +14035,7 @@ function _updateLiveAnchorReasoningRowForFallback(turn, text, opts){
     const group=row.closest&&row.closest('.tool-worklog-group,.tool-call-group,.live-worklog');
     if(group&&typeof _syncToolCallGroupSummary==='function') _syncToolCallGroupSummary(group);
   }else if(row.classList&&row.classList.contains('transparent-event-row')){
-    _renderThinkingInto(row, clean);
+    _renderThinkingInto(row, clean, opts&&opts.titles);
     const eventAt=row.getAttribute&&row.getAttribute('data-event-at');
     const nextTs=typeof _firstValidTimestampSeconds==='function'
       ? _firstValidTimestampSeconds(opts&&opts.ts, opts&&opts.timestamp, opts&&opts.created_at, eventAt)
@@ -14011,7 +14052,7 @@ function _updateLiveAnchorReasoningRowForFallback(turn, text, opts){
       });
     }
   }else{
-    _renderThinkingInto(row, clean);
+    _renderThinkingInto(row, clean, opts&&opts.titles);
   }
   if(turn&&typeof _syncTransparentEventControls==='function') _syncTransparentEventControls(turn);
   if(typeof scrollIfPinned==='function') scrollIfPinned();
@@ -14561,6 +14602,9 @@ function _refreshTransparentThinkingLiveRow(existing, node){
   const existingPre = existing.querySelector('.thinking-card-body pre');
   const nodePre = node.querySelector('.thinking-card-body pre');
   if(!existingPre || !nodePre) return false;
+  const existingCard=existing.querySelector('.thinking-card');
+  const nodeCard=node.querySelector('.thinking-card');
+  if(existingCard&&nodeCard&&nodeCard._reasoningFullText) existingCard._reasoningFullText=nodeCard._reasoningFullText;
   const nextText = String(nodePre.textContent || '');
   if(existingPre.textContent !== nextText) existingPre.textContent = nextText;
   const nodePreview = node.querySelector('.transparent-event-thinking-preview');
@@ -19598,6 +19642,9 @@ function buildToolCard(tc){
   row.dataset.toolError=String(!!(tc&&tc.is_error));
   row.dataset.toolActionLabel=typeof _toolActionLabelText==='function'?_toolActionLabelText(tc):_toolDisplayName(tc);
   const disclosureKey=typeof _toolDisclosureIdentity==='function'?_toolDisclosureIdentity(tc):'';
+  buildToolCard._detailPrefix=buildToolCard._detailPrefix||Math.random().toString(36).slice(2,10);
+  buildToolCard._detailID=(buildToolCard._detailID||0)+1;
+  const detailId=`tool-detail-${buildToolCard._detailPrefix}-${buildToolCard._detailID}`;
   if(disclosureKey) row.setAttribute('data-tool-disclosure-key', disclosureKey);
   const icon=toolIcon(tc.name);
   const hasRawDetail=!!(tc.snippet)||(tc.args&&Object.keys(tc.args).length>0);
@@ -19621,7 +19668,7 @@ function buildToolCard(tc){
   const openClass=hasDetail&&typeof _worklogDetailsExpandedDefault==='function'&&_worklogDetailsExpandedDefault()?' open':'';
   const cardClass='tool-card'+(tc.done===false?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'')+(hasDetail?'':' tool-card-no-detail')+openClass;
   const headerStart=hasDetail
-    ? `<button type="button" class="tool-card-header" aria-expanded="${openClass?'true':'false'}" onclick="_toggleToolCardDisclosure(this)">`
+    ? `<button type="button" class="tool-card-header" aria-expanded="${openClass?'true':'false'}" aria-controls="${detailId}" onclick="_toggleToolCardDisclosure(this)">`
     : '<div class="tool-card-header">';
   const headerEnd=hasDetail?'</button>':'</div>';
   // Clean up legacy subagent prefixes since the Lucide icon already shows it
@@ -19637,14 +19684,14 @@ function buildToolCard(tc){
   const argsEntries=tc.args&&Object.keys(tc.args).length?Object.entries(tc.args):[];
   const visibleArgs=(detailLeadText&&toolKind==='shell')?[]:argsEntries;
   row.innerHTML=`
-    <div class="${cardClass}">
+    <div class="${cardClass}"${hasDetail?` data-tool-detail-id="${detailId}"`:''}>
       ${headerStart}
         <span class="tool-card-icon">${icon}</span>
         <span class="tool-card-name"><span class="tool-card-name-label">${esc(displayName)}</span><span class="tool-card-name-generic">${esc(genericName)}</span></span>
         <span class="tool-card-preview">${esc(previewText)}</span>
         ${hasDetail?`<span class="tool-card-toggle">${li('chevron-right',12)}</span>`:''}
       ${headerEnd}
-      ${hasDetail?`<div class="tool-card-detail">
+      ${hasDetail?`<div id="${detailId}" class="tool-card-detail"${openClass?'':' hidden'}>
         ${detailLead}
         ${visibleArgs.length?`<div class="tool-card-args">${
           visibleArgs.map(([k,v])=>{
@@ -21018,19 +21065,30 @@ function _thinkingMarkup(text=''){
     ? `<div class="thinking-card${openClass}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(clean).trim())}</pre></div></div>`
     : `<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
 }
-function _renderThinkingInto(row,text=''){
+function _renderThinkingInto(row,text='',titles){
   if(!row) return;
-  const clean=_sanitizeThinkingDisplayText(text);
-  if(!clean){
+  const raw=_sanitizeThinkingDisplayText(text);
+  if(!raw){
     row.innerHTML=_thinkingMarkup(text);
     return;
   }
-  const pre=row.querySelector('.thinking-card-body pre');
+  let activeTitles=titles;
+  if(activeTitles===undefined&&row.getAttribute){
+    try{activeTitles=JSON.parse(row.getAttribute('data-reasoning-titles')||'[]');}catch(_){activeTitles=[];}
+  }
+  const clean=_reasoningBodyTextForDisplay(raw,activeTitles);
+  let pre=row.querySelector('.thinking-card-body pre');
   if(pre){
     pre.textContent=clean;
+    const card=row.matches&&row.matches('.thinking-card')?row:row.querySelector('.thinking-card');
+    if(card) card._reasoningFullText=raw;
     return;
   }
-  row.innerHTML=_thinkingMarkup(text);
+  row.innerHTML=_thinkingMarkup(raw);
+  pre=row.querySelector('.thinking-card-body pre');
+  if(pre) pre.textContent=clean;
+  const card=row.matches&&row.matches('.thinking-card')?row:row.querySelector('.thinking-card');
+  if(card) card._reasoningFullText=raw;
 }
 function finalizeThinkingCard(){
   // Guard: only finalize thinking card if we're looking at the session that started it.
@@ -21119,7 +21177,7 @@ function appendThinking(text='', options){
       if(inner) inner.appendChild(row);
     }
     row.setAttribute('data-thinking-active','1');
-    _renderThinkingInto(row,text);
+    _renderThinkingInto(row,text,options.titles);
     if(typeof _applyReasoningTitles==='function') _applyReasoningTitles(row,options.titles,true);
     if(typeof scrollIfPinned==='function') scrollIfPinned();
     return;
@@ -21164,7 +21222,7 @@ function appendThinking(text='', options){
         if(liveFooter&&liveFooter.parentElement===blocks) blocks.insertBefore(row,liveFooter);
         else blocks.appendChild(row);
       }else{
-        _renderThinkingInto(row, clean);
+        _renderThinkingInto(row, clean, options.titles);
         if(typeof _applyReasoningTitles==='function') _applyReasoningTitles(row,options.titles,true);
       }
       row.id='thinkingRow';
@@ -21210,7 +21268,7 @@ function appendThinking(text='', options){
         row.setAttribute('data-thinking-active','1');
         list.appendChild(row);
       }else{
-        _renderThinkingInto(row, clean);
+        _renderThinkingInto(row, clean, options.titles);
         if(typeof _applyReasoningTitles==='function') _applyReasoningTitles(row,options.titles,true);
       }
       row.setAttribute('data-thinking-active','1');

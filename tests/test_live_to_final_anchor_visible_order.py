@@ -753,6 +753,66 @@ console.log(JSON.stringify({{ok:true}}));
     _run_node_script(script)
 
 
+@pytest.mark.skipif(NODE is None, reason="node is required for reasoning-title behavior")
+def test_reasoning_title_rotation_respects_reduced_motion():
+    script = f"""
+const assert=require('assert');
+let scheduled=0;
+global.window={{matchMedia:()=>({{matches:true}})}};
+global.document={{hidden:false,querySelectorAll:()=>[]}};
+global.setInterval=()=>{{scheduled++;return 1;}};
+let _reasoningTitleRotationTimer=null;
+function _ensureReasoningTitleRotation(){{
+{_function_body(UI_JS, "_ensureReasoningTitleRotation")}
+}}
+_ensureReasoningTitleRotation();
+assert.strictEqual(scheduled,0);
+console.log(JSON.stringify({{ok:true}}));
+"""
+    _run_node_script(script)
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for reasoning-title behavior")
+def test_active_reasoning_without_titles_keeps_active_state():
+    script = f"""
+const assert=require('assert');
+global.t=()=>"Thinking";
+global._reasoningTitleList=value=>Array.isArray(value)?value:[];
+const attrs=new Map();
+const label={{textContent:''}};
+const row={{
+  querySelector:selector=>selector==='.thinking-card-label'?label:null,
+  removeAttribute:name=>attrs.delete(name),
+  setAttribute:(name,value)=>attrs.set(name,value),
+}};
+function _applyReasoningTitles(row,value,active){{
+{_function_body(UI_JS, "_applyReasoningTitles")}
+}}
+_applyReasoningTitles(row,[],true);
+assert.strictEqual(attrs.get('data-reasoning-active'),'1');
+assert.strictEqual(label.textContent,'Thinking');
+console.log(JSON.stringify({{ok:true}}));
+"""
+    _run_node_script(script)
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for locale behavior")
+def test_count_free_specialized_summaries_are_grammatical():
+    locale_source = I18N_JS[
+        I18N_JS.index("const _I18N_TOOL_SUMMARY_TEXT_EN"):
+        I18N_JS.index("function _i18nToolSummaryJoinEn")
+    ]
+    script = f"""
+const assert=require('assert');
+{locale_source}
+assert.strictEqual(_i18nToolWorklogSummaryRu('shell','running',5),'Выполняются команды');
+assert.strictEqual(_i18nToolWorklogSummaryZh('shell','running',5),'正在运行命令');
+assert.strictEqual(_i18nToolWorklogSummaryZhHant('shell','running',5),'正在執行命令');
+console.log(JSON.stringify({{ok:true}}));
+"""
+    _run_node_script(script)
+
+
 def test_anchor_tool_preview_slot_stays_empty_for_result_text():
     assert ".tool-worklog-list .tool-card-preview" in STYLE_CSS
     preview_rule = STYLE_CSS[

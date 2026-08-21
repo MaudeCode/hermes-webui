@@ -4888,13 +4888,18 @@ def _anchor_scene_content_rows(message, order_index, message_index, stream_id=""
             continue
         if part_type in ("thinking", "reasoning"):
             text = _anchor_scene_content_text(part)
-            if _anchor_scene_clean_text(text):
+            titles = normalize_reasoning_titles(
+                text,
+                explicit_titles=part.get("titles") or part.get("reasoning_titles"),
+                stable=True,
+            )
+            if _anchor_scene_clean_text(text) or titles:
                 rows.append(_anchor_scene_thinking_row(
                     text,
                     order_index + len(rows),
                     message_index,
                     stream_id,
-                    part.get("titles") or part.get("reasoning_titles"),
+                    titles,
                 ))
             continue
         if part_type == "tool_use":
@@ -5134,13 +5139,20 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
             push(_anchor_scene_prose_row(text, order, absolute_idx, stream_id))
             order += 1
         reasoning = _anchor_scene_message_reasoning_text(message)
-        if _anchor_scene_clean_text(reasoning) and _anchor_scene_text_key(reasoning) != _anchor_scene_text_key(text):
+        reasoning_titles = _anchor_scene_message_reasoning_titles(message)
+        if (
+            (_anchor_scene_clean_text(reasoning) or reasoning_titles)
+            and (
+                not _anchor_scene_clean_text(reasoning)
+                or _anchor_scene_text_key(reasoning) != _anchor_scene_text_key(text)
+            )
+        ):
             push(_anchor_scene_thinking_row(
                 reasoning,
                 order,
                 absolute_idx,
                 stream_id,
-                _anchor_scene_message_reasoning_titles(message),
+                reasoning_titles,
             ))
             order += 1
         for key in ("tool_calls", "_partial_tool_calls"):

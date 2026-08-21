@@ -26075,6 +26075,18 @@ const _I18N_TOOL_SUMMARY_TEXT_RU = {
     delegate: { running: ['Делегируется задача', 'Делегируются {n} задачи', 'Делегируется {n} задач'], done: ['Задача делегирована', 'Делегированы {n} задачи', 'Делегировано {n} задач'] },
     unknown: { running: ['Выполняется инструмент', 'Выполняются {n} инструмента', 'Выполняется {n} инструментов'], done: ['Инструмент выполнен', 'Выполнены {n} инструмента', 'Выполнено {n} инструментов'] },
 };
+const _I18N_TOOL_SUMMARY_TEXT_RU_COUNT_FREE = {
+    shell: { running: 'Выполняются команды', done: 'Выполнены команды' },
+    read: { running: 'Читаются файлы', done: 'Прочитаны файлы' },
+    list: { running: 'Показываются списки файлов', done: 'Показаны списки файлов' },
+    search: { running: 'Идут поиски в рабочей области', done: 'Поиски в рабочей области выполнены' },
+    web: { running: 'Выполняются проверки веба', done: 'Проверки веба выполнены' },
+    write: { running: 'Обновляются файлы', done: 'Обновлены файлы' },
+    skill: { running: 'Загружаются навыки', done: 'Загружены навыки' },
+    memory: { running: 'Сохраняются обновления памяти', done: 'Сохранены обновления памяти' },
+    delegate: { running: 'Делегируются задачи', done: 'Задачи делегированы' },
+    unknown: { running: 'Выполняются инструменты', done: 'Инструменты выполнены' },
+};
 const _I18N_TOOL_ACTION_TEXT_ZH = {
     shell: { running: '正在运行', done: '已运行', fail: '运行', fallback: '命令' },
     read: { running: '正在读取', done: '已读取', fail: '读取', fallback: '文件' },
@@ -26170,7 +26182,8 @@ function _i18nToolActionLabelZhHant(kind, state, target, display, failed) {
 function _i18nToolWorklogSummaryFromMap(map, kind, state, count) {
   const n = Math.max(1, Number(count) || 1);
   const form = (map[kind] || map.unknown || _I18N_TOOL_SUMMARY_TEXT_EN.unknown)[state] || map.unknown.running;
-  return (n === 1 ? form[0] : form[1]).replace('{n}', '').replace(/\s+/g, ' ').trim();
+  const picked = n === 1 ? form[0] : form[1];
+  return (picked.includes('{n}') ? form[0] : picked).trim();
 }
 function _i18nToolWorklogSummaryEn(kind, state, count) {
   return _i18nToolWorklogSummaryFromMap(_I18N_TOOL_SUMMARY_TEXT_EN, kind, state, count);
@@ -26179,8 +26192,10 @@ function _i18nToolWorklogSummaryRu(kind, state, count) {
   const n = Math.max(1, Number(count) || 1);
   const form = (_I18N_TOOL_SUMMARY_TEXT_RU[kind] || _I18N_TOOL_SUMMARY_TEXT_RU.unknown)[state]
     || _I18N_TOOL_SUMMARY_TEXT_RU.unknown.running;
-  const picked = _i18nRuPlural(n, form[0], form[1], form[2]);
-  return picked.replace('{n}', '').replace(/\s+/g, ' ').trim();
+  if (n === 1) return form[0];
+  const countFree = _I18N_TOOL_SUMMARY_TEXT_RU_COUNT_FREE[kind]
+    || _I18N_TOOL_SUMMARY_TEXT_RU_COUNT_FREE.unknown;
+  return countFree[state] || countFree.running;
 }
 function _i18nToolWorklogSummaryZh(kind, state, count) {
   return _i18nToolWorklogSummaryFromMap(_I18N_TOOL_SUMMARY_TEXT_ZH, kind, state, count);

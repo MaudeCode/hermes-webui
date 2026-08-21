@@ -962,8 +962,8 @@ def test_messages_js_supports_live_reasoning_and_tool_completion(cleanup_test_se
         "live reasoning SSE events must schedule the coalesced Worklog Thinking Card renderer"
     assert "const liveThinkingText=_liveThinkingText();" in src, \
         "the coalesced renderer must compute the current segment's Worklog Thinking Card text once"
-    assert "const anchorReasoningFallback={};" in src, \
-        "the coalesced renderer must capture the active anchor id for fallback"
+    assert "titles:typeof liveReasoningTitles==='undefined'?[]:liveReasoningTitles" in src, \
+        "the coalesced renderer must carry current reasoning-title metadata into fallback"
     assert "if(!_upsertAnchorReasoning(liveThinkingText,anchorReasoningFallback))" in src, \
         "the coalesced renderer must prefer the anchor renderer before falling back"
     assert "_updateLiveThinkingCard(liveThinkingText,{" in src and "...anchorReasoningFallback" in src, \

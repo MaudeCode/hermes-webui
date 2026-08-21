@@ -2,6 +2,10 @@
 
 from pathlib import Path
 
+import pytest
+
+import api.reasoning_titles as reasoning_titles
+
 from api.reasoning_titles import normalize_reasoning_titles, reasoning_event_payload
 from api.gateway_chat import _gateway_tool_progress_event
 from api.routes import _anchor_scene_thinking_row
@@ -28,6 +32,25 @@ def test_plain_title_waits_for_a_stable_boundary():
     assert normalize_reasoning_titles(partial) == []
     assert normalize_reasoning_titles(partial, stable=True) == [partial]
     assert normalize_reasoning_titles(partial + "\nmore detail") == [partial]
+
+
+def test_title_length_is_bounded_for_unbroken_text():
+    title = normalize_reasoning_titles("x" * 81, stable=True)
+    assert title == ["x" * 80]
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    [
+        "My password is swordfish.",
+        "SSN 123-45-6789 belongs to the user.",
+        "Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
+        "Private tool output: customer email user@example.com",
+    ],
+)
+def test_sensitive_reasoning_never_becomes_a_derived_or_explicit_title(unsafe):
+    assert normalize_reasoning_titles(unsafe, stable=True) == []
+    assert normalize_reasoning_titles("", explicit_titles=[unsafe]) == []
 
 
 def test_unsafe_or_unusable_lines_do_not_become_titles():
@@ -59,10 +82,26 @@ def test_reasoning_event_payload_keeps_legacy_text_and_adds_optional_snapshot():
     assert reasoning_event_payload(
         "\n",
         "Planning temporary script implementation\n",
+        stable=True,
     ) == {
         "text": "\n",
         "titles": ["Planning temporary script implementation"],
     }
+
+
+def test_unstable_reasoning_payload_derivation_is_incremental(monkeypatch):
+    observed_lengths = []
+
+    def fake_normalize(text, **_kwargs):
+        observed_lengths.append(len(text))
+        return []
+
+    monkeypatch.setattr(reasoning_titles, "normalize_reasoning_titles", fake_normalize)
+    cumulative = "x" * 50_000
+    for _ in range(50_000):
+        reasoning_titles.reasoning_event_payload("x", cumulative)
+
+    assert sum(observed_lengths) == 50_000
 
 
 def test_gateway_bridge_accepts_future_explicit_titles():
@@ -83,6 +122,16 @@ def test_persisted_thinking_row_carries_titles_additively():
     assert row["thinking"]["titles"] == ["Planning implementation"]
     assert row["payload"]["titles"] == ["Planning implementation"]
 
+    title_only = _anchor_scene_thinking_row(
+        "",
+        0,
+        1,
+        "stream-1",
+        ["Gateway title"],
+    )
+    assert title_only["text"] == ""
+    assert title_only["thinking"]["titles"] == ["Gateway title"]
+
 
 def test_browser_consumes_titles_without_reimplementing_the_parser():
     messages = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
@@ -101,12 +150,9 @@ def test_tool_disclosures_are_semantic_and_count_free_in_every_locale():
     i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
     build_tool = ui.split("function buildToolCard(tc)", 1)[1].split("function _colorDiffLines", 1)[0]
     summary = ui.split("function _toolWorklogSummary(toolCalls, opts)", 1)[1].split("function _toolWorklogListEl", 1)[0]
-    locale_summary = i18n.split("function _i18nToolWorklogSummaryFromMap", 1)[1].split("function _i18nToolWorklogSummaryEn", 1)[0]
-    russian_summary = i18n.split("function _i18nToolWorklogSummaryRu", 1)[1].split("function _i18nToolWorklogSummaryZh", 1)[0]
 
     assert "<button" in build_tool and "aria-expanded" in build_tool
     assert "_toggleToolCardDisclosure(this)" in build_tool
     assert "1 failed" not in summary
-    assert "replace('{n}', '')" in locale_summary
-    assert "replace('{n}', '')" in russian_summary
+    assert "_I18N_TOOL_SUMMARY_TEXT_RU_COUNT_FREE" in i18n
     assert ".tool-card-header" in css and "min-height:44px" in css

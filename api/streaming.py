@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 from api.config import (
     get_config,
     STREAMS, STREAMS_LOCK, CANCEL_FLAGS, AGENT_INSTANCES, STREAM_PARTIAL_TEXT,
-    STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS,
+    STREAM_REASONING_TEXT, STREAM_REASONING_TITLES, STREAM_LIVE_TOOL_CALLS,
     append_stream_text_chunk, stream_text_value, set_stream_text_value,
     STREAM_GOAL_RELATED, PENDING_GOAL_CONTINUATION,
     STREAM_LAST_EVENT_ID,
@@ -8055,7 +8055,7 @@ def _terminal_turn_duration(session, *, now: float | None = None) -> float | Non
     return round(elapsed, 3)
 
 
-def _build_partial_message(content_text, reasoning_text, tool_calls) -> dict | None:
+def _build_partial_message(content_text, reasoning_text, tool_calls, reasoning_titles=None) -> dict | None:
     """Build a _partial assistant message from raw streaming buffers.
 
     Shared by cancel_stream() and _snapshot_and_append_partial_on_error().
@@ -8076,8 +8076,9 @@ def _build_partial_message(content_text, reasoning_text, tool_calls) -> dict | N
                             '', _stripped,
                             flags=_re.DOTALL | _re.IGNORECASE).strip()
     _has_reasoning = bool(reasoning_text and reasoning_text.strip())
+    _titles = normalize_reasoning_titles("", explicit_titles=reasoning_titles)
     _has_tools = bool(tool_calls)
-    if not (_stripped or _has_reasoning or _has_tools):
+    if not (_stripped or _has_reasoning or _titles or _has_tools):
         return None
     _msg: dict = {
         'role': 'assistant',
@@ -8087,6 +8088,8 @@ def _build_partial_message(content_text, reasoning_text, tool_calls) -> dict | N
     }
     if _has_reasoning:
         _msg['reasoning'] = reasoning_text.strip()
+    if _titles:
+        _msg['reasoning_titles'] = _titles
     if _has_tools:
         _msg['_partial_tool_calls'] = list(tool_calls)
     return _msg
@@ -8206,6 +8209,7 @@ def _snapshot_and_append_partial_on_error(
     streams_lock = STREAMS_LOCK
     partial_texts = STREAM_PARTIAL_TEXT
     reasoning_texts = STREAM_REASONING_TEXT
+    reasoning_titles = STREAM_REASONING_TITLES
     live_tool_calls = STREAM_LIVE_TOOL_CALLS
 
     # Defensive check for live config (similar to cancel_stream)
@@ -8213,10 +8217,12 @@ def _snapshot_and_append_partial_on_error(
         streams_lock = _live_config.STREAMS_LOCK
         partial_texts = getattr(_live_config, 'STREAM_PARTIAL_TEXT', partial_texts)
         reasoning_texts = getattr(_live_config, 'STREAM_REASONING_TEXT', reasoning_texts)
+        reasoning_titles = getattr(_live_config, 'STREAM_REASONING_TITLES', reasoning_titles)
         live_tool_calls = getattr(_live_config, 'STREAM_LIVE_TOOL_CALLS', live_tool_calls)
 
     _snap_partial_text = None
     _snap_reasoning = None
+    _snap_reasoning_titles = None
     _snap_tool_calls = None
 
     # The streaming thread mirrors these three buffers lock-free (GIL-atomic; see
@@ -8239,6 +8245,8 @@ def _snapshot_and_append_partial_on_error(
             if _live_reasoning is not reasoning_texts:
                 _snap_reasoning = stream_text_value(_live_reasoning, stream_id)
 
+        _snap_reasoning_titles = list(reasoning_titles.get(stream_id, []) or [])
+
         _snap_tool_calls = list(live_tool_calls.get(stream_id, []) or [])
         if not _snap_tool_calls:
             _live_tools = getattr(_live_config, 'STREAM_LIVE_TOOL_CALLS', live_tool_calls)
@@ -8254,7 +8262,12 @@ def _snapshot_and_append_partial_on_error(
                 _tc['done'] = True
                 _tc['_sealed_by_terminal_error'] = True
 
-    _partial_msg = _build_partial_message(_snap_partial_text, _snap_reasoning, _snap_tool_calls)
+    _partial_msg = _build_partial_message(
+        _snap_partial_text,
+        _snap_reasoning,
+        _snap_tool_calls,
+        _snap_reasoning_titles,
+    )
     if _partial_msg is None:
         return None
     if not isinstance(session.messages, list):
@@ -9015,6 +9028,7 @@ def _run_agent_streaming(
         CANCEL_FLAGS[stream_id] = cancel_event
         STREAM_PARTIAL_TEXT[stream_id] = []  # chunked partial text accumulator (#893)
         STREAM_REASONING_TEXT[stream_id] = []  # chunked reasoning accumulator (#1361 §A)
+        STREAM_REASONING_TITLES[stream_id] = []
         STREAM_LIVE_TOOL_CALLS[stream_id] = []  # start accumulating tool calls (#1361 §B)
 
     agent = None
@@ -9809,6 +9823,14 @@ def _run_agent_streaming(
             def _current_reasoning_text():
                 return stream_text_value(_reasoning_segments, _current_reasoning_idx)
 
+            def _remember_reasoning_titles(titles):
+                if not titles:
+                    return
+                snapshot = list(titles)
+                _reasoning_titles_last_sent[0] = snapshot
+                if stream_id in STREAM_REASONING_TITLES:
+                    STREAM_REASONING_TITLES[stream_id] = snapshot
+
             def _flush_reasoning_buffer(*, stable=False):
                 # #4729: emit any coalesced-but-not-yet-flushed reasoning text immediately.
                 # The ~10 Hz throttle in on_reasoning leaves a sub-100ms tail in the buffer;
@@ -9824,13 +9846,13 @@ def _run_agent_streaming(
                     )
                     put('reasoning', payload)
                     if payload.get('titles'):
-                        _reasoning_titles_last_sent[0] = payload['titles']
+                        _remember_reasoning_titles(payload['titles'])
                     _reasoning_buffer[0] = ''
                 elif stable:
                     titles = normalize_reasoning_titles(_current_reasoning_text(), stable=True)
                     if titles and titles != _reasoning_titles_last_sent[0]:
                         put('reasoning', {'text': '', 'titles': titles})
-                        _reasoning_titles_last_sent[0] = titles
+                        _remember_reasoning_titles(titles)
 
 
             def _emit_metering():
@@ -9984,7 +10006,7 @@ def _run_agent_streaming(
                     )
                     put('reasoning', payload)
                     if payload.get('titles'):
-                        _reasoning_titles_last_sent[0] = payload['titles']
+                        _remember_reasoning_titles(payload['titles'])
                     _reasoning_buffer[0] = ''
                 # Track reasoning deltas in the meter so live TPS reflects all AI output.
                 _metering_reasoning_deltas[0] += 1
@@ -10108,7 +10130,7 @@ def _run_agent_streaming(
                         )
                         put('reasoning', payload)
                         if payload.get('titles'):
-                            _reasoning_titles_last_sent[0] = payload['titles']
+                            _remember_reasoning_titles(payload['titles'])
                         _metering_reasoning_deltas[0] += 1
                         meter().record_reasoning(stream_id, _metering_reasoning_deltas[0])
                         _emit_metering()
@@ -13233,6 +13255,7 @@ def _run_agent_streaming(
             AGENT_INSTANCES.pop(stream_id, None)  # Clean up agent instance reference
             STREAM_PARTIAL_TEXT.pop(stream_id, None)  # Clean up partial text buffer (#893)
             STREAM_REASONING_TEXT.pop(stream_id, None)  # Clean up reasoning trace (#1361 §A)
+            STREAM_REASONING_TITLES.pop(stream_id, None)
             STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)  # Clean up tool calls (#1361 §B)
             STREAM_GOAL_RELATED.pop(stream_id, None)  # Clean up goal-related flag (#1932)
             STREAM_LAST_EVENT_ID.pop(stream_id, None)  # Clean up event_id pointer (stage-364)
@@ -13463,6 +13486,7 @@ def cancel_stream(stream_id: str) -> bool:
     # partial text / reasoning / tool-calls (Codex pre-release finding).
     _snap_partial_text = None
     _snap_reasoning = None
+    _snap_reasoning_titles = None
     _snap_tool_calls = None
     _snap_flag = None
     _snap_agent = None
@@ -13490,6 +13514,7 @@ def cancel_stream(stream_id: str) -> bool:
             _live_reasoning = getattr(_live_config, 'STREAM_REASONING_TEXT', STREAM_REASONING_TEXT)
             if _live_reasoning is not STREAM_REASONING_TEXT:
                 _snap_reasoning = stream_text_value(_live_reasoning, stream_id)
+        _snap_reasoning_titles = list(STREAM_REASONING_TITLES.get(stream_id, []) or [])
         _snap_tool_calls = list(STREAM_LIVE_TOOL_CALLS.get(stream_id, []) or [])
         if not _snap_tool_calls:
             _live_tools = getattr(_live_config, 'STREAM_LIVE_TOOL_CALLS', STREAM_LIVE_TOOL_CALLS)
@@ -13665,6 +13690,11 @@ def cancel_stream(stream_id: str) -> bool:
         live_reasoning = getattr(_live_config, 'STREAM_REASONING_TEXT', STREAM_REASONING_TEXT)
         if live_reasoning is not STREAM_REASONING_TEXT:
             _cancel_reasoning = stream_text_value(live_reasoning, stream_id)
+    _cancel_reasoning_titles = (
+        _snap_reasoning_titles
+        if _snap_reasoning_titles is not None
+        else list(STREAM_REASONING_TITLES.get(stream_id, []) or [])
+    )
     _cancel_tool_calls = _snap_tool_calls if _snap_tool_calls is not None else STREAM_LIVE_TOOL_CALLS.get(stream_id, [])
     if not _cancel_tool_calls:
         live_tools = getattr(_live_config, 'STREAM_LIVE_TOOL_CALLS', STREAM_LIVE_TOOL_CALLS)
@@ -13801,7 +13831,10 @@ def cancel_stream(stream_id: str) -> bool:
                 # The underscore-prefixed key is not in the whitelist, so sanitize
                 # strips it. The UI reads it via static/messages.js. (v0.50.251.)
                 _partial_msg = _build_partial_message(
-                    _cancel_partial_text, _cancel_reasoning, _cancel_tool_calls,
+                    _cancel_partial_text,
+                    _cancel_reasoning,
+                    _cancel_tool_calls,
+                    _cancel_reasoning_titles,
                 )
                 _cancel_marker_exists = _session_has_cancel_marker(_cs)
                 _cancel_marker_idx = len(_cs.messages)
