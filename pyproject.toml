@@ -52,7 +52,7 @@ version_file = "api/_scm_version.py"
 # scripts/ruff_lint.py and TESTING.md > "Python lint gate (ruff)".
 
 [tool.ruff]
-# Match the Python versions exercised in CI (tests.yml matrix: 3.11–3.13).
+# Keep Ruff compatible with the minimum supported runtime; CI executes Python 3.13.
 target-version = "py311"
 # Keep the linter scoped to the application + tests; never crawl vendored or
 # generated trees. (These are belt-and-suspenders; the gate passes explicit files.)

@@ -82,7 +82,7 @@ unsupported system interpreters during collection:
 ./scripts/test.sh
 ```
 
-CI also runs this suite on Python `3.11`, `3.12`, and `3.13`.
+CI runs this suite on Python `3.13` across five parallel shards.
 
 If your change affects browser behavior, also run the relevant manual checks from [TESTING.md](TESTING.md).
 
