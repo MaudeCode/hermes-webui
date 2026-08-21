@@ -121,6 +121,22 @@ def safe_platform_temp_root(*protected_roots: Path) -> Path | None:
         return None
 
 
+def safe_legacy_tmp_root(*protected_roots: Path) -> Path | None:
+    """Return /tmp unless a protected tree is nested inside it.
+
+    CI and some launchers can override HOME into /tmp. In that shape, granting
+    all of /tmp would silently grant the protected home as well.
+    """
+    try:
+        candidate = Path("/tmp").resolve()
+        protected = [Path(root).expanduser().resolve() for root in protected_roots]
+        if any(root == candidate or root.is_relative_to(candidate) for root in protected):
+            return None
+        return candidate
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
 def media_capture_allowed(path: Path) -> bool:
     """Allow-list predicate for snapshot capture (same gate as serve).
 
@@ -170,7 +186,10 @@ def _allowed_roots_for_capture() -> list[Path]:
     # macOS and other platforms may use a private per-user temp root instead of
     # /tmp. Include it only after the shared safety gate rejects protected or
     # permissive TMPDIR overrides. Keep /tmp for compatibility.
-    candidates = [hermes_home, Path("/tmp"), home / ".hermes"]
+    candidates = [hermes_home, home / ".hermes"]
+    legacy_tmp = safe_legacy_tmp_root(home, hermes_home, home / ".hermes")
+    if legacy_tmp is not None:
+        candidates.append(legacy_tmp)
     platform_temp = safe_platform_temp_root(home, hermes_home, home / ".hermes")
     if platform_temp is not None:
         candidates.append(platform_temp)

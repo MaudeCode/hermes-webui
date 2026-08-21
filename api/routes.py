@@ -20191,7 +20191,7 @@ def _handle_media(handler, parsed):
     """
     import os as _os
     from api.auth import is_auth_enabled, parse_cookie, verify_session
-    from api.media_snapshots import safe_platform_temp_root
+    from api.media_snapshots import safe_legacy_tmp_root, safe_platform_temp_root
     _HOME = Path(_os.path.expanduser("~"))
     _HERMES_HOME = Path(_os.getenv("HERMES_HOME", str(_HOME / ".hermes"))).expanduser()
 
@@ -20223,9 +20223,11 @@ def _handle_media(handler, parsed):
     # ~/.aws, browser profiles, etc. to any authenticated user.
     allowed_roots = [
         _HERMES_HOME.resolve(),
-        Path("/tmp").resolve(),
         (_HOME / ".hermes").resolve(),
     ]
+    legacy_tmp = safe_legacy_tmp_root(_HOME, _HERMES_HOME, _HOME / ".hermes")
+    if legacy_tmp is not None:
+        allowed_roots.append(legacy_tmp)
     platform_temp = safe_platform_temp_root(_HOME, _HERMES_HOME, _HOME / ".hermes")
     if platform_temp is not None:
         allowed_roots.append(platform_temp)
