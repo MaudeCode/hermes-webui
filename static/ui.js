@@ -12151,7 +12151,9 @@ function _attachCopyButton(header){
   const card=header.closest?header.closest('.tool-card,.thinking-card'):null;
   const headerIsButton=String(header.tagName||'').toLowerCase()==='button';
   const existing=header.querySelector('.transparent-event-copy,.thinking-copy-btn')
-    || (headerIsButton&&card&&card.querySelector(':scope > .transparent-event-copy'));
+    || (headerIsButton&&card&&card.querySelector(
+      ':scope > .thinking-card-head-row > .thinking-copy-btn,:scope > .transparent-event-copy'
+    ));
   if(existing){
     // Normalise the class so CSS treats them identically.
     return bindCopyButton(existing);
@@ -13550,9 +13552,8 @@ function _anchorSceneTransparentNodeForRow(row, opts){
     if(window._showThinking===false) return null;
     const text=String(row.text||row.thinking&&row.thinking.text||'').trim();
     const titles=row.thinking&&Array.isArray(row.thinking.titles)?row.thinking.titles:row.payload&&row.payload.titles;
-    if(!text&&!(Array.isArray(titles)&&titles.length)) return null;
     node=_decorateTransparentEventRow(_thinkingActivityNode(
-      text||(titles[titles.length-1]||''),
+      text,
       false,
       row.row_id||row.local_id||'anchor-thinking',
       titles,

@@ -228,6 +228,9 @@ def test_browser_consumes_titles_without_reimplementing_the_parser():
     assert "function _applyReasoningTitles" in ui
     assert "1500" in ui
     assert "normalize_reasoning_titles" not in messages + anchors + ui
+    transparent_thinking = ui.split("}else if(row.role==='thinking'){", 2)[-1].split("}else if(row.role==='tool'){", 1)[0]
+    assert "text||(titles[titles.length-1]||'')" not in transparent_thinking
+    assert "_thinkingActivityNode(\n      text," in transparent_thinking
 
 
 def test_tool_disclosures_are_semantic_and_count_free_in_every_locale():
