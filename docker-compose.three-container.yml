@@ -3,6 +3,11 @@
 # QUICK START:
 #   docker compose -f docker-compose.three-container.yml up -d
 #   Open http://localhost:8787 (chat) and http://localhost:9119 (dashboard)
+#   Remote access (issue #6876): set HERMES_DASHBOARD_BIND to a specific
+#   trusted host address, configure an authenticated reverse proxy, and set
+#   API_SERVER_KEY to at least 16 characters before recreating the stack.
+#   The WebUI reports "Hermes agent is not responding" when the gateway
+#   listener is down — API_SERVER_KEY must be set for port 8642 to open.
 #
 # This extends the two-container setup with the Hermes Dashboard for
 # monitoring agent activity, sessions, and resource usage.
@@ -39,7 +44,10 @@ services:
     container_name: hermes-agent
     command: gateway run
     ports:
-      - "127.0.0.1:8642:8642"
+      # Bind to loopback by default. For remote access (issue #6876), set
+      # HERMES_AGENT_BIND=0.0.0.0 in .env — the gateway requires
+      # API_SERVER_KEY (>=16 chars) to open the listener at all.
+      - "${HERMES_AGENT_BIND:-127.0.0.1}:8642:8642"
     volumes:
       # Persist config, state, sessions, skills, memory across restarts
       - hermes-home:/home/hermes/.hermes
@@ -83,7 +91,11 @@ services:
     container_name: hermes-dashboard
     command: dashboard --host 0.0.0.0 --insecure
     ports:
-      - "127.0.0.1:9119:9119"
+      # Loopback-only by default (the dashboard runs --insecure). To reach the
+      # dashboard from another machine (issue #6876), bind a specific trusted
+      # host address and put it behind an authenticated reverse proxy. Do not
+      # use 0.0.0.0 unless a host firewall restricts direct access.
+      - "${HERMES_DASHBOARD_BIND:-127.0.0.1}:9119:9119"
     volumes:
       - hermes-home:/home/hermes/.hermes
     environment:

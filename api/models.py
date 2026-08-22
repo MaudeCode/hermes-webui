@@ -1356,6 +1356,9 @@ class Session:
         self.cache_read_tokens = cache_read_tokens or 0
         self.cache_write_tokens = cache_write_tokens or 0
         self.personality = personality
+        # Exact disk revision used to load this object's sidecar rows. Runtime
+        # cache metadata only, never serialized by compact().
+        self._sidecar_loaded_signature = None
         self.active_stream_id = active_stream_id
         self.pending_user_message = pending_user_message
         self.pending_attachments = pending_attachments or []
@@ -1681,6 +1684,12 @@ class Session:
                     )
                 except Exception:
                     logger.debug("legacy sidecar facts cache populate failed for %s", sid, exc_info=True)
+            _post_read_sig = _sidecar_stat_signature(p)
+            session._sidecar_loaded_signature = (
+                _post_read_sig
+                if _pre_read_sig is not None and _pre_read_sig == _post_read_sig
+                else None
+            )
         try:
             from api.session_drafts import read_session_draft
 

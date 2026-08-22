@@ -34,6 +34,14 @@ def test_backstop_applied_when_no_boundary_prefix():
     assert _state_db_backstop_limit_for_display(_StubSession(), msg_before=None) == _STATE_DB_DISPLAY_ROW_BACKSTOP
 
 
+def test_backstop_skipped_when_sidecar_rows_can_overlap_omitted_prefix():
+    assert _state_db_backstop_limit_for_display(
+        _StubSession(),
+        msg_before=None,
+        sidecar_messages=[{"role": "user", "content": "persisted"}],
+    ) is None
+
+
 def test_backstop_skipped_when_truncation_boundary_set():
     """Regression: a compressed session (truncation_boundary set) needs its
     preserved-prefix rows for the merge, so the backstop must NOT cap the read."""

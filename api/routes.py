@@ -29,7 +29,7 @@ import time
 import uuid
 import http.client
 import socket as _socket
-from collections import defaultdict, deque
+from collections import defaultdict, deque, OrderedDict
 from pathlib import Path
 from contextlib import closing
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
@@ -9060,27 +9060,73 @@ _SIDECAR_BYTE_TAIL_THRESHOLD = 500_000  # 500 KB
 _STATE_DB_DISPLAY_ROW_BACKSTOP = 50000
 
 
-def _state_db_backstop_limit_for_display(session, msg_before) -> int | None:
-    """Return the row backstop to apply to the display path's state.db read, or
-    ``None`` for an uncapped (full-history) read.
+def _state_db_backstop_limit_for_display(
+    session,
+    msg_before,
+    *,
+    sidecar_messages=None,
+) -> int | None:
+    """Return the row backstop to apply to the display path's state.db read.
 
-    The backstop is a defensive net against a pathological/huge state.db, NOT a
-    semantic window. It is applied ONLY on provably-safe reads where no
-    ``truncation_boundary`` prefix is required for the merge:
-    ``merge_session_messages_append_only`` needs the rows at/around the session's
-    ``truncation_boundary`` to reconcile correctly, and a newest-N-only SQL cap
-    would drop those boundary rows for a >N-row session and corrupt the merge
-    (silently losing the preserved prefix). So this mirrors the same conditions
-    ``_state_db_since_timestamp_for_limited_display`` uses to decide a read is
-    boundary-free: not ``msg_before`` paging, and no ``truncation_watermark`` /
-    ``truncation_boundary``. Extracted for direct test coverage.
+    The newest-N cap is safe only without a compression boundary, paging cursor,
+    or sidecar rows that could overlap the omitted state.db prefix. Keeping the
+    capped case in one exact coordinate space lets the response account for the
+    omitted prefix without guessing how append-only reconciliation deduplicated
+    it.
     """
     has_boundary_prefix = (
         msg_before is not None
         or getattr(session, "truncation_watermark", None) not in (None, "")
         or getattr(session, "truncation_boundary", None) not in (None, "")
     )
-    return None if has_boundary_prefix else _STATE_DB_DISPLAY_ROW_BACKSTOP
+    has_sidecar_rows = bool(sidecar_messages)
+    return (
+        None
+        if has_boundary_prefix or has_sidecar_rows
+        else _STATE_DB_DISPLAY_ROW_BACKSTOP
+    )
+
+
+def _state_db_display_row_count(
+    session_id,
+    *,
+    profile=None,
+    since_timestamp=None,
+) -> int | None:
+    """Count the exact active state.db scope used by the bounded display read."""
+    if not session_id or not is_safe_session_id(str(session_id)):
+        return None
+    try:
+        from api.agent_sessions import open_state_db_readonly
+        from api.models import _agent_state_db_path
+
+        db_path = _agent_state_db_path(profile=profile)
+        if db_path is None or not db_path.exists():
+            return 0
+        with closing(open_state_db_readonly(db_path)) as conn:
+            columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")
+            }
+            if not {"session_id", "timestamp"}.issubset(columns):
+                return None
+            clauses = ["session_id = ?"]
+            params: list[object] = [str(session_id)]
+            if since_timestamp is not None:
+                try:
+                    since_value = float(since_timestamp)
+                except (TypeError, ValueError):
+                    return None
+                clauses.append("(timestamp IS NULL OR timestamp >= ?)")
+                params.append(since_value)
+            if "active" in columns:
+                clauses.append("(active IS NULL OR active != 0)")
+            row = conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE " + " AND ".join(clauses),
+                params,
+            ).fetchone()
+            return max(0, int(row[0])) if row is not None else None
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return None
 
 
 def _limited_webui_messages_for_display(session, state_db_messages) -> list:
@@ -9100,11 +9146,112 @@ def _limited_webui_messages_for_display(session, state_db_messages) -> list:
     )
 
 
-def _limited_webui_messages_for_display_with_sidecar(session, sidecar_messages, state_db_messages) -> list:
+def _display_merge_session_is_active(session) -> bool:
+    """Return whether any canonical in-memory projection is active/pending."""
+    if getattr(session, "active_stream_id", None) or getattr(
+        session, "pending_user_message", None
+    ):
+        return True
+    sid = str(getattr(session, "session_id", "") or "")
+    if not sid:
+        return True
+    try:
+        if api_config.session_writeback_owner(sid):
+            return True
+        with api_config.ACTIVE_RUNS_LOCK:
+            active_runs = list((api_config.ACTIVE_RUNS or {}).values())
+        if any(
+            str((run or {}).get("session_id") or "") == sid
+            for run in active_runs
+            if isinstance(run, dict)
+        ):
+            return True
+    except Exception:
+        return True
+    with LOCK:
+        live = SESSIONS.get(sid)
+    if live is None or live is session:
+        return False
+    if str(getattr(live, "session_id", "") or "") != sid:
+        return True
+    return bool(
+        getattr(live, "active_stream_id", None)
+        or getattr(live, "pending_user_message", None)
+    )
+
+
+def _display_merge_cached_result(session, sidecar_messages, *, msg_before=None):
+    """Return cached transcript rows and the exact omitted-prefix count, or None.
+
+    Lets GET /api/session skip loading the state.db rows entirely on a hit. That
+    is only sound because the cache key can be built from the existing
+    commit-reliable DB/WAL/SHM signature (`_state_db_session_signature`) rather
+    than a fingerprint computed FROM the loaded rows -- otherwise the key could
+    not be built without paying exactly the cost we are trying to avoid.
+
+    Fail-closed by construction: returns None whenever the session is active,
+    the key cannot be built, or the cached entry does not match, and the caller
+    then performs the normal full load + merge.
+    """
+    if msg_before is not None or _display_merge_session_is_active(session):
+        return None
+    sid = str(getattr(session, "session_id", "") or "")
+    if not sid:
+        return None
+    with _display_merge_cache_lock:
+        entry = _display_merge_cache.get(sid)
+        if entry is None:
+            return None
+    # Resolve the sidecar exactly like the merge helper does: it treats None as
+    # "load the lineage myself", and the cache entry was keyed on that RESOLVED
+    # list. Probing with a bare None would key on an empty sidecar and miss
+    # every time -- silently reverting this optimisation.
     if sidecar_messages is None:
         sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
-    else:
-        sidecar_messages = list(sidecar_messages or [])
+    # Building the key requires the sidecar rows (cheap: already in memory or
+    # served from the lineage cache) but not the state.db rows -- that
+    # asymmetry is the whole point.
+    cache_key = _display_merge_cache_key(session, sidecar_messages, None)
+    if cache_key is None:
+        return None
+    with _display_merge_cache_lock:
+        entry = _display_merge_cache.get(sid)
+        if not _display_merge_cache_entry_usable(entry, cache_key):
+            return None
+        assert entry is not None
+        _display_merge_cache.move_to_end(sid, last=True)
+        return (
+            [dict(m) if isinstance(m, dict) else m for m in entry["messages"]],
+            max(0, int(entry.get("omitted_state_db_rows") or 0)),
+        )
+
+
+def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None):
+    """Compatibility wrapper returning only cached merged transcript rows."""
+    result = _display_merge_cached_result(
+        session,
+        sidecar_messages,
+        msg_before=msg_before,
+    )
+    return None if result is None else result[0]
+
+
+_DISPLAY_STATE_SIGNATURE_UNSET = object()
+
+
+def _limited_webui_messages_for_display_with_sidecar(
+    session,
+    sidecar_messages,
+    state_db_messages,
+    *,
+    state_db_signature=_DISPLAY_STATE_SIGNATURE_UNSET,
+    msg_before=None,
+    omitted_state_db_rows=0,
+) -> list:
+    if sidecar_messages is None:
+        sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
+    sidecar_cache_source = sidecar_messages
+    sidecar_messages = list(sidecar_messages or [])
     state_db_messages = list(state_db_messages or [])
     if not state_db_messages:
         return sidecar_messages
@@ -9116,12 +9263,527 @@ def _limited_webui_messages_for_display_with_sidecar(session, sidecar_messages, 
     # the paginated load). The append-only merge is O(n) over already-bounded
     # in-memory lists; the real latency win here is skipping the lineage-parent
     # DISK load above, which we still skip. (#4070 ship-review)
-    return merge_session_messages_append_only(
+    #
+    # perf: the merge itself is still expensive for multi-thousand-message
+    # historical transcripts (~2-3s per request: json.dumps merge keys +
+    # loose-content probes per row), and GET /api/session re-runs it on every
+    # open/poll. Memoize per session id. Validity is fail-closed:
+    #   - only INACTIVE sessions (no active stream, no pending user message):
+    #     an active session's in-memory tail can be ahead of its disk
+    #     signature, so it always recomputes;
+    #   - the child sidecar's exact stat signature plus every lineage parent
+    #     signature recorded by _webui_sidecar_lineage_messages_for_display;
+    #   - the sidecar row count and last timestamp (guards unsaved in-memory
+    #     appends that have not reached disk yet);
+    #   - a content fingerprint of the (bounded) state.db rows.
+    # Any uncertainty (missing signature, fingerprint failure) skips caching.
+    cache_key = None
+    # A msg_before request deliberately reads a different (uncapped) state.db
+    # scope than the initial tail request.  It must bypass both cache layers:
+    # skipping only the pre-load probe still let this inner lookup reuse the
+    # initial 50k-row backstop merge and made the oldest row unreachable.
+    if msg_before is None and not _display_merge_session_is_active(session):
+        if state_db_signature is _DISPLAY_STATE_SIGNATURE_UNSET:
+            _state_key = _state_db_rows_fingerprint(state_db_messages)
+        else:
+            _state_key = state_db_signature
+            if _state_key is not None:
+                _current_key = _state_db_session_signature(
+                    getattr(session, "session_id", None),
+                    getattr(session, "profile", None) or None,
+                )
+                if _current_key != _state_key:
+                    _state_key = None
+        if _state_key is not None:
+            cache_key = _display_merge_cache_key(
+                session,
+                sidecar_cache_source,
+                state_db_messages,
+                state_db_signature=_state_key,
+            )
+    if cache_key is not None:
+        sid = str(getattr(session, "session_id", "") or "")
+        with _display_merge_cache_lock:
+            entry = _display_merge_cache.get(sid)
+            if _display_merge_cache_entry_usable(entry, cache_key):
+                _display_merge_cache.move_to_end(sid, last=True)
+                return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
+    merged = merge_session_messages_append_only(
         sidecar_messages,
         state_db_messages,
         truncation_watermark=getattr(session, "truncation_watermark", None),
         truncation_boundary=getattr(session, "truncation_boundary", None),
     )
+    if cache_key is not None:
+        _state_key = cache_key[4]
+        _streaming_key = (
+            isinstance(_state_key, (list, tuple))
+            and bool(_state_key)
+            and _state_key[0] == "streaming"
+        )
+        if (
+            state_db_signature is not _DISPLAY_STATE_SIGNATURE_UNSET
+            and not _streaming_key
+            and _state_db_session_signature(
+                getattr(session, "session_id", None),
+                getattr(session, "profile", None) or None,
+            )
+            != state_db_signature
+        ):
+            cache_key = None
+    if cache_key is not None:
+        sid = str(getattr(session, "session_id", "") or "")
+        cache_weight = _display_merge_messages_weight(
+            merged,
+            limit=_DISPLAY_MERGE_CACHE_MAX_ENTRY_BYTES,
+        )
+        if cache_weight <= _DISPLAY_MERGE_CACHE_MAX_ENTRY_BYTES:
+            with _display_merge_cache_lock:
+                _display_merge_cache[sid] = {
+                    "key": cache_key,
+                    "messages": merged,
+                    "omitted_state_db_rows": max(0, int(omitted_state_db_rows or 0)),
+                    "stored_at": time.monotonic(),
+                    "weight": cache_weight,
+                }
+                _display_merge_cache.move_to_end(sid, last=True)
+                while (
+                    len(_display_merge_cache) > _DISPLAY_MERGE_CACHE_MAX
+                    or sum(
+                        max(0, int(entry.get("weight") or 0))
+                        for entry in _display_merge_cache.values()
+                    )
+                    > _DISPLAY_MERGE_CACHE_MAX_BYTES
+                ):
+                    _display_merge_cache.popitem(last=False)
+            # Same shallow-copy contract as the cache-hit path (and as the
+            # lineage cache): callers may attach display metadata to the
+            # returned rows.
+            return [dict(m) if isinstance(m, dict) else m for m in merged]
+    return merged
+
+
+# perf: memoized sidecar↔state.db display merges for GET /api/session.
+# See _limited_webui_messages_for_display_with_sidecar for the validity rules.
+_DISPLAY_MERGE_CACHE_MAX = 16
+# The merge and lineage caches share a fixed 512 MiB transcript budget. Each
+# cache owns half so concurrent insertions cannot exceed the aggregate cap.
+_TRANSCRIPT_DISPLAY_CACHE_MAX_BYTES = 512 * 1024 * 1024
+_DISPLAY_MERGE_CACHE_MAX_BYTES = _TRANSCRIPT_DISPLAY_CACHE_MAX_BYTES // 2
+_DISPLAY_MERGE_CACHE_MAX_ENTRY_BYTES = _DISPLAY_MERGE_CACHE_MAX_BYTES
+# Legacy streaming-freeze keys are still accepted defensively and remain
+# tightly bounded. Production streaming keys now carry an exact target-session
+# digest, so unrelated deltas stay stable without hiding target mutations.
+_DISPLAY_MERGE_STREAMING_TTL_SECONDS = 5.0
+_display_merge_cache: "OrderedDict[str, dict]" = OrderedDict()
+_display_merge_cache_lock = threading.Lock()
+
+
+def _display_merge_messages_weight(messages, *, limit: int) -> int:
+    """Estimate retained cache bytes without allocating a serialized copy."""
+    total = 0
+    stack = list(messages or [])
+    seen: set[int] = set()
+    while stack:
+        value = stack.pop()
+        if isinstance(value, (dict, list, tuple, set)):
+            identity = id(value)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            total += 64
+            if isinstance(value, dict):
+                stack.extend(value.keys())
+                stack.extend(value.values())
+            else:
+                stack.extend(value)
+        elif isinstance(value, str):
+            # Four bytes per code point is a conservative UTF-8 upper bound and
+            # avoids allocating another copy of a potentially huge string.
+            total += 49 + (4 * len(value))
+        elif isinstance(value, (bytes, bytearray, memoryview)):
+            total += 33 + len(value)
+        else:
+            total += 32
+        if total > limit:
+            return total
+    return total
+
+
+def _display_merge_cache_entry_usable(entry, cache_key) -> bool:
+    if entry is None or entry.get("key") != cache_key:
+        return False
+    try:
+        state_key = cache_key[4]
+    except (IndexError, TypeError):
+        return False
+    is_streaming_key = (
+        isinstance(state_key, (list, tuple))
+        and bool(state_key)
+        and state_key[0] == "streaming"
+    )
+    if not is_streaming_key:
+        return True
+    try:
+        age = time.monotonic() - float(entry["stored_at"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return 0.0 <= age <= _DISPLAY_MERGE_STREAMING_TTL_SECONDS
+
+
+def _display_merge_requires_lineage_provenance(session) -> bool:
+    """Return whether this sidecar view depends on a stitched snapshot parent."""
+    parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
+    if not parent_id:
+        return False
+    if not is_safe_session_id(parent_id):
+        return True
+    try:
+        parent = Session.load(parent_id)
+    except Exception:
+        return True
+    if parent is None:
+        return True
+    if not getattr(parent, "pre_compression_snapshot", False):
+        return False
+    source = str(getattr(session, "session_source", "") or "").strip().lower()
+    parent_source = str(
+        getattr(parent, "session_source", "") or ""
+    ).strip().lower()
+    if source == "fork" and parent_source != "fork":
+        return False
+    return not _messages_start_with_visible_prefix(
+        list(getattr(session, "messages", []) or []),
+        list(getattr(parent, "messages", []) or []),
+    )
+
+
+def _evict_lineage_display_cache_entry(sid, expected_entry) -> None:
+    """Evict only the lineage entry that this caller validated as stale."""
+    with _lineage_display_cache_lock:
+        if _lineage_display_cache.get(sid) is expected_entry:
+            _lineage_display_cache.pop(sid, None)
+
+
+def _display_merge_cache_key(
+    session,
+    sidecar_messages,
+    state_db_messages,
+    *,
+    state_db_signature=_DISPLAY_STATE_SIGNATURE_UNSET,
+):
+    """Return a fail-closed validity key for the display-merge cache, or None.
+
+    None means "do not cache": any component that cannot be resolved exactly
+    (missing sidecar signature, unfingerprintable state rows) disables the
+    cache for this request rather than risking a stale transcript.
+    """
+    from api.models import _sidecar_stat_signature
+
+    sid = str(getattr(session, "session_id", "") or "")
+    if not sid or not is_safe_session_id(sid):
+        return None
+    self_sig = _sidecar_stat_signature(SESSION_DIR / f"{sid}.json")
+    if self_sig is None:
+        return None
+    resolved_sidecar_sig = getattr(sidecar_messages, "sidecar_signature", None)
+    if getattr(sidecar_messages, "cache_safe", None) is False:
+        return None
+    if resolved_sidecar_sig is not None and resolved_sidecar_sig != self_sig:
+        return None
+    # Lineage parents: reuse the signatures recorded by the (already memoized)
+    # lineage stitch so a write to any parent snapshot invalidates this cache
+    # too. A lineage without snapshot parents records no entry — empty tuple.
+    parent_sigs = ()
+    with _lineage_display_cache_lock:
+        lineage_entry = _lineage_display_cache.get(sid)
+    if lineage_entry is not None:
+        if (
+            lineage_entry.get("provenance_complete") is not True
+            or lineage_entry.get("self_sig") != self_sig
+        ):
+            _evict_lineage_display_cache_entry(sid, lineage_entry)
+            return None
+        parent_sigs = tuple(
+            (str(path), tuple(sig) if isinstance(sig, (list, tuple)) else sig)
+            for path, sig in (lineage_entry.get("parent_sigs") or [])
+        )
+        for parent_path, parent_sig in parent_sigs:
+            if _sidecar_stat_signature(Path(parent_path)) != parent_sig:
+                _evict_lineage_display_cache_entry(sid, lineage_entry)
+                return None
+        with _lineage_display_cache_lock:
+            if _lineage_display_cache.get(sid) is not lineage_entry:
+                return None
+    if not parent_sigs and _display_merge_requires_lineage_provenance(session):
+        return None
+    last_ts = None
+    if sidecar_messages:
+        last = sidecar_messages[-1]
+        if isinstance(last, dict):
+            last_ts = last.get("timestamp")
+    # Prefer the existing commit-reliable DB/WAL/SHM signature outside streams.
+    # While another turn streams, use an exact digest scoped to this target
+    # session so unrelated per-delta commits do not churn the key. Fail closed
+    # onto the exact row fingerprint whenever the signature cannot be read.
+    if state_db_signature is _DISPLAY_STATE_SIGNATURE_UNSET:
+        state_fp = _state_db_session_signature(
+            sid, getattr(session, "profile", None) or None
+        )
+    else:
+        state_fp = state_db_signature
+    if state_fp is None:
+        # state_db_messages is None on the cache-probe path, where the rows were
+        # deliberately not loaded. Fingerprinting None would key on the empty
+        # row set and could match an entry built from real rows, so fail closed.
+        if state_db_messages is None:
+            return None
+        state_fp = _state_db_rows_fingerprint(state_db_messages)
+    if state_fp is None:
+        return None
+    return (
+        self_sig,
+        parent_sigs,
+        len(sidecar_messages),
+        last_ts,
+        state_fp,
+        getattr(session, "truncation_watermark", None),
+        getattr(session, "truncation_boundary", None),
+    )
+
+
+def _state_db_target_session_signature(db_path, session_id):
+    """Hash every target-session row without materialising display dictionaries."""
+    try:
+        uri_path = quote(str(Path(db_path).resolve()), safe="/")
+        with closing(
+            sqlite3.connect(f"file:{uri_path}?mode=ro", uri=True, timeout=5.0)
+        ) as conn:
+            conn.execute("PRAGMA query_only=ON")
+            columns = [str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")]
+            if "session_id" not in columns or "id" not in columns:
+                return None
+            quoted_columns = ", ".join(
+                '"' + column.replace('"', '""') + '"' for column in columns
+            )
+            conn.text_factory = lambda raw: ("text", raw)
+            rows = conn.execute(
+                f'SELECT {quoted_columns} FROM messages '
+                'WHERE session_id = ? ORDER BY id',
+                (str(session_id),),
+            )
+            digest = hashlib.blake2b(digest_size=32)
+            digest.update("\x1f".join(columns).encode("utf-8"))
+            row_count = 0
+            for row in rows:
+                row_count += 1
+                for value in row:
+                    if value is None:
+                        tag, payload = b"n", b""
+                    elif isinstance(value, tuple) and value[:1] == ("text",):
+                        tag, payload = b"t", value[1]
+                    elif isinstance(value, bytes):
+                        tag, payload = b"b", value
+                    elif isinstance(value, int):
+                        tag, payload = b"i", str(value).encode("ascii")
+                    elif isinstance(value, float):
+                        tag, payload = b"f", value.hex().encode("ascii")
+                    else:
+                        return None
+                    digest.update(tag)
+                    digest.update(len(payload).to_bytes(8, "big"))
+                    digest.update(payload)
+            return ("streaming-target", row_count, digest.hexdigest())
+    except (OSError, sqlite3.Error, ValueError):
+        return None
+
+
+def _state_db_target_session_revision(db_path, session_id):
+    """Return a bounded cross-process revision for one session's display rows.
+
+    Supported writers update ``sessions.last_activity_at``/``message_count``.
+    The indexed tail revision additionally catches direct appends, tail deletes,
+    and raw changes to timestamp, row flags, or byte lengths on the newest row.
+    Legacy stores without a sessions row use full numeric/length aggregates. A
+    same-length raw SQL rewrite of an older row that bypasses session metadata
+    is outside the state-store writer contract; detecting it exactly would
+    require scanning and hashing every message payload (148 MB on the production
+    long session), which would make the cache slower than the uncached path.
+    """
+    message_length_columns = (
+        "role",
+        "content",
+        "tool_call_id",
+        "tool_calls",
+        "tool_name",
+        "finish_reason",
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details",
+        "codex_reasoning_items",
+        "codex_message_items",
+        "effect_disposition",
+        "api_content",
+        "display_kind",
+        "display_metadata",
+    )
+    message_sum_columns = ("observed", "active", "compacted")
+    session_revision_columns = (
+        "message_count",
+        "last_activity_at",
+        "ended_at",
+        "end_reason",
+        "rewind_count",
+        "archived",
+    )
+    try:
+        uri_path = quote(str(Path(db_path).resolve()), safe="/")
+        with closing(
+            sqlite3.connect(f"file:{uri_path}?mode=ro", uri=True, timeout=0.25)
+        ) as conn:
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("PRAGMA busy_timeout=250")
+            message_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")
+            }
+            if "session_id" not in message_columns or "id" not in message_columns:
+                return None
+            session_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(sessions)")
+            }
+            available_session_columns = [
+                column
+                for column in session_revision_columns
+                if column in session_columns
+            ]
+            session_revision = None
+            if "id" in session_columns and available_session_columns:
+                session_revision = conn.execute(
+                    "SELECT "
+                    + ", ".join(
+                        f'"{column}"' for column in available_session_columns
+                    )
+                    + " FROM sessions WHERE id = ?",
+                    (str(session_id),),
+                ).fetchone()
+            if session_revision is not None:
+                latest_parts = ["id"]
+                latest_parts.append(
+                    "timestamp" if "timestamp" in message_columns else "NULL"
+                )
+                latest_parts.extend(
+                    f'LENGTH(COALESCE("{column}", \'\'))'
+                    for column in message_length_columns
+                    if column in message_columns
+                )
+                latest_parts.extend(
+                    f'COALESCE("{column}", 0)'
+                    for column in message_sum_columns
+                    if column in message_columns
+                )
+                latest_revision = conn.execute(
+                    f"SELECT {', '.join(latest_parts)} FROM messages "
+                    "WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+                    (str(session_id),),
+                ).fetchone()
+                return (
+                    "target-session-revision-v2",
+                    tuple(available_session_columns),
+                    tuple(session_revision),
+                    tuple(latest_revision) if latest_revision is not None else None,
+                )
+
+            # Legacy state stores without a sessions row have no supported
+            # O(1) activity revision. Keep them conservative by scanning compact
+            # numeric/length aggregates instead of trusting a global DB stamp.
+            aggregate_parts = ["COUNT(*)", "MAX(id)"]
+            aggregate_parts.append(
+                "MAX(timestamp)" if "timestamp" in message_columns else "NULL"
+            )
+            aggregate_parts.extend(
+                f'SUM(LENGTH(COALESCE("{column}", \'\')))'
+                for column in message_length_columns
+                if column in message_columns
+            )
+            aggregate_parts.extend(
+                f'SUM(COALESCE("{column}", 0))'
+                for column in message_sum_columns
+                if column in message_columns
+            )
+            message_revision = conn.execute(
+                f"SELECT {', '.join(aggregate_parts)} FROM messages "
+                "WHERE session_id = ?",
+                (str(session_id),),
+            ).fetchone()
+            return (
+                "target-session-revision-v1-legacy",
+                (),
+                None,
+                tuple(message_revision) if message_revision is not None else None,
+            )
+    except (OSError, sqlite3.Error, ValueError):
+        return None
+
+
+def _state_db_session_signature(session_id, profile=None):
+    """Return a cross-process target-session cache revision, fail-closed.
+
+    The session-scoped revision avoids DB/WAL false invalidations caused by a
+    different conversation streaming in another WebUI process. If the schema
+    cannot provide that revision, fall back to the existing global file key.
+    """
+    from api.models import _agent_state_db_path, _sqlite_file_stat_cache_key
+
+    sid = str(session_id or "")
+    if not sid or not is_safe_session_id(sid):
+        return None
+    try:
+        db_path = _agent_state_db_path(profile=profile)
+        if not db_path or not Path(db_path).exists():
+            return None
+    except Exception:
+        return None
+    target_revision = _state_db_target_session_revision(db_path, sid)
+    if target_revision is not None:
+        return target_revision
+    try:
+        signature = _sqlite_file_stat_cache_key(Path(db_path))
+    except Exception:
+        return None
+    if signature is None:
+        return None
+    # ``_sqlite_file_stat_cache_key`` is a tuple of the content fingerprint and
+    # DB/WAL/SHM stat stamps. A completely empty result is not a valid key.
+    try:
+        if not any(component is not None for component in signature):
+            return None
+    except TypeError:
+        return None
+    return signature
+
+
+def _load_state_db_messages_with_stable_signature(session_id, profile, reader_kwargs):
+    """Load rows and return the database signature that brackets that read."""
+    before = _state_db_session_signature(session_id, profile)
+    rows = get_state_db_session_messages(session_id, **dict(reader_kwargs or {}))
+    after = _state_db_session_signature(session_id, profile)
+    stable = before if before is not None and before == after else None
+    return rows, stable
+
+
+def _state_db_rows_fingerprint(rows) -> str | None:
+    """Content fingerprint of the state.db display rows, or None on failure."""
+    try:
+        h = hashlib.sha256()
+        h.update(str(len(rows)).encode("utf-8"))
+        for row in rows:
+            if isinstance(row, dict):
+                h.update(json.dumps(row, sort_keys=True, default=str).encode("utf-8", "replace"))
+            else:
+                h.update(repr(row).encode("utf-8", "replace"))
+        return h.hexdigest()
+    except Exception:
+        return None
 
 
 def _sidecar_file_exceeds_threshold(session_id, threshold_bytes) -> bool:
@@ -9219,6 +9881,65 @@ def _messages_start_with_visible_prefix(messages, prefix) -> bool:
         return False
 
 
+# perf: memoized lineage-stitch results for GET /api/session. Keyed by session
+# id; validity = exact stat signature of the child sidecar AND every snapshot
+# parent involved in the stitch. Any write to any involved sidecar changes its
+# signature and invalidates the entry. Bounded LRU — historical lineages are
+# few but their merges cost seconds each.
+_LINEAGE_DISPLAY_CACHE_MAX = 16
+_LINEAGE_DISPLAY_CACHE_MAX_BYTES = _TRANSCRIPT_DISPLAY_CACHE_MAX_BYTES // 2
+_LINEAGE_DISPLAY_CACHE_MAX_ENTRY_BYTES = _LINEAGE_DISPLAY_CACHE_MAX_BYTES
+_lineage_display_cache: "OrderedDict[str, dict]" = OrderedDict()
+_lineage_display_cache_lock = threading.Lock()
+
+
+class _LineageDisplayMessages(list):
+    """List carrying the exact child-sidecar revision used for its rows."""
+
+    __slots__ = ("sidecar_signature", "cache_safe")
+
+    def __init__(self, values, *, sidecar_signature, cache_safe):
+        super().__init__(values or [])
+        self.sidecar_signature = sidecar_signature
+        self.cache_safe = bool(cache_safe)
+
+
+def _lineage_display_result(messages, *, sidecar_signature, cache_safe):
+    return _LineageDisplayMessages(
+        [dict(m) if isinstance(m, dict) else m for m in (messages or [])],
+        sidecar_signature=sidecar_signature,
+        cache_safe=cache_safe,
+    )
+
+
+def _store_lineage_display_cache(sid, self_sig, parent_sigs, messages) -> bool:
+    cache_weight = _display_merge_messages_weight(
+        messages,
+        limit=_LINEAGE_DISPLAY_CACHE_MAX_ENTRY_BYTES,
+    )
+    if cache_weight > _LINEAGE_DISPLAY_CACHE_MAX_ENTRY_BYTES:
+        return False
+    with _lineage_display_cache_lock:
+        _lineage_display_cache[sid] = {
+            "self_sig": self_sig,
+            "parent_sigs": parent_sigs,
+            "provenance_complete": True,
+            "messages": messages,
+            "weight": cache_weight,
+        }
+        _lineage_display_cache.move_to_end(sid, last=True)
+        while (
+            len(_lineage_display_cache) > _LINEAGE_DISPLAY_CACHE_MAX
+            or sum(
+                max(0, int(entry.get("weight") or 0))
+                for entry in _lineage_display_cache.values()
+            )
+            > _LINEAGE_DISPLAY_CACHE_MAX_BYTES
+        ):
+            _lineage_display_cache.popitem(last=False)
+    return True
+
+
 def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) -> list:
     """Return WebUI sidecar messages stitched across compression snapshots.
 
@@ -9227,20 +9948,109 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
     child sidecar. Opening the child alone makes older turns look lost. Stitch
     only those snapshot parents for display; ordinary forks also carry
     ``parent_session_id`` but must remain independent conversations.
+
+    perf: the stitched merge is O(total messages) with expensive per-row keys
+    (json.dumps of tool_calls, loose-content regex). For multi-thousand-message
+    lineages it costs seconds per request, and GET /api/session re-runs it on
+    every open/poll. The result is cached per session id, keyed by the stat
+    signature of every sidecar involved (child + each snapshot parent), so an
+    idle historical lineage merges once and any write to any involved sidecar
+    invalidates naturally. Cache hits return shallow-copied rows so callers can
+    attach display metadata without corrupting the cache.
     """
+    from api.models import _sidecar_stat_signature
+
+    cache_allowed = not _display_merge_session_is_active(session)
+    sid = str(getattr(session, "session_id", "") or "")
+    self_sig = None
+    if sid and is_safe_session_id(sid):
+        self_sig = _sidecar_stat_signature(SESSION_DIR / f"{sid}.json")
+    if cache_allowed and self_sig is not None:
+        with _lineage_display_cache_lock:
+            entry = _lineage_display_cache.get(sid)
+        if (
+            entry is not None
+            and entry.get("provenance_complete") is True
+            and entry.get("self_sig") == self_sig
+        ):
+            stale = False
+            for parent_path, parent_sig in entry.get("parent_sigs") or []:
+                if _sidecar_stat_signature(Path(parent_path)) != parent_sig:
+                    stale = True
+                    break
+            if not stale:
+                with _lineage_display_cache_lock:
+                    current_entry = _lineage_display_cache.get(sid)
+                    if current_entry is entry:
+                        _lineage_display_cache.move_to_end(sid, last=True)
+                        return _lineage_display_result(
+                            entry["messages"],
+                            sidecar_signature=self_sig,
+                            cache_safe=True,
+                        )
+            else:
+                _evict_lineage_display_cache_entry(sid, entry)
+
+    resolved_child = session
+    child_signature_stable = False
+    if cache_allowed and self_sig is not None:
+        loaded_signature = getattr(session, "_sidecar_loaded_signature", None)
+        if loaded_signature == self_sig:
+            child_signature_stable = True
+        else:
+            child_sig_before = self_sig
+            try:
+                loaded_child = Session.load(sid)
+            except Exception:
+                loaded_child = None
+            child_sig_after = _sidecar_stat_signature(SESSION_DIR / f"{sid}.json")
+            if (
+                loaded_child is not None
+                and child_sig_before is not None
+                and child_sig_before == child_sig_after
+                and getattr(loaded_child, "_sidecar_loaded_signature", None)
+                == child_sig_after
+            ):
+                resolved_child = loaded_child
+                self_sig = child_sig_after
+                child_signature_stable = True
+            else:
+                cache_allowed = False
+
     segments = []
-    current = session
-    session_messages = list(getattr(session, "messages", []) or [])
-    source = str(getattr(session, "session_source", "") or "").strip().lower()
+    current = resolved_child
+    session_messages = list(getattr(resolved_child, "messages", []) or [])
+    source = str(
+        getattr(resolved_child, "session_source", "") or ""
+    ).strip().lower()
     root_is_fork = source == "fork"
-    seen = {str(getattr(session, "session_id", "") or "")}
+    seen = {str(getattr(resolved_child, "session_id", "") or "")}
+    parent_sigs: list[tuple[str, tuple]] = []
+    parent_signatures_complete = True
     for _ in range(max(0, int(max_hops))):
         parent_id = str(getattr(current, "parent_session_id", "") or "").strip()
-        if not parent_id or parent_id in seen or not is_safe_session_id(parent_id):
+        if not parent_id:
             break
+        if parent_id in seen or not is_safe_session_id(parent_id):
+            parent_signatures_complete = False
+            break
+        parent_path = SESSION_DIR / f"{parent_id}.json"
+        parent_sig_before = _sidecar_stat_signature(parent_path)
         parent = Session.load(parent_id)
-        if not parent or not getattr(parent, "pre_compression_snapshot", False):
+        if not parent:
+            parent_signatures_complete = False
             break
+        if not getattr(parent, "pre_compression_snapshot", False):
+            break
+        parent_sig = _sidecar_stat_signature(parent_path)
+        if (
+            parent_sig_before is None
+            or parent_sig is None
+            or parent_sig_before != parent_sig
+        ):
+            parent_signatures_complete = False
+        else:
+            parent_sigs.append((str(parent_path), parent_sig))
         parent_source = str(getattr(parent, "session_source", "") or "").strip().lower()
         if root_is_fork and parent_source != "fork":
             break
@@ -9248,13 +10058,33 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
             session_messages,
             getattr(parent, "messages", []) or [],
         ):
-            return session_messages
+            return _lineage_display_result(
+                session_messages,
+                sidecar_signature=self_sig,
+                cache_safe=cache_allowed and child_signature_stable,
+            )
         segments.append(parent)
         seen.add(parent_id)
         current = parent
+    else:
+        # Exhausting max_hops means the declared ancestry may continue beyond
+        # the signatures captured above. Never publish partial provenance.
+        parent_signatures_complete = False
 
     if not segments:
-        return list(getattr(session, "messages", []) or [])
+        cache_safe = cache_allowed and child_signature_stable
+        if cache_safe:
+            _store_lineage_display_cache(
+                sid,
+                self_sig,
+                parent_sigs,
+                session_messages,
+            )
+        return _lineage_display_result(
+            session_messages,
+            sidecar_signature=self_sig,
+            cache_safe=cache_safe,
+        )
 
     merged = []
     for segment in reversed(segments):
@@ -9264,10 +10094,27 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
             truncation_watermark=getattr(segment, "truncation_watermark", None),
             truncation_boundary=getattr(segment, "truncation_boundary", None),
         )
-    return merge_session_messages_append_only(
+    merged = merge_session_messages_append_only(
         merged,
-        getattr(session, "messages", []) or [],
+        getattr(resolved_child, "messages", []) or [],
         truncation_watermark=None,
+    )
+    cache_safe = (
+        cache_allowed
+        and child_signature_stable
+        and parent_signatures_complete
+    )
+    if cache_safe and self_sig is not None and parent_sigs:
+        _store_lineage_display_cache(
+            sid,
+            self_sig,
+            parent_sigs,
+            merged,
+        )
+    return _lineage_display_result(
+        merged,
+        sidecar_signature=self_sig,
+        cache_safe=cache_safe,
     )
 
 
@@ -13068,6 +13915,12 @@ def handle_get(handler, parsed) -> bool:
             metadata_summary = None
             limited_sidecar_messages = None
             state_db_since_timestamp = None
+            # Set by the limited-display path when the memoized merge can be
+            # reused without loading the state.db rows; must exist for every
+            # branch below, including the ones that never probe the cache.
+            _display_cache_hit = None
+            _display_state_db_signature = None
+            _display_omitted_state_db_rows = 0
             if is_messaging_session:
                 cli_messages = get_cli_session_messages(sid)
             elif load_messages:
@@ -13083,18 +13936,86 @@ def handle_get(handler, parsed) -> bool:
                 _state_db_reader_kwargs = {"profile": _session_profile}
                 if state_db_since_timestamp is not None:
                     _state_db_reader_kwargs["since_timestamp"] = state_db_since_timestamp
-                # Apply the display-path row backstop ONLY on provably-safe
-                # reads where no truncation_boundary prefix is required for the
-                # merge — see _state_db_backstop_limit_for_display. Compressed
-                # sessions and msg_before paging need their full prefix rows for
-                # correct reconciliation, so those stay uncapped.
-                _backstop = _state_db_backstop_limit_for_display(s, msg_before)
-                if _backstop is not None:
-                    _state_db_reader_kwargs["limit"] = _backstop
-                state_db_messages = get_state_db_session_messages(
-                    sid,
-                    **_state_db_reader_kwargs,
+                # Apply the newest-N state.db backstop only when the merge has
+                # no boundary or sidecar overlap. On a miss, count that exact SQL
+                # scope first so the response can preserve absolute pagination
+                # coordinates for any omitted prefix.
+                _backstop = _state_db_backstop_limit_for_display(
+                    s,
+                    msg_before,
+                    sidecar_messages=limited_sidecar_messages,
                 )
+                # perf: on the limited-display path the state.db rows are only
+                # consumed by the memoized merge below. Now that the cache key
+                # is a bounded SQL signature rather than a fingerprint OF these
+                # rows, a hit no longer needs them -- and materialising tens of
+                # thousands of dicts was the dominant remaining cost (~2.3s on a
+                # 36k-row session) even when the merge itself was served from
+                # cache. Probe the cache first and skip the load on a hit.
+                _display_cache_hit = None
+                if msg_limit is not None:
+                    _display_cache_hit = _display_merge_cached_result(
+                        s,
+                        limited_sidecar_messages,
+                        msg_before=msg_before,
+                    )
+                if _display_cache_hit is not None:
+                    state_db_messages = []
+                    _display_omitted_state_db_rows = _display_cache_hit[1]
+                else:
+                    _display_session_active = _display_merge_session_is_active(s)
+                    _backstop_count_signature = None
+                    if _backstop is not None and not _display_session_active:
+                        _backstop_count_signature = _state_db_session_signature(
+                            sid,
+                            _session_profile,
+                        )
+                        _state_db_row_count = _state_db_display_row_count(
+                            sid,
+                            profile=_session_profile,
+                            since_timestamp=state_db_since_timestamp,
+                        )
+                        if (
+                            _backstop_count_signature is not None
+                            and _state_db_row_count is not None
+                        ):
+                            _display_omitted_state_db_rows = max(
+                                0,
+                                _state_db_row_count - _backstop,
+                            )
+                            if _display_omitted_state_db_rows:
+                                _state_db_reader_kwargs["limit"] = _backstop
+                    if msg_limit is not None and not _display_session_active:
+                        (
+                            state_db_messages,
+                            _display_state_db_signature,
+                        ) = _load_state_db_messages_with_stable_signature(
+                            sid,
+                            _session_profile,
+                            _state_db_reader_kwargs,
+                        )
+                        if (
+                            _display_omitted_state_db_rows
+                            and _display_state_db_signature != _backstop_count_signature
+                        ):
+                            # The count and bounded load observed different DB
+                            # revisions. Reload uncapped instead of publishing a
+                            # shifted cursor under the newer cache signature.
+                            _state_db_reader_kwargs.pop("limit", None)
+                            _display_omitted_state_db_rows = 0
+                            (
+                                state_db_messages,
+                                _display_state_db_signature,
+                            ) = _load_state_db_messages_with_stable_signature(
+                                sid,
+                                _session_profile,
+                                _state_db_reader_kwargs,
+                            )
+                    else:
+                        state_db_messages = get_state_db_session_messages(
+                            sid,
+                            **_state_db_reader_kwargs,
+                        )
             elif not is_messaging_session:
                 # Metadata-only callers still need the same append-only
                 # reconciliation contract as full loads so stale/replayed
@@ -13127,11 +14048,17 @@ def handle_get(handler, parsed) -> bool:
                     # them chronologically and dedupe exact repeats.
                     _all_msgs = _merged_session_messages_for_display(s, cli_messages)
                 elif msg_limit is not None:
-                    _all_msgs = _limited_webui_messages_for_display_with_sidecar(
-                        s,
-                        limited_sidecar_messages,
-                        state_db_messages,
-                    )
+                    if _display_cache_hit is not None:
+                        _all_msgs = _display_cache_hit[0]
+                    else:
+                        _all_msgs = _limited_webui_messages_for_display_with_sidecar(
+                            s,
+                            limited_sidecar_messages,
+                            state_db_messages,
+                            state_db_signature=_display_state_db_signature,
+                            msg_before=msg_before,
+                            omitted_state_db_rows=_display_omitted_state_db_rows,
+                        )
                 else:
                     _all_msgs = merge_session_messages_append_only(
                         _webui_sidecar_lineage_messages_for_display(s),
@@ -13176,6 +14103,7 @@ def handle_get(handler, parsed) -> bool:
                     msg_before=msg_before,
                     expand_renderable=expand_renderable,
                 )
+                _messages_offset += _display_omitted_state_db_rows
                 if msg_limit is not None:
                     _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
                 _truncated_msgs = _hydrate_anchor_activity_scenes(
@@ -13192,7 +14120,11 @@ def handle_get(handler, parsed) -> bool:
             _windowed_messages = (
                 load_messages
                 and msg_limit is not None
-                and (msg_before is not None or len(_truncated_msgs) < len(_all_msgs))
+                and (
+                    msg_before is not None
+                    or _display_omitted_state_db_rows > 0
+                    or len(_truncated_msgs) < len(_all_msgs)
+                )
             )
             # Resolve effective context_length with model-metadata fallback so
             # older sessions (pre-#1318) that have context_length=0 persisted
@@ -13262,7 +14194,11 @@ def handle_get(handler, parsed) -> bool:
                     _messages_offset,
                     len(_truncated_msgs),
                 )
-            _merged_message_count = _summary_message_count if _summary_message_count is not None else len(_all_msgs)
+            _merged_message_count = (
+                _summary_message_count
+                if _summary_message_count is not None
+                else len(_all_msgs) + _display_omitted_state_db_rows
+            )
             _merged_last_message_at = _summary_last_message_at if _summary_last_message_at is not None else 0
             if _summary_last_message_at is None and _all_msgs:
                 try:
@@ -26917,7 +27853,6 @@ def _handle_session_compress(handler, body):
         return {"role": role, "ts": ts, "text": norm, "attachments": attach_count}
 
     def _compression_summary_from_messages(messages):
-        text = None
         for m in reversed(messages or []):
             if not isinstance(m, dict):
                 continue

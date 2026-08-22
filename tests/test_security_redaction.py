@@ -503,14 +503,15 @@ def _create_session_with_credentials() -> str:
     return sid
 
 
-def test_api_session_redacts_messages():
-    """GET /api/session route must call redact_session_data() before returning."""
-    import inspect
-    import api.routes as routes
-    src = inspect.getsource(routes.handle_get)
-    # Verify redact_session_data is applied to the session payload
-    assert "redact_session_data" in src, (
-        "api/routes.py handle_get must call redact_session_data() on /api/session response"
+@_needs_server
+def test_api_session_redacts_messages(test_server):
+    """GET /api/session must redact credentials in its observable response."""
+    sid = _create_session_with_credentials()
+    payload = _get(f"/api/session?session_id={sid}&resolve_model=0")
+
+    _assert_no_plaintext_credentials(
+        json.dumps(payload),
+        "GET /api/session",
     )
 
 
@@ -539,14 +540,15 @@ def test_api_sessions_list_redacts_titles(test_server):
     _assert_no_plaintext_credentials(dump, "GET /api/sessions titles")
 
 
-def test_api_session_export_redacts():
-    """GET /api/session/export must call redact_session_data() in _handle_session_export."""
-    import inspect
-    import api.routes as routes
-    # The export handler is a separate function (_handle_session_export)
-    src = inspect.getsource(routes._handle_session_export)
-    assert "redact_session_data" in src, (
-        "_handle_session_export must call redact_session_data() before serving download"
+@_needs_server
+def test_api_session_export_redacts(test_server):
+    """GET /api/session/export must redact credentials in downloaded JSON."""
+    sid = _create_session_with_credentials()
+    payload = _get_raw(f"/api/session/export?session_id={sid}&format=json")
+
+    _assert_no_plaintext_credentials(
+        payload.decode("utf-8"),
+        "GET /api/session/export",
     )
 
 
