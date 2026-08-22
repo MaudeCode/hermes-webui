@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -487,6 +488,14 @@ def _gateway_sse_reasoning_delta(payload: dict) -> str:
         return ""
 
 
+def _gateway_duration_seconds(value: object) -> float:
+    try:
+        duration = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return round(duration, 3) if math.isfinite(duration) and duration > 0 else 0
+
+
 def _gateway_stream_usage(payload: dict) -> dict:
     usage = payload.get("usage") if isinstance(payload, dict) else None
     if not isinstance(usage, dict):
@@ -496,12 +505,9 @@ def _gateway_stream_usage(payload: dict) -> dict:
         "output_tokens": int(usage.get("completion_tokens") or usage.get("output_tokens") or 0),
         "estimated_cost": usage.get("estimated_cost") or usage.get("estimated_cost_usd") or 0,
     }
-    try:
-        duration = float(usage.get("duration_seconds"))
-    except (TypeError, ValueError):
-        duration = 0
+    duration = _gateway_duration_seconds(usage.get("duration_seconds"))
     if duration > 0:
-        result["duration_seconds"] = round(duration, 3)
+        result["duration_seconds"] = duration
     return result
 
 
@@ -763,6 +769,18 @@ def _run_gateway_runs_api_streaming(
     headers_sse["Accept"] = "text/event-stream"
     req_events = urllib.request.Request(url_events, headers=headers_sse, method="GET")
     final_chunks: list[str] = []
+    deferred_reasoning: list[dict[str, Any]] = []
+
+    def emit_reasoning(event_payload: dict[str, Any]) -> None:
+        reason_delta = event_payload.get("text")
+        if reason_delta and stream_id in STREAM_REASONING_TEXT:
+            append_stream_text_chunk(STREAM_REASONING_TEXT, stream_id, reason_delta)
+        put_gateway_event("reasoning", event_payload)
+
+    def flush_deferred_reasoning() -> None:
+        while deferred_reasoning:
+            emit_reasoning(deferred_reasoning.pop(0))
+
     sse_event = "message"
     with urllib.request.urlopen(req_events, timeout=_gateway_read_timeout_secs()) as resp:
         for raw_line in _iter_sse_lines_cancellable(resp, cancel_event):
@@ -786,6 +804,8 @@ def _run_gateway_runs_api_streaming(
             except json.JSONDecodeError:
                 continue
             payload_event = str(payload.get("event") or payload.get("type") or sse_event).strip() or "message"
+            if deferred_reasoning and payload_event not in {"reasoning.available", "run.completed"}:
+                flush_deferred_reasoning()
             if payload_event == "approval.request":
                 approval_data = _gateway_runs_approval_event(payload)
                 if approval_data:
@@ -812,10 +832,10 @@ def _run_gateway_runs_api_streaming(
                     if event_name == "reasoning":
                         reason_delta = event_payload.get("text")
                         if reason_delta and " ".join(reason_delta.split()) == " ".join("".join(final_chunks).split()):
+                            deferred_reasoning.append(event_payload)
                             sse_event = "message"
                             continue
-                        if reason_delta and stream_id in STREAM_REASONING_TEXT:
-                            append_stream_text_chunk(STREAM_REASONING_TEXT, stream_id, reason_delta)
+                        emit_reasoning(event_payload)
                     elif stream_id in STREAM_LIVE_TOOL_CALLS:
                         if event_name == "tool":
                             STREAM_LIVE_TOOL_CALLS[stream_id].append({
@@ -834,7 +854,8 @@ def _run_gateway_runs_api_streaming(
                                     shared_tc["done"] = True
                                     shared_tc["is_error"] = bool(event_payload.get("is_error"))
                                     break
-                    put_gateway_event(event_name, event_payload)
+                    if event_name != "reasoning":
+                        put_gateway_event(event_name, event_payload)
                     if event_name != "reasoning":
                         update_active_run(stream_id, phase="gateway-tool", latest_tool=event_payload.get("name"))
                 sse_event = "message"
@@ -858,6 +879,12 @@ def _run_gateway_runs_api_streaming(
                     final_chunks = [output]
                     if stream_id in STREAM_PARTIAL_TEXT:
                         set_stream_text_value(STREAM_PARTIAL_TEXT, stream_id, output)
+                final_text = " ".join((output or "".join(final_chunks)).split())
+                for event_payload in deferred_reasoning:
+                    reason_delta = " ".join(str(event_payload.get("text") or "").split())
+                    if reason_delta != final_text:
+                        emit_reasoning(event_payload)
+                deferred_reasoning.clear()
                 usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
                 sse_event = "message"
                 continue
@@ -886,6 +913,7 @@ def _run_gateway_runs_api_streaming(
                     append_stream_text_chunk(STREAM_PARTIAL_TEXT, stream_id, delta)
                 put_gateway_event("token", {"text": delta})
             usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
+    flush_deferred_reasoning()
     return "".join(final_chunks), usage
 
 
@@ -1594,10 +1622,7 @@ def _run_gateway_chat_streaming(
                 active_turn_identity.get("timestamp") or now
             )
             assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
-            try:
-                turn_duration = float(usage.get("duration_seconds"))
-            except (TypeError, ValueError):
-                turn_duration = 0
+            turn_duration = _gateway_duration_seconds(usage.get("duration_seconds"))
             if turn_duration <= 0:
                 from api.streaming import _terminal_turn_duration
 

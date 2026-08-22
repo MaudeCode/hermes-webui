@@ -15,6 +15,7 @@ import api.streaming as streaming
 from api.config import PENDING_GOAL_CONTINUATION, STREAMS, create_stream_channel
 from api.models import new_session
 from api.gateway_chat import (
+    _gateway_duration_seconds,
     _gateway_http_error_event,
     _gateway_reasoning_delta,
     _gateway_sse_delta,
@@ -102,6 +103,21 @@ def test_gateway_stream_usage_normalizes_token_names():
         "estimated_cost": 0.01,
     }
     assert _gateway_stream_usage({}) == {}
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["1e309", float("inf"), float("nan"), 10**10000, None],
+    ids=["overflow-string", "infinity", "nan", "huge-integer", "none"],
+)
+def test_gateway_duration_rejects_non_finite_or_overflowing_values(value):
+    assert _gateway_duration_seconds(value) == 0
+    assert "duration_seconds" not in _gateway_stream_usage({"usage": {"duration_seconds": value}})
+
+
+def test_gateway_duration_accepts_positive_finite_values():
+    assert _gateway_duration_seconds("4.2519") == 4.252
+    assert _gateway_stream_usage({"usage": {"duration_seconds": "4.2519"}})["duration_seconds"] == 4.252
 
 
 def test_gateway_tool_progress_event_translates_gateway_lifecycle_payloads():
@@ -1910,6 +1926,52 @@ def test_gateway_runs_regeneration_sends_retained_user_once(monkeypatch):
     assert captured["session_key"] == (
         f"webui:session-regeneration:regeneration:{stream_id}"
     )
+
+
+def test_gateway_runs_releases_reasoning_that_only_matches_an_assistant_prefix(monkeypatch):
+    import threading
+
+    events = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size=65536):
+            return b'{"run_id":"prefix-run"}'
+
+        def __iter__(self):
+            return iter([
+                b'data: {"event":"message.delta","delta":"Hel"}\n',
+                b'data: {"event":"reasoning.available","text":"Hel","titles":["Prefix reasoning"]}\n',
+                b'data: {"event":"message.delta","delta":"lo"}\n',
+                b'data: {"event":"run.completed","output":"Hello","usage":{"duration_seconds":1}}\n',
+                b'data: [DONE]\n',
+            ])
+
+    def fake_urlopen(_req, timeout=0):
+        return FakeResponse()
+
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+    final_text, _usage = gateway_chat._run_gateway_runs_api_streaming(
+        "prefix-session",
+        "hello",
+        "model",
+        "/tmp",
+        "prefix-stream",
+        "http://gateway.local",
+        "secret",
+        [],
+        {},
+        put_gateway_event=lambda *event: events.append(event),
+        cancel_event=threading.Event(),
+    )
+
+    assert final_text == "Hello"
+    assert ("reasoning", {"text": "Hel", "titles": ["Prefix reasoning"]}) in events
 
 
 @pytest.mark.parametrize("context_retains_user", [True, False])
