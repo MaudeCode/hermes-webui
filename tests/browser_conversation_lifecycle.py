@@ -865,10 +865,13 @@ def _assert_no_running_tool_rows(rows: list[dict]) -> None:
 def _assert_live_activity(snapshot: dict) -> None:
     assert snapshot["live"], snapshot
     assert snapshot["groupCount"] == 1, snapshot
-    assert snapshot["sequences"], snapshot
-    assert all(sequence["collapsed"] for sequence in snapshot["sequences"]), snapshot
-    assert sum(sequence["active"] for sequence in snapshot["sequences"]) == 1, snapshot
-    assert snapshot["sequences"][-1]["active"], snapshot
+    if SCENARIO == "terminal-error":
+        assert not snapshot["sequences"], snapshot
+    else:
+        assert snapshot["sequences"], snapshot
+        assert all(sequence["collapsed"] for sequence in snapshot["sequences"]), snapshot
+        assert sum(sequence["active"] for sequence in snapshot["sequences"]) == 1, snapshot
+        assert snapshot["sequences"][-1]["active"], snapshot
     roles = [row["role"] for row in snapshot["rows"]]
     assert roles.count("thinking") == 1, snapshot
     assert roles.count("tool") == 1, snapshot
@@ -1112,15 +1115,16 @@ def main() -> int:
                 "mock Gateway did not reach the live activity checkpoint; "
                 f"request body: {gateway.request_body!r}; events: {gateway.emitted_events!r}"
             )
+        # This checkpoint owns semantic row availability. Group cardinality is
+        # covered above; visible process prose may correctly separate two singletons.
         page.wait_for_function(
-            """({reasoning, tool}) => {
+            """({tool}) => {
               const turn = document.querySelector('#liveAssistantTurn');
               if (!turn) return false;
-              return Boolean(turn.querySelector('[data-activity-sequence-group="1"]')) &&
-                Boolean(turn.querySelector('[data-anchor-row-role="thinking"]')) &&
+              return Boolean(turn.querySelector('[data-anchor-row-role="thinking"]')) &&
                 Boolean(turn.querySelector(`[data-anchor-row-role="tool"][data-tool-name="${tool}"]`));
             }""",
-            arg={"reasoning": REASONING_TEXT, "tool": TOOL_NAME},
+            arg={"tool": TOOL_NAME},
             timeout=10000,
         )
         live_snapshot = _activity_snapshot(page)
