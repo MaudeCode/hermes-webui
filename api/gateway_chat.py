@@ -804,9 +804,8 @@ def _run_gateway_runs_api_streaming(
             except json.JSONDecodeError:
                 continue
             payload_event = str(payload.get("event") or payload.get("type") or sse_event).strip() or "message"
-            if deferred_reasoning and payload_event not in {"reasoning.available", "run.completed"}:
-                flush_deferred_reasoning()
             if payload_event == "approval.request":
+                flush_deferred_reasoning()
                 approval_data = _gateway_runs_approval_event(payload)
                 if approval_data:
                     approval_data["run_id"] = run_id
@@ -826,6 +825,8 @@ def _run_gateway_runs_api_streaming(
                 sse_event = "message"
                 continue
             if payload_event in {"tool.started", "tool.completed", "reasoning.available"}:
+                if deferred_reasoning and payload_event != "reasoning.available":
+                    flush_deferred_reasoning()
                 translated = _gateway_tool_progress_event(payload)
                 if translated:
                     event_name, event_payload = translated
@@ -863,6 +864,7 @@ def _run_gateway_runs_api_streaming(
             if payload_event == "message.delta":
                 delta = str(payload.get("delta") or "")
                 if delta:
+                    flush_deferred_reasoning()
                     final_chunks.append(delta)
                     if stream_id in STREAM_PARTIAL_TEXT:
                         append_stream_text_chunk(STREAM_PARTIAL_TEXT, stream_id, delta)
@@ -889,10 +891,12 @@ def _run_gateway_runs_api_streaming(
                 sse_event = "message"
                 continue
             if payload_event == "run.failed":
+                flush_deferred_reasoning()
                 from api.route_approvals import retire_gateway_pending_mirror
                 retire_gateway_pending_mirror(session_id, run_id=run_id)
                 raise RuntimeError(str(payload.get("error") or "Gateway run failed"))
             if payload_event == "run.cancelled":
+                flush_deferred_reasoning()
                 from api.route_approvals import retire_gateway_pending_mirror
                 retire_gateway_pending_mirror(session_id, run_id=run_id)
                 put_gateway_event("cancel", {"message": "Cancelled by gateway"})
@@ -908,6 +912,7 @@ def _run_gateway_runs_api_streaming(
                 put_gateway_event("reasoning", reasoning_payload)
             delta = _gateway_sse_delta(payload)
             if delta:
+                flush_deferred_reasoning()
                 final_chunks.append(delta)
                 if stream_id in STREAM_PARTIAL_TEXT:
                     append_stream_text_chunk(STREAM_PARTIAL_TEXT, stream_id, delta)

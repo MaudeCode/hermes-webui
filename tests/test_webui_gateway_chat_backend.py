@@ -1974,6 +1974,49 @@ def test_gateway_runs_releases_reasoning_that_only_matches_an_assistant_prefix(m
     assert ("reasoning", {"text": "Hel", "titles": ["Prefix reasoning"]}) in events
 
 
+def test_gateway_runs_keeps_exact_echo_deferred_across_empty_delta(monkeypatch):
+    import threading
+
+    events = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size=65536):
+            return b'{"run_id":"empty-delta-run"}'
+
+        def __iter__(self):
+            return iter([
+                b'data: {"event":"message.delta","delta":"Hello"}\n',
+                b'data: {"event":"reasoning.available","text":"Hello","titles":["Echo"]}\n',
+                b'data: {"event":"message.delta","delta":""}\n',
+                b'data: {"event":"run.completed","output":"Hello","usage":{"duration_seconds":1}}\n',
+                b'data: [DONE]\n',
+            ])
+
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda _req, timeout=0: FakeResponse())
+    final_text, _usage = gateway_chat._run_gateway_runs_api_streaming(
+        "empty-delta-session",
+        "hello",
+        "model",
+        "/tmp",
+        "empty-delta-stream",
+        "http://gateway.local",
+        "secret",
+        [],
+        {},
+        put_gateway_event=lambda *event: events.append(event),
+        cancel_event=threading.Event(),
+    )
+
+    assert final_text == "Hello"
+    assert not any(event[0] == "reasoning" for event in events)
+
+
 @pytest.mark.parametrize("context_retains_user", [True, False])
 def test_gateway_regeneration_persists_retained_user_once(
     tmp_path,
