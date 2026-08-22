@@ -19807,8 +19807,10 @@ function buildToolCard(tc){
         </div>`:''}
       </div>`:''}
     </div>`;
-  const label=row.querySelector('.tool-card-name-label');
-  if(tc&&tc.done===false&&label) _syncActivityGlowDuration(label);
+  if(tc&&tc.done===false){
+    const label=row.querySelector('.tool-card-name-label');
+    if(label) _syncActivityGlowDuration(label);
+  }
   row._tcData = tc;
   // Durable classification flags: _tcData (a JS property) does NOT survive the
   // outerHTML/innerHTML snapshot+restore the live tool-call group uses on session
