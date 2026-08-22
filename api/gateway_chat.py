@@ -770,6 +770,7 @@ def _run_gateway_runs_api_streaming(
     req_events = urllib.request.Request(url_events, headers=headers_sse, method="GET")
     final_chunks: list[str] = []
     deferred_reasoning: list[dict[str, Any]] = []
+    deferred_followups: list[dict[str, Any]] = []
     deferred_baseline_text = ""
     deferred_baseline_titles: list[str] = []
     deferred_baseline_titles_present = False
@@ -805,6 +806,7 @@ def _run_gateway_runs_api_streaming(
         deferred_baseline_text = ""
         deferred_baseline_titles = []
         deferred_baseline_titles_present = False
+        deferred_followups.clear()
 
     def settle_deferred_reasoning(final_text: str) -> None:
         nonlocal deferred_baseline_text, deferred_baseline_titles
@@ -812,7 +814,11 @@ def _run_gateway_runs_api_streaming(
         if not deferred_reasoning:
             return
         pending = list(deferred_reasoning)
+        followups = list(deferred_followups)
+        final_titles_present = stream_id in STREAM_REASONING_TITLES
+        final_titles = list(STREAM_REASONING_TITLES.get(stream_id, []) or [])
         deferred_reasoning.clear()
+        deferred_followups.clear()
         if stream_id in STREAM_REASONING_TEXT:
             set_stream_text_value(STREAM_REASONING_TEXT, stream_id, deferred_baseline_text)
         if deferred_baseline_titles_present:
@@ -826,6 +832,15 @@ def _run_gateway_runs_api_streaming(
             reason_delta = " ".join(str(event_payload.get("text") or "").split())
             if reason_delta != final_text:
                 emit_reasoning(event_payload)
+        for event_payload in followups:
+            reason_delta = event_payload.get("text")
+            if stream_id in STREAM_REASONING_TEXT:
+                append_stream_text_chunk(STREAM_REASONING_TEXT, stream_id, reason_delta)
+        if followups:
+            if final_titles_present:
+                STREAM_REASONING_TITLES[stream_id] = final_titles
+            else:
+                STREAM_REASONING_TITLES.pop(stream_id, None)
 
     sse_event = "message"
     with urllib.request.urlopen(req_events, timeout=_gateway_read_timeout_secs()) as resp:
@@ -882,7 +897,10 @@ def _run_gateway_runs_api_streaming(
                             defer_reasoning(event_payload)
                             sse_event = "message"
                             continue
-                        flush_deferred_reasoning()
+                        if deferred_reasoning:
+                            if "titles" in event_payload:
+                                STREAM_REASONING_TITLES[stream_id] = list(event_payload.get("titles") or [])
+                            deferred_followups.append(event_payload)
                         emit_reasoning(event_payload)
                     elif stream_id in STREAM_LIVE_TOOL_CALLS:
                         if event_name == "tool":
