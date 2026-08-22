@@ -491,11 +491,18 @@ def _gateway_stream_usage(payload: dict) -> dict:
     usage = payload.get("usage") if isinstance(payload, dict) else None
     if not isinstance(usage, dict):
         return {}
-    return {
+    result = {
         "input_tokens": int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
         "output_tokens": int(usage.get("completion_tokens") or usage.get("output_tokens") or 0),
         "estimated_cost": usage.get("estimated_cost") or usage.get("estimated_cost_usd") or 0,
     }
+    try:
+        duration = float(usage.get("duration_seconds"))
+    except (TypeError, ValueError):
+        duration = 0
+    if duration > 0:
+        result["duration_seconds"] = round(duration, 3)
+    return result
 
 
 def _gateway_reasoning_delta(payload: dict) -> str:
@@ -804,6 +811,9 @@ def _run_gateway_runs_api_streaming(
                     event_name, event_payload = translated
                     if event_name == "reasoning":
                         reason_delta = event_payload.get("text")
+                        if reason_delta and " ".join(reason_delta.split()) == " ".join("".join(final_chunks).split()):
+                            sse_event = "message"
+                            continue
                         if reason_delta and stream_id in STREAM_REASONING_TEXT:
                             append_stream_text_chunk(STREAM_REASONING_TEXT, stream_id, reason_delta)
                     elif stream_id in STREAM_LIVE_TOOL_CALLS:
@@ -1584,6 +1594,16 @@ def _run_gateway_chat_streaming(
                 active_turn_identity.get("timestamp") or now
             )
             assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
+            try:
+                turn_duration = float(usage.get("duration_seconds"))
+            except (TypeError, ValueError):
+                turn_duration = 0
+            if turn_duration <= 0:
+                from api.streaming import _terminal_turn_duration
+
+                turn_duration = _terminal_turn_duration(s, now=now) or 0
+            if turn_duration > 0:
+                assistant_msg["_turnDuration"] = round(turn_duration, 3)
             saved_reasoning = stream_text_value(STREAM_REASONING_TEXT, stream_id)
             if saved_reasoning:
                 assistant_msg["reasoning"] = saved_reasoning
