@@ -632,40 +632,57 @@ def _expand_settled_worklog(page) -> None:
 
 def _assert_tool_disclosure_accessibility(page) -> None:
     state = page.evaluate(
-        """() => {
+        """async () => {
           const row = buildToolCard({
-            name: 'terminal',
-            args: {command: 'pwd'},
-            done: true,
-            snippet: '/tmp',
+            name: 'read_file',
+            args: {path: 'README.md'},
+            done: false,
+            snippet: 'Hermes WebUI',
           });
-          document.body.appendChild(row);
+          const sequence = _createActivitySequenceGroup('a11y-sequence', false, false);
+          _toolWorklogListEl(sequence).appendChild(row);
+          document.body.appendChild(sequence);
+          const sequenceHeader = sequence.querySelector(':scope > .tool-worklog-summary');
           const card = row.querySelector('.tool-card');
           const header = row.querySelector('.tool-card-header');
           const detail = row.querySelector('.tool-card-detail');
+          const glowLabel = row.querySelector('.tool-card-name-label');
+          await Promise.resolve();
           const before = {
+            sequenceExpanded: sequenceHeader.getAttribute('aria-expanded'),
             expanded: header.getAttribute('aria-expanded'),
             controls: header.getAttribute('aria-controls'),
             detailId: detail.id,
             hidden: detail.hidden,
+            glowDuration: glowLabel.style.getPropertyValue('--activity-glow-duration'),
+            computedGlowDuration: getComputedStyle(glowLabel).animationDuration,
           };
+          _toggleActivityGroup(sequenceHeader);
           _toggleToolCardDisclosure(header);
           const after = {
+            sequenceExpanded: sequenceHeader.getAttribute('aria-expanded'),
             expanded: header.getAttribute('aria-expanded'),
             hidden: detail.hidden,
           };
-          row.remove();
+          sequence.remove();
           return {before, after};
         }"""
     )
     assert state["before"] == {
+        "sequenceExpanded": "false",
         "expanded": "false",
         "controls": state["before"]["detailId"],
         "detailId": state["before"]["detailId"],
         "hidden": True,
+        "glowDuration": "2.50s",
+        "computedGlowDuration": "2.5s",
     }, state
     assert state["before"]["detailId"], state
-    assert state["after"] == {"expanded": "true", "hidden": False}, state
+    assert state["after"] == {
+        "sequenceExpanded": "true",
+        "expanded": "true",
+        "hidden": False,
+    }, state
 
 
 def _assert_thinking_disclosure_accessibility(page) -> None:
@@ -728,11 +745,52 @@ def _assert_settled_sequence_cardinality(page) -> None:
             [toolRow('first'), toolRow('second')],
             {settled: true},
           );
+          const liveSingleton = makeGroup();
+          _renderAnchorSceneRowsIntoWorklog(liveSingleton, [toolRow('live-one')], {live: true});
+          const liveSingletonBeforePromotion = liveSingleton.querySelectorAll('[data-activity-sequence-group="1"]').length;
+          _toggleToolCardDisclosure(liveSingleton.querySelector('.tool-card-header'));
+          const promotedDisclosure = _captureWorklogDetailDisclosureState(liveSingleton);
+          _renderAnchorSceneRowsIntoWorklog(
+            liveSingleton,
+            [toolRow('live-one'), toolRow('live-two')],
+            {live: true},
+          );
+          _restoreWorklogDetailDisclosureState(liveSingleton, promotedDisclosure);
+          const liveMultiple = makeGroup();
+          _renderAnchorSceneRowsIntoWorklog(
+            liveMultiple,
+            [toolRow('live-first'), toolRow('live-second')],
+            {live: true},
+          );
+          const legacyGroup = count => {
+            const group = makeGroup();
+            const tools = document.createElement('div');
+            tools.className = 'wl-step-tools';
+            for (let index = 0; index < count; index += 1) {
+              const row = document.createElement('div');
+              row.className = 'tool-card-row';
+              row.setAttribute('data-tool-disclosure-key', `legacy-${count}-${index}`);
+              tools.appendChild(row);
+            }
+            _toolWorklogListEl(group).appendChild(tools);
+            _syncActivitySequenceGroups(group, true);
+            return group;
+          };
+          const legacySingleton = legacyGroup(1);
+          const legacyMultiple = legacyGroup(2);
           return {
             singletonSequences: singleton.querySelectorAll('[data-activity-sequence-group="1"]').length,
             singletonRows: singleton.querySelectorAll('[data-anchor-scene-row="1"]').length,
             multipleSequences: multiple.querySelectorAll('[data-activity-sequence-group="1"]').length,
             multipleRows: multiple.querySelectorAll('[data-anchor-scene-row="1"]').length,
+            liveSingletonBeforePromotion,
+            promotedSequences: liveSingleton.querySelectorAll('[data-activity-sequence-group="1"]').length,
+            liveSingletonRows: liveSingleton.querySelectorAll('[data-anchor-scene-row="1"]').length,
+            promotedFirstToolOpen: liveSingleton.querySelector('.tool-card').classList.contains('open'),
+            liveMultipleSequences: liveMultiple.querySelectorAll('[data-activity-sequence-group="1"]').length,
+            liveMultipleRows: liveMultiple.querySelectorAll('[data-anchor-scene-row="1"]').length,
+            legacySingletonSequences: legacySingleton.querySelectorAll('[data-activity-sequence-group="1"]').length,
+            legacyMultipleSequences: legacyMultiple.querySelectorAll('[data-activity-sequence-group="1"]').length,
           };
         }"""
     )
@@ -741,6 +799,14 @@ def _assert_settled_sequence_cardinality(page) -> None:
         "singletonRows": 1,
         "multipleSequences": 1,
         "multipleRows": 2,
+        "liveSingletonBeforePromotion": 0,
+        "promotedSequences": 1,
+        "liveSingletonRows": 2,
+        "promotedFirstToolOpen": True,
+        "liveMultipleSequences": 1,
+        "liveMultipleRows": 2,
+        "legacySingletonSequences": 0,
+        "legacyMultipleSequences": 1,
     }, state
 
 
@@ -799,10 +865,13 @@ def _assert_no_running_tool_rows(rows: list[dict]) -> None:
 def _assert_live_activity(snapshot: dict) -> None:
     assert snapshot["live"], snapshot
     assert snapshot["groupCount"] == 1, snapshot
-    assert snapshot["sequences"], snapshot
-    assert all(sequence["collapsed"] for sequence in snapshot["sequences"]), snapshot
-    assert sum(sequence["active"] for sequence in snapshot["sequences"]) == 1, snapshot
-    assert snapshot["sequences"][-1]["active"], snapshot
+    if SCENARIO == "terminal-error":
+        assert not snapshot["sequences"], snapshot
+    else:
+        assert snapshot["sequences"], snapshot
+        assert all(sequence["collapsed"] for sequence in snapshot["sequences"]), snapshot
+        assert sum(sequence["active"] for sequence in snapshot["sequences"]) == 1, snapshot
+        assert snapshot["sequences"][-1]["active"], snapshot
     roles = [row["role"] for row in snapshot["rows"]]
     assert roles.count("thinking") == 1, snapshot
     assert roles.count("tool") == 1, snapshot
@@ -1046,15 +1115,16 @@ def main() -> int:
                 "mock Gateway did not reach the live activity checkpoint; "
                 f"request body: {gateway.request_body!r}; events: {gateway.emitted_events!r}"
             )
+        # This checkpoint owns semantic row availability. Group cardinality is
+        # covered above; visible process prose may correctly separate two singletons.
         page.wait_for_function(
-            """({reasoning, tool}) => {
+            """({tool}) => {
               const turn = document.querySelector('#liveAssistantTurn');
               if (!turn) return false;
-              return Boolean(turn.querySelector('[data-activity-sequence-group="1"]')) &&
-                Boolean(turn.querySelector('[data-anchor-row-role="thinking"]')) &&
+              return Boolean(turn.querySelector('[data-anchor-row-role="thinking"]')) &&
                 Boolean(turn.querySelector(`[data-anchor-row-role="tool"][data-tool-name="${tool}"]`));
             }""",
-            arg={"reasoning": REASONING_TEXT, "tool": TOOL_NAME},
+            arg={"tool": TOOL_NAME},
             timeout=10000,
         )
         live_snapshot = _activity_snapshot(page)

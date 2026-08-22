@@ -67,6 +67,17 @@ class FakeNode{{
   getAttribute(name){{return Object.prototype.hasOwnProperty.call(this.attributes,name)?this.attributes[name]:null;}}
   removeAttribute(name){{delete this.attributes[name];}}
   toggleAttribute(name,force){{if(force)this.setAttribute(name,'');else delete this.attributes[name];}}
+  querySelectorAll(selector){{
+    const found=[];
+    const visit=node=>{{
+      for(const child of node.children){{
+        if(selector==='[data-anchor-scene-row="1"]'&&child.getAttribute('data-anchor-scene-row')==='1') found.push(child);
+        visit(child);
+      }}
+    }};
+    visit(this);
+    return found;
+  }}
   appendChild(child){{return this.insertBefore(child,null);}}
   insertBefore(child,ref){{
     if(child.parentNode){{const old=child.parentNode.children.indexOf(child);if(old>=0)child.parentNode.children.splice(old,1);}}
@@ -113,7 +124,7 @@ _renderAnchorSceneRowsIntoWorklog(group,[
   {{row_id:'status-1',role:'control',source_event_type:'status',text:'running'}},
 ],{{live:true}});
 const firstBefore=list.children[0];
-const thinkingBefore=firstBefore.list.children[0];
+const thinkingBefore=firstBefore;
 const secondBefore=list.children[1];
 _renderAnchorSceneRowsIntoWorklog(group,[
   {{row_id:'reason-1',role:'thinking',source_event_type:'reasoning',text:'unchanged'}},
@@ -121,7 +132,7 @@ _renderAnchorSceneRowsIntoWorklog(group,[
 ],{{live:true}});
 process.stdout.write(JSON.stringify({{
   firstPreserved:list.children[0]===firstBefore,
-  thinkingPreserved:list.children[0].list.children[0]===thinkingBefore,
+  thinkingPreserved:list.children[0]===thinkingBefore,
   changedReplaced:list.children[1]!==secondBefore,
   clearCount:list.clearCount,
   order:list.children.map(x=>x.getAttribute('data-activity-sequence-key')||x.getAttribute('data-anchor-row-id')),

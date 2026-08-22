@@ -5,6 +5,7 @@ blank Thinking placeholder while preserving the quiet tool/thinking metadata
 family.
 """
 
+import json
 import pathlib
 import shutil
 import subprocess
@@ -86,9 +87,41 @@ def test_active_rows_use_text_glow_without_spinner_or_progress_bar():
     assert "_attachProgressBar(row, opts)" not in decorate_fn
     assert '[data-reasoning-active="1"] .thinking-card-label' in STYLE_CSS
     assert ".tool-card-running .tool-card-name-label" in STYLE_CSS
+    assert '[data-reasoning-active="1"] .thinking-card-header' in STYLE_CSS
+    assert ".tool-card-running .tool-card-name" in STYLE_CSS
     assert "prefers-reduced-motion:reduce" in STYLE_CSS
+    assert "animation:reasoning-title-glow var(--activity-glow-duration,4s) ease-in-out infinite" in STYLE_CSS
     apply_titles = UI_JS.split("function _applyReasoningTitles(row, value, active)", 1)[1].split("function isSimplifiedToolCalling", 1)[0]
     assert "row.setAttribute('data-reasoning-active',active?'1':'0')" in apply_titles
+    assert "_syncActivityGlowDuration(label)" in apply_titles
+
+
+def test_activity_glow_duration_tracks_rendered_text_width_with_bounds():
+    helper = _function_source(UI_JS, "_activityGlowDurationSeconds")
+    script = f"""
+{helper}
+console.log(JSON.stringify([0,175,280,700].map(_activityGlowDurationSeconds)));
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout) == [2.5, 2.5, 4, 6]
+
+    sequence = _function_source(UI_JS, "_syncActivitySequenceSummary")
+    build_tool = _function_source(UI_JS, "buildToolCard")
+    rotation = _function_source(UI_JS, "_ensureReasoningTitleRotation")
+    assert "_syncActivityGlowDuration(label)" in sequence
+    assert "_syncActivityGlowDuration(label)" in build_tool
+    assert "_syncActivityGlowDuration(label)" in rotation
+
+
+def test_activity_sequence_header_keeps_full_size_without_outer_worklog_divider():
+    assert '.activity-sequence-group > .tool-worklog-summary{' in STYLE_CSS
+    sequence_rule = STYLE_CSS.split('.activity-sequence-group > .tool-worklog-summary{', 1)[1].split('}', 1)[0]
+    assert "width:100%" in sequence_rule
+    assert "min-height:44px" in sequence_rule
+    assert "border:0" in sequence_rule
+
+    outer_selector = '.tool-worklog-group[data-tool-worklog-group="1"]:not([data-run-activity-group="1"]) > .tool-worklog-summary'
+    assert outer_selector in STYLE_CSS
 
 
 def test_settled_activity_render_keeps_tools_bound_to_progress_bursts():
