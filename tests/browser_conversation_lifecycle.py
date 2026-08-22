@@ -632,11 +632,11 @@ def _expand_settled_worklog(page) -> None:
 
 def _assert_tool_disclosure_accessibility(page) -> None:
     state = page.evaluate(
-        """() => {
+        """async () => {
           const row = buildToolCard({
             name: 'read_file',
             args: {path: 'README.md'},
-            done: true,
+            done: false,
             snippet: 'Hermes WebUI',
           });
           const sequence = _createActivitySequenceGroup('a11y-sequence', false, false);
@@ -646,12 +646,16 @@ def _assert_tool_disclosure_accessibility(page) -> None:
           const card = row.querySelector('.tool-card');
           const header = row.querySelector('.tool-card-header');
           const detail = row.querySelector('.tool-card-detail');
+          const glowLabel = row.querySelector('.tool-card-name-label');
+          await Promise.resolve();
           const before = {
             sequenceExpanded: sequenceHeader.getAttribute('aria-expanded'),
             expanded: header.getAttribute('aria-expanded'),
             controls: header.getAttribute('aria-controls'),
             detailId: detail.id,
             hidden: detail.hidden,
+            glowDuration: glowLabel.style.getPropertyValue('--activity-glow-duration'),
+            computedGlowDuration: getComputedStyle(glowLabel).animationDuration,
           };
           _toggleActivityGroup(sequenceHeader);
           _toggleToolCardDisclosure(header);
@@ -670,6 +674,8 @@ def _assert_tool_disclosure_accessibility(page) -> None:
         "controls": state["before"]["detailId"],
         "detailId": state["before"]["detailId"],
         "hidden": True,
+        "glowDuration": "2.50s",
+        "computedGlowDuration": "2.5s",
     }, state
     assert state["before"]["detailId"], state
     assert state["after"] == {

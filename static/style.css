@@ -3931,7 +3931,7 @@ body.resizing .sidebar{transition:none!important;}
   background-size:240% 100%;
   background-clip:text;
   -webkit-background-clip:text;
-  animation:reasoning-title-glow 4s ease-in-out infinite;
+  animation:reasoning-title-glow var(--activity-glow-duration,4s) ease-in-out infinite;
 }
 .transparent-event-progress{display:none!important;}
 @media (prefers-reduced-motion:reduce){

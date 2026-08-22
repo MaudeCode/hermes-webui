@@ -11777,6 +11777,34 @@ function _restoreWorklogDetailDisclosureState(root, state){
     }
   });
 }
+function _activityGlowDurationSeconds(width){
+  const measured=Number(width);
+  if(!Number.isFinite(measured)||measured<=0) return 2.5;
+  return Math.min(6,Math.max(2.5,measured/70));
+}
+function _syncActivityGlowDuration(label){
+  if(!label||typeof document==='undefined') return;
+  const apply=()=>{
+    if(!label.isConnected||!label.style) return;
+    let width=0;
+    if(typeof document.createRange==='function'){
+      const range=document.createRange();
+      range.selectNodeContents(label);
+      width=range.getBoundingClientRect().width;
+      if(typeof range.detach==='function') range.detach();
+    }
+    if(width<=0&&typeof document.createElement==='function'){
+      const context=document.createElement('canvas').getContext('2d');
+      if(context){
+        if(typeof getComputedStyle==='function') context.font=getComputedStyle(label).font;
+        width=context.measureText(String(label.textContent||'')).width;
+      }
+    }
+    label.style.setProperty('--activity-glow-duration',`${_activityGlowDurationSeconds(width).toFixed(2)}s`);
+  };
+  if(label.isConnected) apply();
+  else if(typeof queueMicrotask==='function') queueMicrotask(apply);
+}
 function _thinkingCardHtml(text, open){
   const clean=_sanitizeThinkingDisplayText(text);
   const copyBtn=`<button class="thinking-copy-btn" onclick="event.stopPropagation();_copyThinkingText(this)" title="${t('copy')}" aria-label="${t('copy')}">${li('copy',12)}</button>`;
@@ -11810,7 +11838,10 @@ function _ensureReasoningTitleRotation(){
       if(titles.length<2) return;
       const next=(Number(row.getAttribute('data-reasoning-title-index')||0)+1)%titles.length;
       const label=row.querySelector('.thinking-card-label');
-      if(label) label.textContent=titles[next];
+      if(label){
+        label.textContent=titles[next];
+        _syncActivityGlowDuration(label);
+      }
       const sequence=row.closest&&row.closest('[data-activity-sequence-group="1"]');
       if(sequence) _syncActivitySequenceSummary(sequence);
       row.setAttribute('data-reasoning-title-index',String(next));
@@ -11825,7 +11856,10 @@ function _applyReasoningTitles(row, value, active){
     row.removeAttribute('data-reasoning-titles');
     row.removeAttribute('data-reasoning-title-index');
     row.setAttribute('data-reasoning-active',active?'1':'0');
-    if(label) label.textContent=t('thinking');
+    if(label){
+      label.textContent=t('thinking');
+      if(active) _syncActivityGlowDuration(label);
+    }
     return;
   }
   const current=label&&titles.indexOf(String(label.textContent||''));
@@ -11836,6 +11870,7 @@ function _applyReasoningTitles(row, value, active){
   if(label){
     label.textContent=titles[index];
     label.setAttribute('aria-live','off');
+    if(active) _syncActivityGlowDuration(label);
   }
   if(active&&titles.length>1) _ensureReasoningTitleRotation();
 }
@@ -13710,6 +13745,7 @@ function _syncActivitySequenceSummary(group){
     if(currentLabel){
       label.textContent=currentLabel;
       label.setAttribute('data-sweep-label',label.textContent);
+      _syncActivityGlowDuration(label);
       return;
     }
   }
@@ -13718,6 +13754,7 @@ function _syncActivitySequenceSummary(group){
   label.textContent=(titled&&titled.textContent.trim())
     || (cards.length?_toolWorklogSummary(cards,{live:false,toolCount:cards.length}):(typeof t==='function'?t('thinking'):'Thinking'));
   label.setAttribute('data-sweep-label',label.textContent);
+  if(isActive) _syncActivityGlowDuration(label);
 }
 function _activitySequenceDirectNode(node){
   return !!(node&&node.classList&&(
@@ -19770,6 +19807,8 @@ function buildToolCard(tc){
         </div>`:''}
       </div>`:''}
     </div>`;
+  const label=row.querySelector('.tool-card-name-label');
+  if(tc&&tc.done===false&&label) _syncActivityGlowDuration(label);
   row._tcData = tc;
   // Durable classification flags: _tcData (a JS property) does NOT survive the
   // outerHTML/innerHTML snapshot+restore the live tool-call group uses on session

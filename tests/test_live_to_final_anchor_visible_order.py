@@ -720,6 +720,7 @@ function _syncActivitySequenceSummary(group){{
 }}
 global.t=()=>"Thinking";
 global._toolWorklogSummary=()=>"Ran 1 command";
+global._syncActivityGlowDuration=()=>{{}};
 const label={{textContent:'',setAttribute(){{}}}};
 const tool={{
   classList:{{contains:()=>false}},
@@ -779,6 +780,7 @@ def test_active_reasoning_without_titles_keeps_active_state():
 const assert=require('assert');
 global.t=()=>"Thinking";
 global._reasoningTitleList=value=>Array.isArray(value)?value:[];
+global._syncActivityGlowDuration=()=>{{}};
 const attrs=new Map();
 const label={{textContent:''}};
 const row={{
