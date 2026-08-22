@@ -421,9 +421,18 @@ class DeterministicGateway:
                             "event": "message.delta",
                             "delta": FINAL_SUFFIX,
                         })
+                        self._event("reasoning.available", {
+                            "event": "reasoning.available",
+                            "text": FINAL_TEXT,
+                            "titles": [FINAL_TEXT],
+                        })
                         self._event("run.completed", {
                             "event": "run.completed",
-                            "usage": {"input_tokens": 12, "output_tokens": 5},
+                            "usage": {
+                                "input_tokens": 12,
+                                "output_tokens": 5,
+                                "duration_seconds": 4.25,
+                            },
                         })
                     self.wfile.write(b"data: [DONE]\n\n")
                     self.wfile.flush()
@@ -543,6 +552,7 @@ def _activity_snapshot(page) -> dict:
               label: (group.querySelector(':scope > .tool-worklog-summary .tool-worklog-label') || {}).textContent || '',
               collapsed: group.classList.contains('tool-call-group-collapsed'),
               active: group.getAttribute('data-live-activity-current') === '1',
+              rows: group.querySelectorAll('[data-anchor-scene-row="1"]').length,
               expanded: (group.querySelector(':scope > .tool-worklog-summary') || {})
                 .getAttribute?.('aria-expanded') || '',
             })),
@@ -693,6 +703,47 @@ def _assert_thinking_disclosure_accessibility(page) -> None:
     assert state["after"] == {"expanded": "true", "hidden": False}, state
 
 
+def _assert_settled_sequence_cardinality(page) -> None:
+    state = page.evaluate(
+        """() => {
+          const makeGroup = () => {
+            const group = document.createElement('div');
+            group.className = 'tool-worklog-group';
+            group.setAttribute('data-tool-worklog-group', '1');
+            group.innerHTML = '<button class="tool-worklog-summary"><span class="tool-worklog-label"></span></button><div class="tool-worklog-body"><div class="worklog"><div class="tool-worklog-list"></div></div></div>';
+            return group;
+          };
+          const toolRow = id => ({
+            role: 'tool',
+            row_id: id,
+            tool_call_id: id,
+            status: 'completed',
+            tool: {id, name: 'read_file', args: {path: 'README.md'}},
+          });
+          const singleton = makeGroup();
+          _renderAnchorSceneRowsIntoWorklog(singleton, [toolRow('one')], {settled: true});
+          const multiple = makeGroup();
+          _renderAnchorSceneRowsIntoWorklog(
+            multiple,
+            [toolRow('first'), toolRow('second')],
+            {settled: true},
+          );
+          return {
+            singletonSequences: singleton.querySelectorAll('[data-activity-sequence-group="1"]').length,
+            singletonRows: singleton.querySelectorAll('[data-anchor-scene-row="1"]').length,
+            multipleSequences: multiple.querySelectorAll('[data-activity-sequence-group="1"]').length,
+            multipleRows: multiple.querySelectorAll('[data-anchor-scene-row="1"]').length,
+          };
+        }"""
+    )
+    assert state == {
+        "singletonSequences": 0,
+        "singletonRows": 1,
+        "multipleSequences": 1,
+        "multipleRows": 2,
+    }, state
+
+
 def _terminal_rows(snapshot: dict) -> list[dict]:
     return [row for row in snapshot["rows"] if row["role"] == "terminal"]
 
@@ -771,14 +822,16 @@ def _assert_live_activity(snapshot: dict) -> None:
 def _assert_settled(snapshot: dict, scenario: str) -> None:
     assert not snapshot["live"], snapshot
     assert snapshot["groupCount"] == 1, snapshot
-    assert snapshot["sequences"] and all(sequence["collapsed"] for sequence in snapshot["sequences"]), snapshot
-    assert snapshot["summary"][0]["label"].startswith("Worked"), snapshot
+    assert snapshot["sequences"], snapshot
+    assert all(sequence["rows"] >= 2 for sequence in snapshot["sequences"]), snapshot
+    assert snapshot["summary"][0]["label"].startswith("Worked for "), snapshot
     roles = [row["role"] for row in snapshot["rows"]]
     assert "thinking" in roles and "tool" in roles, snapshot
     tool_rows = _tool_rows(snapshot)
     assert len(tool_rows) == 1 and tool_rows[0]["tool"] == TOOL_NAME, snapshot
     _assert_no_running_tool_rows(tool_rows)
     thinking_rows = [row for row in snapshot["rows"] if row["role"] == "thinking"]
+    assert all(FINAL_TEXT not in row["text"] for row in thinking_rows), snapshot
     expected_title = "Thinking" if TITLE_CLEAR else REASONING_TITLE
     assert all(row["thinkingTitle"] == expected_title for row in thinking_rows), snapshot
     if TITLE_ONLY or TITLE_CLEAR:
@@ -799,6 +852,8 @@ def _assert_settled(snapshot: dict, scenario: str) -> None:
         assert sum(TERMINAL_ERROR_TEXT in text for text in snapshot["visibleFinal"]) == 1, snapshot
         assert TERMINAL_ERROR_TEXT in snapshot["transcript"], snapshot
     else:
+        turn_duration = snapshot["assistantMessage"].get("turnDuration")
+        assert isinstance(turn_duration, (int, float)) and turn_duration > 0, snapshot
         assert sum(FINAL_TEXT in text for text in snapshot["visibleFinal"]) == 1, snapshot
         assert snapshot["transcript"].count(FINAL_TEXT) == 1, snapshot
 
@@ -982,6 +1037,7 @@ def main() -> int:
         page.wait_for_selector("#msg", state="visible", timeout=15000)
         _assert_tool_disclosure_accessibility(page)
         _assert_thinking_disclosure_accessibility(page)
+        _assert_settled_sequence_cardinality(page)
         page.locator("#msg").fill(PROMPT)
         page.locator("#btnSend").click()
 

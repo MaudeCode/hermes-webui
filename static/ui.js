@@ -13878,6 +13878,16 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
     desired.push(opts.afterNode);
     wrote=true;
   }
+  if(!(opts&&opts.live)){
+    for(let index=desired.length-1;index>=0;index--){
+      const sequence=desired[index];
+      if(!(sequence&&sequence.getAttribute&&sequence.getAttribute('data-activity-sequence-group')==='1')) continue;
+      if(sequence.querySelectorAll('[data-anchor-scene-row="1"]').length!==1) continue;
+      const sequenceList=_toolWorklogListEl(sequence);
+      if(!sequenceList) continue;
+      desired.splice(index,1,...Array.from(sequenceList.children));
+    }
+  }
   desired.filter(node=>node.getAttribute&&node.getAttribute('data-activity-sequence-group')==='1')
     .forEach(node=>node.removeAttribute('data-live-activity-current'));
   if(opts&&opts.live&&currentSequence) currentSequence.setAttribute('data-live-activity-current','1');
