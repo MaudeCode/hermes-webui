@@ -492,11 +492,10 @@ class TestToolCallGroupingStatic:
             "keep result previews inside the expanded detail."
         )
 
-    def test_read_search_list_web_detail_is_error_only(self):
+    def test_every_tool_with_raw_detail_is_expandable(self):
         helper = _function_body(UI_JS, "_toolCardAllowsDetail")
 
-        assert "read:1,search:1,list:1,web:1" in helper
-        assert "if(infoKinds[kind]&&!(tc&&tc.is_error)) return false;" in helper
+        assert "infoKinds" not in helper
         assert "return true;" in helper
 
     def test_live_thinking_does_not_rewrite_visible_interim_echoes(self):

@@ -696,6 +696,7 @@ def test_activity_sequences_are_collapsed_inside_visible_prose_and_preserve_open
     assert "currentSequenceList.appendChild" in render
     assert "desired.push(node);" in render
     assert "if(opts&&opts.live&&currentSequence)" in render
+    assert "if(!(opts&&opts.live))" not in render
     assert "existing.getAttribute('data-activity-sequence-group')==='1'" in reconcile
     assert "actual=existing" in reconcile
     assert "data-reasoning-titles" in summary
@@ -1763,16 +1764,16 @@ def test_live_sequences_use_natural_titles_and_settled_outer_group_uses_worked_d
     assert "_toolWorklogSummary" in sequence
     assert "durationEl.textContent='';" in summary
     assert "collapsed:false" in live
-    assert ".tool-worklog-group[data-tool-worklog-group=\"1\"]:not([data-run-activity-group=\"1\"]) .tool-worklog-summary" in STYLE_CSS
+    assert ".tool-worklog-group[data-tool-worklog-group=\"1\"]:not([data-run-activity-group=\"1\"]) > .tool-worklog-summary" in STYLE_CSS
 
 
 def test_processed_time_anchor_uses_lightweight_summary_style():
     summary_rule = STYLE_CSS[
-        STYLE_CSS.index(".tool-worklog-group[data-tool-worklog-group=\"1\"]:not([data-run-activity-group=\"1\"]) .tool-worklog-summary{"):
-        STYLE_CSS.index(".tool-worklog-group[data-tool-worklog-group=\"1\"]:not([data-run-activity-group=\"1\"]) .tool-worklog-label{")
+        STYLE_CSS.index(".tool-worklog-group[data-tool-worklog-group=\"1\"]:not([data-run-activity-group=\"1\"]) > .tool-worklog-summary{"):
+        STYLE_CSS.index(".tool-worklog-group[data-tool-worklog-group=\"1\"]:not([data-run-activity-group=\"1\"]) > .tool-worklog-summary .tool-worklog-label{")
     ]
     label_rule = STYLE_CSS[
-        STYLE_CSS.index(".tool-worklog-group[data-tool-worklog-group=\"1\"]:not([data-run-activity-group=\"1\"]) .tool-worklog-label{"):
+        STYLE_CSS.index(".tool-worklog-group[data-tool-worklog-group=\"1\"]:not([data-run-activity-group=\"1\"]) > .tool-worklog-summary .tool-worklog-label{"):
         STYLE_CSS.index(".tool-worklog-group[data-tool-worklog-group=\"1\"]:not([data-run-activity-group=\"1\"]) .tool-worklog-summary:hover{")
     ]
 
@@ -1791,7 +1792,7 @@ def test_legacy_settled_worklog_is_marked_as_completed_run():
     assert "data-completed-run-group" in summary
     assert "_syncActivitySequenceGroups(group,false)" in summary
     assert "t('processed_elapsed',durationText)" in summary
-    assert ".tool-worklog-group[data-tool-worklog-group=\"1\"]:not([data-run-activity-group=\"1\"]) .tool-worklog-summary" in STYLE_CSS
+    assert ".tool-worklog-group[data-tool-worklog-group=\"1\"]:not([data-run-activity-group=\"1\"]) > .tool-worklog-summary" in STYLE_CSS
 
 
 def test_live_sequence_headers_are_clickable_while_technical_host_stays_open():

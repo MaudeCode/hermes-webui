@@ -11601,7 +11601,7 @@ function _worklogDetailHashKey(value){
 }
 function _worklogDetailBaseKey(el){
   if(!el||!el.classList) return '';
-  const activity=el.closest&&el.closest('.agent-activity-group,.tool-worklog-group[data-tool-worklog-group="1"],.tool-call-group[data-tool-call-group="1"],.live-worklog[data-live-worklog-shell="1"]');
+  const activity=el.closest&&el.closest('.agent-activity-group:not([data-activity-sequence-group="1"]),.tool-worklog-group[data-tool-worklog-group="1"],.tool-call-group[data-tool-call-group="1"],.live-worklog[data-live-worklog-shell="1"]');
   const scope=activity?[
     activity.getAttribute('data-anchor-stream-id')?`stream:${activity.getAttribute('data-anchor-stream-id')}`:'',
     activity.getAttribute('data-activity-disclosure-key')||'',
@@ -13730,22 +13730,47 @@ function _activitySequenceDirectNode(node){
 function _syncActivitySequenceGroups(worklog, live){
   const list=_toolWorklogListEl(worklog);
   if(!list) return;
+  Array.from(list.querySelectorAll(':scope > [data-activity-sequence-group="1"]')).forEach(group=>{
+    if(group.querySelectorAll('.agent-activity-thinking,.tool-card-row,.compression-card-row').length!==1) return;
+    const sequenceList=_toolWorklogListEl(group);
+    if(!sequenceList) return;
+    Array.from(sequenceList.children).forEach(node=>list.insertBefore(node,group));
+    group.remove();
+  });
   let sequence=null;
+  let pending=null;
   Array.from(list.children).forEach((node,index)=>{
     if(node.getAttribute&&node.getAttribute('data-activity-sequence-group')==='1'){
       sequence=node;
+      pending=null;
       sequence.removeAttribute('data-live-activity-current');
       return;
     }
     if(_activitySequenceDirectNode(node)){
-      if(!sequence){
+      const itemCount=node.classList.contains('wl-step-tools')
+        ? node.querySelectorAll(':scope > .tool-card-row').length
+        : 1;
+      if(sequence){
+        _toolWorklogListEl(sequence).appendChild(node);
+      }else if(pending){
+        const key=_activitySequenceNodeKey(pending,index-1);
+        sequence=_createActivitySequenceGroup(key,!!live,false);
+        list.insertBefore(sequence,pending);
+        const sequenceList=_toolWorklogListEl(sequence);
+        sequenceList.appendChild(pending);
+        sequenceList.appendChild(node);
+        pending=null;
+      }else if(itemCount>1){
         const key=_activitySequenceNodeKey(node,index);
         sequence=_createActivitySequenceGroup(key,!!live,false);
         list.insertBefore(sequence,node);
+        _toolWorklogListEl(sequence).appendChild(node);
+      }else{
+        pending=node;
       }
-      _toolWorklogListEl(sequence).appendChild(node);
     }else{
       sequence=null;
+      pending=null;
     }
   });
   const groups=Array.from(list.querySelectorAll(':scope > [data-activity-sequence-group="1"]'));
@@ -13878,15 +13903,13 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
     desired.push(opts.afterNode);
     wrote=true;
   }
-  if(!(opts&&opts.live)){
-    for(let index=desired.length-1;index>=0;index--){
-      const sequence=desired[index];
-      if(!(sequence&&sequence.getAttribute&&sequence.getAttribute('data-activity-sequence-group')==='1')) continue;
-      if(sequence.querySelectorAll('[data-anchor-scene-row="1"]').length!==1) continue;
-      const sequenceList=_toolWorklogListEl(sequence);
-      if(!sequenceList) continue;
-      desired.splice(index,1,...Array.from(sequenceList.children));
-    }
+  for(let index=desired.length-1;index>=0;index--){
+    const sequence=desired[index];
+    if(!(sequence&&sequence.getAttribute&&sequence.getAttribute('data-activity-sequence-group')==='1')) continue;
+    if(sequence.querySelectorAll('[data-anchor-scene-row="1"]').length!==1) continue;
+    const sequenceList=_toolWorklogListEl(sequence);
+    if(!sequenceList) continue;
+    desired.splice(index,1,...Array.from(sequenceList.children));
   }
   desired.filter(node=>node.getAttribute&&node.getAttribute('data-activity-sequence-group')==='1')
     .forEach(node=>node.removeAttribute('data-live-activity-current'));
@@ -19653,8 +19676,6 @@ function _toolCardPreviewText(tc, displaySnippet){
   return 'Completed';
 }
 function _toolCardAllowsDetail(kind, tc){
-  const infoKinds={read:1,search:1,list:1,web:1};
-  if(infoKinds[kind]&&!(tc&&tc.is_error)) return false;
   return true;
 }
 function _toolDetailLeadLabel(kind){

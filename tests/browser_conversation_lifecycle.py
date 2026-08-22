@@ -634,38 +634,49 @@ def _assert_tool_disclosure_accessibility(page) -> None:
     state = page.evaluate(
         """() => {
           const row = buildToolCard({
-            name: 'terminal',
-            args: {command: 'pwd'},
+            name: 'read_file',
+            args: {path: 'README.md'},
             done: true,
-            snippet: '/tmp',
+            snippet: 'Hermes WebUI',
           });
-          document.body.appendChild(row);
+          const sequence = _createActivitySequenceGroup('a11y-sequence', false, false);
+          _toolWorklogListEl(sequence).appendChild(row);
+          document.body.appendChild(sequence);
+          const sequenceHeader = sequence.querySelector(':scope > .tool-worklog-summary');
           const card = row.querySelector('.tool-card');
           const header = row.querySelector('.tool-card-header');
           const detail = row.querySelector('.tool-card-detail');
           const before = {
+            sequenceExpanded: sequenceHeader.getAttribute('aria-expanded'),
             expanded: header.getAttribute('aria-expanded'),
             controls: header.getAttribute('aria-controls'),
             detailId: detail.id,
             hidden: detail.hidden,
           };
+          _toggleActivityGroup(sequenceHeader);
           _toggleToolCardDisclosure(header);
           const after = {
+            sequenceExpanded: sequenceHeader.getAttribute('aria-expanded'),
             expanded: header.getAttribute('aria-expanded'),
             hidden: detail.hidden,
           };
-          row.remove();
+          sequence.remove();
           return {before, after};
         }"""
     )
     assert state["before"] == {
+        "sequenceExpanded": "false",
         "expanded": "false",
         "controls": state["before"]["detailId"],
         "detailId": state["before"]["detailId"],
         "hidden": True,
     }, state
     assert state["before"]["detailId"], state
-    assert state["after"] == {"expanded": "true", "hidden": False}, state
+    assert state["after"] == {
+        "sequenceExpanded": "true",
+        "expanded": "true",
+        "hidden": False,
+    }, state
 
 
 def _assert_thinking_disclosure_accessibility(page) -> None:
@@ -728,11 +739,52 @@ def _assert_settled_sequence_cardinality(page) -> None:
             [toolRow('first'), toolRow('second')],
             {settled: true},
           );
+          const liveSingleton = makeGroup();
+          _renderAnchorSceneRowsIntoWorklog(liveSingleton, [toolRow('live-one')], {live: true});
+          const liveSingletonBeforePromotion = liveSingleton.querySelectorAll('[data-activity-sequence-group="1"]').length;
+          _toggleToolCardDisclosure(liveSingleton.querySelector('.tool-card-header'));
+          const promotedDisclosure = _captureWorklogDetailDisclosureState(liveSingleton);
+          _renderAnchorSceneRowsIntoWorklog(
+            liveSingleton,
+            [toolRow('live-one'), toolRow('live-two')],
+            {live: true},
+          );
+          _restoreWorklogDetailDisclosureState(liveSingleton, promotedDisclosure);
+          const liveMultiple = makeGroup();
+          _renderAnchorSceneRowsIntoWorklog(
+            liveMultiple,
+            [toolRow('live-first'), toolRow('live-second')],
+            {live: true},
+          );
+          const legacyGroup = count => {
+            const group = makeGroup();
+            const tools = document.createElement('div');
+            tools.className = 'wl-step-tools';
+            for (let index = 0; index < count; index += 1) {
+              const row = document.createElement('div');
+              row.className = 'tool-card-row';
+              row.setAttribute('data-tool-disclosure-key', `legacy-${count}-${index}`);
+              tools.appendChild(row);
+            }
+            _toolWorklogListEl(group).appendChild(tools);
+            _syncActivitySequenceGroups(group, true);
+            return group;
+          };
+          const legacySingleton = legacyGroup(1);
+          const legacyMultiple = legacyGroup(2);
           return {
             singletonSequences: singleton.querySelectorAll('[data-activity-sequence-group="1"]').length,
             singletonRows: singleton.querySelectorAll('[data-anchor-scene-row="1"]').length,
             multipleSequences: multiple.querySelectorAll('[data-activity-sequence-group="1"]').length,
             multipleRows: multiple.querySelectorAll('[data-anchor-scene-row="1"]').length,
+            liveSingletonBeforePromotion,
+            promotedSequences: liveSingleton.querySelectorAll('[data-activity-sequence-group="1"]').length,
+            liveSingletonRows: liveSingleton.querySelectorAll('[data-anchor-scene-row="1"]').length,
+            promotedFirstToolOpen: liveSingleton.querySelector('.tool-card').classList.contains('open'),
+            liveMultipleSequences: liveMultiple.querySelectorAll('[data-activity-sequence-group="1"]').length,
+            liveMultipleRows: liveMultiple.querySelectorAll('[data-anchor-scene-row="1"]').length,
+            legacySingletonSequences: legacySingleton.querySelectorAll('[data-activity-sequence-group="1"]').length,
+            legacyMultipleSequences: legacyMultiple.querySelectorAll('[data-activity-sequence-group="1"]').length,
           };
         }"""
     )
@@ -741,6 +793,14 @@ def _assert_settled_sequence_cardinality(page) -> None:
         "singletonRows": 1,
         "multipleSequences": 1,
         "multipleRows": 2,
+        "liveSingletonBeforePromotion": 0,
+        "promotedSequences": 1,
+        "liveSingletonRows": 2,
+        "promotedFirstToolOpen": True,
+        "liveMultipleSequences": 1,
+        "liveMultipleRows": 2,
+        "legacySingletonSequences": 0,
+        "legacyMultipleSequences": 1,
     }, state
 
 
