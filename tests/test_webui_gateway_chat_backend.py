@@ -2017,6 +2017,59 @@ def test_gateway_runs_keeps_exact_echo_deferred_across_empty_delta(monkeypatch):
     assert not any(event[0] == "reasoning" for event in events)
 
 
+@pytest.mark.parametrize("exit_mode", ["cancel", "error"])
+def test_gateway_runs_preserves_deferred_reasoning_for_partial_snapshots(monkeypatch, exit_mode):
+    import threading
+
+    cancel_event = threading.Event()
+    stream_id = f"deferred-{exit_mode}-stream"
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size=65536):
+            return b'{"run_id":"partial-run"}'
+
+        def __iter__(self):
+            yield b'data: {"event":"message.delta","delta":"Hello"}\n'
+            yield b'data: {"event":"reasoning.available","text":"Hello","titles":["Deferred title"]}\n'
+            if exit_mode == "cancel":
+                cancel_event.set()
+                yield b': cancelled\n'
+                return
+            raise RuntimeError("transport failed")
+
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda _req, timeout=0: FakeResponse())
+    gateway_chat.STREAM_REASONING_TEXT[stream_id] = []
+    gateway_chat.STREAM_REASONING_TITLES.pop(stream_id, None)
+    try:
+        if exit_mode == "error":
+            with pytest.raises(RuntimeError, match="transport failed"):
+                gateway_chat._run_gateway_runs_api_streaming(
+                    "partial-session", "hello", "model", "/tmp", stream_id,
+                    "http://gateway.local", "secret", [], {},
+                    put_gateway_event=lambda *_event: None,
+                    cancel_event=cancel_event,
+                )
+        else:
+            final_text, _usage = gateway_chat._run_gateway_runs_api_streaming(
+                "partial-session", "hello", "model", "/tmp", stream_id,
+                "http://gateway.local", "secret", [], {},
+                put_gateway_event=lambda *_event: None,
+                cancel_event=cancel_event,
+            )
+            assert final_text is None
+        assert gateway_chat.stream_text_value(gateway_chat.STREAM_REASONING_TEXT, stream_id) == "Hello"
+        assert gateway_chat.STREAM_REASONING_TITLES[stream_id] == ["Deferred title"]
+    finally:
+        gateway_chat.STREAM_REASONING_TEXT.pop(stream_id, None)
+        gateway_chat.STREAM_REASONING_TITLES.pop(stream_id, None)
+
+
 @pytest.mark.parametrize("context_retains_user", [True, False])
 def test_gateway_regeneration_persists_retained_user_once(
     tmp_path,
