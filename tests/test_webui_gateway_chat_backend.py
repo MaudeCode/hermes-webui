@@ -2070,6 +2070,55 @@ def test_gateway_runs_preserves_deferred_reasoning_for_partial_snapshots(monkeyp
         gateway_chat.STREAM_REASONING_TITLES.pop(stream_id, None)
 
 
+def test_gateway_runs_preserves_reasoning_after_deferred_echo(monkeypatch):
+    import threading
+
+    stream_id = "deferred-followed-by-reasoning"
+    events = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size=65536):
+            return b'{"run_id":"reasoning-followup-run"}'
+
+        def __iter__(self):
+            return iter([
+                b'data: {"event":"message.delta","delta":"Hello"}\n',
+                b'data: {"event":"reasoning.available","text":"Hello","titles":["Candidate"]}\n',
+                b'data: {"event":"reasoning.available","text":"Legitimate reasoning","titles":["Legitimate"]}\n',
+                b'data: {"event":"run.completed","output":"Hello","usage":{"duration_seconds":1}}\n',
+                b'data: [DONE]\n',
+            ])
+
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda _req, timeout=0: FakeResponse())
+    gateway_chat.STREAM_REASONING_TEXT[stream_id] = []
+    gateway_chat.STREAM_REASONING_TITLES.pop(stream_id, None)
+    try:
+        final_text, _usage = gateway_chat._run_gateway_runs_api_streaming(
+            "reasoning-followup-session", "hello", "model", "/tmp", stream_id,
+            "http://gateway.local", "secret", [], {},
+            put_gateway_event=lambda *event: events.append(event),
+            cancel_event=threading.Event(),
+        )
+        assert final_text == "Hello"
+        assert gateway_chat.stream_text_value(
+            gateway_chat.STREAM_REASONING_TEXT,
+            stream_id,
+        ) == "HelloLegitimate reasoning"
+        assert [event[1]["text"] for event in events if event[0] == "reasoning"] == [
+            "Hello",
+            "Legitimate reasoning",
+        ]
+    finally:
+        gateway_chat.STREAM_REASONING_TEXT.pop(stream_id, None)
+        gateway_chat.STREAM_REASONING_TITLES.pop(stream_id, None)
+
+
 @pytest.mark.parametrize("context_retains_user", [True, False])
 def test_gateway_regeneration_persists_retained_user_once(
     tmp_path,

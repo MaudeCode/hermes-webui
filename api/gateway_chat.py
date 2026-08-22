@@ -809,6 +809,8 @@ def _run_gateway_runs_api_streaming(
     def settle_deferred_reasoning(final_text: str) -> None:
         nonlocal deferred_baseline_text, deferred_baseline_titles
         nonlocal deferred_baseline_titles_present
+        if not deferred_reasoning:
+            return
         pending = list(deferred_reasoning)
         deferred_reasoning.clear()
         if stream_id in STREAM_REASONING_TEXT:
@@ -880,6 +882,7 @@ def _run_gateway_runs_api_streaming(
                             defer_reasoning(event_payload)
                             sse_event = "message"
                             continue
+                        flush_deferred_reasoning()
                         emit_reasoning(event_payload)
                     elif stream_id in STREAM_LIVE_TOOL_CALLS:
                         if event_name == "tool":
