@@ -665,7 +665,27 @@ def _assert_tool_disclosure_accessibility(page) -> None:
             hidden: detail.hidden,
           };
           sequence.remove();
-          return {before, after};
+          const restored = _anchorSceneNodeForRow({
+            role: 'tool',
+            row_id: 'restored-command',
+            status: 'completed',
+            tool: {
+              name: 'terminal',
+              command: 'printf restored-output',
+              preview: 'restored-output',
+              done: true,
+            },
+          }, {settled: true});
+          document.body.appendChild(restored);
+          const restoredHeader = restored.querySelector('.tool-card-header');
+          const restoredDetail = restored.querySelector('.tool-card-detail');
+          const restoredState = {
+            headerTag: restoredHeader && restoredHeader.tagName,
+            hasDetail: Boolean(restoredDetail),
+            detailText: restoredDetail && restoredDetail.innerText,
+          };
+          restored.remove();
+          return {before, after, restored: restoredState};
         }"""
     )
     assert state["before"] == {
@@ -683,6 +703,10 @@ def _assert_tool_disclosure_accessibility(page) -> None:
         "expanded": "true",
         "hidden": False,
     }, state
+    assert state["restored"]["headerTag"] == "BUTTON", state
+    assert state["restored"]["hasDetail"] is True, state
+    assert "$ printf restored-output" in state["restored"]["detailText"], state
+    assert "restored-output" in state["restored"]["detailText"], state
 
 
 def _assert_thinking_disclosure_accessibility(page) -> None:
