@@ -10945,6 +10945,7 @@ from api.todo_state import attach_todo_state
 from api.providers import (
     get_providers,
     get_provider_quota,
+    get_provider_quotas,
     get_provider_cost_history,
     provider_has_process_wakeup_recovery_credential,
     set_provider_key,
@@ -13681,6 +13682,13 @@ def handle_get(handler, parsed) -> bool:
     # ── Plugins/hooks visibility (read-only, no callback/source internals) ──
     if parsed.path == "/api/plugins":
         return _handle_plugins(handler, parsed)
+    if parsed.path == "/api/provider/quotas":
+        query = parse_qs(parsed.query)
+        source_id = (query.get("source", [""])[0] or None)
+        refresh = (query.get("refresh", [""])[0] or "").strip().lower() in {"1", "true", "yes", "on"}
+        from api.profiles import profile_env_for_active_request_readonly
+        with profile_env_for_active_request_readonly("/api/provider/quotas", logger_override=logger):
+            return j(handler, get_provider_quotas(source_id=source_id, refresh=refresh))
     if parsed.path == "/api/provider/quota":
         query = parse_qs(parsed.query)
         provider_id = (query.get("provider", [""])[0] or None)
