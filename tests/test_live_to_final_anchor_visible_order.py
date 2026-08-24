@@ -838,7 +838,8 @@ def test_anchor_tool_rows_are_action_labeled_iconed_and_single_line():
     summary = _function_body(UI_JS, "_syncToolCallGroupSummary")
 
     assert "_toolActionLabelText(tc,{limit:112})" in build
-    assert "const hasRawDetail=!!(tc.snippet)" in build
+    assert "const detailSnippet=String(tc.snippet||((tc.done!==false&&tc.preview)||''))" in build
+    assert "const hasRawDetail=!!detailSnippet||!!detailLeadText" in build
     assert "_toolCardAllowsDetail(toolKind,tc)" in build
     assert "previewText===argPreview" in build
     assert "previewText==='Completed'||previewText==='Running'||previewText==='Failed'" in build

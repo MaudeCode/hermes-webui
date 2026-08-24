@@ -19748,12 +19748,14 @@ function buildToolCard(tc){
   const detailId=`tool-detail-${buildToolCard._detailPrefix}-${buildToolCard._detailID}`;
   if(disclosureKey) row.setAttribute('data-tool-disclosure-key', disclosureKey);
   const icon=toolIcon(tc.name);
-  const hasRawDetail=!!(tc.snippet)||(tc.args&&Object.keys(tc.args).length>0);
+  const detailSnippet=String(tc.snippet||((tc.done!==false&&tc.preview)||''));
+  const detailLeadText=typeof _toolDetailLeadText==='function'?_toolDetailLeadText(toolKind,tc):'';
+  const hasRawDetail=!!detailSnippet||!!detailLeadText||(tc.args&&Object.keys(tc.args).length>0);
   const allowsDetail=typeof _toolCardAllowsDetail==='function'?_toolCardAllowsDetail(toolKind,tc):true;
   const hasDetail=hasRawDetail&&allowsDetail;
   let displaySnippet='';
-  if(tc.snippet){
-    const s=tc.snippet;
+  if(detailSnippet){
+    const s=detailSnippet;
     if(s.length<=800){displaySnippet=s;}
     else{
       const cutoff=s.slice(0,800);
@@ -19779,9 +19781,8 @@ function buildToolCard(tc){
   const argPreview=_formatToolArgPreview(tc&&tc.args);
   if(toolKind==='shell'||previewText===argPreview||previewText==='Completed'||previewText==='Running'||previewText==='Failed') previewText='';
   if(isSubagent) previewText=previewText.replace(/^(?:\u{1F500}|↳)\s*/u,'');
-  const detailLeadText=hasDetail&&typeof _toolDetailLeadText==='function'?_toolDetailLeadText(toolKind,tc):'';
   const detailLeadLabel=typeof _toolDetailLeadLabel==='function'?_toolDetailLeadLabel(toolKind):(toolKind==='shell'?'Shell':'Input');
-  const detailLead=detailLeadText?`<div class="tool-card-detail-lead"><div class="tool-card-detail-lead-label">${esc(detailLeadLabel)}</div><pre>${esc(detailLeadText)}</pre></div>`:'';
+  const detailLead=hasDetail&&detailLeadText?`<div class="tool-card-detail-lead"><div class="tool-card-detail-lead-label">${esc(detailLeadLabel)}</div><pre>${esc(detailLeadText)}</pre></div>`:'';
   const argsEntries=tc.args&&Object.keys(tc.args).length?Object.entries(tc.args):[];
   const visibleArgs=(detailLeadText&&toolKind==='shell')?[]:argsEntries;
   row.innerHTML=`

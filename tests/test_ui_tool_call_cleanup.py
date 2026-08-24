@@ -484,7 +484,8 @@ class TestToolCallGroupingStatic:
         assert "tc.preview" not in target_fn
         assert "const explicit=String(tc&&tc.preview||'').trim();" not in preview_fn
         assert "if(explicit) return explicit;" not in preview_fn
-        assert "const hasRawDetail=!!(tc.snippet)" in build_fn
+        assert "const detailSnippet=String(tc.snippet||((tc.done!==false&&tc.preview)||''))" in build_fn
+        assert "const hasRawDetail=!!detailSnippet||!!detailLeadText" in build_fn
         assert "const allowsDetail=typeof _toolCardAllowsDetail==='function'?_toolCardAllowsDetail(toolKind,tc):true;" in build_fn
         assert "const hasDetail=hasRawDetail&&allowsDetail" in build_fn
         assert "if(toolKind==='shell'||previewText===argPreview" in build_fn, (
