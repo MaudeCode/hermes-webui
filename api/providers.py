@@ -21,6 +21,8 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -135,12 +137,14 @@ _account_usage_probe_semaphore: threading.BoundedSemaphore | None = None
 # provider usage API while the Settings panel is open. Transient None probe
 # results are intentionally not cached; known exhausted/unavailable states are
 # represented as non-None snapshots and remain cacheable.
-_account_usage_status_cache: dict[tuple[str, str, str], tuple[float, Any]] = {}
+_account_usage_status_cache: dict[tuple[str, str, str, str], tuple[float, Any]] = {}
 _account_usage_status_cache_lock = threading.Lock()
 _providers_cache: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 _providers_cache_lock = threading.Lock()
 _account_usage_worker_pool: dict[str, list["_AccountUsageProbeWorker"]] = {}
 _account_usage_worker_pool_lock = threading.Lock()
+_quota_scope_id_lock = threading.Lock()
+_quota_scope_id_cache: str | None = None
 
 # Per-home worker pool configuration for probe tail-latency reduction (#3787)
 _ACCOUNT_USAGE_WORKERS_PER_HOME = 2
@@ -589,7 +593,7 @@ def _codex_pool_snapshot(entries, rows, queried):
 def _codex_pool_exhausted_row(entry, index):
     label = _safe_entry_label(entry, index)
     retry_after = _entry_pool_retry_after(entry)
-    return {
+    row = {
         "label": label,
         "status": "exhausted",
         "plan": None,
@@ -599,6 +603,10 @@ def _codex_pool_exhausted_row(entry, index):
         "retry_after": retry_after,
         "fetched_at": None,
     }
+    credential_id = _entry_value(entry, "id")
+    if credential_id:
+        row["_credential_id"] = credential_id
+    return row
 
 
 def _probe_codex_pool_entry(item):
@@ -625,15 +633,23 @@ def _probe_codex_pool_entry(item):
         "unavailable_reason": None if snapshot_available else _safe_unavailable_reason(reason or getattr(snapshot, "unavailable_reason", None)),
         "fetched_at": _iso(getattr(snapshot, "fetched_at", None)) if snapshot is not None else None,
     }
+    credential_id = _entry_value(entry, "id")
+    if credential_id:
+        row["_credential_id"] = credential_id
     return index, row, did_query_count
 
 
-def _fetch_codex_account_usage_from_pool():
+def _fetch_codex_account_usage_from_pool(credential_id=None):
     try:
         from agent.credential_pool import load_pool
 
         pool = load_pool("openai-codex")
         entries = list(pool.entries()) if pool is not None and hasattr(pool, "entries") else []
+        if credential_id:
+            entries = [
+                entry for entry in entries
+                if _entry_value(entry, "id") == credential_id
+            ]
         if not entries:
             return None
         rows_by_index = {}
@@ -656,7 +672,7 @@ def _fetch_codex_account_usage_from_pool():
         return None
 
 
-def _fetch_snapshot(provider, api_key, env_var=None):
+def _fetch_snapshot(provider, api_key, env_var=None, credential_id=None):
     previous = os.environ.get(env_var) if env_var else None
     had_previous = bool(env_var and env_var in os.environ)
     if env_var and api_key:
@@ -667,7 +683,7 @@ def _fetch_snapshot(provider, api_key, env_var=None):
         except Exception:
             snapshot = None
         if str(provider or "").strip().lower() == "openai-codex":
-            pool_snapshot = _fetch_codex_account_usage_from_pool()
+            pool_snapshot = _fetch_codex_account_usage_from_pool(credential_id)
             if isinstance(getattr(pool_snapshot, "pool", None), dict):
                 snapshot = pool_snapshot
         return _snapshot_payload(snapshot)
@@ -686,7 +702,13 @@ def _run_worker():
             provider = request.get("provider")
             api_key = request.get("api_key") or None
             env_var = request.get("env_var") or None
-            payload = _fetch_snapshot(provider, api_key, env_var=env_var)
+            credential_id = request.get("credential_id") or None
+            payload = _fetch_snapshot(
+                provider,
+                api_key,
+                env_var=env_var,
+                credential_id=credential_id,
+            )
         except Exception:
             payload = None
         print(json.dumps(payload), flush=True)
@@ -697,7 +719,8 @@ if len(sys.argv) > 1 and sys.argv[1] == "--worker":
 else:
     provider = sys.argv[1]
     api_key = sys.argv[2] or None
-    print(json.dumps(_fetch_snapshot(provider, api_key)), flush=True)
+    credential_id = sys.argv[3] if len(sys.argv) > 3 else None
+    print(json.dumps(_fetch_snapshot(provider, api_key, credential_id=credential_id)), flush=True)
 """
 
 
@@ -895,14 +918,20 @@ def _entry_pool_exhausted_reason(entry):
     return reason + "."
 
 
-def _local_pool_snapshot(provider):
+def _local_pool_snapshot(provider, credential_id=None):
     """Probe-free pool snapshot from local auth.json entries.
 
     Returns a SimpleNamespace compatible with _serialize_account_usage_snapshot,
     or None if the provider has no pool or no entries.
     """
     try:
-        entries = [SimpleNamespace(**payload) for payload in _pool_entry_payloads(provider)]
+        payloads = _pool_entry_payloads(provider)
+        if credential_id:
+            payloads = [
+                payload for payload in payloads
+                if str(payload.get("id") or "").strip() == credential_id
+            ]
+        entries = [SimpleNamespace(**payload) for payload in payloads]
     except Exception:
         return None
     if not entries:
@@ -1336,9 +1365,20 @@ def _provider_has_key(provider_id: str) -> bool:
     return False
 
 
-def _get_provider_api_key(provider_id: str) -> str | None:
+def _get_provider_api_key(provider_id: str, credential_id: str | None = None) -> str | None:
     """Return a configured provider API key without exposing it to callers."""
     provider_id = (provider_id or "").strip().lower()
+    if credential_id:
+        for entry in _pool_entry_payloads(provider_id):
+            if str(entry.get("id") or "").strip() != credential_id:
+                continue
+            return str(
+                entry.get("runtime_api_key")
+                or entry.get("agent_key")
+                or entry.get("access_token")
+                or ""
+            ).strip() or None
+        return None
     env_var = _provider_env_var_for(provider_id)
     if env_var:
         env_path = _get_hermes_home() / ".env"
@@ -1554,6 +1594,32 @@ def _isoformat_utc(value: Any) -> str | None:
     return text or None
 
 
+def _public_account_usage_pool(pool: dict[str, Any]) -> dict[str, Any]:
+    public_pool = dict(pool)
+    credential_rows = pool.get("credentials")
+    if isinstance(credential_rows, list):
+        public_pool["credentials"] = [
+            {key: value for key, value in row.items() if key != "_credential_id"}
+            if isinstance(row, dict)
+            else row
+            for row in credential_rows
+        ]
+    return public_pool
+
+
+def _credential_rows_by_id(snapshot: Any) -> dict[str, dict[str, Any]]:
+    pool = getattr(snapshot, "pool", None)
+    credential_rows = pool.get("credentials") if isinstance(pool, dict) else None
+    if not isinstance(credential_rows, list):
+        return {}
+    return {
+        credential_id: row
+        for row in credential_rows
+        if isinstance(row, dict)
+        if (credential_id := str(row.get("_credential_id") or "").strip())
+    }
+
+
 def _serialize_account_usage_snapshot(snapshot: Any) -> dict[str, Any] | None:
     if snapshot is None:
         return None
@@ -1594,7 +1660,7 @@ def _serialize_account_usage_snapshot(snapshot: Any) -> dict[str, Any] | None:
     }
     pool = getattr(snapshot, "pool", None)
     if isinstance(pool, dict):
-        result["pool"] = pool
+        result["pool"] = _public_account_usage_pool(pool)
     return result
 
 
@@ -1716,25 +1782,57 @@ class _AccountUsageProbeWorker:
         except Exception:
             pass
 
-    def fetch(self, provider: str, *, api_key: str | None = None) -> Any:
+    def fetch(
+        self,
+        provider: str,
+        *,
+        api_key: str | None = None,
+        credential_id: str | None = None,
+    ) -> Any:
         if not self._lock.acquire(blocking=False):
-            return _fetch_account_usage_once_for_home(provider, self.home, api_key=api_key)
+            if not credential_id:
+                return _fetch_account_usage_once_for_home(
+                    provider,
+                    self.home,
+                    api_key=api_key,
+                )
+            return _fetch_account_usage_once_for_home(
+                provider,
+                self.home,
+                api_key=api_key,
+                credential_id=credential_id,
+            )
         try:
-            return self._fetch_locked(provider, api_key=api_key)
+            if not credential_id:
+                return self._fetch_locked(provider, api_key=api_key)
+            return self._fetch_locked(
+                provider,
+                api_key=api_key,
+                credential_id=credential_id,
+            )
         finally:
             self._lock.release()
 
-    def _fetch_locked(self, provider: str, *, api_key: str | None = None) -> Any:
+    def _fetch_locked(
+        self,
+        provider: str,
+        *,
+        api_key: str | None = None,
+        credential_id: str | None = None,
+    ) -> Any:
         self.last_used = time.monotonic()
         proc = self._ensure_process(provider)
         if proc is None or proc.stdin is None or proc.stdout is None:
             return None
 
-        request = json.dumps({
+        request_payload = {
             "provider": provider,
             "api_key": api_key or "",
             "env_var": _provider_env_var_for((provider or "").strip().lower()),
-        }) + "\n"
+        }
+        if credential_id:
+            request_payload["credential_id"] = credential_id
+        request = json.dumps(request_payload) + "\n"
         result: dict[str, Any] = {}
 
         def round_trip() -> None:
@@ -1854,16 +1952,25 @@ def _launch_account_usage_worker_process(
         return None
 
 
-def _fetch_account_usage_once_for_home(provider: str, home: Path, *, api_key: str | None = None) -> Any:
+def _fetch_account_usage_once_for_home(
+    provider: str,
+    home: Path,
+    *,
+    api_key: str | None = None,
+    credential_id: str | None = None,
+) -> Any:
     proc = _launch_account_usage_worker_process(Path(home), provider)
     if proc is None or proc.stdin is None or proc.stdout is None:
         _AccountUsageProbeWorker._close_process(proc)
         return None
-    request = json.dumps({
+    request_payload = {
         "provider": provider,
         "api_key": api_key or "",
         "env_var": _provider_env_var_for((provider or "").strip().lower()),
-    }) + "\n"
+    }
+    if credential_id:
+        request_payload["credential_id"] = credential_id
+    request = json.dumps(request_payload) + "\n"
     try:
         stdout, _stderr = proc.communicate(request, timeout=_ACCOUNT_USAGE_SUBPROCESS_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
@@ -1980,14 +2087,24 @@ def _close_account_usage_probe_workers_async(*, provider_id: str | None = None) 
 atexit.register(_close_account_usage_probe_workers)
 
 
-def _account_usage_cache_key(provider: str, home: Path, api_key: str | None) -> tuple[str, str, str]:
+def _account_usage_cache_key(
+    provider: str,
+    home: Path,
+    api_key: str | None,
+    credential_id: str | None = None,
+) -> tuple[str, str, str, str]:
     key_fingerprint = ""
     if api_key:
         key_fingerprint = hashlib.sha256(api_key.encode("utf-8", "ignore")).hexdigest()
-    return ((provider or "").strip().lower(), str(Path(home)), key_fingerprint)
+    return (
+        (provider or "").strip().lower(),
+        str(Path(home)),
+        key_fingerprint,
+        str(credential_id or ""),
+    )
 
 
-def _get_cached_account_usage(cache_key: tuple[str, str, str]) -> tuple[bool, Any]:
+def _get_cached_account_usage(cache_key: tuple[str, str, str, str]) -> tuple[bool, Any]:
     now = time.monotonic()
     with _account_usage_status_cache_lock:
         cached = _account_usage_status_cache.get(cache_key)
@@ -2013,7 +2130,7 @@ def invalidate_account_usage_status_cache(provider_id: str | None = None) -> Non
 
 
 def _set_cached_account_usage(
-    cache_key: tuple[str, str, str],
+    cache_key: tuple[str, str, str, str],
     snapshot: Any,
 ) -> None:
     now = time.monotonic()
@@ -2039,22 +2156,46 @@ def _set_cached_account_usage(
             _account_usage_status_cache.pop(oldest_key, None)
 
 
-def _agent_fetch_account_usage_for_home(provider: str, home: Path, *, api_key: str | None = None) -> Any:
+def _agent_fetch_account_usage_for_home(
+    provider: str,
+    home: Path,
+    *,
+    api_key: str | None = None,
+    credential_id: str | None = None,
+) -> Any:
     try:
         _cleanup_account_usage_probe_workers()
         worker = _get_account_usage_probe_worker(home)
         if worker is not None:
             try:
-                return worker._fetch_locked(provider, api_key=api_key)
+                if not credential_id:
+                    return worker._fetch_locked(provider, api_key=api_key)
+                return worker._fetch_locked(
+                    provider,
+                    api_key=api_key,
+                    credential_id=credential_id,
+                )
             finally:
                 worker._lock.release()
-        return _fetch_account_usage_once_for_home(provider, home, api_key=api_key)
+        if not credential_id:
+            return _fetch_account_usage_once_for_home(provider, home, api_key=api_key)
+        return _fetch_account_usage_once_for_home(
+            provider,
+            home,
+            api_key=api_key,
+            credential_id=credential_id,
+        )
     except Exception:
         logger.debug("Account usage probe for %s failed", provider, exc_info=True)
         return None
 
 
-def _fetch_account_usage_with_profile_context(provider: str, *, refresh: bool = False) -> Any:
+def _fetch_account_usage_with_profile_context(
+    provider: str,
+    *,
+    refresh: bool = False,
+    credential_id: str | None = None,
+) -> Any:
     """Fetch account usage for a provider within the active profile context.
 
     Concurrency is capped by the module-level BoundedSemaphore so that rapid
@@ -2065,8 +2206,12 @@ def _fetch_account_usage_with_profile_context(provider: str, *, refresh: bool = 
     Warm per-profile worker processes handle the actual probe requests.
     """
     home = _get_hermes_home()
-    api_key = _get_provider_api_key(provider)
-    cache_key = _account_usage_cache_key(provider, home, api_key)
+    api_key = (
+        _get_provider_api_key(provider, credential_id)
+        if credential_id
+        else _get_provider_api_key(provider)
+    )
+    cache_key = _account_usage_cache_key(provider, home, api_key, credential_id)
     if not refresh:
         cache_hit, cached = _get_cached_account_usage(cache_key)
         if cache_hit:
@@ -2074,11 +2219,19 @@ def _fetch_account_usage_with_profile_context(provider: str, *, refresh: bool = 
     sem = _get_account_usage_probe_semaphore()
     try:
         with sem:
-            snapshot = _agent_fetch_account_usage_for_home(
-                provider,
-                home,
-                api_key=api_key,
-            )
+            if credential_id:
+                snapshot = _agent_fetch_account_usage_for_home(
+                    provider,
+                    home,
+                    api_key=api_key,
+                    credential_id=credential_id,
+                )
+            else:
+                snapshot = _agent_fetch_account_usage_for_home(
+                    provider,
+                    home,
+                    api_key=api_key,
+                )
             _set_cached_account_usage(cache_key, snapshot)
             return snapshot
     except Exception:
@@ -2087,11 +2240,22 @@ def _fetch_account_usage_with_profile_context(provider: str, *, refresh: bool = 
         return None
 
 
-def _provider_account_usage_status(provider: str, display_name: str, *, refresh: bool = False) -> dict[str, Any]:
-    snapshot = _fetch_account_usage_with_profile_context(provider, refresh=refresh)
+def _provider_account_usage_status(
+    provider: str,
+    display_name: str,
+    *,
+    refresh: bool = False,
+    credential_id: str | None = None,
+    include_internal: bool = False,
+) -> dict[str, Any]:
+    snapshot = _fetch_account_usage_with_profile_context(
+        provider,
+        refresh=refresh,
+        credential_id=credential_id,
+    )
     account_limits = _serialize_account_usage_snapshot(snapshot)
     if account_limits and account_limits.get("available"):
-        return {
+        result = {
             "ok": True,
             "provider": provider,
             "display_name": display_name,
@@ -2102,28 +2266,37 @@ def _provider_account_usage_status(provider: str, display_name: str, *, refresh:
             "account_limits": account_limits,
             "message": f"{display_name} account limits loaded.",
         }
+    else:
+        reason = ""
+        if account_limits:
+            reason = str(account_limits.get("unavailable_reason") or "").strip()
+        message = (
+            f"{display_name} account limits are unavailable. {reason}"
+            if reason
+            else f"{display_name} account limits are unavailable. Confirm provider authentication and try again."
+        )
+        result = {
+            "ok": False,
+            "provider": provider,
+            "display_name": display_name,
+            "supported": True,
+            "status": "unavailable",
+            "quota": None,
+            "account_limits": account_limits,
+            "message": message,
+        }
+    if include_internal:
+        result["_credential_rows_by_id"] = _credential_rows_by_id(snapshot)
+    return result
 
-    reason = ""
-    if account_limits:
-        reason = str(account_limits.get("unavailable_reason") or "").strip()
-    message = (
-        f"{display_name} account limits are unavailable. {reason}"
-        if reason
-        else f"{display_name} account limits are unavailable. Confirm provider authentication and try again."
-    )
-    return {
-        "ok": False,
-        "provider": provider,
-        "display_name": display_name,
-        "supported": True,
-        "status": "unavailable",
-        "quota": None,
-        "account_limits": account_limits,
-        "message": message,
-    }
 
-
-def get_provider_quota(provider_id: str | None = None, *, refresh: bool = False) -> dict[str, Any]:
+def get_provider_quota(
+    provider_id: str | None = None,
+    *,
+    refresh: bool = False,
+    credential_id: str | None = None,
+    _include_internal: bool = False,
+) -> dict[str, Any]:
     """Return sanitized quota/rate-limit status for the active provider.
 
     OpenRouter keeps its documented key endpoint. OAuth-backed account usage
@@ -2144,10 +2317,20 @@ def get_provider_quota(provider_id: str | None = None, *, refresh: bool = False)
 
     display_name = _PROVIDER_DISPLAY.get(provider, provider.replace("-", " ").title())
     if provider in _ACCOUNT_USAGE_PROVIDERS:
-        return _provider_account_usage_status(provider, display_name, refresh=refresh)
+        return _provider_account_usage_status(
+            provider,
+            display_name,
+            refresh=refresh,
+            credential_id=credential_id,
+            include_internal=_include_internal,
+        )
 
     if provider == "openrouter":
-        api_key = _get_provider_api_key("openrouter")
+        api_key = (
+            _get_provider_api_key("openrouter", credential_id)
+            if credential_id
+            else _get_provider_api_key("openrouter")
+        )
         if not api_key:
             return {
                 "ok": False,
@@ -2207,7 +2390,7 @@ def get_provider_quota(provider_id: str | None = None, *, refresh: bool = False)
                 "message": "OpenRouter quota status is temporarily unavailable.",
             }
 
-    local_snapshot = _local_pool_snapshot(provider)
+    local_snapshot = _local_pool_snapshot(provider, credential_id)
     if local_snapshot is not None:
         account_limits = _serialize_account_usage_snapshot(local_snapshot)
         if account_limits and account_limits.get("available"):
@@ -2242,6 +2425,229 @@ def get_provider_quota(provider_id: str | None = None, *, refresh: bool = False)
         "status": "unsupported",
         "quota": None,
         "message": f"Quota status is not available for {display_name}. {detail}",
+    }
+
+
+def _quota_server_scope_id() -> str:
+    """Return the stable, public identity namespace for this WebUI instance."""
+    global _quota_scope_id_cache
+    with _quota_scope_id_lock:
+        if _quota_scope_id_cache:
+            return _quota_scope_id_cache
+        from api.config import STATE_DIR
+
+        path = Path(STATE_DIR) / ".quota_scope_id"
+        try:
+            stored = path.read_text(encoding="utf-8").strip().lower()
+        except OSError:
+            stored = ""
+        if len(stored) != 32 or any(char not in "0123456789abcdef" for char in stored):
+            stored = uuid.uuid4().hex
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+            temporary.write_text(stored + "\n", encoding="utf-8")
+            temporary.replace(path)
+        _quota_scope_id_cache = stored
+        return stored
+
+
+def _quota_profile_scope_id(profile: str) -> str:
+    canonical = "\0".join((_quota_server_scope_id(), profile)).encode("utf-8")
+    return "qscope_" + hashlib.sha256(canonical).hexdigest()[:32]
+
+
+def _quota_source_id(profile: str, provider: str, credential_id: str) -> str:
+    """Return an opaque, non-secret identity for one profile/provider/account."""
+    canonical = "\0".join(
+        (_quota_profile_scope_id(profile), provider, credential_id)
+    ).encode("utf-8")
+    return "qsrc_" + hashlib.sha256(canonical).hexdigest()[:32]
+
+
+def _quota_source_descriptors(profile: str, provider: dict[str, Any]) -> list[dict[str, Any]]:
+    provider_id = str(provider.get("id") or "").strip().lower()
+    if not provider_id:
+        return []
+    provider_label = str(provider.get("display_name") or provider_id).strip() or provider_id
+    stable_entries = []
+    for index, entry in enumerate(_pool_entry_payloads(provider_id), start=1):
+        credential_id = str(entry.get("id") or "").strip()
+        if not credential_id:
+            continue
+        label = _safe_entry_label(SimpleNamespace(**entry), index)
+        stable_entries.append({
+            "source_id": _quota_source_id(profile, provider_id, credential_id),
+            "provider_id": provider_id,
+            "provider_label": provider_label,
+            "account_label": label,
+            "credential_id": credential_id,
+        })
+    if stable_entries:
+        return stable_entries
+    return [{
+        "source_id": _quota_source_id(profile, provider_id, "provider"),
+        "provider_id": provider_id,
+        "provider_label": provider_label,
+        "account_label": provider_label,
+        "credential_id": None,
+    }]
+
+
+def _quota_source_payload(
+    descriptor: dict[str, Any],
+    quota_status: dict[str, Any],
+    *,
+    active_provider: str | None,
+) -> dict[str, Any]:
+    limits = quota_status.get("account_limits")
+    limits = limits if isinstance(limits, dict) else {}
+    pool = limits.get("pool")
+    pool = pool if isinstance(pool, dict) else {}
+    credential_rows = pool.get("credentials")
+    credential_rows = credential_rows if isinstance(credential_rows, list) else []
+    credential_rows_by_id = quota_status.get("_credential_rows_by_id")
+    has_identity_map = isinstance(credential_rows_by_id, dict)
+    credential_rows_by_id = credential_rows_by_id if has_identity_map else {}
+    descriptor_credential_id = descriptor.get("credential_id")
+    credential = credential_rows_by_id.get(descriptor_credential_id)
+    if has_identity_map and descriptor_credential_id and not isinstance(credential, dict):
+        credential = {
+            "status": "removed",
+            "plan": None,
+            "windows": [],
+            "details": [],
+            "unavailable_reason": "Credential is no longer configured.",
+            "retry_after": None,
+            "fetched_at": None,
+        }
+    elif not isinstance(credential, dict):
+        credential = credential_rows[0] if len(credential_rows) == 1 and isinstance(credential_rows[0], dict) else None
+    selected_limits = credential if credential is not None else limits
+    provider_id = descriptor["provider_id"]
+    status = str(selected_limits.get("status") or quota_status.get("status") or "unavailable")
+    return {
+        "source_id": descriptor["source_id"],
+        "provider_id": provider_id,
+        "provider_label": descriptor["provider_label"],
+        "account_label": descriptor["account_label"],
+        "is_active_provider": provider_id == active_provider,
+        "supported": bool(quota_status.get("supported")),
+        "status": status,
+        "plan": selected_limits.get("plan"),
+        "windows": selected_limits.get("windows") or [],
+        "quota": quota_status.get("quota"),
+        "details": selected_limits.get("details") or [],
+        "unavailable_reason": selected_limits.get("unavailable_reason"),
+        "retry_after": selected_limits.get("retry_after"),
+        "fetched_at": selected_limits.get("fetched_at"),
+        "message": quota_status.get("message"),
+    }
+
+
+def get_provider_quotas(
+    *,
+    source_id: str | None = None,
+    refresh: bool = False,
+) -> dict[str, Any]:
+    """Return every configured quota source for the active server profile."""
+    from api.profiles import get_active_profile_name
+
+    profile = str(get_active_profile_name() or "default").strip() or "default"
+    provider_status = get_providers()
+    active_provider = str(provider_status.get("active_provider") or "").strip().lower() or None
+    descriptors = []
+    for provider in provider_status.get("providers") or []:
+        if not isinstance(provider, dict):
+            continue
+        provider_id = str(provider.get("id") or "").strip().lower()
+        if not provider.get("has_key") and provider_id != active_provider:
+            continue
+        descriptors.extend(_quota_source_descriptors(profile, provider))
+
+    requested_source_id = str(source_id or "").strip() or None
+    if requested_source_id:
+        descriptors = [row for row in descriptors if row["source_id"] == requested_source_id]
+
+    if requested_source_id:
+        sources = [
+            _quota_source_payload(
+                descriptor,
+                get_provider_quota(
+                    descriptor["provider_id"],
+                    refresh=refresh,
+                    credential_id=descriptor["credential_id"],
+                ),
+                active_provider=active_provider,
+            )
+            for descriptor in descriptors
+        ]
+    else:
+        jobs: list[tuple[str, str | None]] = []
+        descriptor_jobs: list[int] = []
+        codex_job: int | None = None
+        for descriptor in descriptors:
+            if descriptor["provider_id"] == "openai-codex" and descriptor["credential_id"]:
+                if codex_job is None:
+                    codex_job = len(jobs)
+                    jobs.append(("openai-codex", None))
+                descriptor_jobs.append(codex_job)
+                continue
+            descriptor_jobs.append(len(jobs))
+            jobs.append((descriptor["provider_id"], descriptor["credential_id"]))
+
+        def fetch_quota(job: tuple[str, str | None]) -> dict[str, Any]:
+            from api.profiles import (
+                clear_request_profile,
+                profile_env_for_active_request_readonly,
+                set_request_profile,
+            )
+
+            set_request_profile(profile)
+            try:
+                with profile_env_for_active_request_readonly("provider quota batch"):
+                    if job == ("openai-codex", None):
+                        return get_provider_quota(
+                            job[0],
+                            refresh=refresh,
+                            _include_internal=True,
+                        )
+                    return get_provider_quota(
+                        job[0],
+                        refresh=refresh,
+                        credential_id=job[1],
+                    )
+            finally:
+                clear_request_profile()
+
+        if len(jobs) > 1:
+            with ThreadPoolExecutor(
+                max_workers=min(_MAX_CONCURRENT_ACCOUNT_USAGE_PROBES, len(jobs))
+            ) as executor:
+                quota_statuses = list(executor.map(fetch_quota, jobs))
+        else:
+            quota_statuses = [fetch_quota(jobs[0])] if jobs else []
+
+        sources = [
+            _quota_source_payload(
+                descriptor,
+                quota_statuses[job_index],
+                active_provider=active_provider,
+            )
+            for descriptor, job_index in zip(
+                descriptors,
+                descriptor_jobs,
+                strict=True,
+            )
+        ]
+
+    return {
+        "version": 1,
+        "scope_id": _quota_profile_scope_id(profile),
+        "profile_id": profile,
+        "active_provider": active_provider,
+        "requested_source_id": requested_source_id,
+        "missing_source": bool(requested_source_id and not descriptors),
+        "sources": sources,
     }
 
 

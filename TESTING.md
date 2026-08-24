@@ -13,6 +13,12 @@
 >
 > Local regression focus: verify that a previously closed workspace panel stays visually closed from first paint through boot completion on desktop refresh; there should be no brief open-then-close flash.
 
+Focused multi-provider quota contract coverage:
+
+```bash
+./scripts/test.sh tests/test_multi_provider_quota.py tests/test_provider_quota_status.py tests/test_issue4360_generic_pool_quota.py -q
+```
+
 ---
 
 ## Static JS runtime lint (brick-class regression guard)

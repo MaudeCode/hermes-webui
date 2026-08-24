@@ -919,6 +919,19 @@ For scale beyond single-user casual use.
 
 ## 11. How To Add a New API Endpoint
 
+### Provider quota sources
+
+`GET /api/provider/quotas` is the read-only multi-provider companion to the
+legacy active-provider `/api/provider/quota` route. It enumerates configured
+quota sources for the request's active profile, returns one sanitized row per
+credential account, and accepts `source=<opaque-id>&refresh=1` for targeted
+refresh without calling credential-pool selection. Source IDs hash a non-secret
+instance UUID stored at `STATE_DIR/.quota_scope_id` with profile, provider, and
+credential identity; responses never expose those inputs or credential material.
+The response also includes an opaque `scope_id` for the current server/profile,
+allowing clients to replace one profile's cached display rows without dropping
+rows belonging to another configured server or profile.
+
 Follow this exact pattern. Review existing handlers in do_GET/do_POST for reference.
 
 ### Backend (server.py -> future: api/handlers.py)
