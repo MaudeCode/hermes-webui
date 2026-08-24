@@ -2582,7 +2582,11 @@ def get_provider_quotas(
                 active_provider=active_provider,
                 credential_index=credential_index,
             )
-            for descriptor, (job_index, credential_index) in zip(descriptors, descriptor_jobs)
+            for descriptor, (job_index, credential_index) in zip(
+                descriptors,
+                descriptor_jobs,
+                strict=True,
+            )
         ]
 
     return {
