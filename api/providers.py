@@ -593,7 +593,7 @@ def _codex_pool_snapshot(entries, rows, queried):
 def _codex_pool_exhausted_row(entry, index):
     label = _safe_entry_label(entry, index)
     retry_after = _entry_pool_retry_after(entry)
-    return {
+    row = {
         "label": label,
         "status": "exhausted",
         "plan": None,
@@ -603,6 +603,10 @@ def _codex_pool_exhausted_row(entry, index):
         "retry_after": retry_after,
         "fetched_at": None,
     }
+    credential_id = _entry_value(entry, "id")
+    if credential_id:
+        row["_credential_id"] = credential_id
+    return row
 
 
 def _probe_codex_pool_entry(item):
@@ -629,6 +633,9 @@ def _probe_codex_pool_entry(item):
         "unavailable_reason": None if snapshot_available else _safe_unavailable_reason(reason or getattr(snapshot, "unavailable_reason", None)),
         "fetched_at": _iso(getattr(snapshot, "fetched_at", None)) if snapshot is not None else None,
     }
+    credential_id = _entry_value(entry, "id")
+    if credential_id:
+        row["_credential_id"] = credential_id
     return index, row, did_query_count
 
 
@@ -1587,6 +1594,32 @@ def _isoformat_utc(value: Any) -> str | None:
     return text or None
 
 
+def _public_account_usage_pool(pool: dict[str, Any]) -> dict[str, Any]:
+    public_pool = dict(pool)
+    credential_rows = pool.get("credentials")
+    if isinstance(credential_rows, list):
+        public_pool["credentials"] = [
+            {key: value for key, value in row.items() if key != "_credential_id"}
+            if isinstance(row, dict)
+            else row
+            for row in credential_rows
+        ]
+    return public_pool
+
+
+def _credential_rows_by_id(snapshot: Any) -> dict[str, dict[str, Any]]:
+    pool = getattr(snapshot, "pool", None)
+    credential_rows = pool.get("credentials") if isinstance(pool, dict) else None
+    if not isinstance(credential_rows, list):
+        return {}
+    return {
+        credential_id: row
+        for row in credential_rows
+        if isinstance(row, dict)
+        if (credential_id := str(row.get("_credential_id") or "").strip())
+    }
+
+
 def _serialize_account_usage_snapshot(snapshot: Any) -> dict[str, Any] | None:
     if snapshot is None:
         return None
@@ -1627,7 +1660,7 @@ def _serialize_account_usage_snapshot(snapshot: Any) -> dict[str, Any] | None:
     }
     pool = getattr(snapshot, "pool", None)
     if isinstance(pool, dict):
-        result["pool"] = pool
+        result["pool"] = _public_account_usage_pool(pool)
     return result
 
 
@@ -2213,6 +2246,7 @@ def _provider_account_usage_status(
     *,
     refresh: bool = False,
     credential_id: str | None = None,
+    include_internal: bool = False,
 ) -> dict[str, Any]:
     snapshot = _fetch_account_usage_with_profile_context(
         provider,
@@ -2221,7 +2255,7 @@ def _provider_account_usage_status(
     )
     account_limits = _serialize_account_usage_snapshot(snapshot)
     if account_limits and account_limits.get("available"):
-        return {
+        result = {
             "ok": True,
             "provider": provider,
             "display_name": display_name,
@@ -2232,25 +2266,28 @@ def _provider_account_usage_status(
             "account_limits": account_limits,
             "message": f"{display_name} account limits loaded.",
         }
-
-    reason = ""
-    if account_limits:
-        reason = str(account_limits.get("unavailable_reason") or "").strip()
-    message = (
-        f"{display_name} account limits are unavailable. {reason}"
-        if reason
-        else f"{display_name} account limits are unavailable. Confirm provider authentication and try again."
-    )
-    return {
-        "ok": False,
-        "provider": provider,
-        "display_name": display_name,
-        "supported": True,
-        "status": "unavailable",
-        "quota": None,
-        "account_limits": account_limits,
-        "message": message,
-    }
+    else:
+        reason = ""
+        if account_limits:
+            reason = str(account_limits.get("unavailable_reason") or "").strip()
+        message = (
+            f"{display_name} account limits are unavailable. {reason}"
+            if reason
+            else f"{display_name} account limits are unavailable. Confirm provider authentication and try again."
+        )
+        result = {
+            "ok": False,
+            "provider": provider,
+            "display_name": display_name,
+            "supported": True,
+            "status": "unavailable",
+            "quota": None,
+            "account_limits": account_limits,
+            "message": message,
+        }
+    if include_internal:
+        result["_credential_rows_by_id"] = _credential_rows_by_id(snapshot)
+    return result
 
 
 def get_provider_quota(
@@ -2258,6 +2295,7 @@ def get_provider_quota(
     *,
     refresh: bool = False,
     credential_id: str | None = None,
+    _include_internal: bool = False,
 ) -> dict[str, Any]:
     """Return sanitized quota/rate-limit status for the active provider.
 
@@ -2284,6 +2322,7 @@ def get_provider_quota(
             display_name,
             refresh=refresh,
             credential_id=credential_id,
+            include_internal=_include_internal,
         )
 
     if provider == "openrouter":
@@ -2442,7 +2481,6 @@ def _quota_source_descriptors(profile: str, provider: dict[str, Any]) -> list[di
             "provider_label": provider_label,
             "account_label": label,
             "credential_id": credential_id,
-            "credential_index": index - 1,
         })
     if stable_entries:
         return stable_entries
@@ -2452,7 +2490,6 @@ def _quota_source_descriptors(profile: str, provider: dict[str, Any]) -> list[di
         "provider_label": provider_label,
         "account_label": provider_label,
         "credential_id": None,
-        "credential_index": None,
     }]
 
 
@@ -2461,7 +2498,6 @@ def _quota_source_payload(
     quota_status: dict[str, Any],
     *,
     active_provider: str | None,
-    credential_index: int | None = None,
 ) -> dict[str, Any]:
     limits = quota_status.get("account_limits")
     limits = limits if isinstance(limits, dict) else {}
@@ -2469,16 +2505,14 @@ def _quota_source_payload(
     pool = pool if isinstance(pool, dict) else {}
     credential_rows = pool.get("credentials")
     credential_rows = credential_rows if isinstance(credential_rows, list) else []
-    if (
-        credential_index is not None
-        and 0 <= credential_index < len(credential_rows)
-        and isinstance(credential_rows[credential_index], dict)
-    ):
-        credential = credential_rows[credential_index]
-    else:
-        credential = credential_rows[0] if len(credential_rows) == 1 and isinstance(credential_rows[0], dict) else {}
+    credential_rows_by_id = quota_status.get("_credential_rows_by_id")
+    credential_rows_by_id = credential_rows_by_id if isinstance(credential_rows_by_id, dict) else {}
+    credential = credential_rows_by_id.get(descriptor.get("credential_id"))
+    if not isinstance(credential, dict):
+        credential = credential_rows[0] if len(credential_rows) == 1 and isinstance(credential_rows[0], dict) else None
+    selected_limits = credential if credential is not None else limits
     provider_id = descriptor["provider_id"]
-    status = str(credential.get("status") or quota_status.get("status") or "unavailable")
+    status = str(selected_limits.get("status") or quota_status.get("status") or "unavailable")
     return {
         "source_id": descriptor["source_id"],
         "provider_id": provider_id,
@@ -2487,13 +2521,13 @@ def _quota_source_payload(
         "is_active_provider": provider_id == active_provider,
         "supported": bool(quota_status.get("supported")),
         "status": status,
-        "plan": credential.get("plan") or limits.get("plan"),
-        "windows": credential.get("windows") or limits.get("windows") or [],
+        "plan": selected_limits.get("plan"),
+        "windows": selected_limits.get("windows") or [],
         "quota": quota_status.get("quota"),
-        "details": credential.get("details") or limits.get("details") or [],
-        "unavailable_reason": credential.get("unavailable_reason") or limits.get("unavailable_reason"),
-        "retry_after": credential.get("retry_after"),
-        "fetched_at": credential.get("fetched_at") or limits.get("fetched_at"),
+        "details": selected_limits.get("details") or [],
+        "unavailable_reason": selected_limits.get("unavailable_reason"),
+        "retry_after": selected_limits.get("retry_after"),
+        "fetched_at": selected_limits.get("fetched_at"),
         "message": quota_status.get("message"),
     }
 
@@ -2537,16 +2571,16 @@ def get_provider_quotas(
         ]
     else:
         jobs: list[tuple[str, str | None]] = []
-        descriptor_jobs: list[tuple[int, int | None]] = []
+        descriptor_jobs: list[int] = []
         codex_job: int | None = None
         for descriptor in descriptors:
             if descriptor["provider_id"] == "openai-codex" and descriptor["credential_id"]:
                 if codex_job is None:
                     codex_job = len(jobs)
                     jobs.append(("openai-codex", None))
-                descriptor_jobs.append((codex_job, descriptor["credential_index"]))
+                descriptor_jobs.append(codex_job)
                 continue
-            descriptor_jobs.append((len(jobs), None))
+            descriptor_jobs.append(len(jobs))
             jobs.append((descriptor["provider_id"], descriptor["credential_id"]))
 
         def fetch_quota(job: tuple[str, str | None]) -> dict[str, Any]:
@@ -2559,6 +2593,12 @@ def get_provider_quotas(
             set_request_profile(profile)
             try:
                 with profile_env_for_active_request_readonly("provider quota batch"):
+                    if job == ("openai-codex", None):
+                        return get_provider_quota(
+                            job[0],
+                            refresh=refresh,
+                            _include_internal=True,
+                        )
                     return get_provider_quota(
                         job[0],
                         refresh=refresh,
@@ -2580,9 +2620,8 @@ def get_provider_quotas(
                 descriptor,
                 quota_statuses[job_index],
                 active_provider=active_provider,
-                credential_index=credential_index,
             )
-            for descriptor, (job_index, credential_index) in zip(
+            for descriptor, job_index in zip(
                 descriptors,
                 descriptor_jobs,
                 strict=True,

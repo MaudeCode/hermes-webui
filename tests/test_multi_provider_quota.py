@@ -60,7 +60,7 @@ def test_quota_source_identity_survives_pool_reordering_and_label_changes(monkey
     monkeypatch.setattr(
         providers,
         "get_provider_quota",
-        lambda provider_id, *, refresh=False, credential_id=None: _quota_result(
+        lambda provider_id, *, refresh=False, credential_id=None, _include_internal=False: _quota_result(
             provider_id,
             credential_id,
             10 if credential_id == "account-a" else 20,
@@ -154,7 +154,7 @@ def test_quota_sources_include_multiple_provider_types_and_duplicate_accounts(mo
     monkeypatch.setattr(
         providers,
         "get_provider_quota",
-        lambda provider_id, *, refresh=False, credential_id=None: _quota_result(
+        lambda provider_id, *, refresh=False, credential_id=None, _include_internal=False: _quota_result(
             provider_id,
             credential_id or provider_id,
             25,
@@ -276,14 +276,21 @@ def test_full_quota_fetch_batches_codex_pool_once_and_preserves_source_order(mon
         ],
     )
 
-    def quota(provider_id, *, refresh=False, credential_id=None):
+    def quota(provider_id, *, refresh=False, credential_id=None, _include_internal=False):
         calls.append((provider_id, refresh, credential_id))
+        assert _include_internal is True
         result = _quota_result(provider_id, "pool", 10)
+        work = {"status": "available", "plan": "Work", "windows": [{"used_percent": 10}]}
+        personal = {"status": "available", "plan": "Personal", "windows": [{"used_percent": 20}]}
         result["account_limits"]["pool"] = {
             "credentials": [
-                {"status": "available", "plan": "Work", "windows": [{"used_percent": 10}]},
-                {"status": "available", "plan": "Personal", "windows": [{"used_percent": 20}]},
+                personal,
+                work,
             ]
+        }
+        result["_credential_rows_by_id"] = {
+            "codex-one": work,
+            "codex-two": personal,
         }
         return result
 
@@ -297,6 +304,70 @@ def test_full_quota_fetch_batches_codex_pool_once_and_preserves_source_order(mon
         ("Work", "Work"),
         ("Personal", "Personal"),
     ]
+
+
+def test_selected_quota_source_preserves_meaningful_empty_credential_fields():
+    descriptor = {
+        "source_id": "qsrc_exhausted",
+        "provider_id": "openai-codex",
+        "provider_label": "Codex",
+        "account_label": "Exhausted",
+        "credential_id": "codex-exhausted",
+    }
+    selected = {
+        "status": "exhausted",
+        "plan": None,
+        "windows": [],
+        "details": [],
+        "unavailable_reason": "Quota exhausted.",
+        "retry_after": "2030-03-17T18:46:40Z",
+        "fetched_at": None,
+    }
+    quota_status = _quota_result("openai-codex", "aggregate", 10)
+    quota_status["_credential_rows_by_id"] = {"codex-exhausted": selected}
+
+    payload = providers._quota_source_payload(
+        descriptor,
+        quota_status,
+        active_provider="openai-codex",
+    )
+
+    assert payload["status"] == "exhausted"
+    assert payload["plan"] is None
+    assert payload["windows"] == []
+    assert payload["details"] == []
+    assert payload["unavailable_reason"] == "Quota exhausted."
+
+
+def test_public_account_usage_serialization_strips_internal_credential_identity():
+    snapshot = SimpleNamespace(
+        provider="openai-codex",
+        source="usage_api_pool",
+        title="Account limits",
+        plan=None,
+        windows=(),
+        details=(),
+        available=True,
+        unavailable_reason=None,
+        fetched_at=None,
+        pool={
+            "credentials": [
+                {
+                    "_credential_id": "private-account-id",
+                    "label": "Work",
+                    "status": "available",
+                    "windows": [],
+                }
+            ]
+        },
+    )
+
+    payload = providers._serialize_account_usage_snapshot(snapshot)
+
+    assert payload["pool"]["credentials"] == [
+        {"label": "Work", "status": "available", "windows": []}
+    ]
+    assert "private-account-id" not in json.dumps(payload)
 
 
 def test_multi_provider_quota_route_dispatches_query_in_profile_scope(monkeypatch):
