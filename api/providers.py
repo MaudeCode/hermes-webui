@@ -2506,9 +2506,21 @@ def _quota_source_payload(
     credential_rows = pool.get("credentials")
     credential_rows = credential_rows if isinstance(credential_rows, list) else []
     credential_rows_by_id = quota_status.get("_credential_rows_by_id")
-    credential_rows_by_id = credential_rows_by_id if isinstance(credential_rows_by_id, dict) else {}
-    credential = credential_rows_by_id.get(descriptor.get("credential_id"))
-    if not isinstance(credential, dict):
+    has_identity_map = isinstance(credential_rows_by_id, dict)
+    credential_rows_by_id = credential_rows_by_id if has_identity_map else {}
+    descriptor_credential_id = descriptor.get("credential_id")
+    credential = credential_rows_by_id.get(descriptor_credential_id)
+    if has_identity_map and descriptor_credential_id and not isinstance(credential, dict):
+        credential = {
+            "status": "removed",
+            "plan": None,
+            "windows": [],
+            "details": [],
+            "unavailable_reason": "Credential is no longer configured.",
+            "retry_after": None,
+            "fetched_at": None,
+        }
+    elif not isinstance(credential, dict):
         credential = credential_rows[0] if len(credential_rows) == 1 and isinstance(credential_rows[0], dict) else None
     selected_limits = credential if credential is not None else limits
     provider_id = descriptor["provider_id"]

@@ -339,6 +339,45 @@ def test_selected_quota_source_preserves_meaningful_empty_credential_fields():
     assert payload["unavailable_reason"] == "Quota exhausted."
 
 
+def test_full_quota_fetch_marks_credential_removed_during_batch(monkeypatch):
+    monkeypatch.setattr(
+        providers,
+        "get_providers",
+        lambda: {
+            "active_provider": "openai-codex",
+            "providers": [{"id": "openai-codex", "display_name": "Codex", "has_key": True}],
+        },
+    )
+    monkeypatch.setattr(
+        providers,
+        "_pool_entry_payloads",
+        lambda _provider: [
+            {"id": "codex-one", "label": "Work"},
+            {"id": "codex-two", "label": "Removed during refresh"},
+        ],
+    )
+
+    def quota(provider_id, *, refresh=False, credential_id=None, _include_internal=False):
+        assert _include_internal is True
+        result = _quota_result(provider_id, "remaining pool", 10)
+        work = {"status": "available", "plan": "Work", "windows": [{"used_percent": 10}]}
+        result["account_limits"]["pool"] = {"credentials": [work]}
+        result["_credential_rows_by_id"] = {"codex-one": work}
+        return result
+
+    monkeypatch.setattr(providers, "get_provider_quota", quota)
+    monkeypatch.setattr("api.profiles.get_active_profile_name", lambda: "default")
+
+    result = providers.get_provider_quotas(refresh=True)
+
+    assert [(source["account_label"], source["status"], source["plan"]) for source in result["sources"]] == [
+        ("Work", "available", "Work"),
+        ("Removed during refresh", "removed", None),
+    ]
+    assert result["sources"][1]["windows"] == []
+    assert result["sources"][1]["details"] == []
+
+
 def test_public_account_usage_serialization_strips_internal_credential_identity():
     snapshot = SimpleNamespace(
         provider="openai-codex",
