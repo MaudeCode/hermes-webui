@@ -191,3 +191,39 @@ def test_request_overrides_ignore_saved_source_filter(monkeypatch):
     assert handler.status == 200
     assert seen_filters == [None]
     assert [row["session_id"] for row in handler.json_body()["sessions"]] == ["cron-1"]
+
+
+def test_request_overrides_filter_materialized_background_sidecars(monkeypatch):
+    monkeypatch.setattr(
+        routes,
+        "load_settings",
+        lambda: {
+            "show_cli_sessions": False,
+            "show_cron_sessions": False,
+            "show_webhook_sessions": False,
+            "show_kanban_sessions": False,
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "all_sessions",
+        lambda diag=None: [_session("webhook-sidecar", "webhook")],
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_cli_sessions",
+        lambda **_kwargs: [_session("cron-1", "cron")],
+    )
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+
+    handler = _FakeHandler()
+    routes.handle_get(
+        handler,
+        urlparse(
+            "http://example.test/api/sessions"
+            "?show_cli_sessions=0&show_cron_sessions=1&show_webhook_sessions=0"
+        ),
+    )
+
+    assert handler.status == 200
+    assert [row["session_id"] for row in handler.json_body()["sessions"]] == ["cron-1"]

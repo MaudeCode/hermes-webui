@@ -2465,6 +2465,16 @@ def _build_session_list_cache_payload(
         webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
         if not show_cli_sessions:
             webui_sessions = [s for s in webui_sessions if not _is_cli_session_for_settings(s)]
+        if request_visibility_overrides:
+            webui_sessions = [
+                s for s in webui_sessions
+                if not _hide_from_default_sidebar(
+                    s,
+                    show_cron=show_cron_sessions,
+                    show_webhook=show_webhook_sessions,
+                    show_kanban=show_kanban_sessions,
+                )
+            ]
         # Apply the same CLI visibility semantics to imported local copies so
         # low-value imported artifacts do not leak into the sidebar.
         webui_sessions = [s for s in webui_sessions if is_cli_session_row_visible(s)]
