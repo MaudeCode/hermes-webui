@@ -217,7 +217,8 @@ def test_invalidate_models_cache_direct():
     """Call invalidate_models_cache() after populating the cache.
     _AVAILABLE_MODELS_CACHE should be None and the next call should re-scan.
     """
-    _reset_cache()
+    config.invalidate_models_cache()
+    saved_mtime = config._cfg_mtime
 
     # Ensure _cfg_mtime matches file so mtime check doesn't invalidate
     try:
@@ -225,24 +226,60 @@ def test_invalidate_models_cache_direct():
     except OSError:
         config._cfg_mtime = 0.0
 
-    # First call populates cache
-    result1 = config.get_available_models()
-    assert config._available_models_cache is not None, "Cache should be populated"
-    first_ts = config._available_models_cache_ts
+    # A bounded cold rebuild may legitimately return the static fallback before
+    # its worker publishes the cache. Force a deterministic synchronous rebuild
+    # so this unit test neither depends on a sibling cache warmup nor probes the
+    # configured providers or filesystem cache.
+    catalog = {
+        "active_provider": "test-provider",
+        "default_model": "test-provider/test-model",
+        "configured_model_badges": {},
+        "groups": [
+            {
+                "provider": "Test Provider",
+                "models": [{"id": "test-provider/test-model", "label": "Test Model"}],
+            }
+        ],
+    }
+    rebuild_count = 0
 
-    # Directly invalidate
-    config.invalidate_models_cache()
+    def _deterministic_rebuild(_builder):
+        nonlocal rebuild_count
+        rebuild_count += 1
+        return catalog
 
-    # Cache must be cleared
-    assert config._available_models_cache is None, (
-        "invalidate_models_cache() should set _AVAILABLE_MODELS_CACHE to None"
-    )
+    with (
+        patch.object(config, "_LIVE_REBUILD_BUDGET_SECONDS", 0.0),
+        patch.object(config, "_invoke_models_rebuild", _deterministic_rebuild),
+        patch.object(config, "_load_models_cache_from_disk", return_value=None),
+        patch.object(config, "_save_models_cache_to_disk", return_value=None),
+    ):
+        try:
+            result1 = config.get_available_models()
+            assert config._available_models_cache is not None, (
+                "Cache should be populated"
+            )
+            assert rebuild_count == 1
+            first_ts = config._available_models_cache_ts
 
-    # Next call should re-scan and produce a fresh cache
-    result2 = config.get_available_models()
-    assert config._available_models_cache is not None, "Cache should be re-populated"
-    assert config._available_models_cache_ts >= first_ts, (
-        "Cache timestamp should be updated after re-scan"
-    )
+            # Directly invalidate
+            config.invalidate_models_cache()
 
-    _reset_cache()
+            # Cache must be cleared
+            assert config._available_models_cache is None, (
+                "invalidate_models_cache() should set _AVAILABLE_MODELS_CACHE to None"
+            )
+
+            # Next call should re-scan and produce a fresh cache
+            result2 = config.get_available_models()
+            assert config._available_models_cache is not None, (
+                "Cache should be re-populated"
+            )
+            assert config._available_models_cache_ts >= first_ts, (
+                "Cache timestamp should be updated after re-scan"
+            )
+            assert rebuild_count == 2
+            assert "groups" in result1 and "groups" in result2
+        finally:
+            config._cfg_mtime = saved_mtime
+            config.invalidate_models_cache()
