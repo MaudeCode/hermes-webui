@@ -260,6 +260,9 @@ limits remain downstream responsibilities.
 saved WebUI preferences. When present, they affect only that response, allowing
 another client to apply its own visibility preferences without mutating WebUI
 settings. Background-source overrides do not require CLI sessions to be shown.
+Explicit overrides also bypass the browser's saved source filter and exclude
+disabled project-assigned background rows instead of returning them as hidden
+WebUI cache entries.
 
 ### 4.3 SSE Streaming Engine
 

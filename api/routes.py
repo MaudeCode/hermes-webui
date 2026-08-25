@@ -2016,6 +2016,7 @@ def _session_list_cache_key(
     archived_limit: int | None = None,
     archived_offset: int = 0,
     show_claude_code_sessions: bool = True,
+    request_visibility_overrides: bool = False,
 ) -> tuple:
     return _route_session_list_cache_key(
         active_profile=active_profile,
@@ -2032,7 +2033,7 @@ def _session_list_cache_key(
         sidebar_source=sidebar_source,
         archived_limit=archived_limit,
         archived_offset=archived_offset,
-    ) + (bool(show_claude_code_sessions),)
+    ) + (bool(show_claude_code_sessions), bool(request_visibility_overrides))
 
 _ROUTE_SESSION_LIST_CACHE_DYNAMIC_EXPORTS = {
     "_SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION",
@@ -2275,6 +2276,7 @@ def _build_session_list_cache_payload(
     show_webhook_sessions: bool = False,
     show_kanban_sessions: bool = False,
     source_filter: str | None = None,
+    request_visibility_overrides: bool = False,
     sidebar_source: str | None = None,
     archived_limit: int | None = None,
     archived_offset: int = 0,
@@ -2477,6 +2479,7 @@ def _build_session_list_cache_payload(
             show_webhook_sessions=show_webhook_sessions,
             show_kanban_sessions=show_kanban_sessions,
             source_filter=source_filter,
+            request_visibility_overrides=request_visibility_overrides,
         )
     else:
         diag_stage("filter_webui_sessions")
@@ -10480,6 +10483,7 @@ def _dedupe_cli_sidebar_sessions_for_api(
     show_webhook_sessions: bool = False,
     show_kanban_sessions: bool = False,
     source_filter: str | None = None,
+    request_visibility_overrides: bool = False,
 ) -> list[dict]:
     """Return state sidebar rows while preserving project-hidden background rows.
 
@@ -10491,6 +10495,10 @@ def _dedupe_cli_sidebar_sessions_for_api(
     An explicit ``source_filter`` for a background source (cron/webhook/kanban)
     is a deliberate request to view those rows, so it overrides the default
     hide for that source only — the user asked for them.
+
+    Request-scoped visibility overrides return the exact enabled source set.
+    Browser requests without overrides retain hidden project rows for project
+    chip navigation.
     """
     from api.models import (
         _hide_from_default_sidebar as _hide_background,
@@ -10529,6 +10537,8 @@ def _dedupe_cli_sidebar_sessions_for_api(
             )
         )
     ]
+    if request_visibility_overrides:
+        return visible
     return _include_project_hidden_background_sidebar_sessions(candidates, visible)
 
 
@@ -14541,6 +14551,17 @@ def handle_get(handler, parsed) -> bool:
 
             diag.stage("load_settings")
             settings = load_settings()
+            query = parse_qs(parsed.query)
+            request_visibility_overrides = any(
+                name in query
+                for name in (
+                    "show_cli_sessions",
+                    "show_claude_code_sessions",
+                    "show_cron_sessions",
+                    "show_webhook_sessions",
+                    "show_kanban_sessions",
+                )
+            )
             show_cli_sessions = _query_bool(
                 parsed,
                 "show_cli_sessions",
@@ -14569,7 +14590,11 @@ def handle_get(handler, parsed) -> bool:
                 "show_kanban_sessions",
                 default=bool(settings.get("show_kanban_sessions")),
             )
-            agent_session_source_filter = settings.get("agent_session_source_filter")
+            agent_session_source_filter = (
+                None
+                if request_visibility_overrides
+                else settings.get("agent_session_source_filter")
+            )
             active_profile = profiles_api.get_active_profile_name()
             all_profiles = _all_profiles_enabled(parsed)
             include_archived = _query_flag(parsed, "include_archived")
@@ -14597,6 +14622,7 @@ def handle_get(handler, parsed) -> bool:
                 sidebar_source=sidebar_source,
                 archived_limit=archived_limit,
                 archived_offset=archived_offset,
+                request_visibility_overrides=request_visibility_overrides,
             )
             # Keep the visible /api/sessions contract unchanged even though the
             # heavy lifting now lives in the cache builder: profile scoping via
@@ -14617,6 +14643,7 @@ def handle_get(handler, parsed) -> bool:
                     show_webhook_sessions=show_webhook_sessions,
                     show_kanban_sessions=show_kanban_sessions,
                     source_filter=agent_session_source_filter,
+                    request_visibility_overrides=request_visibility_overrides,
                     sidebar_source=sidebar_source,
                     archived_limit=archived_limit,
                     archived_offset=archived_offset,
