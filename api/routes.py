@@ -518,6 +518,19 @@ def _query_flag(parsed_url, name: str) -> bool:
     return raw in ('1', 'true', 'yes', 'on')
 
 
+def _query_bool(parsed_url, name: str, *, default: bool) -> bool:
+    """Return a request boolean, preserving ``default`` when absent or invalid."""
+    values = parse_qs(parsed_url.query).get(name)
+    if not values:
+        return bool(default)
+    raw = str(values[0]).strip().lower()
+    if raw in ('1', 'true', 'yes', 'on'):
+        return True
+    if raw in ('0', 'false', 'no', 'off'):
+        return False
+    return bool(default)
+
+
 def _query_positive_int(parsed_url, name: str, *, default=None, maximum: int | None = None):
     """Return a non-negative integer query parameter, or default when absent/invalid."""
     qs = parse_qs(parsed_url.query)
@@ -2003,6 +2016,7 @@ def _session_list_cache_key(
     archived_limit: int | None = None,
     archived_offset: int = 0,
     show_claude_code_sessions: bool = True,
+    request_visibility_overrides: bool = False,
 ) -> tuple:
     return _route_session_list_cache_key(
         active_profile=active_profile,
@@ -2019,7 +2033,7 @@ def _session_list_cache_key(
         sidebar_source=sidebar_source,
         archived_limit=archived_limit,
         archived_offset=archived_offset,
-    ) + (bool(show_claude_code_sessions),)
+    ) + (bool(show_claude_code_sessions), bool(request_visibility_overrides))
 
 _ROUTE_SESSION_LIST_CACHE_DYNAMIC_EXPORTS = {
     "_SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION",
@@ -2262,6 +2276,7 @@ def _build_session_list_cache_payload(
     show_webhook_sessions: bool = False,
     show_kanban_sessions: bool = False,
     source_filter: str | None = None,
+    request_visibility_overrides: bool = False,
     sidebar_source: str | None = None,
     archived_limit: int | None = None,
     archived_offset: int = 0,
@@ -2314,13 +2329,13 @@ def _build_session_list_cache_payload(
     show_webhook_sessions = bool(show_webhook_sessions)
     show_kanban_sessions = bool(show_kanban_sessions)
     webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
-    if show_cli_sessions:
+    if show_cli_sessions or show_cron_sessions or show_webhook_sessions or show_kanban_sessions:
         diag_stage("get_cli_sessions")
         if _callable_accepts_kwarg(get_cli_sessions, "include_claude_code"):
             cli = get_cli_sessions(
                 source_filter=source_filter,
                 all_profiles=all_profiles,
-                include_claude_code=show_claude_code_sessions,
+                include_claude_code=show_cli_sessions and show_claude_code_sessions,
             )
         else:
             # Focused tests sometimes monkeypatch routes.get_cli_sessions with
@@ -2448,6 +2463,18 @@ def _build_session_list_cache_payload(
                     if not s.get(key) and meta.get(key):
                         s[key] = meta[key]
         webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
+        if not show_cli_sessions:
+            webui_sessions = [s for s in webui_sessions if not _is_cli_session_for_settings(s)]
+        if request_visibility_overrides:
+            webui_sessions = [
+                s for s in webui_sessions
+                if not _hide_from_default_sidebar(
+                    s,
+                    show_cron=show_cron_sessions,
+                    show_webhook=show_webhook_sessions,
+                    show_kanban=show_kanban_sessions,
+                )
+            ]
         # Apply the same CLI visibility semantics to imported local copies so
         # low-value imported artifacts do not leak into the sidebar.
         webui_sessions = [s for s in webui_sessions if is_cli_session_row_visible(s)]
@@ -2457,10 +2484,12 @@ def _build_session_list_cache_payload(
         deduped_cli = _dedupe_cli_sidebar_sessions_for_api(
             cli,
             represented_webui_ids,
+            show_cli_sessions=show_cli_sessions,
             show_cron_sessions=show_cron_sessions,
             show_webhook_sessions=show_webhook_sessions,
             show_kanban_sessions=show_kanban_sessions,
             source_filter=source_filter,
+            request_visibility_overrides=request_visibility_overrides,
         )
     else:
         diag_stage("filter_webui_sessions")
@@ -10449,10 +10478,12 @@ def _dedupe_cli_sidebar_sessions_for_api(
     cli: list[dict],
     represented_webui_ids: set[str],
     *,
+    show_cli_sessions: bool = True,
     show_cron_sessions: bool = False,
     show_webhook_sessions: bool = False,
     show_kanban_sessions: bool = False,
     source_filter: str | None = None,
+    request_visibility_overrides: bool = False,
 ) -> list[dict]:
     """Return state sidebar rows while preserving project-hidden background rows.
 
@@ -10464,10 +10495,15 @@ def _dedupe_cli_sidebar_sessions_for_api(
     An explicit ``source_filter`` for a background source (cron/webhook/kanban)
     is a deliberate request to view those rows, so it overrides the default
     hide for that source only — the user asked for them.
+
+    Request-scoped visibility overrides return the exact enabled source set.
+    Browser requests without overrides retain hidden project rows for project
+    chip navigation.
     """
     from api.models import (
         _hide_from_default_sidebar as _hide_background,
         _include_project_hidden_background_sidebar_sessions,
+        _is_intentionally_background_sidebar_session,
     )
 
     # An explicit background source filter reveals that source (override the hide).
@@ -10488,13 +10524,21 @@ def _dedupe_cli_sidebar_sessions_for_api(
     ]
     visible = [
         s for s in candidates
-        if not _hide_background(
-            s,
-            show_cron=show_cron_sessions,
-            show_webhook=show_webhook_sessions,
-            show_kanban=show_kanban_sessions,
+        if (
+            not _is_intentionally_background_sidebar_session(s)
+            and show_cli_sessions
+        ) or (
+            _is_intentionally_background_sidebar_session(s)
+            and not _hide_background(
+                s,
+                show_cron=show_cron_sessions,
+                show_webhook=show_webhook_sessions,
+                show_kanban=show_kanban_sessions,
+            )
         )
     ]
+    if request_visibility_overrides:
+        return visible
     return _include_project_hidden_background_sidebar_sessions(candidates, visible)
 
 
@@ -14507,15 +14551,50 @@ def handle_get(handler, parsed) -> bool:
 
             diag.stage("load_settings")
             settings = load_settings()
-            show_cli_sessions = bool(settings.get("show_cli_sessions"))
-            show_claude_code_sessions = bool(settings.get("show_claude_code_sessions"))
+            query = parse_qs(parsed.query)
+            request_visibility_overrides = any(
+                name in query
+                for name in (
+                    "show_cli_sessions",
+                    "show_claude_code_sessions",
+                    "show_cron_sessions",
+                    "show_webhook_sessions",
+                    "show_kanban_sessions",
+                )
+            )
+            show_cli_sessions = _query_bool(
+                parsed,
+                "show_cli_sessions",
+                default=bool(settings.get("show_cli_sessions")),
+            )
+            show_claude_code_sessions = _query_bool(
+                parsed,
+                "show_claude_code_sessions",
+                default=bool(settings.get("show_claude_code_sessions")),
+            )
             show_previous_messaging_sessions = bool(
                 settings.get("show_previous_messaging_sessions")
             )
-            show_cron_sessions = bool(settings.get("show_cron_sessions"))
-            show_webhook_sessions = bool(settings.get("show_webhook_sessions"))
-            show_kanban_sessions = bool(settings.get("show_kanban_sessions"))
-            agent_session_source_filter = settings.get("agent_session_source_filter")
+            show_cron_sessions = _query_bool(
+                parsed,
+                "show_cron_sessions",
+                default=bool(settings.get("show_cron_sessions")),
+            )
+            show_webhook_sessions = _query_bool(
+                parsed,
+                "show_webhook_sessions",
+                default=bool(settings.get("show_webhook_sessions")),
+            )
+            show_kanban_sessions = _query_bool(
+                parsed,
+                "show_kanban_sessions",
+                default=bool(settings.get("show_kanban_sessions")),
+            )
+            agent_session_source_filter = (
+                None
+                if request_visibility_overrides
+                else settings.get("agent_session_source_filter")
+            )
             active_profile = profiles_api.get_active_profile_name()
             all_profiles = _all_profiles_enabled(parsed)
             include_archived = _query_flag(parsed, "include_archived")
@@ -14543,6 +14622,7 @@ def handle_get(handler, parsed) -> bool:
                 sidebar_source=sidebar_source,
                 archived_limit=archived_limit,
                 archived_offset=archived_offset,
+                request_visibility_overrides=request_visibility_overrides,
             )
             # Keep the visible /api/sessions contract unchanged even though the
             # heavy lifting now lives in the cache builder: profile scoping via
@@ -14563,6 +14643,7 @@ def handle_get(handler, parsed) -> bool:
                     show_webhook_sessions=show_webhook_sessions,
                     show_kanban_sessions=show_kanban_sessions,
                     source_filter=agent_session_source_filter,
+                    request_visibility_overrides=request_visibility_overrides,
                     sidebar_source=sidebar_source,
                     archived_limit=archived_limit,
                     archived_offset=archived_offset,
