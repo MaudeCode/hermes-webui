@@ -254,6 +254,13 @@ visibility stage decides whether recovered background rows are shown. In
 are merged; cross-profile scoping, visibility, deduplication, and final route
 limits remain downstream responsibilities.
 
+`GET /api/sessions` accepts optional `show_cli_sessions`,
+`show_claude_code_sessions`, `show_cron_sessions`, `show_webhook_sessions`, and
+`show_kanban_sessions` boolean query values. When absent, the route uses the
+saved WebUI preferences. When present, they affect only that response, allowing
+another client to apply its own visibility preferences without mutating WebUI
+settings. Background-source overrides do not require CLI sessions to be shown.
+
 ### 4.3 SSE Streaming Engine
 
 This is the most architecturally interesting part. Two endpoints cooperate:
