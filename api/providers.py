@@ -131,6 +131,7 @@ _ACCOUNT_USAGE_PARENT_DEATHSIG_BOOTSTRAP = (
 # Module-level cap on concurrent quota-probe subprocesses.
 # Lazily created so this module compiles even when threading isn't ready.
 _account_usage_probe_semaphore: threading.BoundedSemaphore | None = None
+_opencode_go_probe_semaphore = threading.BoundedSemaphore(_OPENCODE_GO_POOL_MAX_WORKERS)
 
 # Short-lived account-usage cache. The Codex pooled probe may check multiple
 # credentials, so cache sanitized snapshots briefly to avoid re-querying the
@@ -1650,8 +1651,9 @@ def _fetch_opencode_go_quota_status(display_name: str, api_key: str) -> dict[str
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=_PROVIDER_QUOTA_TIMEOUT_SECONDS) as resp:
-            raw = resp.read()
+        with _opencode_go_probe_semaphore:
+            with urllib.request.urlopen(req, timeout=_PROVIDER_QUOTA_TIMEOUT_SECONDS) as resp:
+                raw = resp.read()
         payload = json.loads(raw.decode("utf-8")) if isinstance(raw, (bytes, bytearray)) else json.loads(raw)
         account_limits = _sanitize_opencode_go_account_limits(payload)
         if account_limits is None:
