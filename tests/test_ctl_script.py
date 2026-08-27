@@ -1,4 +1,5 @@
 import os
+import socket
 import shutil
 import subprocess
 import sys
@@ -40,6 +41,9 @@ def run_ctl(
         "HERMES_WEBUI_PID_FILE",
         "HERMES_WEBUI_LOG_FILE",
         "HERMES_WEBUI_CTL_STATE_FILE",
+        "HERMES_WEBUI_CTL_PORT_START",
+        "HERMES_WEBUI_CTL_ISOLATE_WORKTREE",
+        "HERMES_WEBUI_CTL_DETACH_WORKTREE",
         "HERMES_WEBUI_NO_DOTENV",
     ):
         merged.pop(key, None)
@@ -49,6 +53,7 @@ def run_ctl(
             "HERMES_HOME": str(home / ".hermes"),
             "PATH": os.environ.get("PATH", ""),
             "HERMES_WEBUI_NO_DOTENV": "0" if load_dotenv else "1",
+            "HERMES_WEBUI_CTL_ISOLATE_WORKTREE": "0",
         }
     )
     if env:
@@ -240,6 +245,50 @@ def test_start_writes_pid_under_hermes_home_runs_foreground_no_browser_and_logs(
         _kill_tree(pid)
         assert_process_exits(pid)
         assert not pid_file.exists()
+
+
+def test_worktree_start_selects_next_free_port_and_reports_it(tmp_path):
+    fake_python = tmp_path / "fake-python"
+    fake_log = tmp_path / "fake-python.log"
+    runtime_root = tmp_path / "runtime"
+    write_fake_python(fake_python)
+
+    while True:
+        blocker = socket.socket()
+        blocker.bind(("127.0.0.1", 0))
+        start_port = blocker.getsockname()[1]
+        if start_port < 65535:
+            break
+        blocker.close()
+    env = {
+        "HERMES_WEBUI_PYTHON": str(fake_python),
+        "FAKE_PYTHON_LOG": str(fake_log),
+        "HERMES_WEBUI_CTL_ISOLATE_WORKTREE": "1",
+        "HERMES_WEBUI_CTL_PORT_START": str(start_port),
+        "HERMES_WEBUI_CTL_ALLOW_LAUNCHD_CONFLICT": "1",
+        "HERMES_WEBUI_CTL_DETACH_WORKTREE": "1",
+        "TMPDIR": str(runtime_root),
+    }
+    try:
+        result = run_ctl(tmp_path, "start", env=env)
+    finally:
+        blocker.close()
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert f"HERMES_WEBUI_PORT={start_port + 1}" in result.stdout
+    assert f"HERMES_WEBUI_URL=http://127.0.0.1:{start_port + 1}" in result.stdout
+    fake_output = wait_for_file_text(fake_log, contains=f"port={start_port + 1}")
+    assert str(runtime_root) in fake_output
+
+    pid_files = list(runtime_root.glob("hermes-webui-ctl-*/*/webui.pid"))
+    assert len(pid_files) == 1
+    pid = int(pid_files[0].read_text().strip())
+    try:
+        stop = run_ctl(tmp_path, "stop", env=env)
+        assert stop.returncode == 0, stop.stderr + stop.stdout
+    finally:
+        _kill_tree(pid)
+        assert_process_exits(pid)
 
 
 def test_start_uses_nohup_so_daemon_survives_launcher_exit():
