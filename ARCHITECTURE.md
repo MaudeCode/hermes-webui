@@ -942,6 +942,10 @@ The response also includes an opaque `scope_id` for the current server/profile,
 allowing clients to replace one profile's cached display rows without dropping
 rows belonging to another configured server or profile.
 
+OpenCode Go sources use the provider's API-key-authenticated `/zen/go/v1/usage`
+endpoint and normalize its rolling 5-hour, weekly, and monthly windows into the
+same sanitized `account_limits` shape used by other quota providers.
+
 Follow this exact pattern. Review existing handlers in do_GET/do_POST for reference.
 
 ### Backend (server.py -> future: api/handlers.py)

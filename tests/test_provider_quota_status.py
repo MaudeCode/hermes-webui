@@ -159,6 +159,150 @@ def test_openrouter_quota_invalid_key_and_timeout_are_sanitized(monkeypatch, tmp
         _restore_config(old_cfg, old_mtime)
 
 
+def test_opencode_go_quota_fetches_usage_windows_and_sanitizes_response(monkeypatch, tmp_path):
+    """OpenCode Go quota should use the provider key without exposing it."""
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.delenv("OPENCODE_GO_API_KEY", raising=False)
+    (tmp_path / ".env").write_text("OPENCODE_GO_API_KEY=test-opencode-key-private\n", encoding="utf-8")
+    old_cfg, old_mtime = _with_config(model={"provider": "opencode-go"})
+
+    import api.providers as providers
+    seen = {}
+
+    def fake_urlopen(req, timeout):
+        seen["url"] = req.full_url
+        seen["timeout"] = timeout
+        seen["authorization"] = req.headers.get("Authorization")
+        payload = {
+            "usage": {
+                "rolling": {"status": "ok", "percent": 17, "resetsAt": "2030-03-17T17:30:00Z"},
+                "weekly": {"status": "ok", "percent": 7.5, "resetsAt": "2030-03-24T00:00:00Z"},
+                "monthly": {"status": "rate-limited", "percent": 100, "resetsAt": "2030-04-01T00:00:00Z"},
+            },
+            "api_key": "must-not-leak",
+        }
+        return _FakeResponse(json.dumps(payload).encode("utf-8"))
+
+    monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
+    try:
+        result = providers.get_provider_quota()
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+    assert seen == {
+        "url": "https://opencode.ai/zen/go/v1/usage",
+        "timeout": 3.0,
+        "authorization": "Bearer test-opencode-key-private",
+    }
+    assert result == {
+        "ok": True,
+        "provider": "opencode-go",
+        "display_name": "OpenCode Go",
+        "supported": True,
+        "status": "available",
+        "label": "OpenCode Go usage",
+        "quota": None,
+        "account_limits": {
+            "provider": "opencode-go",
+            "source": "usage_api",
+            "title": "Account limits",
+            "plan": "Go",
+            "windows": [
+                {
+                    "label": "5-hour",
+                    "used_percent": 17,
+                    "remaining_percent": 83.0,
+                    "reset_at": "2030-03-17T17:30:00Z",
+                    "detail": None,
+                },
+                {
+                    "label": "Weekly",
+                    "used_percent": 7.5,
+                    "remaining_percent": 92.5,
+                    "reset_at": "2030-03-24T00:00:00Z",
+                    "detail": None,
+                },
+                {
+                    "label": "Monthly",
+                    "used_percent": 100,
+                    "remaining_percent": 0.0,
+                    "reset_at": "2030-04-01T00:00:00Z",
+                    "detail": "Rate limited",
+                },
+            ],
+            "details": [],
+            "available": True,
+            "unavailable_reason": None,
+            "fetched_at": result["account_limits"]["fetched_at"],
+        },
+        "message": "OpenCode Go account limits loaded.",
+    }
+    assert "test-opencode-key-private" not in repr(result)
+    assert "must-not-leak" not in repr(result)
+
+
+def test_opencode_go_quota_no_key_returns_safe_no_key_without_network(monkeypatch, tmp_path):
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.delenv("OPENCODE_GO_API_KEY", raising=False)
+    monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
+    old_cfg, old_mtime = _with_config(model={"provider": "opencode-go"})
+
+    import api.providers as providers
+
+    def explode(*_args, **_kwargs):
+        raise AssertionError("quota lookup should not call the network without a key")
+
+    monkeypatch.setattr(providers.urllib.request, "urlopen", explode)
+    try:
+        result = providers.get_provider_quota()
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+    assert result["ok"] is False
+    assert result["provider"] == "opencode-go"
+    assert result["supported"] is True
+    assert result["status"] == "no_key"
+    assert result["account_limits"] is None
+
+
+def test_opencode_go_quota_rejects_invalid_key_and_malformed_usage(monkeypatch, tmp_path):
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.delenv("OPENCODE_GO_API_KEY", raising=False)
+    (tmp_path / ".env").write_text("OPENCODE_GO_API_KEY=test-opencode-key-private\n", encoding="utf-8")
+    old_cfg, old_mtime = _with_config(model={"provider": "opencode-go"})
+
+    import api.providers as providers
+
+    invalid = urllib.error.HTTPError(
+        providers._OPENCODE_GO_USAGE_URL,
+        401,
+        "Unauthorized",
+        {},
+        BytesIO(b"secret body"),
+    )
+    responses = [invalid, _FakeResponse(b'{"usage":{"rolling":{"status":"ok","percent":"secret"}}}')]
+
+    def fake_urlopen(_req, timeout=None):
+        response = responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
+    try:
+        invalid_key = providers.get_provider_quota()
+        malformed = providers.get_provider_quota()
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+    assert invalid_key["status"] == "invalid_key"
+    assert malformed["status"] == "unavailable"
+    assert invalid_key["account_limits"] is None
+    assert malformed["account_limits"] is None
+    assert "test-opencode-key-private" not in repr((invalid_key, malformed))
+    assert "secret" not in repr((invalid_key, malformed)).lower()
+
+
 def test_unsupported_provider_reports_followup_state(monkeypatch, tmp_path):
     """Providers without safe quota APIs should return a clear unsupported state."""
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)

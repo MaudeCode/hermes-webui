@@ -79,6 +79,7 @@ def _custom_provider_name_matches(provider_id: str, name: object) -> bool:
     return pid in candidates
 
 _OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
+_OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
 _PROVIDER_QUOTA_TIMEOUT_SECONDS = 3.0
 _ACCOUNT_USAGE_SUBPROCESS_TIMEOUT_SECONDS = 35.0
 _ACCOUNT_USAGE_CACHE_TTL_SECONDS = 45.0
@@ -1584,6 +1585,40 @@ def _sanitize_openrouter_quota(payload: Any) -> dict[str, int | float | None]:
     }
 
 
+def _sanitize_opencode_go_account_limits(payload: Any) -> dict[str, Any] | None:
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    if not isinstance(usage, dict):
+        return None
+
+    windows = []
+    for key, label in (("rolling", "5-hour"), ("weekly", "Weekly"), ("monthly", "Monthly")):
+        window = usage.get(key)
+        if not isinstance(window, dict) or window.get("status") not in {"ok", "rate-limited"}:
+            return None
+        used_percent = _quota_number(window.get("percent"))
+        reset_at = _parse_dt(window.get("resetsAt"))
+        if used_percent is None or not 0 <= float(used_percent) <= 100 or reset_at is None:
+            return None
+        windows.append(SimpleNamespace(
+            label=label,
+            used_percent=used_percent,
+            reset_at=reset_at,
+            detail="Rate limited" if window["status"] == "rate-limited" else None,
+        ))
+
+    return _serialize_account_usage_snapshot(SimpleNamespace(
+        provider="opencode-go",
+        source="usage_api",
+        title="Account limits",
+        plan="Go",
+        windows=tuple(windows),
+        details=(),
+        available=True,
+        unavailable_reason=None,
+        fetched_at=datetime.now(timezone.utc),
+    ))
+
+
 def _isoformat_utc(value: Any) -> str | None:
     if value in (None, ""):
         return None
@@ -2324,6 +2359,75 @@ def get_provider_quota(
             credential_id=credential_id,
             include_internal=_include_internal,
         )
+
+    if provider == "opencode-go":
+        api_key = _get_provider_api_key(provider, credential_id)
+        if not api_key:
+            return {
+                "ok": False,
+                "provider": provider,
+                "display_name": display_name,
+                "supported": True,
+                "status": "no_key",
+                "quota": None,
+                "account_limits": None,
+                "message": "OpenCode Go account limits need an API key configured on the server.",
+            }
+        req = urllib.request.Request(
+            _OPENCODE_GO_USAGE_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Accept": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=_PROVIDER_QUOTA_TIMEOUT_SECONDS) as resp:
+                raw = resp.read()
+            payload = json.loads(raw.decode("utf-8")) if isinstance(raw, (bytes, bytearray)) else json.loads(raw)
+            account_limits = _sanitize_opencode_go_account_limits(payload)
+            if account_limits is None:
+                raise ValueError("Malformed OpenCode Go usage response")
+            return {
+                "ok": True,
+                "provider": provider,
+                "display_name": display_name,
+                "supported": True,
+                "status": "available",
+                "label": "OpenCode Go usage",
+                "quota": None,
+                "account_limits": account_limits,
+                "message": "OpenCode Go account limits loaded.",
+            }
+        except urllib.error.HTTPError as exc:
+            status = "invalid_key" if exc.code == 401 else "unavailable"
+            message = (
+                "OpenCode Go rejected the configured API key."
+                if status == "invalid_key"
+                else "OpenCode Go account limits require an active subscription."
+                if exc.code == 403
+                else "OpenCode Go account limits are temporarily unavailable."
+            )
+            return {
+                "ok": False,
+                "provider": provider,
+                "display_name": display_name,
+                "supported": True,
+                "status": status,
+                "quota": None,
+                "account_limits": None,
+                "message": message,
+            }
+        except (TimeoutError, urllib.error.URLError, json.JSONDecodeError, OSError, ValueError):
+            return {
+                "ok": False,
+                "provider": provider,
+                "display_name": display_name,
+                "supported": True,
+                "status": "unavailable",
+                "quota": None,
+                "account_limits": None,
+                "message": "OpenCode Go account limits are temporarily unavailable.",
+            }
 
     if provider == "openrouter":
         api_key = (
