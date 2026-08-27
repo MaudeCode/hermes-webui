@@ -42,6 +42,7 @@ def run_ctl(
         "HERMES_WEBUI_LOG_FILE",
         "HERMES_WEBUI_CTL_STATE_FILE",
         "HERMES_WEBUI_CTL_PORT_START",
+        "HERMES_WEBUI_START_GRACE",
         "HERMES_WEBUI_CTL_ISOLATE_WORKTREE",
         "HERMES_WEBUI_CTL_DETACH_WORKTREE",
         "HERMES_WEBUI_NO_DOTENV",
@@ -77,6 +78,39 @@ def write_fake_python(path: Path) -> None:
             printf 'host=%s port=%s state=%s\n' "${HERMES_WEBUI_HOST:-}" "${HERMES_WEBUI_PORT:-}" "${HERMES_WEBUI_STATE_DIR:-}" >> "${FAKE_PYTHON_LOG}"
             trap 'printf "terminated\n" >> "${FAKE_PYTHON_LOG}"; exit 0' TERM INT
             while true; do sleep 0.1; done
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def write_delayed_listener(path: Path) -> None:
+    path.write_text(
+        textwrap.dedent(
+            f"""
+            #!{sys.executable}
+            import os
+            import signal
+            import socket
+            import sys
+            import time
+
+            with open(os.environ["FAKE_PYTHON_LOG"], "a", encoding="utf-8") as log:
+                log.write(f"fake-python args:{{' '.join(sys.argv[1:])}}\\n")
+                log.write(
+                    f"host={{os.environ.get('HERMES_WEBUI_HOST', '')}} "
+                    f"port={{os.environ.get('HERMES_WEBUI_PORT', '')}} "
+                    f"state={{os.environ.get('HERMES_WEBUI_STATE_DIR', '')}}\\n"
+                )
+            time.sleep(float(os.environ["FAKE_BIND_DELAY"]))
+            listener = socket.socket()
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", int(sys.argv[-1])))
+            listener.listen()
+            signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+            while True:
+                time.sleep(0.1)
             """
         ).lstrip(),
         encoding="utf-8",
@@ -251,7 +285,7 @@ def test_worktree_start_selects_next_free_port_and_reports_it(tmp_path):
     fake_python = tmp_path / "fake-python"
     fake_log = tmp_path / "fake-python.log"
     runtime_root = tmp_path / "runtime"
-    write_fake_python(fake_python)
+    write_delayed_listener(fake_python)
 
     while True:
         blocker = socket.socket()
@@ -267,6 +301,7 @@ def test_worktree_start_selects_next_free_port_and_reports_it(tmp_path):
         "HERMES_WEBUI_CTL_PORT_START": str(start_port),
         "HERMES_WEBUI_CTL_ALLOW_LAUNCHD_CONFLICT": "1",
         "HERMES_WEBUI_CTL_DETACH_WORKTREE": "1",
+        "FAKE_BIND_DELAY": "0.1",
         "TMPDIR": str(runtime_root),
     }
     try:
@@ -283,6 +318,86 @@ def test_worktree_start_selects_next_free_port_and_reports_it(tmp_path):
     pid_files = list(runtime_root.glob("hermes-webui-ctl-*/*/webui.pid"))
     assert len(pid_files) == 1
     pid = int(pid_files[0].read_text().strip())
+    try:
+        stop = run_ctl(tmp_path, "stop", env=env)
+        assert stop.returncode == 0, stop.stderr + stop.stdout
+    finally:
+        _kill_tree(pid)
+        assert_process_exits(pid)
+
+
+def test_worktree_runtime_root_is_owner_only(tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("POSIX runtime directory ownership and mode check")
+    runtime_root = tmp_path / "runtime"
+    shared_root = runtime_root / f"hermes-webui-ctl-{os.getuid()}"
+    shared_root.mkdir(parents=True, mode=0o755)
+    shared_root.chmod(0o755)
+
+    result = run_ctl(
+        tmp_path,
+        "status",
+        env={
+            "HERMES_WEBUI_CTL_ISOLATE_WORKTREE": "1",
+            "TMPDIR": str(runtime_root),
+        },
+    )
+
+    assert result.returncode == 0
+    assert shared_root.stat().st_mode & 0o777 == 0o700
+
+
+def test_worktree_runtime_root_rejects_symlink(tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("POSIX runtime directory symlink check")
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
+    target = tmp_path / "attacker-controlled"
+    target.mkdir()
+    shared_root = runtime_root / f"hermes-webui-ctl-{os.getuid()}"
+    shared_root.symlink_to(target, target_is_directory=True)
+
+    result = run_ctl(
+        tmp_path,
+        "status",
+        env={
+            "HERMES_WEBUI_CTL_ISOLATE_WORKTREE": "1",
+            "TMPDIR": str(runtime_root),
+        },
+    )
+
+    assert result.returncode != 0
+    assert "unsafe runtime directory" in result.stderr
+    assert not any(target.iterdir())
+
+
+def test_worktree_start_waits_for_reserved_port_to_bind(tmp_path):
+    fake_python = tmp_path / "delayed-listener"
+    runtime_root = tmp_path / "runtime"
+    write_delayed_listener(fake_python)
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        start_port = probe.getsockname()[1]
+
+    env = {
+        "HERMES_WEBUI_PYTHON": str(fake_python),
+        "FAKE_PYTHON_LOG": str(tmp_path / "fake-python.log"),
+        "HERMES_WEBUI_CTL_ISOLATE_WORKTREE": "1",
+        "HERMES_WEBUI_CTL_PORT_START": str(start_port),
+        "HERMES_WEBUI_CTL_ALLOW_LAUNCHD_CONFLICT": "1",
+        "HERMES_WEBUI_CTL_DETACH_WORKTREE": "1",
+        "HERMES_WEBUI_START_GRACE": "1",
+        "FAKE_BIND_DELAY": "1.75",
+        "TMPDIR": str(runtime_root),
+    }
+    started_at = time.monotonic()
+    result = run_ctl(tmp_path, "start", env=env, timeout=5)
+    elapsed = time.monotonic() - started_at
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert elapsed >= 1.5
+    pid_file = next(runtime_root.glob("hermes-webui-ctl-*/*/webui.pid"))
+    pid = int(pid_file.read_text().strip())
     try:
         stop = run_ctl(tmp_path, "stop", env=env)
         assert stop.returncode == 0, stop.stderr + stop.stdout

@@ -6,6 +6,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${REPO_ROOT}/scripts/lib/health_probe.sh"
 HERMES_HOME="${HERMES_HOME:-${HOME}/.hermes}"
 CTL_WORKTREE_MODE=0
+_ctl_runtime_base=""
 _ctl_git_dir="$(git -C "${REPO_ROOT}" rev-parse --path-format=absolute --git-dir 2>/dev/null || true)"
 _ctl_git_common_dir="$(git -C "${REPO_ROOT}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
 case "${HERMES_WEBUI_CTL_ISOLATE_WORKTREE:-auto}" in
@@ -19,7 +20,8 @@ case "${HERMES_WEBUI_CTL_ISOLATE_WORKTREE:-auto}" in
 esac
 if (( CTL_WORKTREE_MODE )); then
   _ctl_worktree_id="$(printf '%s' "${REPO_ROOT}" | cksum | awk '{print $1}')"
-  _ctl_runtime_root="${TMPDIR:-/tmp}/hermes-webui-ctl-$(id -u)/${_ctl_worktree_id}"
+  _ctl_runtime_base="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/hermes-webui-ctl-$(id -u)"
+  _ctl_runtime_root="${_ctl_runtime_base}/${_ctl_worktree_id}"
 else
   _ctl_runtime_root="${HERMES_HOME}"
 fi
@@ -45,7 +47,30 @@ EOF
 }
 
 ensure_home() {
+  if (( CTL_WORKTREE_MODE )); then
+    local runtime_owner
+    if [[ -L "${_ctl_runtime_base}" ]]; then
+      echo "[ctl] Refusing unsafe runtime directory symlink: ${_ctl_runtime_base}" >&2
+      return 1
+    fi
+    if [[ ! -e "${_ctl_runtime_base}" ]]; then
+      (umask 077; mkdir -p "${_ctl_runtime_base}")
+    fi
+    if [[ ! -d "${_ctl_runtime_base}" || -L "${_ctl_runtime_base}" ]]; then
+      echo "[ctl] Refusing unsafe runtime directory: ${_ctl_runtime_base}" >&2
+      return 1
+    fi
+    runtime_owner="$(stat -f '%u' "${_ctl_runtime_base}" 2>/dev/null || stat -c '%u' "${_ctl_runtime_base}" 2>/dev/null || true)"
+    if [[ "${runtime_owner}" != "$(id -u)" ]]; then
+      echo "[ctl] Refusing unsafe runtime directory not owned by the current user: ${_ctl_runtime_base}" >&2
+      return 1
+    fi
+    chmod 700 "${_ctl_runtime_base}"
+  fi
   mkdir -p "${HERMES_HOME}" "${_ctl_runtime_root}" "${DEFAULT_STATE_DIR}"
+  if (( CTL_WORKTREE_MODE )); then
+    chmod 700 "${_ctl_runtime_root}" "${DEFAULT_STATE_DIR}"
+  fi
 }
 
 _apply_env_file_safely() {
@@ -538,7 +563,7 @@ _select_next_worktree_port() {
     echo "[ctl] HERMES_WEBUI_CTL_PORT_START must be between 1 and 65535" >&2
     return 2
   fi
-  lock_root="${TMPDIR:-/tmp}/hermes-webui-ctl-$(id -u)/port-locks"
+  lock_root="${_ctl_runtime_base}/port-locks"
   mkdir -p "${lock_root}"
   while (( CTL_PORT <= 65535 )); do
     candidate_lock="${lock_root}/${CTL_PORT}"
@@ -750,15 +775,19 @@ start_cmd() {
   # 0 would skip startup monitoring entirely and restore the stale-PID
   # behavior this window exists to prevent; treat it like any invalid value.
   (( grace > 0 )) || grace=3
-  local grace_steps=$(( grace * 4 )) step=0 healthy=0
+  local grace_steps=$(( grace * 4 )) step=0 healthy=0 port_bound=0
   while (( step < grace_steps )); do
     if ! _is_alive "${pid}"; then
       echo "[ctl] Hermes WebUI failed to stay running. Log: ${LOG_FILE}" >&2
       rm -f "${PID_FILE}" "${STATE_FILE}"
       return 1
     fi
+    if ! _port_is_bindable "${CTL_PORT}"; then
+      port_bound=1
+    fi
     if hermes_webui_probe_health "${probe_host}" "${CTL_PORT}" "/health" 1 direct >/dev/null 2>&1; then
       healthy=1
+      port_bound=1
       break
     fi
     sleep 0.25
@@ -768,6 +797,21 @@ start_cmd() {
     echo "[ctl] Hermes WebUI failed to stay running. Log: ${LOG_FILE}" >&2
     rm -f "${PID_FILE}" "${STATE_FILE}"
     return 1
+  fi
+  if [[ -n "${CTL_PORT_LOCK}" ]] && (( ! port_bound )); then
+    echo "[ctl] Waiting for Hermes WebUI to bind reserved port ${CTL_PORT}..."
+    while _is_alive "${pid}"; do
+      if ! _port_is_bindable "${CTL_PORT}"; then
+        port_bound=1
+        break
+      fi
+      sleep 0.25
+    done
+    if (( ! port_bound )); then
+      echo "[ctl] Hermes WebUI exited before binding reserved port ${CTL_PORT}. Log: ${LOG_FILE}" >&2
+      rm -f "${PID_FILE}" "${STATE_FILE}"
+      return 1
+    fi
   fi
   echo "[ctl] Started Hermes WebUI (PID ${pid})"
   echo "[ctl] Bound: ${CTL_HOST}:${CTL_PORT}"
