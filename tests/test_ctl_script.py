@@ -46,6 +46,7 @@ def run_ctl(
         "HERMES_WEBUI_CTL_ISOLATE_WORKTREE",
         "HERMES_WEBUI_CTL_DETACH_WORKTREE",
         "HERMES_WEBUI_NO_DOTENV",
+        "XDG_RUNTIME_DIR",
     ):
         merged.pop(key, None)
     merged.update(
