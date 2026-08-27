@@ -171,9 +171,11 @@ def test_opencode_go_quota_fetches_usage_windows_and_sanitizes_response(monkeypa
     seen = {}
 
     def fake_urlopen(req, timeout):
+        headers = {key.lower(): value for key, value in req.header_items()}
         seen["url"] = req.full_url
         seen["timeout"] = timeout
-        seen["authorization"] = req.headers.get("Authorization")
+        seen["authorization"] = headers.get("authorization")
+        seen["user_agent"] = headers.get("user-agent")
         payload = {
             "usage": {
                 "rolling": {"status": "ok", "percent": 17, "resetsAt": "2030-03-17T17:30:00Z"},
@@ -194,6 +196,7 @@ def test_opencode_go_quota_fetches_usage_windows_and_sanitizes_response(monkeypa
         "url": "https://opencode.ai/zen/go/v1/usage",
         "timeout": 3.0,
         "authorization": "Bearer test-opencode-key-private",
+        "user_agent": "Hermes-WebUI/1.0",
     }
     assert result == {
         "ok": True,

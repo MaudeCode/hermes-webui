@@ -1648,6 +1648,7 @@ def _fetch_opencode_go_quota_status(display_name: str, api_key: str) -> dict[str
         headers={
             "Authorization": f"Bearer {api_key}",
             "Accept": "application/json",
+            "User-Agent": "Hermes-WebUI/1.0",
         },
     )
     try:
