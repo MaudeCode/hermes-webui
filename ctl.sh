@@ -60,7 +60,7 @@ ensure_home() {
       echo "[ctl] Refusing unsafe runtime directory: ${_ctl_runtime_base}" >&2
       return 1
     fi
-    runtime_owner="$(stat -f '%u' "${_ctl_runtime_base}" 2>/dev/null || stat -c '%u' "${_ctl_runtime_base}" 2>/dev/null || true)"
+    runtime_owner="$(LC_ALL=C ls -ldn "${_ctl_runtime_base}" 2>/dev/null | awk '{print $3}')"
     if [[ "${runtime_owner}" != "$(id -u)" ]]; then
       echo "[ctl] Refusing unsafe runtime directory not owned by the current user: ${_ctl_runtime_base}" >&2
       return 1
