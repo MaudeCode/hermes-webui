@@ -5,11 +5,32 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/health_probe.sh
 . "${REPO_ROOT}/scripts/lib/health_probe.sh"
 HERMES_HOME="${HERMES_HOME:-${HOME}/.hermes}"
-PID_FILE="${HERMES_WEBUI_PID_FILE:-${HERMES_HOME}/webui.pid}"
-LOG_FILE="${HERMES_WEBUI_LOG_FILE:-${HERMES_HOME}/webui.log}"
-STATE_FILE="${HERMES_WEBUI_CTL_STATE_FILE:-${HERMES_HOME}/webui.ctl.env}"
-DEFAULT_STATE_DIR="${HERMES_WEBUI_STATE_DIR:-${HERMES_HOME}/webui}"
+CTL_WORKTREE_MODE=0
+_ctl_runtime_base=""
+_ctl_git_dir="$(git -C "${REPO_ROOT}" rev-parse --path-format=absolute --git-dir 2>/dev/null || true)"
+_ctl_git_common_dir="$(git -C "${REPO_ROOT}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+case "${HERMES_WEBUI_CTL_ISOLATE_WORKTREE:-auto}" in
+  1) CTL_WORKTREE_MODE=1 ;;
+  0) CTL_WORKTREE_MODE=0 ;;
+  *)
+    if [[ -n "${_ctl_git_dir}" && -n "${_ctl_git_common_dir}" && "${_ctl_git_dir}" != "${_ctl_git_common_dir}" ]]; then
+      CTL_WORKTREE_MODE=1
+    fi
+    ;;
+esac
+if (( CTL_WORKTREE_MODE )); then
+  _ctl_worktree_id="$(printf '%s' "${REPO_ROOT}" | cksum | awk '{print $1}')"
+  _ctl_runtime_base="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/hermes-webui-ctl-$(id -u)"
+  _ctl_runtime_root="${_ctl_runtime_base}/${_ctl_worktree_id}"
+else
+  _ctl_runtime_root="${HERMES_HOME}"
+fi
+PID_FILE="${HERMES_WEBUI_PID_FILE:-${_ctl_runtime_root}/webui.pid}"
+LOG_FILE="${HERMES_WEBUI_LOG_FILE:-${_ctl_runtime_root}/webui.log}"
+STATE_FILE="${HERMES_WEBUI_CTL_STATE_FILE:-${_ctl_runtime_root}/webui.ctl.env}"
+DEFAULT_STATE_DIR="${HERMES_WEBUI_STATE_DIR:-${_ctl_runtime_root}/webui}"
 DEFAULT_LAUNCHD_LABEL="${HERMES_WEBUI_LAUNCHD_LABEL:-com.parantoux.hermes-webui}"
+CTL_PORT_LOCK=""
 
 usage() {
   cat <<'EOF'
@@ -26,7 +47,30 @@ EOF
 }
 
 ensure_home() {
-  mkdir -p "${HERMES_HOME}" "${DEFAULT_STATE_DIR}"
+  if (( CTL_WORKTREE_MODE )); then
+    local runtime_owner
+    if [[ -L "${_ctl_runtime_base}" ]]; then
+      echo "[ctl] Refusing unsafe runtime directory symlink: ${_ctl_runtime_base}" >&2
+      return 1
+    fi
+    if [[ ! -e "${_ctl_runtime_base}" ]]; then
+      (umask 077; mkdir -p "${_ctl_runtime_base}")
+    fi
+    if [[ ! -d "${_ctl_runtime_base}" || -L "${_ctl_runtime_base}" ]]; then
+      echo "[ctl] Refusing unsafe runtime directory: ${_ctl_runtime_base}" >&2
+      return 1
+    fi
+    runtime_owner="$(LC_ALL=C ls -ldn "${_ctl_runtime_base}" 2>/dev/null | awk '{print $3}')"
+    if [[ "${runtime_owner}" != "$(id -u)" ]]; then
+      echo "[ctl] Refusing unsafe runtime directory not owned by the current user: ${_ctl_runtime_base}" >&2
+      return 1
+    fi
+    chmod 700 "${_ctl_runtime_base}"
+  fi
+  mkdir -p "${HERMES_HOME}" "${_ctl_runtime_root}" "${DEFAULT_STATE_DIR}"
+  if (( CTL_WORKTREE_MODE )); then
+    chmod 700 "${_ctl_runtime_root}" "${DEFAULT_STATE_DIR}"
+  fi
 }
 
 _apply_env_file_safely() {
@@ -178,7 +222,9 @@ _find_python() {
 
 _parse_launch_binding() {
   CTL_HOST="${HERMES_WEBUI_HOST:-127.0.0.1}"
-  CTL_PORT="${HERMES_WEBUI_PORT:-8787}"
+  CTL_PORT="${HERMES_WEBUI_PORT:-${HERMES_WEBUI_CTL_PORT_START:-8787}}"
+  CTL_PORT_EXPLICIT=0
+  [[ -n "${HERMES_WEBUI_PORT:-}" ]] && CTL_PORT_EXPLICIT=1
   local arg next_is_host=0 saw_port=0
   for arg in "$@"; do
     if (( next_is_host )); then
@@ -198,6 +244,7 @@ _parse_launch_binding() {
       *)
         if (( ! saw_port )) && [[ "${arg}" =~ ^[0-9]+$ ]]; then
           CTL_PORT="${arg}"
+          CTL_PORT_EXPLICIT=1
           saw_port=1
         fi
         ;;
@@ -481,6 +528,91 @@ _port_answers_http() {
   return 1
 }
 
+_port_is_bindable() {
+  local host="$1" port="$2" python_exe
+  python_exe="$(command -v python3 || command -v python || true)"
+  [[ -n "${python_exe}" ]] || return 1
+  "${python_exe}" - "${host}" "${port}" <<'PY'
+import socket
+import sys
+
+host = sys.argv[1].strip("[]") or None
+port = int(sys.argv[2])
+try:
+    addresses = socket.getaddrinfo(
+        host, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE
+    )
+except socket.gaierror:
+    raise SystemExit(1)
+
+seen = set()
+for family, socktype, proto, _, address in addresses:
+    key = (family, address)
+    if key in seen:
+        continue
+    seen.add(key)
+    with socket.socket(family, socktype, proto) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(address)
+        except OSError:
+            raise SystemExit(1)
+PY
+}
+
+_release_ctl_port_lock() {
+  if [[ -n "${CTL_PORT_LOCK}" ]]; then
+    rmdir "${CTL_PORT_LOCK}" 2>/dev/null || true
+    CTL_PORT_LOCK=""
+  fi
+}
+
+_select_next_worktree_port() {
+  local lock_root candidate_lock
+  if [[ ! "${CTL_PORT}" =~ ^[0-9]+$ ]] || (( CTL_PORT < 1 || CTL_PORT > 65535 )); then
+    echo "[ctl] HERMES_WEBUI_CTL_PORT_START must be between 1 and 65535" >&2
+    return 2
+  fi
+  lock_root="${_ctl_runtime_base}/port-locks"
+  mkdir -p "${lock_root}"
+  while (( CTL_PORT <= 65535 )); do
+    candidate_lock="${lock_root}/${CTL_PORT}"
+    if mkdir "${candidate_lock}" 2>/dev/null; then
+      CTL_PORT_LOCK="${candidate_lock}"
+      if _port_is_bindable "${CTL_HOST}" "${CTL_PORT}"; then
+        trap _release_ctl_port_lock EXIT
+        return 0
+      fi
+      _release_ctl_port_lock
+    fi
+    CTL_PORT=$((CTL_PORT + 1))
+  done
+  echo "[ctl] No free WebUI port is available" >&2
+  return 1
+}
+
+_print_start_coordinates() {
+  local host="$1" port="$2" scheme connect_host lan_host=""
+  scheme="${_HERMES_WEBUI_PROBE_SCHEME:-$(hermes_webui_probe_scheme)}"
+  connect_host="$(_probe_target_host "${host}")"
+  printf 'HERMES_WEBUI_PORT=%s\n' "${port}"
+  printf 'HERMES_WEBUI_URL=%s://%s:%s\n' "${scheme}" "${connect_host}" "${port}"
+  if [[ "${host}" == "0.0.0.0" ]]; then
+    if command -v route >/dev/null 2>&1 && command -v ipconfig >/dev/null 2>&1; then
+      local default_interface
+      default_interface="$(route -n get default 2>/dev/null | awk '/interface:/ {print $2; exit}' || true)"
+      [[ -n "${default_interface}" ]] && lan_host="$(ipconfig getifaddr "${default_interface}" 2>/dev/null || true)"
+    fi
+    if [[ -z "${lan_host}" ]] && command -v ip >/dev/null 2>&1; then
+      lan_host="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}' || true)"
+    fi
+    if [[ -z "${lan_host}" ]] && command -v hostname >/dev/null 2>&1; then
+      lan_host="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+    fi
+    [[ -n "${lan_host}" ]] && printf 'HERMES_WEBUI_LAN_URL=%s://%s:%s\n' "${scheme}" "${lan_host}" "${port}"
+  fi
+}
+
 _port_listener_diag() {
   # Best-effort one-liner describing what listens on TCP port $1. Used in
   # error/status messages only — never fails the caller.
@@ -592,14 +724,19 @@ start_cmd() {
   mkdir -p "${HERMES_WEBUI_STATE_DIR}"
   _parse_launch_binding "$@"
   _build_bootstrap_args "$@"
-  export HERMES_WEBUI_HOST="${CTL_HOST}"
-  export HERMES_WEBUI_PORT="${CTL_PORT}"
 
   local existing_pid
   if existing_pid="$(_current_pid 2>/dev/null)"; then
+    _load_state_if_present
     echo "[ctl] Hermes WebUI is already running (PID ${existing_pid})"
+    _print_start_coordinates "${HOST:-${CTL_HOST}}" "${PORT:-${CTL_PORT}}"
     return 0
   fi
+  if (( CTL_WORKTREE_MODE && ! CTL_PORT_EXPLICIT )); then
+    _select_next_worktree_port
+  fi
+  export HERMES_WEBUI_HOST="${CTL_HOST}"
+  export HERMES_WEBUI_PORT="${CTL_PORT}"
   local launchd_pid
   if launchd_pid="$(_launchd_webui_pid 2>/dev/null)"; then
     echo "[ctl] Refusing to start a second Hermes WebUI while launchd job ${HERMES_WEBUI_LAUNCHD_LABEL:-${DEFAULT_LAUNCHD_LABEL}} is running (PID ${launchd_pid})." >&2
@@ -656,15 +793,19 @@ start_cmd() {
   # 0 would skip startup monitoring entirely and restore the stale-PID
   # behavior this window exists to prevent; treat it like any invalid value.
   (( grace > 0 )) || grace=3
-  local grace_steps=$(( grace * 4 )) step=0 healthy=0
+  local grace_steps=$(( grace * 4 )) step=0 healthy=0 port_bound=0
   while (( step < grace_steps )); do
     if ! _is_alive "${pid}"; then
       echo "[ctl] Hermes WebUI failed to stay running. Log: ${LOG_FILE}" >&2
       rm -f "${PID_FILE}" "${STATE_FILE}"
       return 1
     fi
+    if ! _port_is_bindable "${CTL_HOST}" "${CTL_PORT}"; then
+      port_bound=1
+    fi
     if hermes_webui_probe_health "${probe_host}" "${CTL_PORT}" "/health" 1 direct >/dev/null 2>&1; then
       healthy=1
+      port_bound=1
       break
     fi
     sleep 0.25
@@ -675,11 +816,37 @@ start_cmd() {
     rm -f "${PID_FILE}" "${STATE_FILE}"
     return 1
   fi
+  if [[ -n "${CTL_PORT_LOCK}" ]] && (( ! port_bound )); then
+    echo "[ctl] Waiting for Hermes WebUI to bind reserved port ${CTL_PORT}..."
+    while _is_alive "${pid}"; do
+      if ! _port_is_bindable "${CTL_HOST}" "${CTL_PORT}"; then
+        port_bound=1
+        break
+      fi
+      sleep 0.25
+    done
+    if (( ! port_bound )); then
+      echo "[ctl] Hermes WebUI exited before binding reserved port ${CTL_PORT}. Log: ${LOG_FILE}" >&2
+      rm -f "${PID_FILE}" "${STATE_FILE}"
+      return 1
+    fi
+  fi
   echo "[ctl] Started Hermes WebUI (PID ${pid})"
   echo "[ctl] Bound: ${CTL_HOST}:${CTL_PORT}"
   echo "[ctl] Log: ${LOG_FILE}"
+  _print_start_coordinates "${CTL_HOST}" "${CTL_PORT}"
+  _release_ctl_port_lock
+  trap - EXIT
   if (( ! healthy )); then
     echo "[ctl] Note: /health did not respond within ${grace}s; check '$(basename "$0") status' shortly."
+  fi
+  if (( CTL_WORKTREE_MODE )) && [[ "${HERMES_WEBUI_CTL_DETACH_WORKTREE:-0}" != "1" ]]; then
+    set +e
+    wait "${pid}"
+    local child_status=$?
+    set -e
+    rm -f "${PID_FILE}" "${STATE_FILE}"
+    return "${child_status}"
   fi
 }
 

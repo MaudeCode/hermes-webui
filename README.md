@@ -137,6 +137,13 @@ For self-hosted VM or homelab installs, `ctl.sh` wraps the common daemon lifecyc
 ./ctl.sh stop
 ```
 
+In a linked Git worktree, `ctl.sh start` keeps PID, log, and WebUI state separate
+from other worktrees, selects the first free port starting at 8787, and prints
+`HERMES_WEBUI_PORT` plus local/LAN URLs for agent callers. Passing a port (for
+example `./ctl.sh start 9000`) still uses that exact port. The start command
+stays attached in a worktree so an agent's execution session owns the server;
+run `./ctl.sh stop` from another terminal to stop it.
+
 `ctl.sh start` runs the bootstrap in foreground/no-browser mode behind the daemon wrapper, writes logs to `~/.hermes/webui.log`, and respects `.env` plus inline overrides such as `HERMES_WEBUI_HOST=0.0.0.0 ./ctl.sh start`.
 
 > **Stopping the server.** Each launch method has its own stop path because only `ctl.sh start` writes a PID file (`~/.hermes/webui.pid`):
