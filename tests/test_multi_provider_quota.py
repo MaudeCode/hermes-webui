@@ -172,6 +172,41 @@ def test_quota_sources_include_multiple_provider_types_and_duplicate_accounts(mo
     assert [row["is_active_provider"] for row in result["sources"]] == [True, True, False]
 
 
+def test_quota_source_set_does_not_follow_active_provider(monkeypatch):
+    active_provider = "unconfigured"
+
+    monkeypatch.setattr(
+        providers,
+        "get_providers",
+        lambda: {
+            "active_provider": active_provider,
+            "providers": [
+                {"id": "unconfigured", "display_name": "Unconfigured", "has_key": False},
+                {"id": "custom-work", "display_name": "Custom Work", "has_key": False, "is_custom": True},
+                {"id": "openrouter", "display_name": "OpenRouter", "has_key": True},
+            ],
+        },
+    )
+    monkeypatch.setattr(providers, "_pool_entry_payloads", lambda _provider: [])
+    monkeypatch.setattr(
+        providers,
+        "get_provider_quota",
+        lambda provider_id, **_kwargs: _quota_result(provider_id, provider_id, 25),
+    )
+    monkeypatch.setattr("api.profiles.get_active_profile_name", lambda: "default")
+
+    first = providers.get_provider_quotas()
+    first_ids = {source["provider_id"]: source["source_id"] for source in first["sources"]}
+    active_provider = "openrouter"
+    second = providers.get_provider_quotas()
+    second_ids = {source["provider_id"]: source["source_id"] for source in second["sources"]}
+
+    assert first_ids == second_ids
+    assert set(first_ids) == {"custom-work", "openrouter"}
+    assert [source["is_active_provider"] for source in first["sources"]] == [False, False]
+    assert [source["is_active_provider"] for source in second["sources"]] == [False, True]
+
+
 def test_targeted_quota_refresh_only_probes_selected_source(monkeypatch):
     calls = []
     monkeypatch.setattr(
@@ -337,6 +372,22 @@ def test_selected_quota_source_preserves_meaningful_empty_credential_fields():
     assert payload["windows"] == []
     assert payload["details"] == []
     assert payload["unavailable_reason"] == "Quota exhausted."
+
+
+def test_quota_source_payload_preserves_normalized_balances():
+    descriptor = {
+        "source_id": "qsrc_deepseek",
+        "provider_id": "deepseek",
+        "provider_label": "DeepSeek",
+        "account_label": "DeepSeek",
+        "credential_id": None,
+    }
+    quota_status = _quota_result("deepseek", "DeepSeek", 10)
+    quota_status["balances"] = [{"currency": "USD", "total": 12.5}]
+
+    payload = providers._quota_source_payload(descriptor, quota_status, active_provider="custom")
+
+    assert payload["balances"] == [{"currency": "USD", "total": 12.5}]
 
 
 def test_full_quota_fetch_marks_credential_removed_during_batch(monkeypatch):

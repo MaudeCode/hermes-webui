@@ -19,6 +19,12 @@ Focused multi-provider quota contract coverage:
 ./scripts/test.sh tests/test_multi_provider_quota.py tests/test_provider_quota_status.py tests/test_issue4360_generic_pool_quota.py -q
 ```
 
+For manual quota verification, use isolated state with at least two configured
+quota providers and select a third provider for chat. Open Settings -> Providers
+at desktop and narrow widths. Confirm every configured source stays visible,
+only the selected source changes after its refresh action, Refresh usage updates
+the full collection, and changing the chat provider only moves the active badge.
+
 ---
 
 ## Static JS runtime lint (brick-class regression guard)

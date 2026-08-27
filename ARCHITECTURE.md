@@ -931,11 +931,13 @@ For scale beyond single-user casual use.
 
 ### Provider quota sources
 
-`GET /api/provider/quotas` is the read-only multi-provider companion to the
-legacy active-provider `/api/provider/quota` route. It enumerates configured
-quota sources for the request's active profile, returns one sanitized row per
-credential account, and accepts `source=<opaque-id>&refresh=1` for targeted
-refresh without calling credential-pool selection. Source IDs hash a non-secret
+`GET /api/provider/quotas` is the authoritative read-only provider-quota
+contract. It enumerates configured quota sources for the request's active
+profile regardless of the active conversation provider, returns one sanitized
+row per credential account, and accepts `source=<opaque-id>&refresh=1` for
+targeted refresh without calling credential-pool selection. The legacy
+active-provider `/api/provider/quota` route remains for compatibility and uses
+the same adapters. Source IDs hash a non-secret
 instance UUID stored at `STATE_DIR/.quota_scope_id` with profile, provider, and
 credential identity; responses never expose those inputs or credential material.
 The response also includes an opaque `scope_id` for the current server/profile,
@@ -945,6 +947,23 @@ rows belonging to another configured server or profile.
 OpenCode Go sources use the provider's API-key-authenticated `/zen/go/v1/usage`
 endpoint and normalize its rolling 5-hour, weekly, and monthly windows into the
 same sanitized `account_limits` shape used by other quota providers.
+
+The supported adapter decisions are deliberately narrow:
+
+- OpenAI Codex and Anthropic reuse Hermes Agent's account-usage adapter.
+- OpenCode Go uses its documented usage endpoint.
+- OpenRouter uses its documented API-key credit endpoint.
+- DeepSeek uses its documented bearer-authenticated `/user/balance` endpoint
+  and returns sanitized currency balances.
+- Other built-in, custom, and plugin providers expose sanitized local
+  credential-pool availability when present; otherwise they return an explicit
+  unsupported state. Admin-only billing APIs, browser account pages, and
+  response-header estimates are not treated as provider-account quota sources.
+
+Opening Settings -> Providers fetches this collection once. Refresh-all uses the
+same endpoint with `refresh=1`; per-source refresh also supplies the opaque
+`source` ID and replaces only that card. The composer quota chip intentionally
+continues to use the legacy active-provider route.
 
 Follow this exact pattern. Review existing handlers in do_GET/do_POST for reference.
 
