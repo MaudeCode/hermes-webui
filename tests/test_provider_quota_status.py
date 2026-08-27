@@ -303,6 +303,87 @@ def test_opencode_go_quota_rejects_invalid_key_and_malformed_usage(monkeypatch, 
     assert "secret" not in repr((invalid_key, malformed)).lower()
 
 
+def test_opencode_go_active_quota_preserves_all_pool_accounts(monkeypatch, tmp_path):
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.delenv("OPENCODE_GO_API_KEY", raising=False)
+    monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
+    old_cfg, old_mtime = _with_config(model={"provider": "opencode-go"})
+
+    import api.providers as providers
+
+    entries = [
+        {"id": "account-a", "label": "Team A", "access_token": "secret-a"},
+        {"id": "account-b", "label": "Team B", "access_token": "secret-b"},
+    ]
+    seen = []
+
+    def fake_urlopen(req, timeout):
+        token = req.headers.get("Authorization")
+        seen.append((token, timeout))
+        used = 60 if token == "Bearer secret-a" else 10
+        payload = {
+            "usage": {
+                "rolling": {"status": "ok", "percent": used, "resetsAt": "2030-03-17T17:30:00Z"},
+                "weekly": {"status": "ok", "percent": used, "resetsAt": "2030-03-24T00:00:00Z"},
+                "monthly": {"status": "ok", "percent": used, "resetsAt": "2030-04-01T00:00:00Z"},
+            },
+        }
+        return _FakeResponse(json.dumps(payload).encode("utf-8"))
+
+    monkeypatch.setattr(providers, "_pool_entry_payloads", lambda provider: entries if provider == "opencode-go" else [])
+    monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
+    try:
+        result = providers.get_provider_quota()
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+    assert seen == [("Bearer secret-a", 3.0), ("Bearer secret-b", 3.0)]
+    assert result["status"] == "available"
+    limits = result["account_limits"]
+    assert limits["source"] == "usage_api_pool"
+    assert limits["windows"][0]["remaining_percent"] == 90.0
+    assert limits["windows"][0]["detail"] == "Best of 2 available credentials"
+    assert limits["pool"]["total_credentials"] == 2
+    assert limits["pool"]["queried_credentials"] == 2
+    assert [row["label"] for row in limits["pool"]["credentials"]] == ["Team A", "Team B"]
+    assert [row["windows"][0]["used_percent"] for row in limits["pool"]["credentials"]] == [60, 10]
+    assert "account-a" not in repr(result)
+    assert "account-b" not in repr(result)
+    assert "secret-a" not in repr(result)
+    assert "secret-b" not in repr(result)
+
+
+def test_opencode_go_quota_respects_pool_exhaustion_backoff(monkeypatch, tmp_path):
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    old_cfg, old_mtime = _with_config(model={"provider": "opencode-go"})
+
+    import api.providers as providers
+
+    entries = [{
+        "id": "account-a",
+        "label": "Cooling down",
+        "access_token": "secret-a",
+        "last_status": "exhausted",
+        "last_error_code": "429",
+        "last_error_reset_at": "2100-01-01T00:00:00Z",
+    }]
+
+    def explode(*_args, **_kwargs):
+        raise AssertionError("exhausted credential must not be probed during backoff")
+
+    monkeypatch.setattr(providers, "_pool_entry_payloads", lambda provider: entries if provider == "opencode-go" else [])
+    monkeypatch.setattr(providers.urllib.request, "urlopen", explode)
+    try:
+        result = providers.get_provider_quota("opencode-go", credential_id="account-a")
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+    assert result["status"] == "unavailable"
+    assert result["account_limits"]["pool"]["credentials"][0]["status"] == "exhausted"
+    assert result["account_limits"]["pool"]["credentials"][0]["retry_after"] == "2100-01-01T00:00:00Z"
+    assert "secret-a" not in repr(result)
+
+
 def test_unsupported_provider_reports_followup_state(monkeypatch, tmp_path):
     """Providers without safe quota APIs should return a clear unsupported state."""
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
