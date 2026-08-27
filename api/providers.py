@@ -79,6 +79,8 @@ def _custom_provider_name_matches(provider_id: str, name: object) -> bool:
     return pid in candidates
 
 _OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
+_OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
+_OPENCODE_GO_POOL_MAX_WORKERS = 6
 _PROVIDER_QUOTA_TIMEOUT_SECONDS = 3.0
 _ACCOUNT_USAGE_SUBPROCESS_TIMEOUT_SECONDS = 35.0
 _ACCOUNT_USAGE_CACHE_TTL_SECONDS = 45.0
@@ -129,6 +131,7 @@ _ACCOUNT_USAGE_PARENT_DEATHSIG_BOOTSTRAP = (
 # Module-level cap on concurrent quota-probe subprocesses.
 # Lazily created so this module compiles even when threading isn't ready.
 _account_usage_probe_semaphore: threading.BoundedSemaphore | None = None
+_opencode_go_probe_semaphore = threading.BoundedSemaphore(_OPENCODE_GO_POOL_MAX_WORKERS)
 
 # Short-lived account-usage cache. The Codex pooled probe may check multiple
 # credentials, so cache sanitized snapshots briefly to avoid re-querying the
@@ -918,14 +921,14 @@ def _entry_pool_exhausted_reason(entry):
     return reason + "."
 
 
-def _local_pool_snapshot(provider, credential_id=None):
+def _local_pool_snapshot(provider, credential_id=None, *, payloads=None):
     """Probe-free pool snapshot from local auth.json entries.
 
     Returns a SimpleNamespace compatible with _serialize_account_usage_snapshot,
     or None if the provider has no pool or no entries.
     """
     try:
-        payloads = _pool_entry_payloads(provider)
+        payloads = _pool_entry_payloads(provider) if payloads is None else list(payloads)
         if credential_id:
             payloads = [
                 payload for payload in payloads
@@ -1582,6 +1585,233 @@ def _sanitize_openrouter_quota(payload: Any) -> dict[str, int | float | None]:
         "usage": _quota_number(payload.get("usage")),
         "limit": _quota_number(payload.get("limit")),
     }
+
+
+def _sanitize_opencode_go_account_limits(payload: Any) -> dict[str, Any] | None:
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    if not isinstance(usage, dict):
+        return None
+
+    windows = []
+    for key, label in (("rolling", "5-hour"), ("weekly", "Weekly"), ("monthly", "Monthly")):
+        window = usage.get(key)
+        if not isinstance(window, dict) or window.get("status") not in {"ok", "rate-limited"}:
+            return None
+        used_percent = _quota_number(window.get("percent"))
+        reset_at = _parse_dt(window.get("resetsAt"))
+        if used_percent is None or not 0 <= float(used_percent) <= 100 or reset_at is None:
+            return None
+        windows.append(SimpleNamespace(
+            label=label,
+            used_percent=used_percent,
+            reset_at=reset_at,
+            detail="Rate limited" if window["status"] == "rate-limited" else None,
+        ))
+
+    return _serialize_account_usage_snapshot(SimpleNamespace(
+        provider="opencode-go",
+        source="usage_api",
+        title="Account limits",
+        plan="Go",
+        windows=tuple(windows),
+        details=(),
+        available=True,
+        unavailable_reason=None,
+        fetched_at=datetime.now(timezone.utc),
+    ))
+
+
+def _opencode_go_status(
+    display_name: str,
+    status: str,
+    message: str,
+    account_limits: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    result = {
+        "ok": status == "available",
+        "provider": "opencode-go",
+        "display_name": display_name,
+        "supported": True,
+        "status": status,
+        "quota": None,
+        "account_limits": account_limits,
+        "message": message,
+    }
+    if status == "available":
+        result["label"] = "OpenCode Go usage"
+    return result
+
+
+def _fetch_opencode_go_quota_status(display_name: str, api_key: str) -> dict[str, Any]:
+    req = urllib.request.Request(
+        _OPENCODE_GO_USAGE_URL,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with _opencode_go_probe_semaphore:
+            with urllib.request.urlopen(req, timeout=_PROVIDER_QUOTA_TIMEOUT_SECONDS) as resp:
+                raw = resp.read()
+        payload = json.loads(raw.decode("utf-8")) if isinstance(raw, (bytes, bytearray)) else json.loads(raw)
+        account_limits = _sanitize_opencode_go_account_limits(payload)
+        if account_limits is None:
+            raise ValueError("Malformed OpenCode Go usage response")
+        return _opencode_go_status(
+            display_name,
+            "available",
+            "OpenCode Go account limits loaded.",
+            account_limits,
+        )
+    except urllib.error.HTTPError as exc:
+        status = "invalid_key" if exc.code == 401 else "unavailable"
+        message = (
+            "OpenCode Go rejected the configured API key."
+            if status == "invalid_key"
+            else "OpenCode Go account limits require an active subscription."
+            if exc.code == 403
+            else "OpenCode Go account limits are temporarily unavailable."
+        )
+        return _opencode_go_status(display_name, status, message)
+    except (TimeoutError, urllib.error.URLError, json.JSONDecodeError, OSError, ValueError):
+        return _opencode_go_status(
+            display_name,
+            "unavailable",
+            "OpenCode Go account limits are temporarily unavailable.",
+        )
+
+
+def _opencode_go_pool_status(display_name: str, entries: list[dict[str, Any]]) -> dict[str, Any]:
+    rows_by_index = {}
+    probe_items = []
+    for index, entry in enumerate(entries, start=1):
+        credential_id = str(entry.get("id") or "").strip()
+        local_snapshot = _local_pool_snapshot("opencode-go", credential_id, payloads=[entry])
+        local_limits = _serialize_account_usage_snapshot(local_snapshot)
+        local_rows = (local_limits or {}).get("pool", {}).get("credentials", [])
+        local_row = local_rows[0] if len(local_rows) == 1 else None
+        if isinstance(local_row, dict) and local_row.get("status") != "available":
+            row = dict(local_row)
+            row["label"] = _safe_entry_label(SimpleNamespace(**entry), index)
+            row["_credential_id"] = credential_id
+            rows_by_index[index] = row
+        else:
+            api_key = str(
+                entry.get("runtime_api_key")
+                or entry.get("agent_key")
+                or entry.get("access_token")
+                or ""
+            ).strip() or None
+            if api_key:
+                probe_items.append((index, entry, api_key))
+            else:
+                rows_by_index[index] = {
+                    "label": _safe_entry_label(SimpleNamespace(**entry), index),
+                    "_credential_id": credential_id,
+                    "status": "failed",
+                    "plan": None,
+                    "windows": [],
+                    "details": [],
+                    "unavailable_reason": "No runtime token available.",
+                    "retry_after": None,
+                    "fetched_at": None,
+                }
+
+    def probe(item):
+        index, entry, api_key = item
+        remote = _fetch_opencode_go_quota_status(display_name, api_key)
+        if remote.get("status") == "available":
+            limits = remote["account_limits"]
+            row = {
+                "status": "available",
+                "plan": limits.get("plan"),
+                "windows": limits.get("windows") or [],
+                "details": limits.get("details") or [],
+                "unavailable_reason": None,
+                "retry_after": None,
+                "fetched_at": limits.get("fetched_at"),
+            }
+        else:
+            row = {
+                "status": "failed",
+                "plan": None,
+                "windows": [],
+                "details": [],
+                "unavailable_reason": remote.get("message") or "Usage unavailable for this credential.",
+                "retry_after": None,
+                "fetched_at": None,
+            }
+        row["label"] = _safe_entry_label(SimpleNamespace(**entry), index)
+        row["_credential_id"] = str(entry.get("id") or "").strip()
+        return index, row
+
+    if probe_items:
+        with ThreadPoolExecutor(
+            max_workers=min(_OPENCODE_GO_POOL_MAX_WORKERS, len(probe_items))
+        ) as executor:
+            for index, row in executor.map(probe, probe_items):
+                rows_by_index[index] = row
+    rows = [rows_by_index[index] for index in range(1, len(entries) + 1)]
+    queried = len(probe_items)
+
+    available_rows = [row for row in rows if row["status"] == "available"]
+    best = {}
+    for row in available_rows:
+        for window in row["windows"]:
+            label = str(window.get("label") or "").strip()
+            remaining = _quota_number(window.get("remaining_percent"))
+            current = best.get(label.lower())
+            if label and remaining is not None and (
+                current is None or float(remaining) > float(current["remaining_percent"])
+            ):
+                best[label.lower()] = {**window, "credential_label": row["label"]}
+    best_windows = list(best.values())
+    exhausted = sum(row["status"] == "exhausted" for row in rows)
+    dead = sum(row["status"] == "dead" for row in rows)
+    failed = len(rows) - len(available_rows) - exhausted - dead
+    details = [f"{len(available_rows)}/{len(rows)} credentials available"]
+    if exhausted:
+        details.append(f"{exhausted} exhausted")
+    if dead:
+        details.append(f"{dead} dead")
+    if failed:
+        details.append(f"{failed} failed to load")
+    snapshot = SimpleNamespace(
+        provider="opencode-go",
+        source="usage_api_pool",
+        title="Account limits",
+        plan="Go" if available_rows else None,
+        windows=tuple(SimpleNamespace(
+            label=window["label"],
+            used_percent=window["used_percent"],
+            reset_at=window.get("reset_at"),
+            detail=f"Best of {len(available_rows)} available credentials",
+        ) for window in best_windows),
+        details=tuple(details),
+        available=bool(available_rows),
+        unavailable_reason=None if available_rows else "No OpenCode Go pool credentials returned available account limits.",
+        fetched_at=datetime.now(timezone.utc),
+        pool={
+            "total_credentials": len(rows),
+            "queried_credentials": queried,
+            "available_credentials": len(available_rows),
+            "exhausted_credentials": exhausted,
+            "dead_credentials": dead,
+            "failed_credentials": failed,
+            "plans": ["Go"] if available_rows else [],
+            "next_reset_at": None,
+            "best_remaining_by_window": best_windows,
+            "credentials": rows,
+        },
+    )
+    account_limits = _serialize_account_usage_snapshot(snapshot)
+    return _opencode_go_status(
+        display_name,
+        "available" if available_rows else "unavailable",
+        "OpenCode Go account limits loaded." if available_rows else "OpenCode Go account limits are unavailable.",
+        account_limits,
+    )
 
 
 def _isoformat_utc(value: Any) -> str | None:
@@ -2324,6 +2554,52 @@ def get_provider_quota(
             credential_id=credential_id,
             include_internal=_include_internal,
         )
+
+    if provider == "opencode-go":
+        pool_entries = _pool_entry_payloads(provider)
+        if credential_id:
+            matching_entries = [
+                entry for entry in pool_entries
+                if str(entry.get("id") or "").strip() == credential_id
+            ]
+            local_snapshot = _local_pool_snapshot(
+                provider,
+                credential_id,
+                payloads=matching_entries,
+            )
+            local_limits = _serialize_account_usage_snapshot(local_snapshot)
+            if local_limits is not None and not local_limits.get("available"):
+                return _opencode_go_status(
+                    display_name,
+                    "unavailable",
+                    "OpenCode Go credential is unavailable during its current pool backoff.",
+                    local_limits,
+                )
+            if matching_entries:
+                entry = matching_entries[0]
+                api_key = str(
+                    entry.get("runtime_api_key")
+                    or entry.get("agent_key")
+                    or entry.get("access_token")
+                    or ""
+                ).strip() or None
+            else:
+                api_key = None
+        else:
+            pool_entries = [
+                entry for entry in pool_entries
+                if str(entry.get("id") or "").strip()
+            ]
+            if pool_entries:
+                return _opencode_go_pool_status(display_name, pool_entries)
+            api_key = _get_provider_api_key(provider)
+        if not api_key:
+            return _opencode_go_status(
+                display_name,
+                "no_key",
+                "OpenCode Go account limits need an API key configured on the server.",
+            )
+        return _fetch_opencode_go_quota_status(display_name, api_key)
 
     if provider == "openrouter":
         api_key = (
