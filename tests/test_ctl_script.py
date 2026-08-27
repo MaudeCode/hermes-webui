@@ -105,9 +105,11 @@ def write_delayed_listener(path: Path) -> None:
                     f"state={{os.environ.get('HERMES_WEBUI_STATE_DIR', '')}}\\n"
                 )
             time.sleep(float(os.environ["FAKE_BIND_DELAY"]))
-            listener = socket.socket()
+            host = os.environ.get("HERMES_WEBUI_HOST", "127.0.0.1").strip("[]")
+            family = socket.AF_INET6 if ":" in host else socket.AF_INET
+            listener = socket.socket(family)
             listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            listener.bind(("127.0.0.1", int(sys.argv[-1])))
+            listener.bind((host, int(sys.argv[-1])))
             listener.listen()
             signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
             while True:
@@ -405,6 +407,102 @@ def test_worktree_start_waits_for_reserved_port_to_bind(tmp_path):
     finally:
         _kill_tree(pid)
         assert_process_exits(pid)
+
+
+def test_worktree_start_probes_requested_ipv6_host(tmp_path):
+    if not socket.has_ipv6:
+        pytest.skip("IPv6 is unavailable")
+    fake_python = tmp_path / "fake-python"
+    fake_log = tmp_path / "fake-python.log"
+    runtime_root = tmp_path / "runtime"
+    write_delayed_listener(fake_python)
+    while True:
+        blocker = socket.socket(socket.AF_INET6)
+        try:
+            blocker.bind(("::1", 0))
+            start_port = blocker.getsockname()[1]
+            if start_port >= 65535:
+                blocker.close()
+                continue
+            with socket.socket(socket.AF_INET6) as next_port:
+                next_port.bind(("::1", start_port + 1))
+            with socket.socket() as next_port_v4:
+                next_port_v4.bind(("127.0.0.1", start_port + 1))
+            break
+        except OSError:
+            blocker.close()
+            pytest.skip("IPv6 loopback is unavailable")
+
+    env = {
+        "HERMES_WEBUI_PYTHON": str(fake_python),
+        "FAKE_PYTHON_LOG": str(fake_log),
+        "HERMES_WEBUI_HOST": "::1",
+        "HERMES_WEBUI_CTL_ISOLATE_WORKTREE": "1",
+        "HERMES_WEBUI_CTL_PORT_START": str(start_port),
+        "HERMES_WEBUI_CTL_ALLOW_LAUNCHD_CONFLICT": "1",
+        "HERMES_WEBUI_CTL_DETACH_WORKTREE": "1",
+        "HERMES_WEBUI_START_GRACE": "1",
+        "FAKE_BIND_DELAY": "0.1",
+        "TMPDIR": str(runtime_root),
+    }
+    try:
+        result = run_ctl(tmp_path, "start", env=env, timeout=12)
+    finally:
+        blocker.close()
+        pid_files = list(runtime_root.glob("hermes-webui-ctl-*/*/webui.pid"))
+        if pid_files:
+            pid = int(pid_files[0].read_text().strip())
+            run_ctl(tmp_path, "stop", env=env)
+            _kill_tree(pid)
+            assert_process_exits(pid)
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert f"HERMES_WEBUI_PORT={start_port + 1}" in result.stdout
+
+
+def test_start_reports_linux_lan_url(tmp_path):
+    fake_python = tmp_path / "fake-python"
+    fake_log = tmp_path / "fake-python.log"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    write_delayed_listener(fake_python)
+    for name, body in {
+        "route": "exit 1",
+        "ipconfig": "exit 1",
+        "ip": "printf '%s\\n' '1.1.1.1 via 192.0.2.1 dev eth0 src 192.0.2.44'",
+    }.items():
+        command = fake_bin / name
+        command.write_text(f"#!/usr/bin/env bash\n{body}\n", encoding="utf-8")
+        command.chmod(0o755)
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+
+    env = {
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+        "HERMES_WEBUI_PYTHON": str(fake_python),
+        "FAKE_PYTHON_LOG": str(fake_log),
+        "HERMES_WEBUI_HOST": "0.0.0.0",
+        "HERMES_WEBUI_PORT": str(port),
+        "HERMES_WEBUI_CTL_ISOLATE_WORKTREE": "1",
+        "HERMES_WEBUI_CTL_ALLOW_LAUNCHD_CONFLICT": "1",
+        "HERMES_WEBUI_CTL_DETACH_WORKTREE": "1",
+        "HERMES_WEBUI_START_GRACE": "1",
+        "FAKE_BIND_DELAY": "0.1",
+        "TMPDIR": str(tmp_path / "runtime"),
+    }
+    try:
+        result = run_ctl(tmp_path, "start", env=env, timeout=5)
+    finally:
+        pid_files = list((tmp_path / "runtime").glob("hermes-webui-ctl-*/*/webui.pid"))
+        if pid_files:
+            pid = int(pid_files[0].read_text().strip())
+            run_ctl(tmp_path, "stop", env=env)
+            _kill_tree(pid)
+            assert_process_exits(pid)
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert f"HERMES_WEBUI_LAN_URL=http://192.0.2.44:{port}" in result.stdout
 
 
 def test_start_uses_nohup_so_daemon_survives_launcher_exit():

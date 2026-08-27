@@ -529,24 +529,34 @@ _port_answers_http() {
 }
 
 _port_is_bindable() {
-  local port="$1" python_exe
+  local host="$1" port="$2" python_exe
   python_exe="$(command -v python3 || command -v python || true)"
   [[ -n "${python_exe}" ]] || return 1
-  "${python_exe}" - "${port}" <<'PY'
+  "${python_exe}" - "${host}" "${port}" <<'PY'
 import socket
 import sys
 
-with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-    probe.settimeout(0.1)
-    if probe.connect_ex(("127.0.0.1", int(sys.argv[1]))) == 0:
-        raise SystemExit(1)
+host = sys.argv[1].strip("[]") or None
+port = int(sys.argv[2])
+try:
+    addresses = socket.getaddrinfo(
+        host, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE
+    )
+except socket.gaierror:
+    raise SystemExit(1)
 
-with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        sock.bind(("127.0.0.1", int(sys.argv[1])))
-    except OSError:
-        raise SystemExit(1)
+seen = set()
+for family, socktype, proto, _, address in addresses:
+    key = (family, address)
+    if key in seen:
+        continue
+    seen.add(key)
+    with socket.socket(family, socktype, proto) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(address)
+        except OSError:
+            raise SystemExit(1)
 PY
 }
 
@@ -569,7 +579,7 @@ _select_next_worktree_port() {
     candidate_lock="${lock_root}/${CTL_PORT}"
     if mkdir "${candidate_lock}" 2>/dev/null; then
       CTL_PORT_LOCK="${candidate_lock}"
-      if _port_is_bindable "${CTL_PORT}"; then
+      if _port_is_bindable "${CTL_HOST}" "${CTL_PORT}"; then
         trap _release_ctl_port_lock EXIT
         return 0
       fi
@@ -587,10 +597,18 @@ _print_start_coordinates() {
   connect_host="$(_probe_target_host "${host}")"
   printf 'HERMES_WEBUI_PORT=%s\n' "${port}"
   printf 'HERMES_WEBUI_URL=%s://%s:%s\n' "${scheme}" "${connect_host}" "${port}"
-  if [[ "${host}" == "0.0.0.0" ]] && command -v route >/dev/null 2>&1 && command -v ipconfig >/dev/null 2>&1; then
-    local default_interface
-    default_interface="$(route -n get default 2>/dev/null | awk '/interface:/ {print $2; exit}')"
-    lan_host="$(ipconfig getifaddr "${default_interface}" 2>/dev/null || true)"
+  if [[ "${host}" == "0.0.0.0" ]]; then
+    if command -v route >/dev/null 2>&1 && command -v ipconfig >/dev/null 2>&1; then
+      local default_interface
+      default_interface="$(route -n get default 2>/dev/null | awk '/interface:/ {print $2; exit}' || true)"
+      [[ -n "${default_interface}" ]] && lan_host="$(ipconfig getifaddr "${default_interface}" 2>/dev/null || true)"
+    fi
+    if [[ -z "${lan_host}" ]] && command -v ip >/dev/null 2>&1; then
+      lan_host="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}' || true)"
+    fi
+    if [[ -z "${lan_host}" ]] && command -v hostname >/dev/null 2>&1; then
+      lan_host="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+    fi
     [[ -n "${lan_host}" ]] && printf 'HERMES_WEBUI_LAN_URL=%s://%s:%s\n' "${scheme}" "${lan_host}" "${port}"
   fi
 }
@@ -782,7 +800,7 @@ start_cmd() {
       rm -f "${PID_FILE}" "${STATE_FILE}"
       return 1
     fi
-    if ! _port_is_bindable "${CTL_PORT}"; then
+    if ! _port_is_bindable "${CTL_HOST}" "${CTL_PORT}"; then
       port_bound=1
     fi
     if hermes_webui_probe_health "${probe_host}" "${CTL_PORT}" "/health" 1 direct >/dev/null 2>&1; then
@@ -801,7 +819,7 @@ start_cmd() {
   if [[ -n "${CTL_PORT_LOCK}" ]] && (( ! port_bound )); then
     echo "[ctl] Waiting for Hermes WebUI to bind reserved port ${CTL_PORT}..."
     while _is_alive "${pid}"; do
-      if ! _port_is_bindable "${CTL_PORT}"; then
+      if ! _port_is_bindable "${CTL_HOST}" "${CTL_PORT}"; then
         port_bound=1
         break
       fi
