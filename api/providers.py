@@ -80,6 +80,7 @@ def _custom_provider_name_matches(provider_id: str, name: object) -> bool:
 
 _OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
 _OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
+_OPENCODE_GO_POOL_MAX_WORKERS = 6
 _PROVIDER_QUOTA_TIMEOUT_SECONDS = 3.0
 _ACCOUNT_USAGE_SUBPROCESS_TIMEOUT_SECONDS = 35.0
 _ACCOUNT_USAGE_CACHE_TTL_SECONDS = 45.0
@@ -1680,9 +1681,8 @@ def _fetch_opencode_go_quota_status(display_name: str, api_key: str) -> dict[str
 
 
 def _opencode_go_pool_status(display_name: str, entries: list[dict[str, Any]]) -> dict[str, Any]:
-    rows = []
-    queried = 0
-    # ponytail: pool probes are sequential; use bounded workers if large OpenCode pools make refresh latency matter.
+    rows_by_index = {}
+    probe_items = []
     for index, entry in enumerate(entries, start=1):
         credential_id = str(entry.get("id") or "").strip()
         local_snapshot = _local_pool_snapshot("opencode-go", credential_id, payloads=[entry])
@@ -1691,6 +1691,9 @@ def _opencode_go_pool_status(display_name: str, entries: list[dict[str, Any]]) -
         local_row = local_rows[0] if len(local_rows) == 1 else None
         if isinstance(local_row, dict) and local_row.get("status") != "available":
             row = dict(local_row)
+            row["label"] = _safe_entry_label(SimpleNamespace(**entry), index)
+            row["_credential_id"] = credential_id
+            rows_by_index[index] = row
         else:
             api_key = str(
                 entry.get("runtime_api_key")
@@ -1698,33 +1701,57 @@ def _opencode_go_pool_status(display_name: str, entries: list[dict[str, Any]]) -
                 or entry.get("access_token")
                 or ""
             ).strip() or None
-            remote = _fetch_opencode_go_quota_status(display_name, api_key) if api_key else None
-            if remote and remote.get("status") == "available":
-                limits = remote["account_limits"]
-                row = {
-                    "status": "available",
-                    "plan": limits.get("plan"),
-                    "windows": limits.get("windows") or [],
-                    "details": limits.get("details") or [],
-                    "unavailable_reason": None,
-                    "retry_after": None,
-                    "fetched_at": limits.get("fetched_at"),
-                }
+            if api_key:
+                probe_items.append((index, entry, api_key))
             else:
-                row = {
+                rows_by_index[index] = {
+                    "label": _safe_entry_label(SimpleNamespace(**entry), index),
+                    "_credential_id": credential_id,
                     "status": "failed",
                     "plan": None,
                     "windows": [],
                     "details": [],
-                    "unavailable_reason": (remote or {}).get("message") or "No runtime token available.",
+                    "unavailable_reason": "No runtime token available.",
                     "retry_after": None,
                     "fetched_at": None,
                 }
-            if api_key:
-                queried += 1
+
+    def probe(item):
+        index, entry, api_key = item
+        remote = _fetch_opencode_go_quota_status(display_name, api_key)
+        if remote.get("status") == "available":
+            limits = remote["account_limits"]
+            row = {
+                "status": "available",
+                "plan": limits.get("plan"),
+                "windows": limits.get("windows") or [],
+                "details": limits.get("details") or [],
+                "unavailable_reason": None,
+                "retry_after": None,
+                "fetched_at": limits.get("fetched_at"),
+            }
+        else:
+            row = {
+                "status": "failed",
+                "plan": None,
+                "windows": [],
+                "details": [],
+                "unavailable_reason": remote.get("message") or "Usage unavailable for this credential.",
+                "retry_after": None,
+                "fetched_at": None,
+            }
         row["label"] = _safe_entry_label(SimpleNamespace(**entry), index)
-        row["_credential_id"] = credential_id
-        rows.append(row)
+        row["_credential_id"] = str(entry.get("id") or "").strip()
+        return index, row
+
+    if probe_items:
+        with ThreadPoolExecutor(
+            max_workers=min(_OPENCODE_GO_POOL_MAX_WORKERS, len(probe_items))
+        ) as executor:
+            for index, row in executor.map(probe, probe_items):
+                rows_by_index[index] = row
+    rows = [rows_by_index[index] for index in range(1, len(entries) + 1)]
+    queried = len(probe_items)
 
     available_rows = [row for row in rows if row["status"] == "available"]
     best = {}

@@ -337,7 +337,7 @@ def test_opencode_go_active_quota_preserves_all_pool_accounts(monkeypatch, tmp_p
     finally:
         _restore_config(old_cfg, old_mtime)
 
-    assert seen == [("Bearer secret-a", 3.0), ("Bearer secret-b", 3.0)]
+    assert sorted(seen) == [("Bearer secret-a", 3.0), ("Bearer secret-b", 3.0)]
     assert result["status"] == "available"
     limits = result["account_limits"]
     assert limits["source"] == "usage_api_pool"
@@ -382,6 +382,48 @@ def test_opencode_go_quota_respects_pool_exhaustion_backoff(monkeypatch, tmp_pat
     assert result["account_limits"]["pool"]["credentials"][0]["status"] == "exhausted"
     assert result["account_limits"]["pool"]["credentials"][0]["retry_after"] == "2100-01-01T00:00:00Z"
     assert "secret-a" not in repr(result)
+
+
+def test_opencode_go_active_pool_probes_are_bounded_and_concurrent(monkeypatch, tmp_path):
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    old_cfg, old_mtime = _with_config(model={"provider": "opencode-go"})
+
+    import api.providers as providers
+
+    entries = [
+        {"id": "account-a", "label": "Team A", "access_token": "secret-a"},
+        {"id": "account-b", "label": "Team B", "access_token": "secret-b"},
+    ]
+    barrier = threading.Barrier(2, timeout=2)
+    events = []
+    events_lock = threading.Lock()
+
+    def fake_urlopen(req, timeout):
+        token = req.headers.get("Authorization")
+        with events_lock:
+            events.append(("enter", token, timeout))
+        barrier.wait()
+        with events_lock:
+            events.append(("exit", token, timeout))
+        payload = {
+            "usage": {
+                "rolling": {"status": "ok", "percent": 10, "resetsAt": "2030-03-17T17:30:00Z"},
+                "weekly": {"status": "ok", "percent": 10, "resetsAt": "2030-03-24T00:00:00Z"},
+                "monthly": {"status": "ok", "percent": 10, "resetsAt": "2030-04-01T00:00:00Z"},
+            },
+        }
+        return _FakeResponse(json.dumps(payload).encode("utf-8"))
+
+    monkeypatch.setattr(providers, "_pool_entry_payloads", lambda provider: entries if provider == "opencode-go" else [])
+    monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
+    try:
+        result = providers.get_provider_quota()
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+    first_exit = next(index for index, event in enumerate(events) if event[0] == "exit")
+    assert [event[0] for event in events[:first_exit]] == ["enter", "enter"]
+    assert result["account_limits"]["pool"]["queried_credentials"] == 2
 
 
 def test_unsupported_provider_reports_followup_state(monkeypatch, tmp_path):
