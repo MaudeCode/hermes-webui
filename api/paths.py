@@ -105,7 +105,13 @@ def _require_writable_target(write_path: Path) -> os.stat_result | None:
         os.close(probe_fd)
 
 
-def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+def _atomic_write_text(
+    path: Path,
+    text: str,
+    *,
+    encoding: str = "utf-8",
+    file_mode: int | None = None,
+) -> None:
     """Atomically replace *path* with *text*.
 
     Writes to a temp file in the same directory, flushes + ``os.fsync``, then
@@ -116,16 +122,18 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
     extracted here so ``config.yaml`` / profile ``config.yaml`` writers can share
     it without pulling in env-file-specific logic.
 
-    Permissions and ownership are preserved: ``os.replace`` carries the temp
-    file's metadata onto the target, and ``tempfile.mkstemp`` starts with the
-    writer's owner/group and mode ``0600``. Without correcting those values,
+    Permissions and ownership are preserved by default: ``os.replace`` carries
+    the temp file's metadata onto the target, and ``tempfile.mkstemp`` starts with
+    the writer's owner/group and mode ``0600``. Without correcting those values,
     every rewrite could silently reset a shared config's group and tighten a
     group/other-readable ``config.yaml`` (commonly ``0644``/``0664``) down to
     owner-only. Existing files copy uid/gid and mode onto the temp descriptor;
     new files use the active process umask, exactly as a normal
     ``open(..., "w")`` would.
     (Unlike ``.env``, ``config.yaml`` holds no secrets and is not meant to be
-    forced to ``0600``.)
+    forced to ``0600``.) Callers writing secrets may pass ``file_mode``; their
+    temporary file starts at ``0600`` and the requested mode is applied before
+    rename.
 
     Symlinks and hard links keep the same follow-through semantics as
     ``Path.write_text``: writing ``config.yaml`` through a symlink updates the
@@ -158,7 +166,9 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
         existing_stat = os.stat(write_path)
     except FileNotFoundError:
         existing_stat = None
-    mode = stat.S_IMODE(existing_stat.st_mode) if existing_stat else None
+    mode = file_mode if file_mode is not None else (
+        stat.S_IMODE(existing_stat.st_mode) if existing_stat else None
+    )
 
     def _verify_symlink_target() -> None:
         if symlink_target is not None and path.resolve(strict=False) != symlink_target:
@@ -179,6 +189,8 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
                 ):
                     raise PermissionError("config target changed before fallback write")
                 _verify_symlink_target()
+                if file_mode is not None and hasattr(os, "fchmod"):
+                    os.fchmod(fallback_fd, file_mode)
                 os.ftruncate(fallback_fd, 0)
                 fallback_file = os.fdopen(fallback_fd, "w", encoding=encoding)
                 owns_fallback_fd = False
@@ -200,10 +212,12 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
         probed_stat = _require_writable_target(write_path)
         if probed_stat is not None and stat.S_ISREG(probed_stat.st_mode):
             existing_stat = probed_stat
-            mode = stat.S_IMODE(existing_stat.st_mode)
+            if file_mode is None:
+                mode = stat.S_IMODE(existing_stat.st_mode)
         else:
             existing_stat = probed_stat
-            mode = None
+            if file_mode is None:
+                mode = None
         if existing_stat is not None and (
             existing_stat.st_nlink > 1 or _has_extended_attributes(write_path)
         ):
@@ -211,7 +225,10 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
             return
 
     try:
-        fd, tmp = _create_atomic_temp_file(write_path, existing=existing_stat is not None)
+        fd, tmp = _create_atomic_temp_file(
+            write_path,
+            existing=existing_stat is not None or file_mode is not None,
+        )
     except PermissionError:
         _write_in_place()
         return

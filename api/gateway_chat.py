@@ -1293,6 +1293,15 @@ def _run_gateway_chat_streaming(
             q.put_nowait(queue_item)
         except Exception:
             logger.debug("Failed to put gateway event to queue")
+        if event in ("done", "cancel", "apperror", "error"):
+            try:
+                from api.talaria_relay import note_talaria_terminal
+                note_talaria_terminal(
+                    stream_id,
+                    {"done": "completed", "cancel": "cancelled"}.get(event, "failed"),
+                )
+            except Exception:
+                logger.debug("Failed to publish Talaria terminal state", exc_info=True)
 
     def _close_gateway_reasoning_segment():
         nonlocal reasoning_titles, explicit_reasoning_titles, explicit_reasoning_titles_seen
