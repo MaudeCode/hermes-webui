@@ -4330,6 +4330,23 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }catch(_){ /* durable endpoint remains the fallback */ }
     return preview;
   }
+  function _queueSettledAnchorRetryBeforePaint(targetMessage,targetIndex,retryStreamId,retryRegistry,retryOwnerKey,onAttached){
+    if(!targetMessage||!Number.isInteger(targetIndex)) return false;
+    const retry=()=>{
+      if(
+        _retrySettledAnchorScene(targetMessage,targetIndex,retryStreamId,retryRegistry,retryOwnerKey)
+        && typeof onAttached==='function'
+      ) onAttached();
+    };
+    if(typeof queueMicrotask==='function') queueMicrotask(retry);
+    else Promise.resolve().then(retry);
+    return true;
+  }
+  function _renderRetriedSettledAnchorScene(sessionId){
+    if(S.session&&S.session.session_id===sessionId&&_isSessionCurrentPane(sessionId)){
+      renderMessages({preserveScroll:true});
+    }
+  }
   function _attachProjectedAnchorSceneToLastAssistant(messages, targetMessage=null, targetIndex=null){
     if(!_anchorRegistry||!Array.isArray(messages)) return false;
     let lastAsst=targetMessage;
@@ -6892,6 +6909,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             if(hasMessageToolMetadata) S._settledLiveToolMetadata=S.toolCalls.map(tc=>({...tc,done:true}));
             S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map(tc=>({...tc,done:true}));
           }
+          if(lastAsst&&!lastAsst._anchor_activity_scene){
+            const _doneAnchorRetryIndex=S.messages.indexOf(lastAsst);
+            const _doneAnchorRetryOwnerKey=_settledAnchorRetryOwnerKey(S.messages,_doneAnchorRetryIndex,streamId);
+            _queueSettledAnchorRetryBeforePaint(
+              lastAsst,
+              _doneAnchorRetryIndex,
+              streamId,
+              _anchorRegistry,
+              _doneAnchorRetryOwnerKey,
+              ()=>_renderRetriedSettledAnchorScene(activeSid)
+            );
+          }
           if(typeof projectSessionArtifactsForOwner==='function') projectSessionArtifactsForOwner(completedSid);
           if(uploaded.length){
             const lastUser=[...S.messages].reverse().find(m=>m.role==='user');
@@ -7245,9 +7274,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _retryOwnerKey=_settledAnchorRetryOwnerKey(S.messages,_retryIndex,_retryStreamId);
           // Retry only for the exact terminal assistant and registry generation.
           // A refresh replacement must prove the same full turn and tool owner.
-          setTimeout(()=>{
-            _retrySettledAnchorScene(_retryTarget,_retryIndex,_retryStreamId,_retryRegistry,_retryOwnerKey);
-          },0);
+          _queueSettledAnchorRetryBeforePaint(
+            _retryTarget,
+            _retryIndex,
+            _retryStreamId,
+            _retryRegistry,
+            _retryOwnerKey,
+            ()=>_renderRetriedSettledAnchorScene(activeSid)
+          );
         }
         if(isRecoveryControlMessage){
           (async()=>{
