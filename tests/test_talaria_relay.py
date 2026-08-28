@@ -1,12 +1,65 @@
 import base64
 import hashlib
 import json
+import stat
 from contextlib import contextmanager
 
+import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 
-from api.talaria_relay import RelayConfig, TalariaRelayPublisher
+from api.talaria_relay import RelayConfig, RelayPairingError, TalariaRelayPublisher, pair_talaria_relay
+
+
+def test_pairing_persists_private_key_and_starts_publisher(tmp_path, monkeypatch):
+    from api import config, talaria_relay
+
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    monkeypatch.setenv("HERMES_WEBUI_TALARIA_RELAY_URL", "https://relay.example.com")
+    configured = []
+    monkeypatch.setattr(talaria_relay, "configure_talaria_relay_publisher", configured.append)
+    captured = {}
+
+    @contextmanager
+    def opener(request, timeout):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        yield type(
+            "Response",
+            (),
+            {"status": 201, "read": lambda self: b'{"keyId":"key-created"}'},
+        )()
+
+    result = pair_talaria_relay(
+        {
+            "relay_url": "https://relay.example.com/",
+            "publisher_id": "https://hermes.example.com",
+            "publisher_invitation": "invite-once",
+            "label": "Home Hermes",
+        },
+        opener=opener,
+    )
+
+    request_body = json.loads(captured["request"].data)
+    saved = json.loads((tmp_path / "talaria-relay.json").read_text())
+    key_path = tmp_path / "talaria-relay-publisher.pem"
+    assert result == {"ok": True, "publisher_id": "https://hermes.example.com"}
+    assert captured["request"].full_url == "https://relay.example.com/v1/pairings/publisher/redeem"
+    assert captured["timeout"] == 10
+    assert request_body["invitation"] == "invite-once"
+    assert len(base64.urlsafe_b64decode(request_body["publicKey"] + "==")) == 32
+    assert saved["key_id"] == "key-created"
+    assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
+    assert configured == [RelayConfig("https://relay.example.com", "https://hermes.example.com", "key-created", key_path)]
+
+
+def test_pairing_rejects_an_untrusted_relay_origin():
+    with pytest.raises(RelayPairingError, match="Untrusted"):
+        pair_talaria_relay({
+            "relay_url": "https://internal.example.com",
+            "publisher_id": "https://hermes.example.com",
+            "publisher_invitation": "invite-once",
+        })
 
 
 def test_signed_snapshot_contains_all_active_sessions(tmp_path, monkeypatch):

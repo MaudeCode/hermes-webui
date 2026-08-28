@@ -15510,6 +15510,14 @@ def handle_post(handler, parsed) -> bool:
             diag.finish()
         return True
 
+    if parsed.path == "/api/talaria/relay/pair":
+        from api.talaria_relay import RelayPairingError, pair_talaria_relay
+
+        try:
+            return j(handler, pair_talaria_relay(body))
+        except RelayPairingError as exc:
+            return bad(handler, str(exc), status=exc.status)
+
     if parsed.path == "/api/escape/authorize":
         return _handle_escape_authorize(handler, parsed, body)
 

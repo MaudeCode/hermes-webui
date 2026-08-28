@@ -18,7 +18,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.hazmat.primitives.serialization import load_pem_private_key
+from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    NoEncryption,
+    PrivateFormat,
+    PublicFormat,
+    load_pem_private_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,21 +40,13 @@ class RelayConfig:
     key_id: str
     private_key_path: Path
 
-    @classmethod
-    def from_environment(cls) -> "RelayConfig | None":
-        values = {
-            "url": os.environ.get("HERMES_WEBUI_TALARIA_RELAY_URL", "").strip().rstrip("/"),
-            "publisher_id": os.environ.get("HERMES_WEBUI_TALARIA_PUBLISHER_ID", "").strip(),
-            "key_id": os.environ.get("HERMES_WEBUI_TALARIA_KEY_ID", "").strip(),
-            "private_key_path": os.environ.get("HERMES_WEBUI_TALARIA_PRIVATE_KEY_PATH", "").strip(),
-        }
-        if not any(values.values()):
-            return None
-        if not all(values.values()):
-            raise ValueError("all HERMES_WEBUI_TALARIA_* settings are required")
-        parsed = urllib.parse.urlsplit(values["url"])
+    @staticmethod
+    def _validated_origin(value: str, *, https_only: bool = False) -> str:
+        value = value.strip().rstrip("/")
+        parsed = urllib.parse.urlsplit(value)
+        schemes = ("https",) if https_only else ("http", "https")
         if (
-            parsed.scheme not in ("http", "https")
+            parsed.scheme not in schemes
             or not parsed.netloc
             or parsed.username is not None
             or parsed.password is not None
@@ -56,13 +54,115 @@ class RelayConfig:
             or parsed.query
             or parsed.fragment
         ):
-            raise ValueError("HERMES_WEBUI_TALARIA_RELAY_URL must be an HTTP(S) origin")
-        return cls(
-            url=values["url"],
-            publisher_id=values["publisher_id"],
-            key_id=values["key_id"],
-            private_key_path=Path(values["private_key_path"]).expanduser(),
-        )
+            protocol = "HTTPS" if https_only else "HTTP(S)"
+            raise ValueError(f"value must be an {protocol} origin")
+        return value
+
+    @classmethod
+    def from_state(cls) -> "RelayConfig | None":
+        path, _ = _state_paths()
+        try:
+            values = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(values, dict):
+                raise ValueError("saved relay configuration is not an object")
+            return cls(
+                url=cls._validated_origin(str(values["url"])),
+                publisher_id=cls._validated_origin(str(values["publisher_id"])),
+                key_id=str(values["key_id"]),
+                private_key_path=Path(str(values["private_key_path"])),
+            )
+        except FileNotFoundError:
+            return None
+
+
+class RelayPairingError(Exception):
+    def __init__(self, message: str, *, status: int):
+        super().__init__(message)
+        self.status = status
+
+
+def _state_paths() -> tuple[Path, Path]:
+    from api.config import STATE_DIR
+
+    state_dir = Path(STATE_DIR)
+    return state_dir / "talaria-relay.json", state_dir / "talaria-relay-publisher.pem"
+
+
+def pair_talaria_relay(body: object, *, opener=urllib.request.urlopen) -> dict[str, str | bool]:
+    if not isinstance(body, dict):
+        raise RelayPairingError("Invalid pairing request", status=400)
+    relay_url = body.get("relay_url")
+    publisher_id = body.get("publisher_id")
+    invitation = body.get("publisher_invitation")
+    label = body.get("label") or "Hermes WebUI"
+    if not all(isinstance(value, str) for value in (relay_url, publisher_id, invitation, label)):
+        raise RelayPairingError("Missing relay pairing fields", status=400)
+    try:
+        relay_url = RelayConfig._validated_origin(relay_url, https_only=True)
+        publisher_id = RelayConfig._validated_origin(publisher_id)
+    except ValueError as exc:
+        raise RelayPairingError(str(exc), status=400) from exc
+    allowed_relay_url = os.environ.get(
+        "HERMES_WEBUI_TALARIA_RELAY_URL",
+        "https://relay.talaria.kil.dev",
+    ).strip().rstrip("/")
+    if relay_url != allowed_relay_url:
+        raise RelayPairingError("Untrusted Talaria Relay origin", status=400)
+    if not 1 <= len(invitation) <= 256 or not 1 <= len(label) <= 80:
+        raise RelayPairingError("Invalid relay pairing fields", status=400)
+
+    key = Ed25519PrivateKey.generate()
+    request = urllib.request.Request(
+        relay_url + "/v1/pairings/publisher/redeem",
+        data=json.dumps(
+            {
+                "invitation": invitation,
+                "publisherId": publisher_id,
+                "label": label,
+                "publicKey": _b64url(key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)),
+            },
+            separators=(",", ":"),
+        ).encode("utf-8"),
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with opener(request, timeout=10) as response:
+            payload = json.loads(response.read())
+            if not 200 <= response.status < 300:
+                raise RelayPairingError("Talaria Relay rejected the invitation", status=502)
+    except RelayPairingError:
+        raise
+    except Exception as exc:
+        raise RelayPairingError("Could not reach Talaria Relay", status=502) from exc
+    key_id = payload.get("keyId") if isinstance(payload, dict) else None
+    if not isinstance(key_id, str) or not key_id:
+        raise RelayPairingError("Talaria Relay returned an invalid response", status=502)
+
+    config_path, key_path = _state_paths()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    from api.paths import _atomic_write_text
+
+    _atomic_write_text(
+        key_path,
+        key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode("ascii"),
+    )
+    key_path.chmod(0o600)
+    config = RelayConfig(relay_url, publisher_id, key_id, key_path)
+    _atomic_write_text(
+        config_path,
+        json.dumps(
+            {
+                "url": config.url,
+                "publisher_id": config.publisher_id,
+                "key_id": config.key_id,
+                "private_key_path": str(config.private_key_path),
+            },
+            indent=2,
+        ) + "\n",
+    )
+    configure_talaria_relay_publisher(config)
+    return {"ok": True, "publisher_id": publisher_id}
 
 
 class TalariaRelayPublisher:
@@ -234,18 +334,14 @@ class TalariaRelayPublisher:
 
 
 _publisher: TalariaRelayPublisher | None = None
-_start_attempted = False
 
 
-def start_talaria_relay_publisher() -> bool:
-    global _publisher, _start_attempted
+def start_talaria_relay_publisher(config: RelayConfig | None = None) -> bool:
+    global _publisher
     if _publisher is not None:
         return True
-    if _start_attempted:
-        return False
-    _start_attempted = True
     try:
-        config = RelayConfig.from_environment()
+        config = config or RelayConfig.from_state()
         if config is None:
             return False
         _publisher = TalariaRelayPublisher(config)
@@ -258,6 +354,12 @@ def start_talaria_relay_publisher() -> bool:
         _publisher = None
         logger.warning("Talaria relay publisher disabled: invalid configuration", exc_info=True)
         return False
+
+
+def configure_talaria_relay_publisher(config: RelayConfig) -> None:
+    stop_talaria_relay_publisher()
+    if not start_talaria_relay_publisher(config):
+        raise RelayPairingError("Could not start Talaria Relay publishing", status=500)
 
 
 def stop_talaria_relay_publisher() -> None:
