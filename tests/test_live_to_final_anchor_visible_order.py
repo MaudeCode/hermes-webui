@@ -1164,6 +1164,44 @@ console.log(JSON.stringify({{
     assert data["sessionState"] == {"result": False, "persisted": 3}
 
 
+@pytest.mark.skipif(NODE is None, reason="node is required for settlement retry tests")
+def test_settlement_retry_runs_before_paint_and_renders_late_anchor_scene():
+    queue_retry = _function_body(MESSAGES_JS, "_queueSettledAnchorRetryBeforePaint")
+    script = f"""
+const microtasks=[];
+let retried=0;
+let rendered=0;
+function queueMicrotask(callback){{ microtasks.push(callback); }}
+function _retrySettledAnchorScene(){{ retried+=1; return true; }}
+function _queueSettledAnchorRetryBeforePaint(targetMessage,targetIndex,retryStreamId,retryRegistry,retryOwnerKey,onAttached){{{queue_retry}}}
+const queued=_queueSettledAnchorRetryBeforePaint({{role:'assistant'}},1,'stream-A',{{}},'owner-A',()=>{{ rendered+=1; }});
+const before={{queued,microtasks:microtasks.length,retried,rendered}};
+microtasks.shift()();
+const after={{retried,rendered}};
+console.log(JSON.stringify({{before,after}}));
+"""
+    result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "before": {"queued": True, "microtasks": 1, "retried": 0, "rendered": 0},
+        "after": {"retried": 1, "rendered": 1},
+    }
+
+
+def test_done_and_application_error_retry_anchor_settlement_before_paint():
+    done = _event_listener_body(MESSAGES_JS, "done")
+    apperror = _event_listener_body(MESSAGES_JS, "apperror")
+
+    done_retry = done.index("_queueSettledAnchorRetryBeforePaint(")
+    done_cleanup = done.index("clearLiveToolCards({preserveDom:true})")
+    assert done_retry < done_cleanup
+
+    app_retry = apperror.index("_queueSettledAnchorRetryBeforePaint(")
+    app_render = apperror.index("renderMessages({preserveScroll:true});", app_retry)
+    assert app_retry < app_render
+
+
 def test_connection_error_terminal_message_attaches_projected_anchor_scene_before_render():
     error = _function_body(MESSAGES_JS, "_handleStreamError")
 
