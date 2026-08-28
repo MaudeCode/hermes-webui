@@ -227,3 +227,34 @@ def test_request_overrides_filter_materialized_background_sidecars(monkeypatch):
 
     assert handler.status == 200
     assert [row["session_id"] for row in handler.json_body()["sessions"]] == ["cron-1"]
+
+
+def test_request_overrides_filter_materialized_background_sidecars_when_all_disabled(monkeypatch):
+    rows = [
+        _session("cron-sidecar", "cron", project_id="cron-project"),
+        _session("webhook-sidecar", "webhook", project_id="webhook-project"),
+    ]
+    monkeypatch.setattr(
+        routes,
+        "load_settings",
+        lambda: {
+            "show_cli_sessions": True,
+            "show_cron_sessions": True,
+            "show_webhook_sessions": True,
+            "show_kanban_sessions": False,
+        },
+    )
+    monkeypatch.setattr(routes, "all_sessions", lambda diag=None: list(rows))
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+
+    handler = _FakeHandler()
+    routes.handle_get(
+        handler,
+        urlparse(
+            "http://example.test/api/sessions"
+            "?show_cli_sessions=0&show_cron_sessions=0&show_webhook_sessions=0"
+        ),
+    )
+
+    assert handler.status == 200
+    assert handler.json_body()["sessions"] == []
