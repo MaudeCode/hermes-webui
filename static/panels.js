@@ -11192,7 +11192,7 @@ async function _fetchProviderQuotas(force=false,sourceId=''){
     params.set('ts',String(Date.now()));
   }
   const query=params.toString();
-  const payload=await api('/api/provider/quotas'+(query?'?'+query:''),{cache:'no-store'});
+  const payload=await api('/api/provider/quotas'+(query?'?'+query:''),{cache:'no-store',timeoutMs:120000});
   const fetchedAt=new Date().toISOString();
   if(payload&&typeof payload==='object'){
     payload.client_fetched_at=fetchedAt;
@@ -11239,6 +11239,10 @@ function _setProviderQuotaRefreshPending(button,pending){
   else button.removeAttribute('aria-busy');
 }
 
+function _providerQuotaRefreshFailed(source){
+  return ['unavailable','failed','invalid_key','removed','stale'].includes(source&&source.status);
+}
+
 function _renderProviderQuotaCostChart(collection){
   const card=collection&&collection.querySelector('[data-provider-quota-provider="openrouter"]');
   if(!card) return;
@@ -11254,7 +11258,8 @@ async function _refreshProviderQuotaCollection(collection,button){
     const fresh=_buildProviderQuotaCollection(payload);
     collection.replaceWith(fresh);
     _renderProviderQuotaCostChart(fresh);
-    if(typeof showToast==='function') showToast(t('provider_quota_refresh_succeeded'));
+    const failed=(payload.sources||[]).some(_providerQuotaRefreshFailed);
+    if(typeof showToast==='function') showToast(t(failed?'provider_quota_refresh_failed':'provider_quota_refresh_succeeded'));
   }catch(e){
     if(collection.isConnected) _setProviderQuotaRefreshPending(button,false);
     if(typeof showToast==='function') showToast(t('provider_quota_refresh_failed'));
@@ -11288,7 +11293,7 @@ async function _refreshProviderQuotaSource(card,button,source){
       fresh.dataset.providerCostOwner='true';
       renderProviderCostChart(fresh); // async, fire-and-forget
     }
-    const failed=['unavailable','failed','invalid_key','removed','stale'].includes(next.status);
+    const failed=_providerQuotaRefreshFailed(next);
     if(typeof showToast==='function') showToast(t(failed?'provider_quota_refresh_failed':'provider_quota_refresh_succeeded'));
   }catch(e){
     if(card.isConnected) _setProviderQuotaRefreshPending(button,false);

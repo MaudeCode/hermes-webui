@@ -24,8 +24,9 @@ def test_multi_provider_sources_render_and_targeted_refresh_keeps_source_identit
 const calls=[];
 const listeners=[];
 const replacements=[];
-const api=async endpoint=>{{
-  calls.push(endpoint);
+const toasts=[];
+const api=async (endpoint,opts={{}})=>{{
+  calls.push({{endpoint,opts}});
   return {{version:1,sources:[{{
     source_id:'qsrc work/1',provider_id:'openrouter',provider_label:'OpenRouter',
     account_label:'Work',is_active_provider:true,supported:true,status:'available',
@@ -33,7 +34,7 @@ const api=async endpoint=>{{
     quota:null,details:[],fetched_at:'2030-03-17T12:30:00Z'
   }},{{
     source_id:'qsrc-personal',provider_id:'deepseek',provider_label:'DeepSeek',
-    account_label:'Personal',is_active_provider:false,supported:true,status:'available',
+    account_label:'Personal',is_active_provider:false,supported:true,status:'stale',
     plan:null,windows:[],balances:[{{currency:'USD',total:8.5}}],quota:null,details:[]
   }}]}};
 }};
@@ -49,7 +50,7 @@ const t=(key,...args)=>({{
 }}[key]||key);
 const esc=value=>String(value??'');
 const localStorage={{getItem:()=>null,setItem:()=>{{}}}};
-const showToast=()=>{{}};
+const showToast=value=>toasts.push(value);
 const $=()=>null;
 const renderProviderCostChart=()=>{{}};
 class FakeElement{{
@@ -80,12 +81,14 @@ const document={{createElement:tag=>new FakeElement(tag)}};
   const list=collection.children[1];
   const card=list.children[0];
   await _refreshProviderQuotaSource(card,card._button,payload.sources[0]);
+  await _refreshProviderQuotaCollection(collection,collection.children[0]._button);
   console.log(JSON.stringify({{
     cards:list.children.length,
     source:card.dataset.providerQuotaSource,
     provider:card.dataset.providerQuotaProvider,
     html:card.innerHTML,
     calls,
+    toasts,
     replacements:replacements.length
   }}));
 }})().catch(error=>{{console.error(error);process.exit(1);}});
@@ -106,7 +109,11 @@ const document={{createElement:tag=>new FakeElement(tag)}};
     assert "Work · Pro" in rendered["html"]
     assert "Active provider" in rendered["html"]
     assert "75%" in rendered["html"]
-    assert rendered["calls"][0] == "/api/provider/quotas"
-    assert "source=qsrc+work%2F1" in rendered["calls"][1]
-    assert "refresh=1" in rendered["calls"][1]
-    assert rendered["replacements"] == 1
+    assert rendered["calls"][0]["endpoint"] == "/api/provider/quotas"
+    assert rendered["calls"][0]["opts"]["timeoutMs"] == 120_000
+    assert "source=qsrc+work%2F1" in rendered["calls"][1]["endpoint"]
+    assert "refresh=1" in rendered["calls"][1]["endpoint"]
+    assert rendered["calls"][1]["opts"]["timeoutMs"] == 120_000
+    assert "refresh=1" in rendered["calls"][2]["endpoint"]
+    assert rendered["toasts"][-1] == "failed"
+    assert rendered["replacements"] == 2
