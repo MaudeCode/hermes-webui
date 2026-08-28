@@ -153,8 +153,7 @@ def test_pairing_confirms_initial_snapshot_before_switching_publishers(monkeypat
 def test_profile_bound_session_cannot_pair_relay(monkeypatch):
     from api import auth, routes
 
-    monkeypatch.setattr(auth, "parse_cookie", lambda _handler: "session")
-    monkeypatch.setattr(auth, "session_bound_profile", lambda _cookie: "work")
+    monkeypatch.setattr(auth, "ensure_trusted_auth_session", lambda _handler: {"bound_profile": "work"})
     handler = type("Handler", (), {"headers": {}})()
     responses = []
     monkeypatch.setattr(routes, "bad", lambda _handler, message, status: responses.append((status, message)) or True)

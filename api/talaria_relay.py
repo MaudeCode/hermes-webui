@@ -246,9 +246,9 @@ class TalariaRelayPublisher:
         failures = 0
         while not self._stop.is_set():
             try:
-                self._changes.get(timeout=1)
+                self._changes.get(timeout=60)
             except queue.Empty:
-                continue
+                pass
             if self._stop.is_set():
                 return
             try:
