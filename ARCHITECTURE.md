@@ -533,6 +533,13 @@ Chat/session durability invariants:
     Sidebar project metadata is cached for at most 30 seconds per profile scope and is
     invalidated immediately by local CRUD, project session events, and focus/visibility
     recovery; ordinary session polling does not reread projects on every refresh.
+    When the optional Talaria Relay publisher is configured, `ACTIVE_RUNS` remains the
+    sole run-liveness owner. `api/talaria_relay.py` listens to the existing session-list
+    invalidation signal, coalesces changes on one daemon worker, and sends an Ed25519-signed
+    complete snapshot. Approval/clarify queues are read only to derive attention state;
+    the publisher never creates a parallel queue. Terminal events are retained in-process
+    for the relay's 15-minute terminal window so completion/failure alerts survive worker
+    teardown. Publication is best-effort and never blocks an agent or browser stream.
 
 Rendering:
     renderMessages()      Full rebuild of #msgInner from S.messages

@@ -661,13 +661,13 @@ def main() -> None:
             print('[ok] SessionChannel reaper thread started', flush=True)
     except Exception as e:
         print(f'[!!] WARNING: SessionChannel reaper failed to start: {e}', flush=True)
-
     try:
         from api.plugins import load_plugins
         load_plugins()
+        from api.talaria_relay import start_talaria_relay_publisher
+        start_talaria_relay_publisher()
     except Exception as e:
         print(f'[!!] WARNING: Plugin loading failed: {e}', flush=True)
-
     _abort_if_already_serving(HOST, PORT)
     httpd = QuietHTTPServer((HOST, PORT), Handler)
 

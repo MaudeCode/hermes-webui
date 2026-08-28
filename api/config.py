@@ -9589,6 +9589,13 @@ def register_active_run(stream_id: str, **metadata) -> None:
         pass
     with ACTIVE_RUNS_LOCK:
         ACTIVE_RUNS[stream_id] = entry
+    try:
+        from api.talaria_relay import start_talaria_relay_publisher
+        from api.session_events import publish_session_list_changed
+        start_talaria_relay_publisher()
+        publish_session_list_changed("run_started", session_id=entry.get("session_id"))
+    except Exception:
+        logger.debug("Failed to publish active-run start", exc_info=True)
 
 
 def update_active_run(stream_id: str, **metadata) -> None:
@@ -9599,6 +9606,15 @@ def update_active_run(stream_id: str, **metadata) -> None:
         entry = ACTIVE_RUNS.get(stream_id)
         if entry is not None:
             entry.update(metadata)
+            session_id = entry.get("session_id")
+        else:
+            session_id = None
+    if session_id:
+        try:
+            from api.session_events import publish_session_list_changed
+            publish_session_list_changed("run_updated", session_id=session_id)
+        except Exception:
+            logger.debug("Failed to publish active-run update", exc_info=True)
 
 
 def unregister_active_run(stream_id: str) -> None:
@@ -9607,9 +9623,17 @@ def unregister_active_run(stream_id: str) -> None:
         return
     global LAST_RUN_FINISHED_AT
     with ACTIVE_RUNS_LOCK:
-        ACTIVE_RUNS.pop(stream_id, None)
+        entry = ACTIVE_RUNS.pop(stream_id, None)
         LAST_RUN_FINISHED_AT = time.time()
     unregister_stream_owner(stream_id)
+    try:
+        from api.session_events import publish_session_list_changed
+        publish_session_list_changed(
+            "run_finished",
+            session_id=entry.get("session_id") if isinstance(entry, dict) else None,
+        )
+    except Exception:
+        logger.debug("Failed to publish active-run finish", exc_info=True)
 
 # Agent cache: reuse AIAgent across messages in the same WebUI session so that
 # _user_turn_count survives between turns.  This mirrors the gateway's

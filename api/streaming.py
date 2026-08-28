@@ -9380,6 +9380,15 @@ def _run_agent_streaming(
             q.put_nowait(queue_item)
         except Exception:
             logger.debug("Failed to put event to queue")
+        if event in ('done', 'cancel', 'apperror', 'error'):
+            try:
+                from api.talaria_relay import note_talaria_terminal
+                note_talaria_terminal(
+                    stream_id,
+                    {'done': 'completed', 'cancel': 'cancelled'}.get(event, 'failed'),
+                )
+            except Exception:
+                logger.debug("Failed to publish Talaria terminal state", exc_info=True)
 
     # #5940: capture a terminal (non-retryable) provider error the Agent emits via
     # its lifecycle status_callback. The Agent aborts a non-retryable API error
