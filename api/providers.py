@@ -79,6 +79,7 @@ def _custom_provider_name_matches(provider_id: str, name: object) -> bool:
     return pid in candidates
 
 _OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
+_DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
 _OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
 _OPENCODE_GO_POOL_MAX_WORKERS = 6
 _PROVIDER_QUOTA_TIMEOUT_SECONDS = 3.0
@@ -1587,6 +1588,26 @@ def _sanitize_openrouter_quota(payload: Any) -> dict[str, int | float | None]:
     }
 
 
+def _sanitize_deepseek_balances(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    balances = []
+    for row in payload.get("balance_infos") or []:
+        if not isinstance(row, dict):
+            continue
+        currency = str(row.get("currency") or "").strip().upper()
+        total = _quota_number(row.get("total_balance"))
+        if currency not in {"CNY", "USD"} or total is None:
+            continue
+        balances.append({
+            "currency": currency,
+            "total": total,
+            "granted": _quota_number(row.get("granted_balance")),
+            "topped_up": _quota_number(row.get("topped_up_balance")),
+        })
+    return balances
+
+
 def _sanitize_opencode_go_account_limits(payload: Any) -> dict[str, Any] | None:
     usage = payload.get("usage") if isinstance(payload, dict) else None
     if not isinstance(usage, dict):
@@ -1889,10 +1910,28 @@ def _serialize_account_usage_snapshot(snapshot: Any) -> dict[str, Any] | None:
         "unavailable_reason": unavailable_reason,
         "fetched_at": _isoformat_utc(getattr(snapshot, "fetched_at", None)),
     }
+    if bool(getattr(snapshot, "stale", False)):
+        result["stale"] = True
     pool = getattr(snapshot, "pool", None)
     if isinstance(pool, dict):
         result["pool"] = _public_account_usage_pool(pool)
     return result
+
+
+def _stale_account_usage_snapshot(snapshot: Any) -> SimpleNamespace:
+    return SimpleNamespace(
+        provider=getattr(snapshot, "provider", None),
+        source=getattr(snapshot, "source", None),
+        title=getattr(snapshot, "title", None),
+        plan=getattr(snapshot, "plan", None),
+        windows=getattr(snapshot, "windows", ()),
+        details=getattr(snapshot, "details", ()),
+        available=getattr(snapshot, "available", False),
+        unavailable_reason=getattr(snapshot, "unavailable_reason", None),
+        fetched_at=getattr(snapshot, "fetched_at", None),
+        pool=getattr(snapshot, "pool", None),
+        stale=True,
+    )
 
 
 def _agent_fetch_account_usage(provider: str, *, base_url: str | None = None, api_key: str | None = None) -> Any:
@@ -2443,6 +2482,12 @@ def _fetch_account_usage_with_profile_context(
         else _get_provider_api_key(provider)
     )
     cache_key = _account_usage_cache_key(provider, home, api_key, credential_id)
+    warm_snapshot = None
+    if refresh:
+        with _account_usage_status_cache_lock:
+            cached = _account_usage_status_cache.get(cache_key)
+            if cached is not None:
+                warm_snapshot = cached[1]
     if not refresh:
         cache_hit, cached = _get_cached_account_usage(cache_key)
         if cache_hit:
@@ -2463,10 +2508,16 @@ def _fetch_account_usage_with_profile_context(
                     home,
                     api_key=api_key,
                 )
+            if snapshot is None and warm_snapshot is not None:
+                snapshot = _stale_account_usage_snapshot(warm_snapshot)
             _set_cached_account_usage(cache_key, snapshot)
             return snapshot
     except Exception:
         logger.debug("Failed to fetch account usage for %s", provider, exc_info=True)
+        if warm_snapshot is not None:
+            snapshot = _stale_account_usage_snapshot(warm_snapshot)
+            _set_cached_account_usage(cache_key, snapshot)
+            return snapshot
         _set_cached_account_usage(cache_key, None)
         return None
 
@@ -2486,16 +2537,21 @@ def _provider_account_usage_status(
     )
     account_limits = _serialize_account_usage_snapshot(snapshot)
     if account_limits and account_limits.get("available"):
+        stale = bool(account_limits.get("stale"))
         result = {
             "ok": True,
             "provider": provider,
             "display_name": display_name,
             "supported": True,
-            "status": "available",
+            "status": "stale" if stale else "available",
             "label": account_limits.get("title") or "Account limits",
             "quota": None,
             "account_limits": account_limits,
-            "message": f"{display_name} account limits loaded.",
+            "message": (
+                f"{display_name} refresh failed; showing last-known account limits."
+                if stale
+                else f"{display_name} account limits loaded."
+            ),
         }
     else:
         reason = ""
@@ -2626,8 +2682,9 @@ def get_provider_quota(
             },
         )
         try:
-            with urllib.request.urlopen(req, timeout=_PROVIDER_QUOTA_TIMEOUT_SECONDS) as resp:
-                raw = resp.read()
+            with _opencode_go_probe_semaphore:
+                with urllib.request.urlopen(req, timeout=_PROVIDER_QUOTA_TIMEOUT_SECONDS) as resp:
+                    raw = resp.read()
             payload = json.loads(raw.decode("utf-8")) if isinstance(raw, (bytes, bytearray)) else json.loads(raw)
             quota = _sanitize_openrouter_quota(payload)
             return {
@@ -2667,6 +2724,62 @@ def get_provider_quota(
                 "message": "OpenRouter quota status is temporarily unavailable.",
             }
 
+    if provider == "deepseek":
+        api_key = _get_provider_api_key("deepseek", credential_id)
+        if not api_key:
+            return {
+                "ok": False,
+                "provider": "deepseek",
+                "display_name": display_name,
+                "supported": True,
+                "status": "no_key",
+                "quota": None,
+                "balances": [],
+                "message": "DeepSeek balance needs a DEEPSEEK_API_KEY configured on the server.",
+            }
+        req = urllib.request.Request(
+            _DEEPSEEK_BALANCE_URL,
+            headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+        )
+        try:
+            with _opencode_go_probe_semaphore:
+                with urllib.request.urlopen(req, timeout=_PROVIDER_QUOTA_TIMEOUT_SECONDS) as resp:
+                    raw = resp.read()
+            payload = json.loads(raw.decode("utf-8")) if isinstance(raw, (bytes, bytearray)) else json.loads(raw)
+            balances = _sanitize_deepseek_balances(payload)
+            if not balances or not isinstance(payload.get("is_available"), bool):
+                raise ValueError("malformed balance payload")
+            available = payload["is_available"]
+            return {
+                "ok": available,
+                "provider": "deepseek",
+                "display_name": display_name,
+                "supported": True,
+                "status": "available" if available else "exhausted",
+                "label": "DeepSeek balance",
+                "quota": None,
+                "balances": balances,
+                "message": "DeepSeek balance loaded." if available else "DeepSeek balance is exhausted.",
+            }
+        except urllib.error.HTTPError as exc:
+            status = "invalid_key" if exc.code in (401, 403) else "unavailable"
+        except (TimeoutError, urllib.error.URLError, json.JSONDecodeError, OSError, ValueError):
+            status = "unavailable"
+        return {
+            "ok": False,
+            "provider": "deepseek",
+            "display_name": display_name,
+            "supported": True,
+            "status": status,
+            "quota": None,
+            "balances": [],
+            "message": (
+                "DeepSeek rejected the configured API key."
+                if status == "invalid_key"
+                else "DeepSeek balance is temporarily unavailable."
+            ),
+        }
+
     local_snapshot = _local_pool_snapshot(provider, credential_id)
     if local_snapshot is not None:
         account_limits = _serialize_account_usage_snapshot(local_snapshot)
@@ -2693,7 +2806,6 @@ def get_provider_quota(
             "message": f"{display_name} credential pool: all credentials are unavailable.",
         }
 
-    detail = "OpenAI/Anthropic rate-limit headers are a follow-up once WebUI captures provider response metadata."
     return {
         "ok": False,
         "provider": provider,
@@ -2701,7 +2813,7 @@ def get_provider_quota(
         "supported": False,
         "status": "unsupported",
         "quota": None,
-        "message": f"Quota status is not available for {display_name}. {detail}",
+        "message": f"No verified server-side quota or balance endpoint is available for {display_name}.",
     }
 
 
@@ -2802,6 +2914,8 @@ def _quota_source_payload(
     selected_limits = credential if credential is not None else limits
     provider_id = descriptor["provider_id"]
     status = str(selected_limits.get("status") or quota_status.get("status") or "unavailable")
+    if quota_status.get("status") == "stale" and status != "removed":
+        status = "stale"
     return {
         "source_id": descriptor["source_id"],
         "provider_id": provider_id,
@@ -2813,6 +2927,7 @@ def _quota_source_payload(
         "plan": selected_limits.get("plan"),
         "windows": selected_limits.get("windows") or [],
         "quota": quota_status.get("quota"),
+        "balances": quota_status.get("balances") or [],
         "details": selected_limits.get("details") or [],
         "unavailable_reason": selected_limits.get("unavailable_reason"),
         "retry_after": selected_limits.get("retry_after"),
@@ -2836,8 +2951,7 @@ def get_provider_quotas(
     for provider in provider_status.get("providers") or []:
         if not isinstance(provider, dict):
             continue
-        provider_id = str(provider.get("id") or "").strip().lower()
-        if not provider.get("has_key") and provider_id != active_provider:
+        if not provider.get("has_key") and not provider.get("is_custom"):
             continue
         descriptors.extend(_quota_source_descriptors(profile, provider))
 

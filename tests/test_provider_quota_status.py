@@ -160,6 +160,83 @@ def test_openrouter_quota_invalid_key_and_timeout_are_sanitized(monkeypatch, tmp
         _restore_config(old_cfg, old_mtime)
 
 
+def test_deepseek_quota_fetches_documented_balance_endpoint_and_sanitizes_response(monkeypatch, tmp_path):
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    (tmp_path / ".env").write_text("DEEPSEEK_API_KEY=test-deepseek-key-private\n", encoding="utf-8")
+    old_cfg, old_mtime = _with_config(model={"provider": "deepseek"})
+
+    import api.providers as providers
+    seen = {}
+
+    def fake_urlopen(req, timeout):
+        seen["url"] = req.full_url
+        seen["timeout"] = timeout
+        seen["authorization"] = req.headers.get("Authorization")
+        payload = {
+            "is_available": True,
+            "balance_infos": [{
+                "currency": "USD",
+                "total_balance": "12.50",
+                "granted_balance": "2.00",
+                "topped_up_balance": "10.50",
+                "private_note": "must-not-leak",
+            }],
+        }
+        return _FakeResponse(json.dumps(payload).encode("utf-8"))
+
+    monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
+    try:
+        result = providers.get_provider_quota("deepseek")
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+    assert seen == {
+        "url": "https://api.deepseek.com/user/balance",
+        "timeout": 3.0,
+        "authorization": "Bearer test-deepseek-key-private",
+    }
+    assert result["ok"] is True
+    assert result["status"] == "available"
+    assert result["balances"] == [{
+        "currency": "USD",
+        "total": 12.5,
+        "granted": 2,
+        "topped_up": 10.5,
+    }]
+    assert "test-deepseek-key-private" not in repr(result)
+    assert "must-not-leak" not in repr(result)
+
+
+def test_deepseek_quota_preserves_exhausted_and_malformed_states(monkeypatch, tmp_path):
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    (tmp_path / ".env").write_text("DEEPSEEK_API_KEY=test-deepseek-key-private\n", encoding="utf-8")
+    old_cfg, old_mtime = _with_config(model={"provider": "deepseek"})
+
+    import api.providers as providers
+    payloads = [
+        {"is_available": False, "balance_infos": [{"currency": "CNY", "total_balance": "0"}]},
+        {"is_available": True, "balance_infos": [{"currency": "USD", "total_balance": "not-a-number"}], "raw": "secret"},
+    ]
+
+    def fake_urlopen(_req, timeout):
+        assert timeout == 3.0
+        return _FakeResponse(json.dumps(payloads.pop(0)).encode("utf-8"))
+
+    monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
+    try:
+        exhausted = providers.get_provider_quota("deepseek")
+        malformed = providers.get_provider_quota("deepseek")
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+    assert exhausted["status"] == "exhausted"
+    assert exhausted["balances"] == [{"currency": "CNY", "total": 0, "granted": None, "topped_up": None}]
+    assert malformed["status"] == "unavailable"
+    assert malformed["balances"] == []
+    assert "secret" not in repr(malformed)
+
+
 def test_opencode_go_quota_fetches_usage_windows_and_sanitizes_response(monkeypatch, tmp_path):
     """OpenCode Go quota should use the provider key without exposing it."""
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
@@ -497,7 +574,7 @@ def test_unsupported_provider_reports_followup_state(monkeypatch, tmp_path):
     assert result["supported"] is False
     assert result["status"] == "unsupported"
     assert result["quota"] is None
-    assert "follow-up" in result["message"]
+    assert "No verified server-side quota or balance endpoint" in result["message"]
 
 
 def test_codex_account_usage_is_fetched_under_active_profile_home(monkeypatch, tmp_path):
@@ -1251,20 +1328,18 @@ def test_account_usage_forced_refresh_failure_preserves_warm_snapshot(monkeypatc
     monkeypatch.setattr(providers, "_agent_fetch_account_usage_for_home", fake_fetch)
     try:
         first = providers._fetch_account_usage_with_profile_context("openai-codex")
-        refreshed = providers._fetch_account_usage_with_profile_context(
-            "openai-codex",
-            refresh=True,
-        )
-        after_refresh_failure = providers._fetch_account_usage_with_profile_context(
-            "openai-codex",
-        )
+        refreshed_status = providers.get_provider_quota("openai-codex", refresh=True)
+        after_refresh_failure = providers.get_provider_quota("openai-codex")
     finally:
         providers._account_usage_status_cache.clear()
         _restore_config(old_cfg, old_mtime)
 
     assert first is good_snapshot
-    assert refreshed is None
-    assert after_refresh_failure is good_snapshot
+    assert refreshed_status["ok"] is True
+    assert refreshed_status["status"] == "stale"
+    assert refreshed_status["account_limits"]["stale"] is True
+    assert after_refresh_failure["status"] == "stale"
+    assert after_refresh_failure["account_limits"]["stale"] is True
     assert calls == [
         ("openai-codex", str(tmp_path), None),
         ("openai-codex", str(tmp_path), None),
@@ -1538,13 +1613,19 @@ def test_provider_quota_route_is_registered():
 
 
 def test_provider_quota_card_is_rendered_in_providers_panel():
-    """The Providers panel should show active provider quota/status before cards."""
+    """The Providers panel should render every source from the multi-provider contract."""
     panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
-    assert "_fetchProviderQuotaStatus(false)" in panels
-    assert "'/api/provider/quota'" in panels
+    assert "_fetchProviderQuotas(false)" in panels
+    assert "'/api/provider/quotas'" in panels
+    assert "'/api/provider/quota'" not in panels
+    assert "function _buildProviderQuotaCollection" in panels
     assert "function _buildProviderQuotaCard" in panels
     assert "provider_quota_title" in panels
     assert "provider-quota-card" in panels
+    assert "data-provider-quota-source" not in panels
+    assert "providerQuotaSource" in panels
+    assert "is_active_provider" in panels
+    assert "provider-quota-active" in panels
     assert "account_limits" in panels
     assert "remaining_percent" in panels
     assert "provider-quota-details" in panels
@@ -1556,7 +1637,7 @@ def test_provider_quota_card_is_rendered_in_providers_panel():
     assert "provider-quota-pool-chevron" in panels
     assert 'aria-hidden="true"' in panels
     assert "count>0&&count<=3" in panels
-    assert "status.status==='available'||accountLimits.pool" in panels
+    assert "accountLimits.pool" in panels
     assert "provider-quota-window-detail" in panels
     assert "provider_quota_session_limit" in panels
     assert "provider_quota_weekly_limit" in panels
@@ -1566,17 +1647,20 @@ def test_provider_quota_card_is_rendered_in_providers_panel():
 
 
 def test_provider_quota_card_has_manual_refresh_control():
-    """The quota card should let users force an immediate fresh usage lookup."""
+    """The collection should support targeted source refresh and refresh-all."""
     panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
-    assert "function _refreshProviderQuota" in panels
-    assert "function _fetchProviderQuotaStatus" in panels
-    assert "refresh=1" in panels
+    assert "function _refreshProviderQuotaSource" in panels
+    assert "function _refreshProviderQuotaCollection" in panels
+    assert "function _fetchProviderQuotas" in panels
+    assert "params.set('source',sourceId)" in panels
+    assert "params.set('refresh','1')" in panels
     assert "cache:'no-store'" in panels
     assert "data-provider-quota-refresh" in panels
+    assert "data-provider-quota-refresh-all" in panels
     assert "provider_quota_refresh_usage" in panels
     assert "provider_quota_refresh_succeeded" in panels
     assert "provider_quota_refresh_failed" in panels
-    assert "card.isConnected&&button" in panels
+    assert "if(card.isConnected)" in panels
     assert "provider_quota_last_checked" in panels
 
 
@@ -1615,10 +1699,15 @@ def test_provider_quota_styles_exist():
     css = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
     for token in (
         ".provider-quota-card",
+        ".provider-quota-collection",
+        ".provider-quota-list",
+        ".provider-quota-active",
         ".provider-quota-metric",
         ".provider-quota-card-available",
         ".provider-quota-card-no_key",
         ".provider-quota-card-invalid_key",
+        ".provider-quota-card-stale",
+        ".provider-quota-card-removed",
         ".provider-quota-details",
         ".provider-quota-window",
         ".provider-quota-actions",
