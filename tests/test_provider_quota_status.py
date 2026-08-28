@@ -1329,9 +1329,7 @@ def test_account_usage_forced_refresh_failure_preserves_warm_snapshot(monkeypatc
     try:
         first = providers._fetch_account_usage_with_profile_context("openai-codex")
         refreshed_status = providers.get_provider_quota("openai-codex", refresh=True)
-        after_refresh_failure = providers._fetch_account_usage_with_profile_context(
-            "openai-codex",
-        )
+        after_refresh_failure = providers.get_provider_quota("openai-codex")
     finally:
         providers._account_usage_status_cache.clear()
         _restore_config(old_cfg, old_mtime)
@@ -1340,7 +1338,8 @@ def test_account_usage_forced_refresh_failure_preserves_warm_snapshot(monkeypatc
     assert refreshed_status["ok"] is True
     assert refreshed_status["status"] == "stale"
     assert refreshed_status["account_limits"]["stale"] is True
-    assert after_refresh_failure is good_snapshot
+    assert after_refresh_failure["status"] == "stale"
+    assert after_refresh_failure["account_limits"]["stale"] is True
     assert calls == [
         ("openai-codex", str(tmp_path), None),
         ("openai-codex", str(tmp_path), None),

@@ -2508,15 +2508,17 @@ def _fetch_account_usage_with_profile_context(
                     home,
                     api_key=api_key,
                 )
-            _set_cached_account_usage(cache_key, snapshot)
             if snapshot is None and warm_snapshot is not None:
                 snapshot = _stale_account_usage_snapshot(warm_snapshot)
+            _set_cached_account_usage(cache_key, snapshot)
             return snapshot
     except Exception:
         logger.debug("Failed to fetch account usage for %s", provider, exc_info=True)
-        _set_cached_account_usage(cache_key, None)
         if warm_snapshot is not None:
-            return _stale_account_usage_snapshot(warm_snapshot)
+            snapshot = _stale_account_usage_snapshot(warm_snapshot)
+            _set_cached_account_usage(cache_key, snapshot)
+            return snapshot
+        _set_cached_account_usage(cache_key, None)
         return None
 
 

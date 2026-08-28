@@ -11192,7 +11192,10 @@ async function _fetchProviderQuotas(force=false,sourceId=''){
     params.set('ts',String(Date.now()));
   }
   const query=params.toString();
-  const payload=await api('/api/provider/quotas'+(query?'?'+query:''),{cache:'no-store',timeoutMs:120000});
+  // Server-side probes are individually bounded, but total batch duration
+  // scales with the configured source count, so a fixed client deadline can
+  // abort a valid response before later probe waves finish.
+  const payload=await api('/api/provider/quotas'+(query?'?'+query:''),{cache:'no-store',timeoutMs:0});
   const fetchedAt=new Date().toISOString();
   if(payload&&typeof payload==='object'){
     payload.client_fetched_at=fetchedAt;

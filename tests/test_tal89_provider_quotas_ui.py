@@ -110,10 +110,10 @@ const document={{createElement:tag=>new FakeElement(tag)}};
     assert "Active provider" in rendered["html"]
     assert "75%" in rendered["html"]
     assert rendered["calls"][0]["endpoint"] == "/api/provider/quotas"
-    assert rendered["calls"][0]["opts"]["timeoutMs"] == 120_000
+    assert rendered["calls"][0]["opts"]["timeoutMs"] == 0
     assert "source=qsrc+work%2F1" in rendered["calls"][1]["endpoint"]
     assert "refresh=1" in rendered["calls"][1]["endpoint"]
-    assert rendered["calls"][1]["opts"]["timeoutMs"] == 120_000
+    assert rendered["calls"][1]["opts"]["timeoutMs"] == 0
     assert "refresh=1" in rendered["calls"][2]["endpoint"]
     assert rendered["toasts"][-1] == "failed"
     assert rendered["replacements"] == 2
