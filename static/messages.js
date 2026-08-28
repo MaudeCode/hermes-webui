@@ -4330,6 +4330,23 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }catch(_){ /* durable endpoint remains the fallback */ }
     return preview;
   }
+  function _queueSettledAnchorRetryBeforePaint(targetMessage,targetIndex,retryStreamId,retryRegistry,retryOwnerKey,onAttached){
+    if(!targetMessage||!Number.isInteger(targetIndex)) return false;
+    const retry=()=>{
+      if(
+        _retrySettledAnchorScene(targetMessage,targetIndex,retryStreamId,retryRegistry,retryOwnerKey)
+        && typeof onAttached==='function'
+      ) onAttached();
+    };
+    if(typeof queueMicrotask==='function') queueMicrotask(retry);
+    else Promise.resolve().then(retry);
+    return true;
+  }
+  function _renderRetriedSettledAnchorScene(sessionId){
+    if(S.session&&S.session.session_id===sessionId&&_isSessionCurrentPane(sessionId)){
+      renderMessages({preserveScroll:true});
+    }
+  }
   function _attachProjectedAnchorSceneToLastAssistant(messages, targetMessage=null, targetIndex=null){
     if(!_anchorRegistry||!Array.isArray(messages)) return false;
     let lastAsst=targetMessage;
@@ -4443,18 +4460,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     }
     return _attachProjectedAnchorSceneToLastAssistant(S.messages,currentTarget,targetIndex);
-  }
-  function _queueSettledAnchorRetryBeforePaint(targetMessage,targetIndex,retryStreamId,retryRegistry,retryOwnerKey,onAttached){
-    if(!targetMessage||!Number.isInteger(targetIndex)) return false;
-    const retry=()=>{
-      if(
-        _retrySettledAnchorScene(targetMessage,targetIndex,retryStreamId,retryRegistry,retryOwnerKey)
-        && typeof onAttached==='function'
-      ) onAttached();
-    };
-    if(typeof queueMicrotask==='function') queueMicrotask(retry);
-    else Promise.resolve().then(retry);
-    return true;
   }
   function _upsertAnchorProcessProse(displayText, options={}){
     const text=String(displayText||'').trim();
@@ -6913,9 +6918,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               streamId,
               _anchorRegistry,
               _doneAnchorRetryOwnerKey,
-              ()=>{
-                if(_isSessionCurrentPane(activeSid)) renderMessages({preserveScroll:true});
-              }
+              ()=>_renderRetriedSettledAnchorScene(activeSid)
             );
           }
           if(typeof projectSessionArtifactsForOwner==='function') projectSessionArtifactsForOwner(completedSid);
@@ -7277,9 +7280,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             _retryStreamId,
             _retryRegistry,
             _retryOwnerKey,
-            ()=>{
-              if(S.session&&S.session.session_id===activeSid) renderMessages({preserveScroll:true});
-            }
+            ()=>_renderRetriedSettledAnchorScene(activeSid)
           );
         }
         if(isRecoveryControlMessage){
