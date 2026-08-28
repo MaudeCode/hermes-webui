@@ -9,8 +9,10 @@ import json
 import logging
 import os
 import queue
+import random
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -136,18 +138,28 @@ def pair_talaria_relay(body: object, *, opener=urllib.request.urlopen) -> dict[s
     except Exception as exc:
         raise RelayPairingError("Could not reach Talaria Relay", status=502) from exc
     key_id = payload.get("keyId") if isinstance(payload, dict) else None
-    if not isinstance(key_id, str) or not key_id:
+    paired_publisher_id = payload.get("publisherId") if isinstance(payload, dict) else None
+    if not isinstance(key_id, str) or not key_id or not isinstance(paired_publisher_id, str):
         raise RelayPairingError("Talaria Relay returned an invalid response", status=502)
+    try:
+        publisher_id = RelayConfig._validated_origin(paired_publisher_id)
+    except ValueError as exc:
+        raise RelayPairingError("Talaria Relay returned an invalid response", status=502) from exc
 
-    config_path, key_path = _state_paths()
+    config_path, _ = _state_paths()
+    key_path = config_path.parent / (
+        "talaria-relay-publisher-"
+        + hashlib.sha256(key_id.encode("utf-8")).hexdigest()[:16]
+        + ".pem"
+    )
     config_path.parent.mkdir(parents=True, exist_ok=True)
     from api.paths import _atomic_write_text
 
     _atomic_write_text(
         key_path,
         key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode("ascii"),
+        file_mode=0o600,
     )
-    key_path.chmod(0o600)
     config = RelayConfig(relay_url, publisher_id, key_id, key_path)
     _atomic_write_text(
         config_path,
@@ -176,7 +188,11 @@ class TalariaRelayPublisher:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._revision_lock = threading.Lock()
-        self._last_revision = 0
+        self._revision_path = config.private_key_path.parent / "talaria-relay-revision"
+        try:
+            self._last_revision = int(self._revision_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, ValueError):
+            self._last_revision = 0
         self._terminal_lock = threading.Lock()
         self._terminal: dict[str, dict] = {}
 
@@ -187,12 +203,13 @@ class TalariaRelayPublisher:
             raise ValueError("Talaria publisher key must be an Ed25519 private key")
         return key
 
-    def start(self) -> None:
+    def start(self, *, publish_initial: bool = True) -> None:
         if self._thread is not None:
             return
         self._thread = threading.Thread(target=self._run, name="talaria-relay", daemon=True)
         self._thread.start()
-        self.changed()
+        if publish_initial:
+            self.changed()
 
     def stop(self) -> None:
         self._stop.set()
@@ -226,6 +243,7 @@ class TalariaRelayPublisher:
             return self._last_revision
 
     def _run(self) -> None:
+        failures = 0
         while not self._stop.is_set():
             try:
                 self._changes.get(timeout=1)
@@ -235,10 +253,37 @@ class TalariaRelayPublisher:
                 return
             try:
                 self.publish_snapshot()
-            except Exception:
-                logger.warning("Talaria relay snapshot failed", exc_info=True)
-                if not self._stop.wait(5):
+            except Exception as exc:
+                if isinstance(exc, _RelayHTTPError) and not exc.retryable:
+                    logger.error(
+                        "Talaria relay publisher stopped after permanent HTTP %s",
+                        exc.status,
+                    )
+                    return
+                failures += 1
+                delay = min(
+                    5 * 2 ** min(failures - 1, 6) * random.uniform(0.8, 1.2),
+                    300,
+                )
+                if failures == 1:
+                    logger.warning(
+                        "Talaria relay snapshot failed (%s); retrying in %.1fs",
+                        exc,
+                        delay,
+                        exc_info=not isinstance(exc, _RelayHTTPError),
+                    )
+                else:
+                    logger.debug(
+                        "Talaria relay snapshot still failing (%s); retrying in %.1fs",
+                        exc,
+                        delay,
+                    )
+                if not self._stop.wait(delay):
                     self.changed()
+            else:
+                if failures:
+                    logger.info("Talaria relay snapshot recovered")
+                failures = 0
 
     def build_states(self) -> list[dict]:
         from api.config import ACTIVE_RUNS, ACTIVE_RUNS_LOCK
@@ -302,6 +347,10 @@ class TalariaRelayPublisher:
                 "updatedAt": int(time.time() * 1_000),
                 "deepLink": f"/sessions/{urllib.parse.quote(sid, safe='')}",
             })
+        if states:
+            from api.paths import _atomic_write_text
+
+            _atomic_write_text(self._revision_path, f"{self._last_revision}\n")
         return states
 
     def publish_snapshot(self) -> None:
@@ -328,9 +377,19 @@ class TalariaRelayPublisher:
                 "X-Talaria-Signature": signature,
             },
         )
-        with self._opener(request, timeout=10) as response:
-            if not 200 <= response.status < 300:
-                raise OSError(f"Talaria relay returned HTTP {response.status}")
+        try:
+            with self._opener(request, timeout=10) as response:
+                if not 200 <= response.status < 300:
+                    raise _RelayHTTPError(response.status)
+        except urllib.error.HTTPError as exc:
+            raise _RelayHTTPError(exc.code) from exc
+
+
+class _RelayHTTPError(Exception):
+    def __init__(self, status: int):
+        super().__init__(f"Talaria relay returned HTTP {status}")
+        self.status = status
+        self.retryable = status in (408, 425, 429) or status >= 500
 
 
 _publisher: TalariaRelayPublisher | None = None
@@ -347,7 +406,7 @@ def start_talaria_relay_publisher(config: RelayConfig | None = None) -> bool:
         _publisher = TalariaRelayPublisher(config)
         from api.session_events import add_session_list_changed_listener
         add_session_list_changed_listener(_publisher.changed)
-        _publisher.start()
+        _publisher.start(publish_initial=False)
         atexit.register(stop_talaria_relay_publisher)
         return True
     except Exception:
@@ -357,9 +416,19 @@ def start_talaria_relay_publisher(config: RelayConfig | None = None) -> bool:
 
 
 def configure_talaria_relay_publisher(config: RelayConfig) -> None:
+    global _publisher
+    candidate = TalariaRelayPublisher(config)
+    try:
+        candidate.publish_snapshot()
+    except Exception as exc:
+        raise RelayPairingError("Could not publish the initial Talaria Relay snapshot", status=502) from exc
     stop_talaria_relay_publisher()
-    if not start_talaria_relay_publisher(config):
-        raise RelayPairingError("Could not start Talaria Relay publishing", status=500)
+    _publisher = candidate
+    from api.session_events import add_session_list_changed_listener
+
+    add_session_list_changed_listener(candidate.changed)
+    candidate.start(publish_initial=False)
+    atexit.register(stop_talaria_relay_publisher)
 
 
 def stop_talaria_relay_publisher() -> None:

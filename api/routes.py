@@ -15511,8 +15511,12 @@ def handle_post(handler, parsed) -> bool:
         return True
 
     if parsed.path == "/api/talaria/relay/pair":
+        from api.auth import parse_cookie, session_bound_profile
         from api.talaria_relay import RelayPairingError, pair_talaria_relay
 
+        relay_session_cookie = parse_cookie(handler)
+        if relay_session_cookie and session_bound_profile(relay_session_cookie) is not None:
+            return bad(handler, "Talaria Relay pairing requires an operator session", status=403)
         try:
             return j(handler, pair_talaria_relay(body))
         except RelayPairingError as exc:
