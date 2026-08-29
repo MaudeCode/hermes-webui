@@ -29,6 +29,12 @@ CONFIG_PY = (REPO_ROOT / "api" / "config.py").read_text(encoding="utf-8")
 GATEWAY_CHAT_PY = (REPO_ROOT / "api" / "gateway_chat.py").read_text(encoding="utf-8")
 
 
+def _nested_function_body(source: str, signature: str) -> str:
+    start = source.index(signature)
+    end = source.find("\n    def ", start + len(signature))
+    return source[start:end if end != -1 else None]
+
+
 def test_stream_last_event_id_dict_exists_in_config():
     """`STREAM_LAST_EVENT_ID` must be declared as a module-level dict in
     api/config.py alongside the other STREAM_* registries."""
@@ -41,9 +47,7 @@ def test_stream_last_event_id_dict_exists_in_config():
 def test_put_writes_event_id_to_side_channel_dict():
     """The `put()` helper must capture the event_id from the journal and
     write it to STREAM_LAST_EVENT_ID[stream_id]."""
-    put_def_idx = STREAMING_PY.find("def put(event, data):")
-    assert put_def_idx != -1, "put(event, data) not found in api/streaming.py"
-    put_body = STREAMING_PY[put_def_idx:put_def_idx + 2500]
+    put_body = _nested_function_body(STREAMING_PY, "def put(event, data):")
     assert "journaled = run_journal.append_sse_event(event, data)" in put_body, (
         "put() must capture append_sse_event return value"
     )
@@ -55,8 +59,7 @@ def test_put_writes_event_id_to_side_channel_dict():
 
 def test_stream_channel_queue_item_carries_per_event_id_with_legacy_fallback():
     """StreamChannel queue items need per-frame ids; legacy queues stay 2-tuples."""
-    put_def_idx = STREAMING_PY.find("def put(event, data):")
-    put_body = STREAMING_PY[put_def_idx:put_def_idx + 2500]
+    put_body = _nested_function_body(STREAMING_PY, "def put(event, data):")
     assert 'queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)' in put_body, (
         "StreamChannel events must carry their own event_id while legacy queue "
         "consumers retain the 2-tuple shape"
