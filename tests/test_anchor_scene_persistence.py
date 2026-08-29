@@ -1,5 +1,6 @@
 import json
 from collections import OrderedDict
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -2434,6 +2435,17 @@ def test_server_persists_runtime_steering_scene_without_browser_postback(monkeyp
         session.anchor_activity_scenes,
     )
     assert hydrated[1]["_anchor_activity_scene"]["activity_rows"][0]["role"] == "steering"
+
+
+def test_eager_cancel_persists_and_hydrates_runtime_steering_scene():
+    source = (Path(__file__).parent.parent / "api" / "streaming.py").read_text(encoding="utf-8")
+    cancel = source[source.index("def cancel_stream("):]
+
+    save = cancel.index("_cs.save()")
+    persist = cancel.index("_persist_runtime_steering_scene(", save)
+    payload = cancel.index("_redacted_session_payload_with_terminal_window(_cs)", persist)
+    hydrate = cancel.index("_hydrate_anchor_activity_scenes(", payload)
+    assert save < persist < payload < hydrate
 
 
 def test_server_runtime_steering_persistence_caps_scene_records(monkeypatch):

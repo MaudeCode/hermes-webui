@@ -11214,7 +11214,7 @@ def _run_agent_streaming(
                 _result_consumed_steers,
                 _result_leftover_steers,
                 _result_unmatched_leftover_steer,
-            ) = _finalize_webui_steers(agent, _result_pending_steer)
+            ) = _finalize_webui_steers(agent, stream_id, _result_pending_steer)
             for _record in _result_consumed_steers:
                 put('steer_consumed', _consumed_steer_payload(_record))
             _result_consumed_steers = []
@@ -13539,9 +13539,11 @@ def _partition_webui_steer_records(records, leftover_text: str):
     return consumed, leftovers, unmatched
 
 
-def _finalize_webui_steers(agent, result_leftover_text: str):
+def _finalize_webui_steers(agent, stream_id: str, result_leftover_text: str):
     state = _webui_steer_state(agent)
     with state['lock']:
+        if state.get('stream_id') not in {None, stream_id}:
+            return [], [], result_leftover_text
         drain = getattr(agent, '_drain_pending_steer', None)
         late_leftover = str(drain() or '') if callable(drain) else ''
         leftover_text = '\n'.join(
@@ -14059,6 +14061,7 @@ def cancel_stream(stream_id: str) -> bool:
                         _cancel_session_id,
                         exc_info=True,
                     )
+                _cancel_turn_duration = _terminal_turn_duration(_cs)
                 _cs.active_stream_id = None
                 _cs.pending_user_message = None
                 _cs.pending_attachments = []
@@ -14128,7 +14131,35 @@ def cancel_stream(stream_id: str) -> bool:
                         'timestamp': int(time.time()),
                     })
                 _cs.save()
+                try:
+                    from api.routes import (
+                        _hydrate_anchor_activity_scenes,
+                        _persist_runtime_steering_scene,
+                    )
+                    _persist_runtime_steering_scene(
+                        _cs,
+                        stream_id,
+                        turn_duration=_cancel_turn_duration,
+                    )
+                except Exception:
+                    logger.debug(
+                        "Failed to persist cancelled runtime steering scene for %s",
+                        stream_id,
+                        exc_info=True,
+                    )
                 _cancel_session_payload = _redacted_session_payload_with_terminal_window(_cs)
+                if _cancel_session_payload is not None:
+                    try:
+                        _cancel_session_payload['messages'] = _hydrate_anchor_activity_scenes(
+                            _cancel_session_payload.get('messages') or [],
+                            getattr(_cs, 'anchor_activity_scenes', None),
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Failed to hydrate cancelled runtime steering scene for %s",
+                            stream_id,
+                            exc_info=True,
+                        )
             except Exception:
                 logger.debug("Failed to clear session state on cancel for %s", _cancel_session_id)
 
