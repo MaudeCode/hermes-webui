@@ -3353,7 +3353,12 @@ def _run_journal_snapshot_event_id_for_run(
     return f"{run_id}:{event_seq}" if event_seq else None
 
 
-def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict | None:
+def _run_journal_live_snapshot(
+    stream_id: str | None,
+    *,
+    handler=None,
+    full_history: bool = False,
+) -> dict | None:
     stream_id = str(stream_id or "").strip()
     if not stream_id:
         return None
@@ -3369,7 +3374,11 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     session_id = str(summary.get("session_id") or "")
     if not session_id:
         return None
-    journal = read_run_event_tail(session_id, stream_id)
+    journal = (
+        read_run_events(session_id, stream_id)
+        if full_history
+        else read_run_event_tail(session_id, stream_id)
+    )
     events = [event for event in (journal.get("events") or []) if isinstance(event, dict)]
     if not events:
         return None
@@ -3441,7 +3450,6 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                     call["duration"] = payload.get("duration")
                 if payload.get("is_error") is not None:
                     call["is_error"] = bool(payload.get("is_error"))
-                call["_journal_order"] = event_order
                 return
 
         if not name or name == "clarify":
@@ -4378,8 +4386,14 @@ def _find_anchor_scene_message(messages, *, message_index=None, message_ref="", 
     return None, None
 
 
-def _persist_runtime_steering_scene(session, stream_id: str, *, turn_duration=None) -> bool:
-    snapshot = _run_journal_live_snapshot(stream_id)
+def _persist_runtime_steering_scene(
+    session,
+    stream_id: str,
+    *,
+    terminal_state: str,
+    turn_duration=None,
+) -> bool:
+    snapshot = _run_journal_live_snapshot(stream_id, full_history=True)
     scene = snapshot.get("anchor_activity_scene") if isinstance(snapshot, dict) else None
     if not isinstance(scene, dict) or not any(
         isinstance(row, dict) and row.get("role") == "steering"
@@ -4387,6 +4401,15 @@ def _persist_runtime_steering_scene(session, stream_id: str, *, turn_duration=No
     ):
         return False
     scene = _sanitize_anchor_activity_scene(scene)
+    terminal_state = str(terminal_state or "").strip().lower()
+    if not terminal_state:
+        return False
+    lifecycle = scene.get("lifecycle") if isinstance(scene.get("lifecycle"), dict) else {}
+    lifecycle = dict(lifecycle)
+    lifecycle["status"] = terminal_state
+    lifecycle["terminal_state"] = terminal_state
+    scene["lifecycle"] = lifecycle
+    scene["terminal_state"] = terminal_state
     if turn_duration is not None:
         scene["turn_duration"] = turn_duration
     messages = getattr(session, "messages", None) or []
@@ -5248,6 +5271,16 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         )
         for row in (scene.get("activity_rows") or [])
     )
+    scene_has_steering = any(
+        isinstance(row, dict) and row.get("role") == "steering"
+        for row in (scene.get("activity_rows") or [])
+    )
+    transcript_has_settled_thinking = any(
+        isinstance(message, dict)
+        and message.get("role") == "assistant"
+        and _anchor_scene_clean_text(_anchor_scene_message_reasoning_text(message))
+        for message in messages[turn_start + 1 : local_final_idx + 1]
+    )
 
     def merge_duplicate_tool_row(existing, incoming, *, prefer_incoming_body=False):
         if not isinstance(existing, dict) or not isinstance(incoming, dict):
@@ -5316,7 +5349,10 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
             return
         row = _anchor_scene_settle_live_running_row(
             row,
-            has_settled_thinking=any(existing.get("role") == "thinking" for existing in rows),
+            has_settled_thinking=(
+                transcript_has_settled_thinking
+                or any(existing.get("role") == "thinking" for existing in rows)
+            ),
         )
         if row is None or not isinstance(row, dict):
             return
@@ -5348,6 +5384,11 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         next_row["order_index"] = len(rows)
         next_row["seq"] = len(rows)
         rows.append(next_row)
+
+    if scene_has_steering:
+        for row in scene.get("activity_rows") or []:
+            if isinstance(row, dict) and row.get("role") != "terminal":
+                push(row)
 
     order = 0
     content_tool_indexes_by_idx = {}
@@ -5483,9 +5524,10 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
             continue
         push(row, prefer_incoming_tool_body=True)
         order += 1
-    for row in scene.get("activity_rows") or []:
-        if isinstance(row, dict) and row.get("role") != "terminal":
-            push(row)
+    if not scene_has_steering:
+        for row in scene.get("activity_rows") or []:
+            if isinstance(row, dict) and row.get("role") != "terminal":
+                push(row)
     for row in scene.get("activity_rows") or []:
         if isinstance(row, dict) and row.get("role") == "terminal":
             push(row)

@@ -67,7 +67,7 @@ from api.message_window import (
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
 from api.compression_recovery import stamp_compression_exhausted_recovery
 from api.metering import meter
-from api.run_journal import RunJournalWriter
+from api.run_journal import RunJournalWriter, append_run_event
 from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
@@ -9340,7 +9340,7 @@ def _run_agent_streaming(
     _success_writeback_committed = False
     s = None
 
-    def _persist_terminal_steering_scene(*, turn_duration=None):
+    def _persist_terminal_steering_scene(*, terminal_state, turn_duration=None):
         if ephemeral or s is None:
             return
         try:
@@ -9355,6 +9355,7 @@ def _run_agent_streaming(
             if _persist_runtime_steering_scene(
                 current,
                 stream_id,
+                terminal_state=terminal_state,
                 turn_duration=turn_duration,
             ):
                 return current
@@ -9375,11 +9376,17 @@ def _run_agent_streaming(
             cancel_event.is_set()
             and not _success_writeback_committed
             and event not in ('cancel', 'apperror')
-            and event != 'steer_consumed'
+            and event not in ('steer_consumed', 'pending_steer_leftover')
         ):
             return
         if event in ('cancel', 'apperror', 'error'):
-            _persist_terminal_steering_scene()
+            _error_type = str((data or {}).get('type') or '').strip().lower() if isinstance(data, dict) else ''
+            _terminal_state = (
+                'interrupted-by-user'
+                if event == 'cancel' or _error_type in {'cancelled', 'canceled'}
+                else ('interrupted-by-crash' if _error_type == 'interrupted' else 'errored')
+            )
+            _persist_terminal_steering_scene(terminal_state=_terminal_state)
         event_id = None
         if run_journal is not None:
             try:
@@ -12778,6 +12785,7 @@ def _run_agent_streaming(
                 try:
                     from api.routes import _hydrate_anchor_activity_scenes
                     _scene_session = _persist_terminal_steering_scene(
+                        terminal_state='tool_limit_reached' if _tool_limit_reached else 'completed',
                         turn_duration=usage.get('duration_seconds'),
                     ) or s
                 except Exception:
@@ -13519,9 +13527,21 @@ def _webui_steer_events_before(stream_id: str, event: str):
     if agent is None:
         return []
     if event in {'cancel', 'apperror', 'error'}:
-        consumed = _take_consumed_webui_steers(agent)
-        _clear_webui_steers(agent)
-        return [('steer_consumed', payload) for payload in consumed]
+        consumed, leftovers, unmatched = _finalize_webui_steers(agent, stream_id, "")
+        events = [
+            ('steer_consumed', _consumed_steer_payload(record))
+            for record in consumed
+        ]
+        events.extend(
+            ('pending_steer_leftover', _leftover_steer_payload(record))
+            for record in leftovers
+        )
+        if unmatched:
+            events.append(('pending_steer_leftover', {
+                'stream_id': stream_id,
+                'text': unmatched,
+            }))
+        return events
     return [
         ('steer_consumed', payload)
         for payload in _take_consumed_webui_steers(agent)
@@ -13741,6 +13761,7 @@ def cancel_stream(stream_id: str) -> bool:
     _snap_agent_messages = []
     _snap_owner_session_id = None
     _cancel_session_payload = None
+    _cancel_steer_events = []
 
     with streams_lock:
         stream_present = stream_id in streams
@@ -13927,6 +13948,46 @@ def cancel_stream(stream_id: str) -> bool:
             or str(getattr(agent, 'session_id', None) or '').strip()
             or None
         )
+    if agent is not None and _cancel_session_id:
+        try:
+            _consumed, _leftovers, _unmatched = _finalize_webui_steers(
+                agent,
+                stream_id,
+                "",
+            )
+            _cancel_steer_events.extend(
+                ('steer_consumed', _consumed_steer_payload(record))
+                for record in _consumed
+            )
+            _cancel_steer_events.extend(
+                ('pending_steer_leftover', _leftover_steer_payload(record))
+                for record in _leftovers
+            )
+            if _unmatched:
+                _cancel_steer_events.append(('pending_steer_leftover', {
+                    'session_id': _cancel_session_id,
+                    'stream_id': stream_id,
+                    'text': _unmatched,
+                }))
+            for _event_name, _event_payload in _cancel_steer_events:
+                try:
+                    _journaled = append_run_event(
+                        _cancel_session_id,
+                        stream_id,
+                        _event_name,
+                        _event_payload,
+                    )
+                    _event_id = _journaled.get('event_id') if isinstance(_journaled, dict) else None
+                    if _event_id:
+                        STREAM_LAST_EVENT_ID[stream_id] = _event_id
+                except Exception:
+                    logger.debug(
+                        "Failed to journal eager-cancel steering event for %s",
+                        stream_id,
+                        exc_info=True,
+                    )
+        except Exception:
+            logger.debug("Failed to finalize eager-cancel steering for %s", stream_id, exc_info=True)
     # Use the snapshots captured under streams_lock above (the worker's finally
     # may have popped the live buffers by now via agent.interrupt()). For the
     # ACTIVE_RUNS-only path (stream absent) the snapshots are None → fall back to
@@ -14139,6 +14200,7 @@ def cancel_stream(stream_id: str) -> bool:
                     _persist_runtime_steering_scene(
                         _cs,
                         stream_id,
+                        terminal_state='interrupted-by-user',
                         turn_duration=_cancel_turn_duration,
                     )
                 except Exception:
@@ -14171,6 +14233,8 @@ def cancel_stream(stream_id: str) -> bool:
             except Exception:
                 logger.debug("Failed to note cancel event_id %s for stream %s", _cancel_event_id, stream_id, exc_info=True)
         try:
+            for _event_name, _event_payload in _cancel_steer_events:
+                q.put_nowait((_event_name, _event_payload))
             _payload = _cancel_event_payload('Cancelled by user', session=_cancel_session_payload)
             q.put_nowait(('cancel', _payload))
         except Exception:

@@ -495,6 +495,23 @@ class TestSteerLifecycleBridge:
         assert _take_consumed_webui_steers(agent) == []
         assert agent._webui_pending_steers == []
 
+    def test_terminal_error_surfaces_unconsumed_steer_as_leftover(self):
+        from api.config import AGENT_INSTANCES
+        from api.streaming import _register_webui_steer, _webui_steer_events_before
+
+        agent = self.Agent()
+        AGENT_INSTANCES["stream"] = agent
+        try:
+            assert _register_webui_steer(agent, self.record("steer-1", "keep me"))
+            events = _webui_steer_events_before("stream", "apperror")
+        finally:
+            AGENT_INSTANCES.pop("stream", None)
+
+        assert [event for event, _payload in events] == ["pending_steer_leftover"]
+        assert events[0][1]["steer_id"] == "steer-1"
+        assert agent._pending_steer is None
+        assert agent._webui_pending_steers == []
+
 
 def test_terminal_steer_finalizes_before_scene_persistence():
     src = (Path(__file__).parent.parent / "api" / "streaming.py").read_text(encoding="utf-8")
@@ -509,8 +526,8 @@ def test_cancel_and_error_terminal_events_persist_steering_scene():
     put = src[src.index("    def put(event, data):"):src.index("    # #5940:")]
 
     assert "if event in ('cancel', 'apperror', 'error'):" in put
-    assert "_persist_terminal_steering_scene()" in put
-    assert "'steer_consumed'" in put
+    assert "_persist_terminal_steering_scene(terminal_state=_terminal_state)" in put
+    assert "'steer_consumed', 'pending_steer_leftover'" in put
 
 
 # ── Routing ───────────────────────────────────────────────────────────────
