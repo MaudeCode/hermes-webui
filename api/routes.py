@@ -4403,6 +4403,12 @@ def _persist_runtime_steering_scene(session, stream_id: str, *, turn_duration=No
         "scene": scene,
         "updated_at": time.time(),
     }
+    if len(records) > 256:
+        ordered = sorted(
+            records.items(),
+            key=lambda item: float((item[1] or {}).get("updated_at") or 0),
+        )
+        records = dict(ordered[-256:])
     session.anchor_activity_scenes = records
     session.save(touch_updated_at=False, skip_index=True)
     return True

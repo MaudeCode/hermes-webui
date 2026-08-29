@@ -11177,16 +11177,11 @@ def _run_agent_streaming(
             _result_pending_steer = str(
                 result.get('pending_steer') or ''
             ) if isinstance(result, dict) else ''
-            if _result_pending_steer:
-                (
-                    _result_consumed_steers,
-                    _result_leftover_steers,
-                    _result_unmatched_leftover_steer,
-                ) = _partition_final_webui_steers(agent, _result_pending_steer)
-            else:
-                _result_consumed_steers = []
-                _result_leftover_steers = []
-                _result_unmatched_leftover_steer = ''
+            (
+                _result_consumed_steers,
+                _result_leftover_steers,
+                _result_unmatched_leftover_steer,
+            ) = _finalize_webui_steers(agent, _result_pending_steer)
             _active_turn_identity = _resolve_active_turn_authority(
                 _active_turn_identity,
                 result=result,
@@ -12663,30 +12658,16 @@ def _run_agent_streaming(
             # frontend can queue it for the next turn — same fallback
             # path as the CLI in cli.py:8788-8794.
             try:
-                _leftover = _result_pending_steer
-                if not _leftover:
-                    _drain_pending_steer = getattr(agent, '_drain_pending_steer', None)
-                    _leftover = _drain_pending_steer() if _drain_pending_steer else None
-                if _leftover:
-                    if _result_pending_steer:
-                        _consumed = _result_consumed_steers
-                        _leftovers = _result_leftover_steers
-                        _unmatched = _result_unmatched_leftover_steer
-                    else:
-                        _consumed, _leftovers, _unmatched = _partition_final_webui_steers(
-                            agent,
-                            str(_leftover),
-                        )
-                    for _record in _consumed:
-                        put('steer_consumed', _consumed_steer_payload(_record))
-                    for _record in _leftovers:
-                        put('pending_steer_leftover', _leftover_steer_payload(_record))
-                    if _unmatched:
-                        put('pending_steer_leftover', {
-                            'session_id': session_id,
-                            'stream_id': stream_id,
-                            'text': _unmatched,
-                        })
+                for _record in _result_consumed_steers:
+                    put('steer_consumed', _consumed_steer_payload(_record))
+                for _record in _result_leftover_steers:
+                    put('pending_steer_leftover', _leftover_steer_payload(_record))
+                if _result_unmatched_leftover_steer:
+                    put('pending_steer_leftover', {
+                        'session_id': session_id,
+                        'stream_id': stream_id,
+                        'text': _result_unmatched_leftover_steer,
+                    })
             except Exception:
                 logger.debug("Failed to drain pending steer for session %s", session_id)
             # /goal parity: after a successful assistant turn, run the Hermes
@@ -13421,7 +13402,12 @@ def _webui_steer_state(agent):
         state = agent.__dict__.get('_webui_steer_state')
         if state is None:
             pending = []
-            state = {'lock': threading.Lock(), 'pending': pending}
+            state = {
+                'lock': threading.Lock(),
+                'pending': pending,
+                'stream_id': None,
+                'closed': False,
+            }
             agent.__dict__['_webui_steer_state'] = state
             agent.__dict__['_webui_pending_steers'] = pending
     return state
@@ -13448,6 +13434,13 @@ def _pending_webui_steer_suffix_start(records, pending_text: str):
 def _register_webui_steer(agent, record: dict) -> bool:
     state = _webui_steer_state(agent)
     with state['lock']:
+        stream_id = record.get('stream_id')
+        if state.get('stream_id') != stream_id:
+            state['pending'].clear()
+            state['stream_id'] = stream_id
+            state['closed'] = False
+        if state.get('closed'):
+            return False
         accepted = bool(agent.steer(record['text']))
         if accepted:
             state['pending'].append(record)
@@ -13503,20 +13496,32 @@ def _webui_steer_events_before(stream_id: str, event: str):
     ]
 
 
-def _partition_final_webui_steers(agent, leftover_text: str):
-    state = _webui_steer_state(agent)
-    with state['lock']:
-        records = list(state['pending'])
-        start = _pending_webui_steer_suffix_start(records, leftover_text)
-        if start is None:
-            state['pending'].clear()
-            return [], [], leftover_text
-        consumed = records[:start]
-        leftovers = records[start:]
-        state['pending'].clear()
+def _partition_webui_steer_records(records, leftover_text: str):
+    start = _pending_webui_steer_suffix_start(records, leftover_text)
+    if start is None:
+        return [], [], leftover_text
+    consumed = records[:start]
+    leftovers = records[start:]
     matched = '\n'.join(record['text'] for record in leftovers)
     unmatched = leftover_text[:-len(matched)].rstrip('\n') if matched else leftover_text
     return consumed, leftovers, unmatched
+
+
+def _finalize_webui_steers(agent, result_leftover_text: str):
+    state = _webui_steer_state(agent)
+    with state['lock']:
+        drain = getattr(agent, '_drain_pending_steer', None)
+        late_leftover = str(drain() or '') if callable(drain) else ''
+        leftover_text = '\n'.join(
+            text for text in (result_leftover_text, late_leftover) if text
+        )
+        partition = _partition_webui_steer_records(
+            list(state['pending']),
+            leftover_text,
+        )
+        state['pending'].clear()
+        state['closed'] = True
+        return partition
 
 
 def _handle_chat_steer(handler, body: dict) -> bool:
@@ -13649,7 +13654,7 @@ def _handle_chat_steer(handler, body: dict) -> bool:
         return j(handler, {"accepted": False, "fallback": "steer_error",
                            "stream_id": active_stream_id})
 
-    return j(handler, {"accepted": accepted, "fallback": None,
+    return j(handler, {"accepted": accepted, "fallback": None if accepted else "not_running",
                        "stream_id": active_stream_id, "steer_id": steer_id})
 
 

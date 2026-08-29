@@ -2436,6 +2436,40 @@ def test_server_persists_runtime_steering_scene_without_browser_postback(monkeyp
     assert hydrated[1]["_anchor_activity_scene"]["activity_rows"][0]["role"] == "steering"
 
 
+def test_server_runtime_steering_persistence_caps_scene_records(monkeypatch):
+    from api import routes
+
+    session = MagicMock()
+    session.messages = [
+        {"role": "user", "content": "Initial request", "message_id": "user-1"},
+        {"role": "assistant", "content": "Final answer.", "message_id": "assistant-1"},
+    ]
+    session.anchor_activity_scenes = {
+        f"old-{index}": {
+            "updated_at": float(index),
+            "scene": {"version": "activity_scene_v1", "activity_rows": []},
+        }
+        for index in range(256)
+    }
+    monkeypatch.setattr(
+        routes,
+        "_run_journal_live_snapshot",
+        lambda stream_id: {
+            "anchor_activity_scene": {
+                "version": "activity_scene_v1",
+                "activity_rows": [{"row_id": "steer-1", "role": "steering"}],
+            }
+        },
+    )
+    monkeypatch.setattr(routes.time, "time", lambda: 1_000.0)
+
+    assert routes._persist_runtime_steering_scene(session, "stream-1")
+
+    assert len(session.anchor_activity_scenes) == 256
+    assert "old-0" not in session.anchor_activity_scenes
+    assert any(record.get("stream_id") == "stream-1" for record in session.anchor_activity_scenes.values())
+
+
 def test_runtime_journal_snapshot_dedupes_reasoning_interim_progress_echo(monkeypatch):
     from api import routes
 

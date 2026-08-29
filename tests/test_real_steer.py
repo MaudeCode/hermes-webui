@@ -388,6 +388,12 @@ class TestSteerLifecycleBridge:
                 )
             return True
 
+        def _drain_pending_steer(self):
+            with self._pending_steer_lock:
+                text = self._pending_steer
+                self._pending_steer = None
+            return text
+
     @staticmethod
     def record(steer_id, text):
         return {
@@ -417,18 +423,45 @@ class TestSteerLifecycleBridge:
         assert agent._webui_pending_steers == []
 
     def test_final_leftover_keeps_its_id_without_reclassifying_it_consumed(self):
-        from api.streaming import _partition_final_webui_steers, _register_webui_steer
+        from api.streaming import _finalize_webui_steers, _register_webui_steer
 
         agent = self.Agent()
         assert _register_webui_steer(agent, self.record("steer-1", "first"))
         assert _register_webui_steer(agent, self.record("steer-2", "second"))
+        with agent._pending_steer_lock:
+            agent._pending_steer = None
 
-        consumed, leftover, unmatched = _partition_final_webui_steers(agent, "second")
+        consumed, leftover, unmatched = _finalize_webui_steers(agent, "second")
 
         assert [record["steer_id"] for record in consumed] == ["steer-1"]
         assert [record["steer_id"] for record in leftover] == ["steer-2"]
         assert unmatched == ""
         assert agent._webui_pending_steers == []
+
+    def test_finalization_includes_steer_accepted_after_agent_result(self):
+        from api.streaming import _finalize_webui_steers, _register_webui_steer
+
+        agent = self.Agent()
+        assert _register_webui_steer(agent, self.record("steer-1", "first"))
+        result_leftover = agent._drain_pending_steer()
+        assert _register_webui_steer(agent, self.record("steer-2", "second"))
+
+        consumed, leftover, unmatched = _finalize_webui_steers(agent, result_leftover)
+
+        assert consumed == []
+        assert [record["steer_id"] for record in leftover] == ["steer-1", "steer-2"]
+        assert unmatched == ""
+
+    def test_finalization_closes_current_stream_but_next_stream_can_steer(self):
+        from api.streaming import _finalize_webui_steers, _register_webui_steer
+
+        agent = self.Agent()
+        assert _register_webui_steer(agent, self.record("steer-1", "first"))
+        _finalize_webui_steers(agent, agent._drain_pending_steer())
+
+        assert not _register_webui_steer(agent, self.record("steer-2", "too late"))
+        next_record = {**self.record("steer-3", "next run"), "stream_id": "stream-2"}
+        assert _register_webui_steer(agent, next_record)
 
     def test_terminal_cleanup_drops_unconsumed_records(self):
         from api.streaming import (
@@ -446,6 +479,13 @@ class TestSteerLifecycleBridge:
 
         assert _take_consumed_webui_steers(agent) == []
         assert agent._webui_pending_steers == []
+
+
+def test_terminal_steer_finalizes_before_scene_persistence():
+    src = (Path(__file__).parent.parent / "api" / "streaming.py").read_text(encoding="utf-8")
+    finalized = src.index(") = _finalize_webui_steers(agent, _result_pending_steer)")
+    persisted = src.index("_persist_runtime_steering_scene(", finalized)
+    assert finalized < persisted
 
 
 # ── Routing ───────────────────────────────────────────────────────────────
@@ -1174,11 +1214,10 @@ class TestLeftoverDelivery:
         )
 
     def test_leftover_drain_runs_before_done_event(self):
-        """The drain must happen BEFORE put('done', ...) so frontend gets both events
+        """Finalization must happen BEFORE put('done', ...) so frontend gets both events
         on the same turn."""
         src = (Path(__file__).parent.parent / "api" / "streaming.py").read_text(encoding="utf-8")
-        # Find the drain invocation and the next put('done', ...) AFTER it
-        drain_idx = src.find("_drain_pending_steer()")
+        drain_idx = src.find("_finalize_webui_steers(agent, _result_pending_steer)")
         assert drain_idx >= 0
         done_idx = src.find("put('done'", drain_idx)
         assert done_idx >= 0
