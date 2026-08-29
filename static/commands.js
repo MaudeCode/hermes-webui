@@ -1757,7 +1757,7 @@ async function _trySteer(msg, explicitSteer){
   try{
     result=await api('/api/chat/steer',{
       method:'POST',
-      body:JSON.stringify({session_id:ownerSid,text:steerText}),
+      body:JSON.stringify({session_id:ownerSid,text:steerText,display_text:originalMsg}),
     });
   }catch(e){
     // Network or server error — keep the active stream running and restore the draft.

@@ -3516,6 +3516,7 @@ def _run_journal_live_snapshot(
                     "titles_present": False,
                     "first_tool_count": len(tool_calls),
                     "created_at": last_ts,
+                    "_journal_order": event_order,
                 }
                 reasoning_segments.append(current_reasoning_segment)
             if "titles" in payload:
@@ -3832,11 +3833,13 @@ def _run_journal_live_snapshot(
     thinking_rows_inserted: set[int] = set()
     tool_rows_rendered = 0
 
-    def append_thinking_rows(*, force: bool = False) -> None:
+    def append_thinking_rows(*, force: bool = False, before_order: int | None = None) -> None:
         for segment_index, segment in enumerate(reasoning_segments):
             if segment_index in thinking_rows_inserted:
                 continue
             if not force and tool_rows_rendered < int(segment.get("first_tool_count") or 0):
+                continue
+            if not force and before_order is not None and int(segment.get("_journal_order") or 0) > before_order:
                 continue
             row = scene_thinking_row(segment, status="running")
             if not row:
@@ -3893,7 +3896,6 @@ def _run_journal_live_snapshot(
         )
         if prose:
             anchor_activity_rows.append(prose)
-            append_thinking_rows()
         group_rows = [
             (event_order, "tool", order, row)
             for event_order, order, row in tool_rows_by_burst.get(burst_id or 0, [])
@@ -3901,7 +3903,8 @@ def _run_journal_live_snapshot(
             (event_order, "control", None, row)
             for event_order, row in control_rows_by_burst.get(burst_id or 0, [])
         ]
-        for _, row_type, order, row in sorted(group_rows, key=lambda item: item[0]):
+        for event_order, row_type, order, row in sorted(group_rows, key=lambda item: item[0]):
+            append_thinking_rows(before_order=event_order)
             row["order_index"] = len(anchor_activity_rows)
             anchor_activity_rows.append(row)
             if row_type == "tool":

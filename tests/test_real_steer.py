@@ -597,7 +597,7 @@ class TestFrontendWiring:
         assert "const ownerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;" in body
         assert "const pendingFilesSnapshot=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];" in body
         assert "steerText=await _steerTextWithPendingFiles(originalMsg,ownerSid,pendingFilesSnapshot)" in body
-        assert "body:JSON.stringify({session_id:ownerSid,text:steerText})" in body, (
+        assert "body:JSON.stringify({session_id:ownerSid,text:steerText,display_text:originalMsg})" in body, (
             "steer endpoint must receive the captured owner session id and attachment-enriched text"
         )
         assert "_clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot)" in body
@@ -875,7 +875,7 @@ class TestFrontendWiring:
 
               const delivered = await _trySteer(msg, explicitSteer);
               assert.strictEqual(delivered, false);
-              assert.deepStrictEqual(apiPayload, {{session_id:'A', text:msg}});
+              assert.deepStrictEqual(apiPayload, {{session_id:'A', text:msg, display_text:msg}});
               assert.strictEqual(S.busy, false);
               assert.strictEqual(S.activeStreamId, null);
               assert.strictEqual(S.session.active_stream_id, null);
@@ -922,7 +922,7 @@ class TestFrontendWiring:
 
               const delivered = await _trySteer(msg, explicitSteer);
               assert.strictEqual(delivered, false);
-              assert.deepStrictEqual(apiPayload, {{session_id:'A', text:msg}});
+              assert.deepStrictEqual(apiPayload, {{session_id:'A', text:msg, display_text:msg}});
               assert.strictEqual(S.busy, true);
               assert.strictEqual(S.activeStreamId, 'stream-1');
               assert.strictEqual(S.session.active_stream_id, 'stream-1');
@@ -986,7 +986,7 @@ class TestFrontendWiring:
 
               const delivered = await _trySteer('queue me', false);
               assert.strictEqual(delivered, true);
-              assert.deepStrictEqual(apiPayload, {{session_id:'A', text:'queue me'}});
+              assert.deepStrictEqual(apiPayload, {{session_id:'A', text:'queue me', display_text:'queue me'}});
               assert.strictEqual(S.busy, true);
               assert.ok(Object.prototype.hasOwnProperty.call(INFLIGHT, 'A'));
               assert.deepStrictEqual(clearInflightCalls, []);

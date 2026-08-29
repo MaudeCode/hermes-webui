@@ -13487,7 +13487,12 @@ def _register_webui_steer(agent, record: dict) -> bool:
 
 
 def _consumed_steer_payload(record: dict) -> dict:
-    return {**record, 'consumed_at': time.time()}
+    return {
+        **record,
+        'agent_text': record.get('text'),
+        'text': record.get('display_text') or record.get('text'),
+        'consumed_at': time.time(),
+    }
 
 
 def _leftover_steer_payload(record: dict) -> dict:
@@ -13613,6 +13618,7 @@ def _handle_chat_steer(handler, body: dict) -> bool:
 
     sid = str((body or {}).get("session_id", "") or "").strip()
     text = str((body or {}).get("text", "") or "").strip()
+    display_text = str((body or {}).get("display_text", "") or "").strip()
     steer_id = str((body or {}).get("steer_id", "") or "").strip()
     if not sid:
         return bad(handler, "session_id required")
@@ -13703,6 +13709,7 @@ def _handle_chat_steer(handler, body: dict) -> bool:
             "session_id": sid,
             "stream_id": active_stream_id,
             "text": text,
+            "display_text": display_text or text,
             "created_at": time.time(),
         })
     except Exception as exc:
@@ -13971,7 +13978,8 @@ def cancel_stream(stream_id: str) -> bool:
                     'stream_id': stream_id,
                     'text': _unmatched,
                 }))
-            for _event_name, _event_payload in _cancel_steer_events:
+            for _index, (_event_name, _event_payload) in enumerate(_cancel_steer_events):
+                _event_id = None
                 try:
                     _journaled = append_run_event(
                         _cancel_session_id,
@@ -13988,6 +13996,7 @@ def cancel_stream(stream_id: str) -> bool:
                         stream_id,
                         exc_info=True,
                     )
+                _cancel_steer_events[_index] = (_event_name, _event_payload, _event_id)
         except Exception:
             logger.debug("Failed to finalize eager-cancel steering for %s", stream_id, exc_info=True)
     # Use the snapshots captured under streams_lock above (the worker's finally
@@ -14235,8 +14244,12 @@ def cancel_stream(stream_id: str) -> bool:
             except Exception:
                 logger.debug("Failed to note cancel event_id %s for stream %s", _cancel_event_id, stream_id, exc_info=True)
         try:
-            for _event_name, _event_payload in _cancel_steer_events:
-                q.put_nowait((_event_name, _event_payload))
+            for _event_name, _event_payload, _event_id in _cancel_steer_events:
+                q.put_nowait(
+                    (_event_name, _event_payload, _event_id)
+                    if _event_id and hasattr(q, "subscribe_with_snapshot")
+                    else (_event_name, _event_payload)
+                )
             _payload = _cancel_event_payload('Cancelled by user', session=_cancel_session_payload)
             q.put_nowait(('cancel', _payload))
         except Exception:
