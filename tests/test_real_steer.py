@@ -484,8 +484,18 @@ class TestSteerLifecycleBridge:
 def test_terminal_steer_finalizes_before_scene_persistence():
     src = (Path(__file__).parent.parent / "api" / "streaming.py").read_text(encoding="utf-8")
     finalized = src.index(") = _finalize_webui_steers(agent, _result_pending_steer)")
-    persisted = src.index("_persist_runtime_steering_scene(", finalized)
-    assert finalized < persisted
+    emitted = src.index("put('steer_consumed', _consumed_steer_payload(_record))", finalized)
+    persisted = src.index("_persist_terminal_steering_scene(", finalized)
+    assert finalized < emitted < persisted
+
+
+def test_cancel_and_error_terminal_events_persist_steering_scene():
+    src = (Path(__file__).parent.parent / "api" / "streaming.py").read_text(encoding="utf-8")
+    put = src[src.index("    def put(event, data):"):src.index("    # #5940:")]
+
+    assert "if event in ('cancel', 'apperror', 'error'):" in put
+    assert "_persist_terminal_steering_scene()" in put
+    assert "'steer_consumed'" in put
 
 
 # ── Routing ───────────────────────────────────────────────────────────────

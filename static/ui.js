@@ -13510,6 +13510,14 @@ function _anchorSceneNodeForRow(row, opts){
     );
   }else if(row.role==='tool'){
     node=buildToolCard(_anchorSceneToolCallFromRow(row,opts));
+  }else if(row.role==='steering'){
+    const text=String(row.text||'').trim();
+    if(!text) return null;
+    node=document.createElement('div');
+    node.className='msg-row anchor-steering-message';
+    node.dataset.role='user';
+    node.dataset.rawText=text;
+    node.innerHTML=`<div class="msg-body">${typeof _getCachedRender==='function'?_getCachedRender(text,true):esc(text)}</div>`;
   }else if(row.role==='lifecycle'){
     if(row.source_event_type==='compressing'||row.source_event_type==='compressed'){
       node=_autoCompressionWorklogNode({

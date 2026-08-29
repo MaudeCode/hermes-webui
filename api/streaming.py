@@ -9338,6 +9338,32 @@ def _run_agent_streaming(
     _metering_thread = threading.Thread(target=_metering_ticker, daemon=True)
 
     _success_writeback_committed = False
+    s = None
+
+    def _persist_terminal_steering_scene(*, turn_duration=None):
+        if ephemeral or s is None:
+            return
+        try:
+            current = _resolve_current_session_for_write(s)
+            current_session_id = getattr(current, 'session_id', None) if current is not None else None
+            if (
+                not current_session_id
+                or session_writeback_owner(current_session_id) != stream_id
+            ):
+                return
+            from api.routes import _persist_runtime_steering_scene
+            if _persist_runtime_steering_scene(
+                current,
+                stream_id,
+                turn_duration=turn_duration,
+            ):
+                return current
+        except Exception:
+            logger.debug(
+                "Failed to persist runtime steering scene for %s",
+                stream_id,
+                exc_info=True,
+            )
 
     def put(event, data):
         for _steer_event, _steer_payload in _webui_steer_events_before(stream_id, event):
@@ -9345,8 +9371,10 @@ def _run_agent_streaming(
         if event != 'metering':
             _automatic_wakeup_last_activity[0] = time.monotonic()
         # If cancelled, drop all further events except the cancel event itself
-        if cancel_event.is_set() and not _success_writeback_committed and event not in ('cancel', 'apperror'):
+        if cancel_event.is_set() and not _success_writeback_committed and event not in ('cancel', 'apperror', 'steer_consumed'):
             return
+        if event in ('cancel', 'apperror', 'error'):
+            _persist_terminal_steering_scene()
         event_id = None
         if run_journal is not None:
             try:
@@ -11182,6 +11210,9 @@ def _run_agent_streaming(
                 _result_leftover_steers,
                 _result_unmatched_leftover_steer,
             ) = _finalize_webui_steers(agent, _result_pending_steer)
+            for _record in _result_consumed_steers:
+                put('steer_consumed', _consumed_steer_payload(_record))
+            _result_consumed_steers = []
             _active_turn_identity = _resolve_active_turn_authority(
                 _active_turn_identity,
                 result=result,
@@ -12740,15 +12771,10 @@ def _run_agent_streaming(
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
             with _stream_writeback_stage(_writeback_timings, "done_payload"):
                 try:
-                    from api.routes import (
-                        _hydrate_anchor_activity_scenes,
-                        _persist_runtime_steering_scene,
-                    )
-                    _persist_runtime_steering_scene(
-                        s,
-                        stream_id,
+                    from api.routes import _hydrate_anchor_activity_scenes
+                    _scene_session = _persist_terminal_steering_scene(
                         turn_duration=usage.get('duration_seconds'),
-                    )
+                    ) or s
                 except Exception:
                     logger.debug(
                         "Failed to persist runtime steering scene for %s",
@@ -12759,7 +12785,7 @@ def _run_agent_streaming(
                 try:
                     raw_session['messages'] = _hydrate_anchor_activity_scenes(
                         raw_session.get('messages') or [],
-                        getattr(s, 'anchor_activity_scenes', None),
+                        getattr(_scene_session, 'anchor_activity_scenes', None),
                         tool_calls=tool_calls,
                     )
                 except Exception:
@@ -13488,8 +13514,9 @@ def _webui_steer_events_before(stream_id: str, event: str):
     if agent is None:
         return []
     if event in {'cancel', 'apperror', 'error'}:
+        consumed = _take_consumed_webui_steers(agent)
         _clear_webui_steers(agent)
-        return []
+        return [('steer_consumed', payload) for payload in consumed]
     return [
         ('steer_consumed', payload)
         for payload in _take_consumed_webui_steers(agent)
