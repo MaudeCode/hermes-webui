@@ -13560,7 +13560,9 @@ def _partition_webui_steer_records(records, leftover_text: str):
 
 
 def _finalize_webui_steers(agent, stream_id: str, result_leftover_text: str):
-    state = _webui_steer_state(agent)
+    state = agent.__dict__.get('_webui_steer_state')
+    if state is None:
+        return [], [], result_leftover_text
     with state['lock']:
         if state.get('stream_id') not in {None, stream_id}:
             return [], [], result_leftover_text
