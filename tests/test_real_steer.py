@@ -18,7 +18,9 @@ emitted so the frontend can queue the leftover text as a next-turn message.
 import sys
 import os
 import unittest
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -122,11 +124,29 @@ class TestHandleChatSteerHappyPath:
         sess.active_stream_id = stream_id
         with patch("api.streaming.get_session", return_value=sess):
             handler = _make_handler()
-            _handle_chat_steer(handler, {"session_id": sid, "text": "Use Python instead"})
+            _handle_chat_steer(handler, {
+                "session_id": sid,
+                "text": "Use Python instead",
+                "steer_id": "steer-client-1",
+            })
 
         agent.steer.assert_called_once_with("Use Python instead")
         body = _captured_response(handler)
-        assert body == {"accepted": True, "fallback": None, "stream_id": stream_id}
+        assert body == {
+            "accepted": True,
+            "fallback": None,
+            "stream_id": stream_id,
+            "steer_id": "steer-client-1",
+        }
+        assert len(agent._webui_pending_steers) == 1
+        pending = agent._webui_pending_steers[0]
+        assert {key: pending[key] for key in ("steer_id", "session_id", "stream_id", "text")} == {
+            "steer_id": "steer-client-1",
+            "session_id": sid,
+            "stream_id": stream_id,
+            "text": "Use Python instead",
+        }
+        assert isinstance(pending["created_at"], float)
 
     def test_accepts_live_agent_after_mid_turn_compression(self, _clear_caches):
         """Steer follows the active stream while its agent rotates session ids."""
@@ -159,13 +179,18 @@ class TestHandleChatSteerHappyPath:
         sess.active_stream_id = stream_id
         with patch("api.streaming.get_session", return_value=sess):
             handler = _make_handler()
-            _handle_chat_steer(handler, {"session_id": old_sid, "text": "keep going"})
+            _handle_chat_steer(handler, {
+                "session_id": old_sid,
+                "text": "keep going",
+                "steer_id": "steer-compression-1",
+            })
 
         agent.steer.assert_called_once_with("keep going")
         assert _captured_response(handler) == {
             "accepted": True,
             "fallback": None,
             "stream_id": stream_id,
+            "steer_id": "steer-compression-1",
         }
         with SESSION_AGENT_CACHE_LOCK:
             assert SESSION_AGENT_CACHE[old_sid][0] is agent
@@ -177,7 +202,11 @@ class TestHandleChatSteerHappyPath:
             SESSION_AGENT_CACHE.clear()
         with patch("api.streaming.get_session", return_value=sess):
             handler = _make_handler()
-            _handle_chat_steer(handler, {"session_id": old_sid, "text": "one more change"})
+            _handle_chat_steer(handler, {
+                "session_id": old_sid,
+                "text": "one more change",
+                "steer_id": "steer-compression-2",
+            })
 
         assert agent.steer.call_args_list == [
             call("keep going"),
@@ -187,6 +216,7 @@ class TestHandleChatSteerHappyPath:
             "accepted": True,
             "fallback": None,
             "stream_id": stream_id,
+            "steer_id": "steer-compression-2",
         }
 
 
@@ -335,6 +365,170 @@ class TestHandleChatSteerInputValidation:
         _handle_chat_steer(handler, {"session_id": "sid", "text": "   \n\t  "})
         assert _captured_status(handler) == 400
 
+    def test_rejects_unsafe_steer_id(self, _clear_caches):
+        from api.streaming import _handle_chat_steer
+        handler = _make_handler()
+        _handle_chat_steer(handler, {
+            "session_id": "sid",
+            "text": "hint",
+            "steer_id": "not safe/for a row id",
+        })
+        assert _captured_status(handler) == 400
+
+
+class TestSteerLifecycleBridge:
+    class Agent(SimpleNamespace):
+        def __init__(self):
+            super().__init__(_pending_steer=None, _pending_steer_lock=threading.Lock())
+
+        def steer(self, text):
+            with self._pending_steer_lock:
+                self._pending_steer = (
+                    f"{self._pending_steer}\n{text}" if self._pending_steer else text
+                )
+            return True
+
+        def _drain_pending_steer(self):
+            with self._pending_steer_lock:
+                text = self._pending_steer
+                self._pending_steer = None
+            return text
+
+    @staticmethod
+    def record(steer_id, text):
+        return {
+            "steer_id": steer_id,
+            "session_id": "sid",
+            "stream_id": "stream",
+            "text": text,
+            "created_at": 1.0,
+        }
+
+    def test_emits_repeated_consumed_steers_individually(self):
+        from api.streaming import _register_webui_steer, _take_consumed_webui_steers
+
+        agent = self.Agent()
+        assert _register_webui_steer(agent, self.record("steer-1", "first"))
+        assert _register_webui_steer(agent, self.record("steer-2", "second"))
+        with agent._pending_steer_lock:
+            agent._pending_steer = None
+
+        events = _take_consumed_webui_steers(agent)
+
+        assert [(event["steer_id"], event["text"]) for event in events] == [
+            ("steer-1", "first"),
+            ("steer-2", "second"),
+        ]
+        assert all(isinstance(event["consumed_at"], float) for event in events)
+        assert agent._webui_pending_steers == []
+
+    def test_final_leftover_keeps_its_id_without_reclassifying_it_consumed(self):
+        from api.streaming import _finalize_webui_steers, _register_webui_steer
+
+        agent = self.Agent()
+        assert _register_webui_steer(agent, self.record("steer-1", "first"))
+        assert _register_webui_steer(agent, self.record("steer-2", "second"))
+        with agent._pending_steer_lock:
+            agent._pending_steer = None
+
+        consumed, leftover, unmatched = _finalize_webui_steers(agent, "stream", "second")
+
+        assert [record["steer_id"] for record in consumed] == ["steer-1"]
+        assert [record["steer_id"] for record in leftover] == ["steer-2"]
+        assert unmatched == ""
+        assert agent._webui_pending_steers == []
+
+    def test_finalization_includes_steer_accepted_after_agent_result(self):
+        from api.streaming import _finalize_webui_steers, _register_webui_steer
+
+        agent = self.Agent()
+        assert _register_webui_steer(agent, self.record("steer-1", "first"))
+        result_leftover = agent._drain_pending_steer()
+        assert _register_webui_steer(agent, self.record("steer-2", "second"))
+
+        consumed, leftover, unmatched = _finalize_webui_steers(agent, "stream", result_leftover)
+
+        assert consumed == []
+        assert [record["steer_id"] for record in leftover] == ["steer-1", "steer-2"]
+        assert unmatched == ""
+
+    def test_finalization_closes_current_stream_but_next_stream_can_steer(self):
+        from api.streaming import _finalize_webui_steers, _register_webui_steer
+
+        agent = self.Agent()
+        assert _register_webui_steer(agent, self.record("steer-1", "first"))
+        _finalize_webui_steers(agent, "stream", agent._drain_pending_steer())
+
+        assert not _register_webui_steer(agent, self.record("steer-2", "too late"))
+        next_record = {**self.record("steer-3", "next run"), "stream_id": "stream-2"}
+        assert _register_webui_steer(agent, next_record)
+
+    def test_old_stream_finalization_does_not_drain_replacement_stream(self):
+        from api.streaming import _finalize_webui_steers, _register_webui_steer
+
+        agent = self.Agent()
+        assert _register_webui_steer(agent, self.record("steer-1", "old"))
+        agent._drain_pending_steer()
+        replacement = {**self.record("steer-2", "replacement"), "stream_id": "stream-2"}
+        assert _register_webui_steer(agent, replacement)
+
+        assert _finalize_webui_steers(agent, "stream", "") == ([], [], "")
+        assert agent._pending_steer == "replacement"
+        assert agent._webui_pending_steers == [replacement]
+        another = {**self.record("steer-3", "still open"), "stream_id": "stream-2"}
+        assert _register_webui_steer(agent, another)
+
+    def test_terminal_cleanup_drops_unconsumed_records(self):
+        from api.streaming import (
+            _clear_webui_steers,
+            _register_webui_steer,
+            _take_consumed_webui_steers,
+        )
+
+        agent = self.Agent()
+        assert _register_webui_steer(agent, self.record("steer-1", "do not leak"))
+
+        _clear_webui_steers(agent)
+        with agent._pending_steer_lock:
+            agent._pending_steer = None
+
+        assert _take_consumed_webui_steers(agent) == []
+        assert agent._webui_pending_steers == []
+
+    def test_terminal_error_surfaces_unconsumed_steer_as_leftover(self):
+        from api.config import AGENT_INSTANCES
+        from api.streaming import _register_webui_steer, _webui_steer_events_before
+
+        agent = self.Agent()
+        AGENT_INSTANCES["stream"] = agent
+        try:
+            assert _register_webui_steer(agent, self.record("steer-1", "keep me"))
+            events = _webui_steer_events_before("stream", "apperror")
+        finally:
+            AGENT_INSTANCES.pop("stream", None)
+
+        assert [event for event, _payload in events] == ["pending_steer_leftover"]
+        assert events[0][1]["steer_id"] == "steer-1"
+        assert agent._pending_steer is None
+        assert agent._webui_pending_steers == []
+
+
+def test_terminal_steer_finalizes_before_scene_persistence():
+    src = (Path(__file__).parent.parent / "api" / "streaming.py").read_text(encoding="utf-8")
+    finalized = src.index(") = _finalize_webui_steers(agent, stream_id, _result_pending_steer)")
+    emitted = src.index("put('steer_consumed', _consumed_steer_payload(_record))", finalized)
+    persisted = src.index("_persist_terminal_steering_scene(", finalized)
+    assert finalized < emitted < persisted
+
+
+def test_cancel_and_error_terminal_events_persist_steering_scene():
+    src = (Path(__file__).parent.parent / "api" / "streaming.py").read_text(encoding="utf-8")
+    put = src[src.index("    def put(event, data):"):src.index("    # #5940:")]
+
+    assert "if event in ('cancel', 'apperror', 'error'):" in put
+    assert "_persist_terminal_steering_scene(terminal_state=_terminal_state)" in put
+    assert "'steer_consumed', 'pending_steer_leftover'" in put
+
 
 # ── Routing ───────────────────────────────────────────────────────────────
 
@@ -403,7 +597,7 @@ class TestFrontendWiring:
         assert "const ownerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;" in body
         assert "const pendingFilesSnapshot=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];" in body
         assert "steerText=await _steerTextWithPendingFiles(originalMsg,ownerSid,pendingFilesSnapshot)" in body
-        assert "body:JSON.stringify({session_id:ownerSid,text:steerText})" in body, (
+        assert "display_text:_steerIndicatorText(originalMsg,pendingFilesSnapshot)" in body, (
             "steer endpoint must receive the captured owner session id and attachment-enriched text"
         )
         assert "_clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot)" in body
@@ -681,7 +875,7 @@ class TestFrontendWiring:
 
               const delivered = await _trySteer(msg, explicitSteer);
               assert.strictEqual(delivered, false);
-              assert.deepStrictEqual(apiPayload, {{session_id:'A', text:msg}});
+              assert.deepStrictEqual(apiPayload, {{session_id:'A', text:msg, display_text:msg}});
               assert.strictEqual(S.busy, false);
               assert.strictEqual(S.activeStreamId, null);
               assert.strictEqual(S.session.active_stream_id, null);
@@ -728,7 +922,7 @@ class TestFrontendWiring:
 
               const delivered = await _trySteer(msg, explicitSteer);
               assert.strictEqual(delivered, false);
-              assert.deepStrictEqual(apiPayload, {{session_id:'A', text:msg}});
+              assert.deepStrictEqual(apiPayload, {{session_id:'A', text:msg, display_text:msg}});
               assert.strictEqual(S.busy, true);
               assert.strictEqual(S.activeStreamId, 'stream-1');
               assert.strictEqual(S.session.active_stream_id, 'stream-1');
@@ -792,7 +986,7 @@ class TestFrontendWiring:
 
               const delivered = await _trySteer('queue me', false);
               assert.strictEqual(delivered, true);
-              assert.deepStrictEqual(apiPayload, {{session_id:'A', text:'queue me'}});
+              assert.deepStrictEqual(apiPayload, {{session_id:'A', text:'queue me', display_text:'queue me'}});
               assert.strictEqual(S.busy, true);
               assert.ok(Object.prototype.hasOwnProperty.call(INFLIGHT, 'A'));
               assert.deepStrictEqual(clearInflightCalls, []);
@@ -1062,11 +1256,10 @@ class TestLeftoverDelivery:
         )
 
     def test_leftover_drain_runs_before_done_event(self):
-        """The drain must happen BEFORE put('done', ...) so frontend gets both events
+        """Finalization must happen BEFORE put('done', ...) so frontend gets both events
         on the same turn."""
         src = (Path(__file__).parent.parent / "api" / "streaming.py").read_text(encoding="utf-8")
-        # Find the drain invocation and the next put('done', ...) AFTER it
-        drain_idx = src.find("_drain_pending_steer()")
+        drain_idx = src.find("_finalize_webui_steers(agent, stream_id, _result_pending_steer)")
         assert drain_idx >= 0
         done_idx = src.find("put('done'", drain_idx)
         assert done_idx >= 0

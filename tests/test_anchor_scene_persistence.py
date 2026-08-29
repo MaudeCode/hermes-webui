@@ -1,6 +1,8 @@
 import json
 from collections import OrderedDict
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 
 def _client_anchor_scene_message_ref(message):
@@ -2318,6 +2320,211 @@ def test_runtime_journal_snapshot_includes_live_anchor_activity_scene(monkeypatc
     assert rows[2]["tool_call_id"] == "call-1"
     assert rows[2]["tool"]["done"] is True
     assert rows[3]["status"] == "running"
+
+
+def test_runtime_journal_snapshot_keeps_consumed_steer_between_activity_phases(monkeypatch):
+    """A settled scene must preserve the user steer at its causal boundary."""
+    from api import routes
+
+    stream_id = "stream-steer-boundary"
+    events = [
+        {
+            "event": "token",
+            "seq": 1,
+            "event_id": f"{stream_id}:1",
+            "created_at": 1.0,
+            "payload": {"text": "first progress"},
+        },
+        {
+            "event": "tool",
+            "seq": 2,
+            "event_id": f"{stream_id}:2",
+            "created_at": 2.0,
+            "payload": {"name": "terminal", "tid": "call-1", "args": {"command": "sleep 1"}},
+        },
+        {
+            "event": "steer_consumed",
+            "seq": 3,
+            "event_id": f"{stream_id}:3",
+            "created_at": 3.0,
+            "payload": {
+                "session_id": "session-steer-boundary",
+                "stream_id": stream_id,
+                "steer_id": "steer-1",
+                "text": "stop after the next sleep",
+                "created_at": 2.5,
+                "consumed_at": 3.0,
+            },
+        },
+        {
+            "event": "tool_complete",
+            "seq": 4,
+            "event_id": f"{stream_id}:4",
+            "created_at": 4.0,
+            "payload": {"name": "terminal", "tid": "call-1", "preview": "ok"},
+        },
+        {
+            "event": "token",
+            "seq": 5,
+            "event_id": f"{stream_id}:5",
+            "created_at": 5.0,
+            "payload": {"text": " second progress"},
+        },
+    ]
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda sid: {
+            "session_id": "session-steer-boundary",
+            "last_seq": 5,
+            "last_event_id": f"{stream_id}:5",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_event_tail",
+        lambda session_id, run_id: {"events": events},
+    )
+
+    rows = routes._run_journal_live_snapshot(stream_id)["anchor_activity_scene"]["activity_rows"]
+
+    assert [row["role"] for row in rows] == ["prose", "tool", "steering", "prose"]
+    steer = rows[2]
+    assert steer["kind"] == "control_boundary"
+    assert steer["source_event_type"] == "steer_consumed"
+    assert steer["local_id"] == "steer-1"
+    assert steer["text"] == "stop after the next sleep"
+    assert steer["status"] == "consumed"
+
+
+def test_server_persists_runtime_steering_scene_without_browser_postback(monkeypatch):
+    from api import routes
+
+    session = MagicMock()
+    session.messages = [
+        {"role": "user", "content": "Initial request", "message_id": "user-1"},
+        {"role": "assistant", "content": "Final answer.", "message_id": "assistant-1"},
+    ]
+    session.anchor_activity_scenes = {}
+    scene = {
+        "version": "activity_scene_v1",
+        "activity_rows": [{
+            "row_id": "local-steer-1",
+            "role": "steering",
+            "kind": "control_boundary",
+            "status": "consumed",
+            "text": "Stop after the next sleep",
+        }],
+    }
+    def snapshot(stream_id, *, full_history=False):
+        assert full_history
+        return {"anchor_activity_scene": scene}
+
+    monkeypatch.setattr(routes, "_run_journal_live_snapshot", snapshot)
+
+    assert routes._persist_runtime_steering_scene(
+        session,
+        "stream-1",
+        terminal_state="completed",
+        turn_duration=10,
+    )
+
+    record = next(iter(session.anchor_activity_scenes.values()))
+    assert record["stream_id"] == "stream-1"
+    assert record["scene"]["activity_rows"][0]["row_id"] == "local-steer-1"
+    assert record["scene"]["turn_duration"] == 10
+    assert record["scene"]["terminal_state"] == "completed"
+    assert record["scene"]["lifecycle"] == {
+        "status": "completed",
+        "terminal_state": "completed",
+    }
+    session.save.assert_called_once_with(touch_updated_at=False, skip_index=True)
+
+    hydrated = routes._hydrate_anchor_activity_scenes(
+        session.messages,
+        session.anchor_activity_scenes,
+    )
+    assert hydrated[1]["_anchor_activity_scene"]["activity_rows"][0]["role"] == "steering"
+
+
+def test_hydration_keeps_authoritative_steer_between_duplicate_tools():
+    from api import routes
+
+    messages = [
+        {"role": "user", "content": "Run both"},
+        {
+            "role": "assistant",
+            "content": "Done.",
+            "_partial_tool_calls": [
+                {"id": "call-1", "name": "terminal", "preview": "first"},
+                {"id": "call-2", "name": "terminal", "preview": "second"},
+            ],
+        },
+    ]
+    scene = {
+        "version": "activity_scene_v1",
+        "final_answer": "Done.",
+        "activity_rows": [
+            {"row_id": "tool-1", "role": "tool", "tool_call_id": "call-1", "tool": {"id": "call-1", "name": "terminal"}},
+            {"row_id": "steer-1", "role": "steering", "text": "Change course"},
+            {"row_id": "tool-2", "role": "tool", "tool_call_id": "call-2", "tool": {"id": "call-2", "name": "terminal"}},
+        ],
+    }
+
+    completed = routes._complete_hydrated_anchor_scene(messages, scene, 1, stream_id="stream-1")
+
+    assert [row["role"] for row in completed["activity_rows"]] == ["tool", "steering", "tool"]
+
+
+def test_eager_cancel_persists_and_hydrates_runtime_steering_scene():
+    source = (Path(__file__).parent.parent / "api" / "streaming.py").read_text(encoding="utf-8")
+    cancel = source[source.index("def cancel_stream("):]
+
+    finalize = cancel.index("_finalize_webui_steers(")
+    journal = cancel.index("append_run_event(", finalize)
+    save = cancel.index("_cs.save()", journal)
+    persist = cancel.index("_persist_runtime_steering_scene(", save)
+    payload = cancel.index("_redacted_session_payload_with_terminal_window(_cs)", persist)
+    hydrate = cancel.index("_hydrate_anchor_activity_scenes(", payload)
+    assert finalize < journal < save < persist < payload < hydrate
+
+
+def test_server_runtime_steering_persistence_caps_scene_records(monkeypatch):
+    from api import routes
+
+    session = MagicMock()
+    session.messages = [
+        {"role": "user", "content": "Initial request", "message_id": "user-1"},
+        {"role": "assistant", "content": "Final answer.", "message_id": "assistant-1"},
+    ]
+    session.anchor_activity_scenes = {
+        f"old-{index}": {
+            "updated_at": float(index),
+            "scene": {"version": "activity_scene_v1", "activity_rows": []},
+        }
+        for index in range(256)
+    }
+    monkeypatch.setattr(
+        routes,
+        "_run_journal_live_snapshot",
+        lambda stream_id, *, full_history=False: {
+            "anchor_activity_scene": {
+                "version": "activity_scene_v1",
+                "activity_rows": [{"row_id": "steer-1", "role": "steering"}],
+            }
+        },
+    )
+    monkeypatch.setattr(routes.time, "time", lambda: 1_000.0)
+
+    assert routes._persist_runtime_steering_scene(
+        session,
+        "stream-1",
+        terminal_state="completed",
+    )
+
+    assert len(session.anchor_activity_scenes) == 256
+    assert "old-0" not in session.anchor_activity_scenes
+    assert any(record.get("stream_id") == "stream-1" for record in session.anchor_activity_scenes.values())
 
 
 def test_runtime_journal_snapshot_dedupes_reasoning_interim_progress_echo(monkeypatch):

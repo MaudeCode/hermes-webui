@@ -188,6 +188,7 @@ when integrating with the live chat SSE relay.
 | `goal` | Goal / plan card update |
 | `goal_continue` | Goal continuation signal |
 | `pending_steer_leftover` | Leftover steer text after interrupt |
+| `steer_consumed` | User steer inserted into the active run, with stable `steer_id`, text, and consumption timestamp |
 | `state_saved` | Durable state write acknowledgment |
 | `todo_state` | Todo / checklist panel update |
 

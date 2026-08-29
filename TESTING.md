@@ -1855,6 +1855,18 @@ EXPECT:
   - The queued message does NOT fire in session B
 FAIL: Queued message fires in session B.
 
+### T36.5: Consumed Steer Survives Settlement
+SETUP: Active session with a response that runs at least two tool batches.
+STEPS:
+  1. Send a steer between the two tool batches.
+  2. Wait for the response to finish.
+  3. Reload the session.
+EXPECT:
+  - The steering text stays between pre-steer and post-steer activity.
+  - The final answer remains below the activity timeline.
+  - The steering text appears once after settlement and once after reload.
+FAIL: Steer disappears, duplicates, moves below the final answer, or activity collapses across it.
+
 ---
 
 ## Section 37: Message Persists on Switch-Away (Sprint 8 hotfix)

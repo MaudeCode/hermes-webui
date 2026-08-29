@@ -932,6 +932,15 @@ def test_settled_scene_keeps_user_visible_lifecycle_and_control_rows():
     assert "status:!settled&&row.status==='running'?'running':'done'" in node
 
 
+def test_settled_scene_renders_steering_as_a_user_message():
+    node = _function_body(UI_JS, "_anchorSceneNodeForRow")
+
+    assert "}else if(row.role==='steering'){" in node
+    assert "node.className='msg-row anchor-steering-message'" in node
+    assert "node.dataset.role='user'" in node
+    assert "_getCachedRender(text,true)" in node
+
+
 def test_settled_successful_auto_compression_stays_live_only():
     helper = _function_body(UI_JS, "_anchorSceneIsSettledSuccessfulCompression")
 

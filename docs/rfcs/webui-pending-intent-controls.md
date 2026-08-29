@@ -364,6 +364,12 @@ Delivered vs Applied:
 - `delivered`: WebUI has sent Steer to the active run/runtime endpoint
 - `applied`: Agent/runtime proves the model consumed or applied the Steer
 
+The current in-process WebUI path emits `steer_consumed` with the request's
+stable `steer_id` when the pending text has left the Agent steer slot and the
+next Agent event proves processing continued. The run journal preserves that
+event so `activity_scene_v1` can restore the same boundary after settlement or
+reload. `pending_steer_leftover` carries the same ID when the run ends first.
+
 WebUI may claim delivered. WebUI must not claim applied without Agent/TUI
 Gateway evidence.
 

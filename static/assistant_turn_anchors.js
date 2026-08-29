@@ -88,6 +88,7 @@
     compressed:Object.freeze({classification:'activity',kind:'lifecycle_status',source:'sse'}),
     approval:Object.freeze({classification:'activity',kind:'control_boundary',source:'sse'}),
     clarify:Object.freeze({classification:'activity',kind:'control_boundary',source:'sse'}),
+    steer_consumed:Object.freeze({classification:'activity',kind:'control_boundary',source:'sse'}),
     pending_steer_leftover:Object.freeze({classification:'activity',kind:'control_boundary',source:'sse'}),
     goal_continue:Object.freeze({classification:'activity',kind:'control_boundary',source:'sse'}),
     artifact_reference:Object.freeze({classification:'artifact',kind:'artifact_reference',source:'derived'}),
@@ -309,6 +310,7 @@
       return normalizeAssistantTurnAnchorTerminalState(sourceType)||TERMINAL_STATES.error;
     }
     if(kind==='lifecycle_status') return 'running';
+    if(sourceType==='steer_consumed') return 'consumed';
     if(kind==='control_boundary') return 'pending';
     if(sourceType==='stream_end') return 'transport_closed';
     return null;
@@ -957,37 +959,38 @@
     });
   }
 
-  function _activityRowRole(kind){
+  function _activityRowRole(kind, sourceType){
     if(kind==='process_prose') return 'prose';
     if(kind==='reasoning') return 'thinking';
     if(_isToolActivityKind(kind)) return 'tool';
     if(kind==='lifecycle_status') return 'lifecycle';
-    if(kind==='control_boundary') return 'control';
+    if(kind==='control_boundary') return sourceType==='steer_consumed'?'steering':'control';
     if(kind==='terminal_status') return 'terminal';
     return 'activity';
   }
 
-  function _activityRowDisplayHint(kind, mode){
+  function _activityRowDisplayHint(kind, mode, sourceType){
     if(mode==='transparent_stream') return 'chronological_activity';
     if(kind==='process_prose') return 'main_prose';
     if(kind==='reasoning') return 'collapsed_thinking';
     if(_isToolActivityKind(kind)) return 'tool_row';
     if(kind==='lifecycle_status') return 'quiet_lifecycle_row';
-    if(kind==='control_boundary') return 'control_boundary_row';
+    if(kind==='control_boundary') return sourceType==='steer_consumed'?'steering_message':'control_boundary_row';
     if(kind==='terminal_status') return 'terminal_status_row';
     return 'activity_row';
   }
 
-  function _activityRowDisplayHints(kind){
+  function _activityRowDisplayHints(kind, sourceType){
     return Object.freeze({
-      compact_worklog:_activityRowDisplayHint(kind,'compact_worklog'),
-      transparent_stream:_activityRowDisplayHint(kind,'transparent_stream'),
+      compact_worklog:_activityRowDisplayHint(kind,'compact_worklog',sourceType),
+      transparent_stream:_activityRowDisplayHint(kind,'transparent_stream',sourceType),
     });
   }
 
   function _activitySceneRow(event, index, mode){
     const payload=_own(event,'payload');
     const kind=_cleanString(_own(event,'kind'))||'activity';
+    const sourceType=_cleanString(_own(event,'source_event_type'))||null;
     const status=_cleanString(_own(event,'status'))||null;
     const text=_activityRowText(event);
     const toolCallId=_activityRowToolId(event,kind);
@@ -996,10 +999,10 @@
       row_id:_activityRowId(event,index),
       order_index:index,
       kind,
-      role:_activityRowRole(kind),
-      display_hint:_activityRowDisplayHint(kind,mode),
-      display_hints:_activityRowDisplayHints(kind),
-      source_event_type:_cleanString(_own(event,'source_event_type'))||null,
+      role:_activityRowRole(kind,sourceType),
+      display_hint:_activityRowDisplayHint(kind,mode,sourceType),
+      display_hints:_activityRowDisplayHints(kind,sourceType),
+      source_event_type:sourceType,
       event_id:_cleanString(_own(event,'event_id'))||null,
       local_id:_cleanString(_own(event,'local_id'))||null,
       run_id:_cleanString(_own(event,'run_id'))||null,
