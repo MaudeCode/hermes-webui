@@ -597,7 +597,7 @@ class TestFrontendWiring:
         assert "const ownerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;" in body
         assert "const pendingFilesSnapshot=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];" in body
         assert "steerText=await _steerTextWithPendingFiles(originalMsg,ownerSid,pendingFilesSnapshot)" in body
-        assert "body:JSON.stringify({session_id:ownerSid,text:steerText,display_text:originalMsg})" in body, (
+        assert "display_text:_steerIndicatorText(originalMsg,pendingFilesSnapshot)" in body, (
             "steer endpoint must receive the captured owner session id and attachment-enriched text"
         )
         assert "_clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot)" in body

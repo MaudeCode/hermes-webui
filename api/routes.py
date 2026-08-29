@@ -3910,7 +3910,7 @@ def _run_journal_live_snapshot(
             if row_type == "tool":
                 consumed_tools.add(order)
                 tool_rows_rendered += 1
-                append_thinking_rows()
+                append_thinking_rows(before_order=event_order)
         text_start = max(text_start, text_end)
 
     def append_ungrouped_rows() -> None:
@@ -3923,13 +3923,14 @@ def _run_journal_live_snapshot(
             (event_order, "control", None, row)
             for event_order, row in ungrouped_control_rows
         ]
-        for _, row_type, order, row in sorted(rows, key=lambda item: item[0]):
+        for event_order, row_type, order, row in sorted(rows, key=lambda item: item[0]):
+            append_thinking_rows(before_order=event_order)
             row["order_index"] = len(anchor_activity_rows)
             anchor_activity_rows.append(row)
             if row_type == "tool":
                 consumed_tools.add(order)
                 tool_rows_rendered += 1
-                append_thinking_rows()
+                append_thinking_rows(before_order=event_order)
 
     if not sorted_anchors:
         append_thinking_rows()
