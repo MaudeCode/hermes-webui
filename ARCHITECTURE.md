@@ -310,6 +310,12 @@ block. If the browser disconnects mid-stream, the daemon thread runs to completi
 then cleans up. The queue fills and the put_nowait() calls fail silently (queue.Full
 is caught).
 
+Mid-run steer requests carry a stable `steer_id`. The streaming worker emits
+`steer_consumed` before the first later Agent event that proves the pending
+steer left the runtime slot. The run journal projects that event as a
+user-authored `steering` row in `activity_scene_v1`, and settlement persists the
+scene so native clients and reloads do not depend on browser postback state.
+
 Fallback sync endpoint: POST /api/chat still exists and holds the connection open until
 the agent finishes. The frontend never uses it but it can be useful for debugging.
 

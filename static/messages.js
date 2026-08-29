@@ -7064,6 +7064,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _finalizeStreamEndFallback(source);
     });
 
+    source.addEventListener('steer_consumed',e=>{
+      try{
+        const d=JSON.parse(e.data||'{}');
+        if((d.session_id||activeSid)!==activeSid||!d.steer_id||!String(d.text||'').trim()) return;
+        _applyToAnchor('steer_consumed',d,e);
+        snapshotLiveTurn();
+      }catch(_){ }
+    });
+
     source.addEventListener('pending_steer_leftover',e=>{
       // The agent finished its turn with steer text still stashed (no
       // tool-result boundary fired). Match the CLI's leftover-delivery
@@ -7557,7 +7566,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       })();
     });
 
-    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
+    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','steer_consumed','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
       source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
     }
   }

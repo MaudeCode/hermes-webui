@@ -22,6 +22,7 @@ import time
 import traceback
 import copy
 import inspect
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -9339,6 +9340,8 @@ def _run_agent_streaming(
     _success_writeback_committed = False
 
     def put(event, data):
+        for _steer_event, _steer_payload in _webui_steer_events_before(stream_id, event):
+            put(_steer_event, _steer_payload)
         if event != 'metering':
             _automatic_wakeup_last_activity[0] = time.monotonic()
         # If cancelled, drop all further events except the cancel event itself
@@ -11171,6 +11174,19 @@ def _run_agent_streaming(
                 _run_conversation_kwargs["user_message"] = user_message
             _result_partial_pre_call_context = list(_previous_context_messages)
             result = agent.run_conversation(**_run_conversation_kwargs)
+            _result_pending_steer = str(
+                result.get('pending_steer') or ''
+            ) if isinstance(result, dict) else ''
+            if _result_pending_steer:
+                (
+                    _result_consumed_steers,
+                    _result_leftover_steers,
+                    _result_unmatched_leftover_steer,
+                ) = _partition_final_webui_steers(agent, _result_pending_steer)
+            else:
+                _result_consumed_steers = []
+                _result_leftover_steers = []
+                _result_unmatched_leftover_steer = ''
             _active_turn_identity = _resolve_active_turn_authority(
                 _active_turn_identity,
                 result=result,
@@ -12647,13 +12663,30 @@ def _run_agent_streaming(
             # frontend can queue it for the next turn — same fallback
             # path as the CLI in cli.py:8788-8794.
             try:
-                _drain_pending_steer = getattr(agent, '_drain_pending_steer', None)
-                _leftover = _drain_pending_steer() if _drain_pending_steer else None
+                _leftover = _result_pending_steer
+                if not _leftover:
+                    _drain_pending_steer = getattr(agent, '_drain_pending_steer', None)
+                    _leftover = _drain_pending_steer() if _drain_pending_steer else None
                 if _leftover:
-                    put('pending_steer_leftover', {
-                        'session_id': session_id,
-                        'text': str(_leftover),
-                    })
+                    if _result_pending_steer:
+                        _consumed = _result_consumed_steers
+                        _leftovers = _result_leftover_steers
+                        _unmatched = _result_unmatched_leftover_steer
+                    else:
+                        _consumed, _leftovers, _unmatched = _partition_final_webui_steers(
+                            agent,
+                            str(_leftover),
+                        )
+                    for _record in _consumed:
+                        put('steer_consumed', _consumed_steer_payload(_record))
+                    for _record in _leftovers:
+                        put('pending_steer_leftover', _leftover_steer_payload(_record))
+                    if _unmatched:
+                        put('pending_steer_leftover', {
+                            'session_id': session_id,
+                            'stream_id': stream_id,
+                            'text': _unmatched,
+                        })
             except Exception:
                 logger.debug("Failed to drain pending steer for session %s", session_id)
             # /goal parity: after a successful assistant turn, run the Hermes
@@ -12725,7 +12758,35 @@ def _run_agent_streaming(
             except Exception as _goal_exc:
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
             with _stream_writeback_stage(_writeback_timings, "done_payload"):
+                try:
+                    from api.routes import (
+                        _hydrate_anchor_activity_scenes,
+                        _persist_runtime_steering_scene,
+                    )
+                    _persist_runtime_steering_scene(
+                        s,
+                        stream_id,
+                        turn_duration=usage.get('duration_seconds'),
+                    )
+                except Exception:
+                    logger.debug(
+                        "Failed to persist runtime steering scene for %s",
+                        stream_id,
+                        exc_info=True,
+                    )
                 raw_session = _session_payload_with_terminal_window(s, tool_calls=tool_calls)
+                try:
+                    raw_session['messages'] = _hydrate_anchor_activity_scenes(
+                        raw_session.get('messages') or [],
+                        getattr(s, 'anchor_activity_scenes', None),
+                        tool_calls=tool_calls,
+                    )
+                except Exception:
+                    logger.debug(
+                        "Failed to hydrate runtime steering scene into done payload for %s",
+                        stream_id,
+                        exc_info=True,
+                    )
                 _done_payload = {'session': redact_session_data(raw_session), 'usage': usage}
                 if _tool_limit_reached:
                     _done_payload['terminal_state'] = 'tool_limit_reached'
@@ -13348,6 +13409,116 @@ def _run_agent_streaming(
 # ============================================================
 
 
+_WEBUI_STEER_STATE_INIT_LOCK = threading.Lock()
+_WEBUI_STEER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+
+def _webui_steer_state(agent):
+    state = agent.__dict__.get('_webui_steer_state')
+    if state is not None:
+        return state
+    with _WEBUI_STEER_STATE_INIT_LOCK:
+        state = agent.__dict__.get('_webui_steer_state')
+        if state is None:
+            pending = []
+            state = {'lock': threading.Lock(), 'pending': pending}
+            agent.__dict__['_webui_steer_state'] = state
+            agent.__dict__['_webui_pending_steers'] = pending
+    return state
+
+
+def _agent_pending_steer_text(agent) -> str:
+    lock = agent.__dict__.get('_pending_steer_lock')
+    if lock is None:
+        return str(agent.__dict__.get('_pending_steer') or '')
+    with lock:
+        return str(agent.__dict__.get('_pending_steer') or '')
+
+
+def _pending_webui_steer_suffix_start(records, pending_text: str):
+    if not pending_text:
+        return len(records)
+    for start in range(len(records) + 1):
+        suffix = '\n'.join(record['text'] for record in records[start:])
+        if suffix and (pending_text == suffix or pending_text.endswith('\n' + suffix)):
+            return start
+    return None
+
+
+def _register_webui_steer(agent, record: dict) -> bool:
+    state = _webui_steer_state(agent)
+    with state['lock']:
+        accepted = bool(agent.steer(record['text']))
+        if accepted:
+            state['pending'].append(record)
+        return accepted
+
+
+def _consumed_steer_payload(record: dict) -> dict:
+    return {**record, 'consumed_at': time.time()}
+
+
+def _leftover_steer_payload(record: dict) -> dict:
+    return {**record, 'leftover_at': time.time()}
+
+
+def _take_consumed_webui_steers(agent) -> list[dict]:
+    state = agent.__dict__.get('_webui_steer_state')
+    if state is None:
+        return []
+    with state['lock']:
+        records = state['pending']
+        start = _pending_webui_steer_suffix_start(records, _agent_pending_steer_text(agent))
+        if start is None or start <= 0:
+            return []
+        consumed = records[:start]
+        del records[:start]
+    return [_consumed_steer_payload(record) for record in consumed]
+
+
+def _clear_webui_steers(agent) -> None:
+    state = agent.__dict__.get('_webui_steer_state')
+    if state is None:
+        return
+    with state['lock']:
+        state['pending'].clear()
+
+
+def _webui_steer_events_before(stream_id: str, event: str):
+    if event not in {
+        'token', 'reasoning', 'interim_assistant', 'tool', 'done',
+        'cancel', 'apperror', 'error',
+    }:
+        return []
+    with STREAMS_LOCK:
+        agent = AGENT_INSTANCES.get(stream_id)
+    if agent is None:
+        return []
+    if event in {'cancel', 'apperror', 'error'}:
+        _clear_webui_steers(agent)
+        return []
+    return [
+        ('steer_consumed', payload)
+        for payload in _take_consumed_webui_steers(agent)
+    ]
+
+
+def _partition_final_webui_steers(agent, leftover_text: str):
+    state = _webui_steer_state(agent)
+    with state['lock']:
+        records = list(state['pending'])
+        start = _pending_webui_steer_suffix_start(records, leftover_text)
+        if start is None:
+            state['pending'].clear()
+            return [], [], leftover_text
+        consumed = records[:start]
+        leftovers = records[start:]
+        state['pending'].clear()
+    matched = '\n'.join(record['text'] for record in leftovers)
+    unmatched = leftover_text[:-len(matched)].rstrip('\n') if matched else leftover_text
+    return consumed, leftovers, unmatched
+
+
 def _handle_chat_steer(handler, body: dict) -> bool:
     """Inject a /steer payload into the active agent for a session.
 
@@ -13381,10 +13552,15 @@ def _handle_chat_steer(handler, body: dict) -> bool:
 
     sid = str((body or {}).get("session_id", "") or "").strip()
     text = str((body or {}).get("text", "") or "").strip()
+    steer_id = str((body or {}).get("steer_id", "") or "").strip()
     if not sid:
         return bad(handler, "session_id required")
     if not text:
         return bad(handler, "text required")
+    if steer_id and not _WEBUI_STEER_ID_RE.fullmatch(steer_id):
+        return bad(handler, "steer_id must be 1-128 URL-safe characters")
+    if not steer_id:
+        steer_id = f"steer-{uuid.uuid4()}"
 
     try:
         s = get_session(sid)
@@ -13461,14 +13637,20 @@ def _handle_chat_steer(handler, body: dict) -> bool:
                            "stream_id": None})
 
     try:
-        accepted = bool(agent.steer(text))
+        accepted = _register_webui_steer(agent, {
+            "steer_id": steer_id,
+            "session_id": sid,
+            "stream_id": active_stream_id,
+            "text": text,
+            "created_at": time.time(),
+        })
     except Exception as exc:
         logger.debug("agent.steer() raised for session=%s: %s", sid, exc)
         return j(handler, {"accepted": False, "fallback": "steer_error",
                            "stream_id": active_stream_id})
 
     return j(handler, {"accepted": accepted, "fallback": None,
-                       "stream_id": active_stream_id})
+                       "stream_id": active_stream_id, "steer_id": steer_id})
 
 
 def cancel_stream(stream_id: str) -> bool:

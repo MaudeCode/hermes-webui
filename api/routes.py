@@ -3397,6 +3397,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     current_reasoning_segment: dict | None = None
     messages: list[dict] = []
     tool_calls: list[dict] = []
+    steer_controls: list[dict] = []
     activity_burst_anchors: list[dict] = []
     current_activity_burst_id = 0
     fresh_segment = True
@@ -3418,7 +3419,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             )
         return current_activity_burst_id
 
-    def update_completed_tool(payload: dict) -> None:
+    def update_completed_tool(payload: dict, event_order: int) -> None:
         tool_id = _run_journal_snapshot_tool_id(payload)
         name = str(payload.get("name") or "").strip()
         for call in reversed(tool_calls):
@@ -3440,6 +3441,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                     call["duration"] = payload.get("duration")
                 if payload.get("is_error") is not None:
                     call["is_error"] = bool(payload.get("is_error"))
+                call["_journal_order"] = event_order
                 return
 
         if not name or name == "clarify":
@@ -3453,6 +3455,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "_live": True,
             "_journal_snapshot": True,
             "_journal_stream_id": stream_id,
+            "_journal_order": event_order,
         }
         tool_id = _run_journal_snapshot_tool_id(payload)
         if tool_id:
@@ -3485,7 +3488,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 break
         return did_remove
 
-    for event in events:
+    for event_order, event in enumerate(events):
         event_name = str(event.get("event") or event.get("type") or "")
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         last_ts = event.get("created_at", last_ts)
@@ -3546,6 +3549,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 "_live": True,
                 "_journal_snapshot": True,
                 "_journal_stream_id": stream_id,
+                "_journal_order": event_order,
             }
             if tool_id:
                 call["tid"] = tool_id
@@ -3560,7 +3564,25 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             current_reasoning_segment = None
             continue
         if event_name == "tool_complete":
-            update_completed_tool(payload)
+            update_completed_tool(payload, event_order)
+            fresh_segment = True
+            current_reasoning_segment = None
+            continue
+        if event_name == "steer_consumed":
+            steer_id = str(payload.get("steer_id") or "").strip()
+            text = str(payload.get("text") or "").strip()
+            if steer_id and text:
+                steer_controls.append({
+                    "steer_id": steer_id,
+                    "text": text,
+                    "created_at": event.get("created_at"),
+                    "submitted_at": payload.get("created_at"),
+                    "consumed_at": payload.get("consumed_at") or event.get("created_at"),
+                    "event_id": event.get("event_id"),
+                    "seq": event.get("seq"),
+                    "activityBurstId": mark_boundary(),
+                    "_journal_order": event_order,
+                })
             fresh_segment = True
             current_reasoning_segment = None
 
@@ -3757,6 +3779,47 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "payload": payload,
         }
 
+    def scene_steering_row(control: dict) -> dict:
+        steer_id = control["steer_id"]
+        burst_id = int(control.get("activityBurstId") or 0) or None
+        return {
+            "row_id": steer_id,
+            "order_index": len(anchor_activity_rows),
+            "kind": "control_boundary",
+            "role": "steering",
+            "display_hint": "steering_message",
+            "display_hints": {
+                "compact_worklog": "steering_message",
+                "transparent_stream": "chronological_activity",
+            },
+            "source_event_type": "steer_consumed",
+            "event_id": control.get("event_id"),
+            "local_id": steer_id,
+            "run_id": run_id,
+            "stream_id": stream_id,
+            "seq": control.get("seq"),
+            "status": "consumed",
+            "created_at": control.get("consumed_at") or control.get("created_at"),
+            "identity": {
+                "event_id": control.get("event_id"),
+                "local_id": steer_id,
+                "run_id": run_id,
+                "stream_id": stream_id,
+                "seq": control.get("seq"),
+            },
+            "group": scene_group(burst_id, burst_id),
+            "text": control["text"],
+            "thinking": None,
+            "tool_call_id": "",
+            "tool": None,
+            "payload": {
+                "steer_id": steer_id,
+                "text": control["text"],
+                "created_at": control.get("submitted_at"),
+                "consumed_at": control.get("consumed_at"),
+            },
+        }
+
     anchor_activity_rows: list[dict] = []
     thinking_rows_inserted: set[int] = set()
     tool_rows_rendered = 0
@@ -3778,17 +3841,27 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             anchor_activity_rows.append(row)
             thinking_rows_inserted.add(segment_index)
 
-    tool_rows_by_burst: dict[int, list[tuple[int, dict]]] = {}
-    ungrouped_tool_rows: list[tuple[int, dict]] = []
+    tool_rows_by_burst: dict[int, list[tuple[int, int, dict]]] = {}
+    ungrouped_tool_rows: list[tuple[int, int, dict]] = []
     for order, call in enumerate(tool_calls):
         burst_id = int(call.get("activityBurstId") or 0) if isinstance(call, dict) else 0
         row = scene_tool_row(call, fallback_order=order)
         if not row:
             continue
         if burst_id:
-            tool_rows_by_burst.setdefault(burst_id, []).append((order, row))
+            tool_rows_by_burst.setdefault(burst_id, []).append((int(call.get("_journal_order") or 0), order, row))
         else:
-            ungrouped_tool_rows.append((order, row))
+            ungrouped_tool_rows.append((int(call.get("_journal_order") or 0), order, row))
+
+    control_rows_by_burst: dict[int, list[tuple[int, dict]]] = {}
+    ungrouped_control_rows: list[tuple[int, dict]] = []
+    for control in steer_controls:
+        burst_id = int(control.get("activityBurstId") or 0)
+        item = (int(control.get("_journal_order") or 0), scene_steering_row(control))
+        if burst_id:
+            control_rows_by_burst.setdefault(burst_id, []).append(item)
+        else:
+            ungrouped_control_rows.append(item)
 
     consumed_tools: set[int] = set()
     text_start = 0
@@ -3813,13 +3886,43 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         if prose:
             anchor_activity_rows.append(prose)
             append_thinking_rows()
-        for order, row in tool_rows_by_burst.get(burst_id or 0, []):
+        group_rows = [
+            (event_order, "tool", order, row)
+            for event_order, order, row in tool_rows_by_burst.get(burst_id or 0, [])
+        ] + [
+            (event_order, "control", None, row)
+            for event_order, row in control_rows_by_burst.get(burst_id or 0, [])
+        ]
+        for _, row_type, order, row in sorted(group_rows, key=lambda item: item[0]):
             row["order_index"] = len(anchor_activity_rows)
             anchor_activity_rows.append(row)
-            consumed_tools.add(order)
-            tool_rows_rendered += 1
-            append_thinking_rows()
+            if row_type == "tool":
+                consumed_tools.add(order)
+                tool_rows_rendered += 1
+                append_thinking_rows()
         text_start = max(text_start, text_end)
+
+    def append_ungrouped_rows() -> None:
+        nonlocal tool_rows_rendered
+        rows = [
+            (event_order, "tool", order, row)
+            for event_order, order, row in ungrouped_tool_rows
+            if order not in consumed_tools
+        ] + [
+            (event_order, "control", None, row)
+            for event_order, row in ungrouped_control_rows
+        ]
+        for _, row_type, order, row in sorted(rows, key=lambda item: item[0]):
+            row["order_index"] = len(anchor_activity_rows)
+            anchor_activity_rows.append(row)
+            if row_type == "tool":
+                consumed_tools.add(order)
+                tool_rows_rendered += 1
+                append_thinking_rows()
+
+    if not sorted_anchors:
+        append_thinking_rows()
+        append_ungrouped_rows()
 
     if text_start < len(assistant_text):
         segment_seq = max(len(sorted_anchors) + 1, 1)
@@ -3836,13 +3939,8 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     if not assistant_text:
         append_thinking_rows()
 
-    for order, row in sorted(ungrouped_tool_rows, key=lambda item: item[0]):
-        if order in consumed_tools:
-            continue
-        row["order_index"] = len(anchor_activity_rows)
-        anchor_activity_rows.append(row)
-        tool_rows_rendered += 1
-        append_thinking_rows()
+    if sorted_anchors:
+        append_ungrouped_rows()
 
     append_thinking_rows(force=True)
 
@@ -4278,6 +4376,36 @@ def _find_anchor_scene_message(messages, *, message_index=None, message_ref="", 
         if isinstance(message, dict) and message.get("role") == "assistant":
             return idx, message
     return None, None
+
+
+def _persist_runtime_steering_scene(session, stream_id: str, *, turn_duration=None) -> bool:
+    snapshot = _run_journal_live_snapshot(stream_id)
+    scene = snapshot.get("anchor_activity_scene") if isinstance(snapshot, dict) else None
+    if not isinstance(scene, dict) or not any(
+        isinstance(row, dict) and row.get("role") == "steering"
+        for row in scene.get("activity_rows") or []
+    ):
+        return False
+    scene = _sanitize_anchor_activity_scene(scene)
+    if turn_duration is not None:
+        scene["turn_duration"] = turn_duration
+    messages = getattr(session, "messages", None) or []
+    message_index, message = _find_anchor_scene_message(messages, scene=scene)
+    if message_index is None or message is None:
+        return False
+    message_ref = _assistant_anchor_scene_message_ref(message)
+    records = dict(_anchor_scene_records(session))
+    records[message_ref or f"index:{message_index}"] = {
+        "version": "anchor_activity_scene_record_v1",
+        "message_index": message_index,
+        "message_ref": message_ref,
+        "stream_id": stream_id,
+        "scene": scene,
+        "updated_at": time.time(),
+    }
+    session.anchor_activity_scenes = records
+    session.save(touch_updated_at=False, skip_index=True)
+    return True
 
 
 def _normalize_anchor_scene_message_ref(message_ref) -> str:

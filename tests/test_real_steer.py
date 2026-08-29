@@ -18,7 +18,9 @@ emitted so the frontend can queue the leftover text as a next-turn message.
 import sys
 import os
 import unittest
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -122,11 +124,29 @@ class TestHandleChatSteerHappyPath:
         sess.active_stream_id = stream_id
         with patch("api.streaming.get_session", return_value=sess):
             handler = _make_handler()
-            _handle_chat_steer(handler, {"session_id": sid, "text": "Use Python instead"})
+            _handle_chat_steer(handler, {
+                "session_id": sid,
+                "text": "Use Python instead",
+                "steer_id": "steer-client-1",
+            })
 
         agent.steer.assert_called_once_with("Use Python instead")
         body = _captured_response(handler)
-        assert body == {"accepted": True, "fallback": None, "stream_id": stream_id}
+        assert body == {
+            "accepted": True,
+            "fallback": None,
+            "stream_id": stream_id,
+            "steer_id": "steer-client-1",
+        }
+        assert len(agent._webui_pending_steers) == 1
+        pending = agent._webui_pending_steers[0]
+        assert {key: pending[key] for key in ("steer_id", "session_id", "stream_id", "text")} == {
+            "steer_id": "steer-client-1",
+            "session_id": sid,
+            "stream_id": stream_id,
+            "text": "Use Python instead",
+        }
+        assert isinstance(pending["created_at"], float)
 
     def test_accepts_live_agent_after_mid_turn_compression(self, _clear_caches):
         """Steer follows the active stream while its agent rotates session ids."""
@@ -159,13 +179,18 @@ class TestHandleChatSteerHappyPath:
         sess.active_stream_id = stream_id
         with patch("api.streaming.get_session", return_value=sess):
             handler = _make_handler()
-            _handle_chat_steer(handler, {"session_id": old_sid, "text": "keep going"})
+            _handle_chat_steer(handler, {
+                "session_id": old_sid,
+                "text": "keep going",
+                "steer_id": "steer-compression-1",
+            })
 
         agent.steer.assert_called_once_with("keep going")
         assert _captured_response(handler) == {
             "accepted": True,
             "fallback": None,
             "stream_id": stream_id,
+            "steer_id": "steer-compression-1",
         }
         with SESSION_AGENT_CACHE_LOCK:
             assert SESSION_AGENT_CACHE[old_sid][0] is agent
@@ -177,7 +202,11 @@ class TestHandleChatSteerHappyPath:
             SESSION_AGENT_CACHE.clear()
         with patch("api.streaming.get_session", return_value=sess):
             handler = _make_handler()
-            _handle_chat_steer(handler, {"session_id": old_sid, "text": "one more change"})
+            _handle_chat_steer(handler, {
+                "session_id": old_sid,
+                "text": "one more change",
+                "steer_id": "steer-compression-2",
+            })
 
         assert agent.steer.call_args_list == [
             call("keep going"),
@@ -187,6 +216,7 @@ class TestHandleChatSteerHappyPath:
             "accepted": True,
             "fallback": None,
             "stream_id": stream_id,
+            "steer_id": "steer-compression-2",
         }
 
 
@@ -334,6 +364,88 @@ class TestHandleChatSteerInputValidation:
         handler = _make_handler()
         _handle_chat_steer(handler, {"session_id": "sid", "text": "   \n\t  "})
         assert _captured_status(handler) == 400
+
+    def test_rejects_unsafe_steer_id(self, _clear_caches):
+        from api.streaming import _handle_chat_steer
+        handler = _make_handler()
+        _handle_chat_steer(handler, {
+            "session_id": "sid",
+            "text": "hint",
+            "steer_id": "not safe/for a row id",
+        })
+        assert _captured_status(handler) == 400
+
+
+class TestSteerLifecycleBridge:
+    class Agent(SimpleNamespace):
+        def __init__(self):
+            super().__init__(_pending_steer=None, _pending_steer_lock=threading.Lock())
+
+        def steer(self, text):
+            with self._pending_steer_lock:
+                self._pending_steer = (
+                    f"{self._pending_steer}\n{text}" if self._pending_steer else text
+                )
+            return True
+
+    @staticmethod
+    def record(steer_id, text):
+        return {
+            "steer_id": steer_id,
+            "session_id": "sid",
+            "stream_id": "stream",
+            "text": text,
+            "created_at": 1.0,
+        }
+
+    def test_emits_repeated_consumed_steers_individually(self):
+        from api.streaming import _register_webui_steer, _take_consumed_webui_steers
+
+        agent = self.Agent()
+        assert _register_webui_steer(agent, self.record("steer-1", "first"))
+        assert _register_webui_steer(agent, self.record("steer-2", "second"))
+        with agent._pending_steer_lock:
+            agent._pending_steer = None
+
+        events = _take_consumed_webui_steers(agent)
+
+        assert [(event["steer_id"], event["text"]) for event in events] == [
+            ("steer-1", "first"),
+            ("steer-2", "second"),
+        ]
+        assert all(isinstance(event["consumed_at"], float) for event in events)
+        assert agent._webui_pending_steers == []
+
+    def test_final_leftover_keeps_its_id_without_reclassifying_it_consumed(self):
+        from api.streaming import _partition_final_webui_steers, _register_webui_steer
+
+        agent = self.Agent()
+        assert _register_webui_steer(agent, self.record("steer-1", "first"))
+        assert _register_webui_steer(agent, self.record("steer-2", "second"))
+
+        consumed, leftover, unmatched = _partition_final_webui_steers(agent, "second")
+
+        assert [record["steer_id"] for record in consumed] == ["steer-1"]
+        assert [record["steer_id"] for record in leftover] == ["steer-2"]
+        assert unmatched == ""
+        assert agent._webui_pending_steers == []
+
+    def test_terminal_cleanup_drops_unconsumed_records(self):
+        from api.streaming import (
+            _clear_webui_steers,
+            _register_webui_steer,
+            _take_consumed_webui_steers,
+        )
+
+        agent = self.Agent()
+        assert _register_webui_steer(agent, self.record("steer-1", "do not leak"))
+
+        _clear_webui_steers(agent)
+        with agent._pending_steer_lock:
+            agent._pending_steer = None
+
+        assert _take_consumed_webui_steers(agent) == []
+        assert agent._webui_pending_steers == []
 
 
 # ── Routing ───────────────────────────────────────────────────────────────
