@@ -9371,7 +9371,12 @@ def _run_agent_streaming(
         if event != 'metering':
             _automatic_wakeup_last_activity[0] = time.monotonic()
         # If cancelled, drop all further events except the cancel event itself
-        if cancel_event.is_set() and not _success_writeback_committed and event not in ('cancel', 'apperror', 'steer_consumed'):
+        if (
+            cancel_event.is_set()
+            and not _success_writeback_committed
+            and event not in ('cancel', 'apperror')
+            and event != 'steer_consumed'
+        ):
             return
         if event in ('cancel', 'apperror', 'error'):
             _persist_terminal_steering_scene()
