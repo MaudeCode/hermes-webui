@@ -27,10 +27,10 @@ available only when `GET /api/auth/status` reports both `oidc_enabled` and
 
 ## Security contract
 
-- App callbacks must use a non-HTTP custom scheme, the exact host
-  `oidc-callback`, and no credentials, port, path, query, or fragment in the
-  registered URL. PKCE protects an authorization code intercepted by another
-  app that claims the same custom scheme.
+- App callbacks must use the production `talaria` or branch-build
+  `talaria-branch` scheme, the exact host `oidc-callback`, and no credentials,
+  port, path, query, or fragment in the registered URL. PKCE protects an
+  authorization code intercepted by another app that claims the same scheme.
 - App state and flow identity are checked at callback and exchange. The exchange
   is also bound to the exact WebUI origin that created it.
 - Exchange codes are random, single-use, and expire after 60 seconds. Native

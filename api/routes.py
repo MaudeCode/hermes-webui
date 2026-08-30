@@ -11648,6 +11648,16 @@ def _request_base_url(handler) -> str:
     return f"{scheme}://{host}"
 
 
+def _redirect_no_store(handler, location: str) -> bool:
+    handler.send_response(302)
+    handler.send_header("Location", location)
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Content-Length", "0")
+    _security_headers(handler)
+    handler.end_headers()
+    return True
+
+
 def _oidc_login_html(parsed) -> str:
     try:
         from api.auth_oidc import is_oidc_enabled
@@ -13583,13 +13593,7 @@ def handle_get(handler, parsed) -> bool:
             return j(handler, {"error": str(exc)}, status=404)
         except OIDCAuthError as exc:
             return j(handler, {"error": str(exc)}, status=exc.status_code)
-        handler.send_response(302)
-        handler.send_header("Location", location)
-        handler.send_header("Cache-Control", "no-store")
-        handler.send_header("Content-Length", "0")
-        _security_headers(handler)
-        handler.end_headers()
-        return True
+        return _redirect_no_store(handler, location)
 
     if parsed.path == "/api/auth/oidc/callback":
         from api.auth import create_session, set_auth_cookie
@@ -13614,13 +13618,7 @@ def handle_get(handler, parsed) -> bool:
                     )
                 except OIDCAuthError as exc:
                     return j(handler, {"error": str(exc)}, status=exc.status_code)
-                handler.send_response(302)
-                handler.send_header("Location", location)
-                handler.send_header("Cache-Control", "no-store")
-                _security_headers(handler)
-                handler.send_header("Content-Length", "0")
-                handler.end_headers()
-                return True
+                return _redirect_no_store(handler, location)
             description = str(query.get("error_description", [""])[0] or "").strip()
             return j(handler, {"error": description or error}, status=401)
         code = str(query.get("code", [""])[0] or "").strip()
@@ -13640,13 +13638,7 @@ def handle_get(handler, parsed) -> bool:
                 except OIDCAuthError:
                     pass
                 else:
-                    handler.send_response(302)
-                    handler.send_header("Location", location)
-                    handler.send_header("Cache-Control", "no-store")
-                    _security_headers(handler)
-                    handler.send_header("Content-Length", "0")
-                    handler.end_headers()
-                    return True
+                    return _redirect_no_store(handler, location)
             return j(handler, {"error": str(exc)}, status=404)
         except OIDCAuthError as exc:
             native_flow_id = str(getattr(exc, "native_flow_id", None) or "")
@@ -13658,13 +13650,7 @@ def handle_get(handler, parsed) -> bool:
                 except OIDCAuthError:
                     pass
                 else:
-                    handler.send_response(302)
-                    handler.send_header("Location", location)
-                    handler.send_header("Cache-Control", "no-store")
-                    _security_headers(handler)
-                    handler.send_header("Content-Length", "0")
-                    handler.end_headers()
-                    return True
+                    return _redirect_no_store(handler, location)
             return j(handler, {"error": str(exc)}, status=exc.status_code)
         native_flow_id = str(result.get("native_flow_id") or "").strip()
         if native_flow_id:
@@ -13678,13 +13664,7 @@ def handle_get(handler, parsed) -> bool:
                 )
             except OIDCAuthError as exc:
                 return j(handler, {"error": str(exc)}, status=exc.status_code)
-            handler.send_response(302)
-            handler.send_header("Location", location)
-            handler.send_header("Cache-Control", "no-store")
-            _security_headers(handler)
-            handler.send_header("Content-Length", "0")
-            handler.end_headers()
-            return True
+            return _redirect_no_store(handler, location)
 
         cookie_val = create_session()
         handler.send_response(302)

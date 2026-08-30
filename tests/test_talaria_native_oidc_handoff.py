@@ -75,6 +75,7 @@ def begin_flow(auth_oidc, *, origin="https://server.example", state="app-state-1
     [
         "https://attacker.example/oidc-callback",
         "javascript:alert(1)",
+        "evilapp://oidc-callback",
         "talaria://wrong-host",
         "talaria://oidc-callback/extra",
         "talaria://user@oidc-callback",
@@ -219,6 +220,56 @@ def test_wrong_server_or_verifier_consumes_only_that_exchange_code():
         )
 
 
+def test_wrong_state_flow_and_cross_wired_concurrent_codes_fail_closed():
+    import api.auth_oidc as auth_oidc
+
+    wrong_state, wrong_state_verifier = begin_flow(auth_oidc, state="wrong-state-target")
+    wrong_state_query = parse_qs(urlparse(auth_oidc.finish_native_authorization(
+        "https://server.example", wrong_state["flow_id"], subject="state", email=""
+    )).query)
+    with pytest.raises(auth_oidc.OIDCAuthError, match="state"):
+        auth_oidc.exchange_native_authorization(
+            "https://server.example",
+            wrong_state["flow_id"],
+            wrong_state_query["code"][0],
+            "different-state-123",
+            wrong_state_verifier,
+        )
+    with pytest.raises(auth_oidc.OIDCAuthError, match="Invalid or expired"):
+        auth_oidc.exchange_native_authorization(
+            "https://server.example",
+            wrong_state["flow_id"],
+            wrong_state_query["code"][0],
+            "wrong-state-target",
+            wrong_state_verifier,
+        )
+
+    first, first_verifier = begin_flow(auth_oidc, state="cross-first-state")
+    second, second_verifier = begin_flow(auth_oidc, state="cross-second-state")
+    first_query = parse_qs(urlparse(auth_oidc.finish_native_authorization(
+        "https://server.example", first["flow_id"], subject="first", email=""
+    )).query)
+    second_query = parse_qs(urlparse(auth_oidc.finish_native_authorization(
+        "https://server.example", second["flow_id"], subject="second", email=""
+    )).query)
+
+    with pytest.raises(auth_oidc.OIDCAuthError, match="flow"):
+        auth_oidc.exchange_native_authorization(
+            "https://server.example",
+            second["flow_id"],
+            first_query["code"][0],
+            "cross-first-state",
+            first_verifier,
+        )
+    assert auth_oidc.exchange_native_authorization(
+        "https://server.example",
+        second["flow_id"],
+        second_query["code"][0],
+        "cross-second-state",
+        second_verifier,
+    )["subject"] == "second"
+
+
 def test_cancel_and_expiry_cannot_be_reused(monkeypatch):
     import api.auth_oidc as auth_oidc
 
@@ -295,36 +346,43 @@ def test_auth_status_advertises_native_handoff_only_with_oidc(monkeypatch):
     assert handler.json_body()["oidc_native_handoff_enabled"] is True
 
 
-def test_native_exchange_route_sets_normal_http_only_session_cookie(monkeypatch):
+def test_native_exchange_route_sets_normal_http_only_session_cookie():
     import api.auth as auth
+    import api.auth_oidc as auth_oidc
     import api.routes as routes
 
-    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
-    monkeypatch.setattr(
-        routes,
-        "read_body",
-        lambda _handler: {
-            "flow_id": "flow-id",
-            "code": "exchange-code",
-            "state": "app-state-123456",
-            "code_verifier": "v" * 43,
-        },
+    start, verifier = begin_flow(auth_oidc, origin="http://server.example")
+    callback = auth_oidc.finish_native_authorization(
+        "http://server.example",
+        start["flow_id"],
+        subject="user-123",
+        email="user@example.com",
     )
-    monkeypatch.setattr(
-        "api.auth_oidc.exchange_native_authorization",
-        lambda *_args: {"subject": "user", "email": "user@example.com", "bound_profile": None},
-    )
-    monkeypatch.setattr(auth, "create_session", lambda **_kwargs: "session-value.signature")
+    query = parse_qs(urlparse(callback).query)
+    body = json.dumps({
+        "flow_id": start["flow_id"],
+        "code": query["code"][0],
+        "state": "app-state-123456",
+        "code_verifier": verifier,
+    }).encode()
 
     handler = RouteFakeHandler()
+    handler.rfile = io.BytesIO(body)
+    handler.headers["Content-Length"] = str(len(body))
     routes.handle_post(handler, SimpleNamespace(path="/api/auth/oidc/native/exchange"))
 
     assert handler.status == 200
     assert handler.json_body() == {"ok": True}
     [cookie] = handler.header_values("Set-Cookie")
     assert auth.COOKIE_NAME in cookie
-    assert "session-value.signature" in cookie
     assert "HttpOnly" in cookie
+    cookie_value = cookie.split(";", 1)[0].split("=", 1)[1]
+    assert auth.verify_session(cookie_value)
+    session_info = auth.get_session_info(cookie_value)
+    assert session_info["auth_type"] == "oidc"
+    assert session_info["username"] == "user@example.com"
+    assert session_info["bound_profile"] is None
+    auth.invalidate_session(cookie_value)
 
 
 def test_provider_error_returns_sanitized_native_callback(monkeypatch):
@@ -339,6 +397,7 @@ def test_provider_error_returns_sanitized_native_callback(monkeypatch):
             "created_at": auth_oidc.time.time(),
             "native_flow_id": start["flow_id"],
         },
+        request_base_url="https://server.example",
     )
     handler = RouteFakeHandler()
 

@@ -32,6 +32,7 @@ _CACHE_TTL_SECONDS = 300
 _NATIVE_FLOW_TTL_SECONDS = 600
 _NATIVE_EXCHANGE_TTL_SECONDS = 60
 _NATIVE_CALLBACK_HOST = "oidc-callback"
+_NATIVE_CALLBACK_SCHEMES = {"talaria", "talaria-branch"}
 _NATIVE_VALUE_RE = re.compile(r"^[A-Za-z0-9._~-]{16,256}$")
 _PKCE_CHALLENGE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _PKCE_VERIFIER_RE = re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
@@ -99,8 +100,6 @@ def build_authorization_redirect(
     nonce = secrets.token_urlsafe(24)
     verifier = secrets.token_urlsafe(48)
     challenge = _b64u(hashlib.sha256(verifier.encode("ascii")).digest())
-    if native_flow_id:
-        _validate_native_flow_for_provider_start(request_base_url, native_flow_id)
     _store_pending_flow(
         state,
         {
@@ -110,6 +109,7 @@ def build_authorization_redirect(
             "next_path": _safe_next_path(next_path),
             "native_flow_id": native_flow_id,
         },
+        request_base_url=request_base_url if native_flow_id else None,
     )
     params = {
         "response_type": "code",
@@ -238,7 +238,7 @@ def finish_native_authorization(
         flow = _native_flows.pop(str(flow_id or ""), None)
         if flow is None:
             raise OIDCAuthError("Invalid or expired native OIDC flow", status_code=401)
-        if not hmac_compare(_normalize_server_origin(request_base_url), flow["server_origin"]):
+        if not _constant_time_equal(_normalize_server_origin(request_base_url), flow["server_origin"]):
             raise OIDCAuthError("Native OIDC flow belongs to a different server", status_code=401)
         _trim_state_map(_native_exchange_codes, _MAX_PENDING_FLOWS)
         code = secrets.token_urlsafe(32)
@@ -272,7 +272,7 @@ def fail_native_authorization(request_base_url: str, flow_id: str, error: str) -
         flow = _native_flows.pop(str(flow_id or ""), None)
     if flow is None:
         raise OIDCAuthError("Invalid or expired native OIDC flow", status_code=401)
-    if not hmac_compare(_normalize_server_origin(request_base_url), flow["server_origin"]):
+    if not _constant_time_equal(_normalize_server_origin(request_base_url), flow["server_origin"]):
         raise OIDCAuthError("Native OIDC flow belongs to a different server", status_code=401)
     separator = "&" if urllib.parse.urlsplit(flow["callback_url"]).query else "?"
     return flow["callback_url"] + separator + urllib.parse.urlencode(
@@ -307,17 +307,17 @@ def exchange_native_authorization(
         exchange = _native_exchange_codes.pop(str(code or ""), None)
     if exchange is None:
         raise OIDCAuthError("Invalid or expired native OIDC exchange code", status_code=401)
-    if not hmac_compare(_normalize_server_origin(request_base_url), exchange["server_origin"]):
+    if not _constant_time_equal(_normalize_server_origin(request_base_url), exchange["server_origin"]):
         raise OIDCAuthError("Native OIDC exchange code belongs to a different server", status_code=401)
-    if not hmac_compare(str(flow_id or ""), exchange["flow_id"]):
+    if not _constant_time_equal(str(flow_id or ""), exchange["flow_id"]):
         raise OIDCAuthError("Native OIDC flow did not match", status_code=401)
-    if not hmac_compare(str(client_state or ""), exchange["client_state"]):
+    if not _constant_time_equal(str(client_state or ""), exchange["client_state"]):
         raise OIDCAuthError("Native OIDC state did not match", status_code=401)
     verifier = str(code_verifier or "")
     if not _PKCE_VERIFIER_RE.fullmatch(verifier):
         raise OIDCAuthError("Native OIDC PKCE verifier did not match", status_code=401)
     challenge = _b64u(hashlib.sha256(verifier.encode("ascii")).digest())
-    if not hmac_compare(challenge, exchange["code_challenge"]):
+    if not _constant_time_equal(challenge, exchange["code_challenge"]):
         raise OIDCAuthError("Native OIDC PKCE verifier did not match", status_code=401)
     return {
         "subject": exchange["subject"],
@@ -332,15 +332,15 @@ def cancel_native_authorization(flow_id: str, client_state: str) -> bool:
     state = str(client_state or "")
     with _pending_lock:
         flow = _native_flows.get(flow_id)
-        if flow is not None and not hmac_compare(state, flow["client_state"]):
+        if flow is not None and not _constant_time_equal(state, flow["client_state"]):
             return False
         matching_exchanges = [
             (code, exchange)
             for code, exchange in _native_exchange_codes.items()
-            if hmac_compare(str(exchange.get("flow_id") or ""), flow_id)
+            if _constant_time_equal(str(exchange.get("flow_id") or ""), flow_id)
         ]
         if any(
-            not hmac_compare(state, str(exchange.get("client_state") or ""))
+            not _constant_time_equal(state, str(exchange.get("client_state") or ""))
             for _, exchange in matching_exchanges
         ):
             return False
@@ -349,21 +349,10 @@ def cancel_native_authorization(flow_id: str, client_state: str) -> bool:
             _native_exchange_codes.pop(code, None)
             removed = True
         for provider_state, pending in list(_pending_flows.items()):
-            if hmac_compare(str(pending.get("native_flow_id") or ""), flow_id):
+            if _constant_time_equal(str(pending.get("native_flow_id") or ""), flow_id):
                 _pending_flows.pop(provider_state, None)
                 removed = True
     return removed
-
-
-def _validate_native_flow_for_provider_start(request_base_url: str, flow_id: str) -> None:
-    now = time.time()
-    with _pending_lock:
-        _prune_native_state(now)
-        flow = _native_flows.get(str(flow_id or ""))
-        if flow is None:
-            raise OIDCAuthError("Invalid or expired native OIDC flow", status_code=401)
-        if not hmac_compare(_normalize_server_origin(request_base_url), flow["server_origin"]):
-            raise OIDCAuthError("Native OIDC flow belongs to a different server", status_code=401)
 
 
 def _validate_native_callback_url(raw_url: str) -> str:
@@ -376,7 +365,7 @@ def _validate_native_callback_url(raw_url: str) -> str:
     scheme = parsed.scheme.lower()
     if (
         not _CALLBACK_SCHEME_RE.fullmatch(scheme)
-        or scheme in {"http", "https", "javascript", "data", "file"}
+        or scheme not in _NATIVE_CALLBACK_SCHEMES
         or parsed.hostname != _NATIVE_CALLBACK_HOST
         or parsed.username is not None
         or parsed.password is not None
@@ -418,7 +407,7 @@ def _server_identity(origin: str) -> str:
     return _b64u(hashlib.sha256(origin.encode("utf-8")).digest())
 
 
-def hmac_compare(left: str, right: str) -> bool:
+def _constant_time_equal(left: str, right: str) -> bool:
     return secrets.compare_digest(str(left).encode("utf-8"), str(right).encode("utf-8"))
 
 
@@ -591,11 +580,26 @@ def _resolve_redirect_uri(cfg: dict[str, Any], request_base_url: str) -> str:
     return request_base_url.rstrip("/") + "/api/auth/oidc/callback"
 
 
-def _store_pending_flow(state: str, payload: dict[str, Any]) -> None:
+def _store_pending_flow(
+    state: str,
+    payload: dict[str, Any],
+    *,
+    request_base_url: str | None = None,
+) -> None:
     now = time.time()
     with _pending_lock:
+        native_flow_id = str(payload.get("native_flow_id") or "")
+        if native_flow_id:
+            _prune_native_state(now)
+            flow = _native_flows.get(native_flow_id)
+            if flow is None:
+                raise OIDCAuthError("Invalid or expired native OIDC flow", status_code=401)
+            if request_base_url is None or not _constant_time_equal(
+                _normalize_server_origin(request_base_url), flow["server_origin"]
+            ):
+                raise OIDCAuthError("Native OIDC flow belongs to a different server", status_code=401)
         _prune_pending_flows(now)
-        _trim_pending_flows()
+        _trim_state_map(_pending_flows, _MAX_PENDING_FLOWS)
         _pending_flows[state] = payload
 
 
@@ -614,18 +618,6 @@ def _prune_pending_flows(now: float) -> None:
         if now - float(payload.get("created_at") or 0) > _PENDING_TTL_SECONDS
     ]
     for state in expired:
-        _pending_flows.pop(state, None)
-
-
-def _trim_pending_flows() -> None:
-    overflow = len(_pending_flows) - _MAX_PENDING_FLOWS + 1
-    if overflow <= 0:
-        return
-    oldest = sorted(
-        _pending_flows,
-        key=lambda state: float(_pending_flows[state].get("created_at") or 0),
-    )
-    for state in oldest[:overflow]:
         _pending_flows.pop(state, None)
 
 
