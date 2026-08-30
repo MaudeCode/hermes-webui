@@ -2,6 +2,7 @@ import base64
 import hashlib
 import io
 import json
+import threading
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
@@ -159,6 +160,54 @@ def test_provider_authorization_state_is_linked_to_exact_native_flow(monkeypatch
     provider_state = parse_qs(urlparse(redirect).query)["state"][0]
 
     assert auth_oidc._pending_flows[provider_state]["native_flow_id"] == start["flow_id"]
+
+
+def test_cancel_cannot_land_between_native_validation_and_provider_state_store(monkeypatch):
+    import api.auth_oidc as auth_oidc
+
+    start, _ = begin_flow(auth_oidc)
+    entered_validation = threading.Event()
+    release_validation = threading.Event()
+    real_normalize = auth_oidc._normalize_server_origin
+
+    def blocking_normalize(value):
+        entered_validation.set()
+        assert release_validation.wait(timeout=2)
+        return real_normalize(value)
+
+    monkeypatch.setattr(auth_oidc, "_normalize_server_origin", blocking_normalize)
+    errors = []
+
+    def store_provider_state():
+        try:
+            auth_oidc._store_pending_flow(
+                "provider-state",
+                {
+                    "created_at": auth_oidc.time.time(),
+                    "native_flow_id": start["flow_id"],
+                },
+                request_base_url="https://server.example",
+            )
+        except Exception as exc:  # pragma: no cover - surfaced by the assertion below
+            errors.append(exc)
+
+    store_thread = threading.Thread(target=store_provider_state)
+    store_thread.start()
+    assert entered_validation.wait(timeout=2)
+    cancel_thread = threading.Thread(
+        target=auth_oidc.cancel_native_authorization,
+        args=(start["flow_id"], "app-state-123456"),
+    )
+    cancel_thread.start()
+    release_validation.set()
+    store_thread.join(timeout=2)
+    cancel_thread.join(timeout=2)
+
+    assert not store_thread.is_alive()
+    assert not cancel_thread.is_alive()
+    assert errors == []
+    assert "provider-state" not in auth_oidc._pending_flows
+    assert start["flow_id"] not in auth_oidc._native_flows
 
 
 def test_wrong_server_or_verifier_consumes_only_that_exchange_code():
