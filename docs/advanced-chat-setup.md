@@ -55,13 +55,14 @@ Hermes WebUI derives a provisional session title from the first user message
 and, after the first response, may call an LLM to generate a better title
 (and periodically refresh it for long sessions).
 
-The title model receives up to 2,000 characters from the user request and up to
-2,000 characters of optional assistant context. The user request is
-authoritative; assistant text is used only to clarify vague references or
-concrete terminology. Generated titles are limited to 50 characters and aim to
-capture the durable subject and desired outcome rather than tools, intermediate
-findings, or workflow status. Title generation can still run when no visible
-assistant text is available.
+The title model receives up to 2,000 combined characters from the opening
+exchange. That budget is allocated to the user request first, with any remainder
+available for optional assistant context. The user request is authoritative;
+assistant text is used only to clarify vague references or concrete terminology.
+Generated titles are limited to 50 characters and aim to capture the durable
+subject and desired outcome rather than tools, intermediate findings, or
+workflow status. Title generation can still run when no visible assistant text
+is available.
 
 Automatic title-generation LLM calls honor the active Hermes profile's
 `auxiliary.title_generation.enabled` setting (default: `true`):

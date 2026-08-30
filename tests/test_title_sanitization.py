@@ -68,6 +68,12 @@ class TestGeneratedTitleSanitization(unittest.TestCase):
         self.assertNotIn("Use BOTH", prompts[0])
         self.assertEqual(qa, "User request:\nInvestigate flaky session titles")
 
+    def test_title_prompt_caps_combined_context_with_user_first(self):
+        qa, _prompts = _title_prompts("用" * 1500, "答" * 2000)
+
+        self.assertEqual(qa.count("用"), 1500)
+        self.assertEqual(qa.count("答"), 500)
+
     def test_generated_titles_are_capped_at_fifty_characters(self):
         self.assertEqual(
             _sanitize_generated_title("A" * 60),

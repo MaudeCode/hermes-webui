@@ -4205,12 +4205,14 @@ def _title_language_mismatch(user_text: str, title: str) -> bool:
 
 
 def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]:
-    qa = f"User request:\n{str(user_text or '')[:_TITLE_CONTEXT_CHARS]}"
+    user_context = str(user_text or '')[:_TITLE_CONTEXT_CHARS]
+    qa = f"User request:\n{user_context}"
     assistant_context = str(assistant_text or '').strip()
-    if assistant_context:
+    assistant_budget = _TITLE_CONTEXT_CHARS - len(user_context)
+    if assistant_context and assistant_budget > 0:
         qa += (
             "\n\nAssistant context (use only to clarify vague references or concrete terminology):\n"
-            f"{assistant_context[:_TITLE_CONTEXT_CHARS]}"
+            f"{assistant_context[:assistant_budget]}"
         )
     language_rule = _title_prompt_language_rule(user_text)
     prompts = [
