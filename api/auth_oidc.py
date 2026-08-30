@@ -178,6 +178,9 @@ def _resolve_oidc_config() -> dict[str, Any]:
     scopes = _normalize_scopes(pick("scopes", "HERMES_WEBUI_OIDC_SCOPES"))
     raw_allow = pick("allow_values", "HERMES_WEBUI_OIDC_ALLOW_VALUES")
     allow_values = _normalize_allow_values(raw_allow)
+    trusted_private_hosts = _normalize_trusted_private_hosts(
+        pick("trusted_private_hosts", "HERMES_WEBUI_OIDC_TRUSTED_PRIVATE_HOSTS")
+    )
     if (
         raw_allow is not None
         and not isinstance(raw_allow, (list, tuple, set))
@@ -195,6 +198,7 @@ def _resolve_oidc_config() -> dict[str, Any]:
         "scopes": scopes,
         "allow_claim": str(pick("allow_claim", "HERMES_WEBUI_OIDC_ALLOW_CLAIM") or "").strip(),
         "allow_values": allow_values,
+        "trusted_private_hosts": trusted_private_hosts,
     }
 
 
@@ -241,6 +245,38 @@ def _normalize_allow_values(raw: Any) -> list[str]:
         return [value for value in (str(item).strip() for item in raw) if value]
     text = str(raw).replace("\n", ",")
     return [part.strip() for part in text.split(",") if part.strip()]
+
+
+def _normalize_trusted_private_hosts(raw: Any) -> list[str]:
+    trusted = []
+    seen = set()
+    for value in _normalize_text_list(raw):
+        hostname = value.strip().lower().rstrip(".")
+        if (
+            not hostname
+            or hostname == "localhost"
+            or _parse_ip_address(hostname) is not None
+            or any(char in hostname for char in ":/\\@*")
+        ):
+            continue
+        try:
+            hostname = hostname.encode("idna").decode("ascii")
+        except UnicodeError:
+            continue
+        labels = hostname.split(".")
+        if any(
+            not label
+            or len(label) > 63
+            or label.startswith("-")
+            or label.endswith("-")
+            or not all(char.isalnum() or char == "-" for char in label)
+            for label in labels
+        ):
+            continue
+        if hostname not in seen:
+            seen.add(hostname)
+            trusted.append(hostname)
+    return trusted
 
 
 def _normalize_text_list(raw: Any) -> list[str]:
@@ -433,7 +469,14 @@ def _validate_outbound_oidc_url(url: str) -> None:
     hostname = str(parsed.hostname or "").strip()
     if not hostname:
         raise OIDCAuthError("OIDC endpoint URL was missing a hostname", status_code=502)
-    if _is_disallowed_oidc_host(hostname):
+    normalized_hostname = hostname.lower().rstrip(".")
+    trusted_private_hosts = set(
+        _resolve_oidc_config().get("trusted_private_hosts") or []
+    )
+    if (
+        _is_disallowed_oidc_host(hostname)
+        and normalized_hostname not in trusted_private_hosts
+    ):
         raise OIDCAuthError(
             "OIDC endpoint URLs must not target private or local addresses",
             status_code=502,

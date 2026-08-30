@@ -513,6 +513,45 @@ def test_fetch_json_rejects_dns_resolved_private_hosts(monkeypatch):
         auth_oidc._fetch_json("https://issuer.example/.well-known/openid-configuration")
 
 
+def test_private_oidc_host_requires_exact_operator_allowlist(monkeypatch):
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    monkeypatch.setenv("HERMES_WEBUI_OIDC_TRUSTED_PRIVATE_HOSTS", "issuer.example")
+    monkeypatch.setattr(
+        auth_oidc.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.7", 443))
+        ],
+    )
+
+    auth_oidc._validate_outbound_oidc_url("https://issuer.example/.well-known/openid-configuration")
+    with pytest.raises(OIDCAuthError, match="private or local addresses"):
+        auth_oidc._validate_outbound_oidc_url("https://other.example/.well-known/openid-configuration")
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["192.168.1.7", "*.example", "https://issuer.example", "localhost"],
+)
+def test_private_oidc_host_allowlist_ignores_unsafe_values(monkeypatch, value):
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    monkeypatch.setenv("HERMES_WEBUI_OIDC_TRUSTED_PRIVATE_HOSTS", value)
+    monkeypatch.setattr(
+        auth_oidc.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.7", 443))
+        ],
+    )
+
+    with pytest.raises(OIDCAuthError, match="private or local addresses"):
+        auth_oidc._validate_outbound_oidc_url("https://issuer.example/.well-known/openid-configuration")
+
+
 def test_select_public_key_rejects_wrong_ec_curve_for_alg():
     import api.auth_oidc as auth_oidc
     from api.auth_oidc import OIDCAuthError
