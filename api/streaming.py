@@ -3824,7 +3824,7 @@ def _sanitize_generated_title(text: str) -> str:
     # Guard against chain-of-thought leakage, meta-reasoning, and trivial echo.
     if _is_bad_new_title(s):
         return ''
-    return s[:80]
+    return s[:50]
 
 
 def _looks_invalid_generated_title(text: str) -> bool:
@@ -3978,6 +3978,9 @@ def _looks_like_current_user_turn(msg, msg_text) -> bool:
     return any(" ".join(str(candidate or '').split()) == needle for candidate in candidates)
 
 
+_TITLE_CONTEXT_CHARS = 2000
+
+
 def _first_exchange_snippets(messages):
     """Return (first_user_text, first_assistant_text) snippets for title generation.
 
@@ -4010,7 +4013,7 @@ def _first_exchange_snippets(messages):
                 asst_text = candidate
         if user_text and asst_text:
             break
-    return user_text[:500], asst_text[:500]
+    return user_text[:_TITLE_CONTEXT_CHARS], asst_text[:_TITLE_CONTEXT_CHARS]
 
 
 def _latest_exchange_snippets(messages):
@@ -4038,7 +4041,7 @@ def _latest_exchange_snippets(messages):
                 user_text = candidate
         if user_text and asst_text:
             break
-    return user_text[:500], asst_text[:500]
+    return user_text[:_TITLE_CONTEXT_CHARS], asst_text[:_TITLE_CONTEXT_CHARS]
 
 
 def _count_exchanges(messages):
@@ -4202,28 +4205,42 @@ def _title_language_mismatch(user_text: str, title: str) -> bool:
 
 
 def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]:
-    qa = f"User question:\n{user_text[:500]}\n\nAssistant answer:\n{assistant_text[:500]}"
+    qa = f"User request:\n{str(user_text or '')[:_TITLE_CONTEXT_CHARS]}"
+    assistant_context = str(assistant_text or '').strip()
+    if assistant_context:
+        qa += (
+            "\n\nAssistant context (use only to clarify vague references or concrete terminology):\n"
+            f"{assistant_context[:_TITLE_CONTEXT_CHARS]}"
+        )
     language_rule = _title_prompt_language_rule(user_text)
     prompts = [
         (
-            "Generate a short session title from this conversation start.\n"
-            "Use BOTH the user's question and the assistant's visible answer.\n"
+            "Generate a title that will help the user recognize this conversation weeks later.\n"
+            "Before answering, silently identify:\n"
+            "- Subject: What system, feature, question, or problem is this really about?\n"
+            "- Outcome: What does the user want to understand or change?\n"
+            "- Incidental instructions: What only describes how the work should be performed?\n"
+            "Title the subject and desired outcome. Discard incidental instructions.\n"
             f"{language_rule}"
-            "Return only the title text, 3-8 words, as a topic label.\n"
-            "Do not use markdown, bullets, labels, or prefixes like Session Title:.\n"
-            "Do not output a full sentence.\n"
-            "Do not output acknowledgements or completion phrases like OK, done, or all set.\n"
-            "Do not describe internal reasoning.\n"
-            "Bad: The user is asking..., OK, all set.\n"
-            "Good: Title Generation Test, Clarify Dialog Layout, GitHub Issue Triage"
+            "Return only the title, using 3-8 words and no more than 50 characters.\n"
+            "Use a compact noun phrase or clear action phrase.\n"
+            "Prefer the user's explicit goal.\n"
+            "Use assistant context only to resolve vague references or identify concrete terminology.\n"
+            "Do not turn one assistant finding into the conversation's subject.\n"
+            "Capture the umbrella goal when several symptoms or steps are listed.\n"
+            "Ignore models, tools, agents, output formats, plans, tests, commits, and workflow status unless they are the actual topic.\n"
+            "For research, name the question domain rather than the research process.\n"
+            "Preserve useful identifiers such as ticket numbers.\n"
+            "Do not claim completion or copy and truncate the user's message.\n"
+            "Do not use markdown, quotes, labels, or trailing punctuation."
         ),
         (
-            "Rewrite this conversation start as a concise noun-phrase title.\n"
-            "Use the actual topic, not the task outcome.\n"
+            "Rewrite the user request as a durable conversation title.\n"
+            "Identify the real subject and desired outcome, ignoring incidental workflow instructions.\n"
+            "Prefer the user's explicit goal; use assistant context only to clarify concrete terminology.\n"
             f"{language_rule}"
-            "Return title text only.\n"
-            "Do not use markdown, bullets, labels, or prefixes like Session Title:.\n"
-            "Never output acknowledgements, completion status, or meta commentary."
+            "Return only a 3-8 word title of no more than 50 characters.\n"
+            "Do not use markdown, labels, completion status, or meta commentary."
         ),
     ]
     return qa, prompts
@@ -4461,7 +4478,7 @@ def generate_title_raw_via_aux(
     base_url: str = '',
 ) -> tuple[Optional[str], str]:
     """Return (raw_text, status) via auxiliary LLM route."""
-    if not user_text or not assistant_text:
+    if not user_text:
         return None, 'missing_exchange'
     qa, prompts = _title_prompts(user_text, assistant_text)
     configured = _get_aux_title_config()
@@ -4541,7 +4558,7 @@ def generate_title_raw_via_aux(
 
 def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> tuple[Optional[str], str]:
     """Return (raw_text, status) via active-agent route."""
-    if not user_text or not assistant_text:
+    if not user_text:
         return None, 'missing_exchange'
     if agent is None:
         return None, 'missing_agent'
@@ -12830,7 +12847,7 @@ def _run_agent_streaming(
                 # misbehaving log handler here would otherwise skip the
                 # background-title thread spawn below. (#4923 gate hardening)
                 pass
-            if _should_bg_title and _u0 and _a0:
+            if _should_bg_title and _u0:
                 threading.Thread(
                     target=_run_background_title_update,
                     args=(s.session_id, _u0, _a0, str(s.title or '').strip(), put, agent),
