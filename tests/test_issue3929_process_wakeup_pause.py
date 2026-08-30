@@ -2455,7 +2455,9 @@ def test_streaming_no_pause_post_save_cancel_after_success_commit_emits_done(tmp
         "hello",
         "Stream reply",
     ]
-    queued_events = [item[0] for item in list(stream_queue.queue)]
+    queued_events = []
+    while "stream_end" not in queued_events:
+        queued_events.append(stream_queue.get(timeout=2)[0])
     assert "done" in queued_events
     assert "stream_end" in queued_events
     assert "cancel" not in queued_events
