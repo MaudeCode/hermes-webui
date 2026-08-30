@@ -155,6 +155,12 @@ class TestGeneratedTitleSanitization(unittest.TestCase):
             "random cancel discussion",
         )
 
+    def test_fallback_title_obeys_generated_title_cap(self):
+        self.assertEqual(
+            _fallback_title_from_exchange("x" * 80, ""),
+            "x" * 50,
+        )
+
     def test_fallback_title_summary_label_is_english(self):
         self.assertEqual(
             _fallback_title_from_exchange("Generate a short title summary test", ""),

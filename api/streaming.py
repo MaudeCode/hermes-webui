@@ -3809,6 +3809,9 @@ def _strip_xml_tool_calls(text: str) -> str:
     return s.strip()
 
 
+_GENERATED_TITLE_MAX_CHARS = 50
+
+
 def _sanitize_generated_title(text: str) -> str:
     """Sanitize LLM-generated title text before persisting to session."""
     s = _strip_thinking_markup(text or '')
@@ -3824,7 +3827,7 @@ def _sanitize_generated_title(text: str) -> str:
     # Guard against chain-of-thought leakage, meta-reasoning, and trivial echo.
     if _is_bad_new_title(s):
         return ''
-    return s[:50]
+    return s[:_GENERATED_TITLE_MAX_CHARS]
 
 
 def _looks_invalid_generated_title(text: str) -> bool:
@@ -4224,7 +4227,7 @@ def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]
             "- Incidental instructions: What only describes how the work should be performed?\n"
             "Title the subject and desired outcome. Discard incidental instructions.\n"
             f"{language_rule}"
-            "Return only the title, using 3-8 words and no more than 50 characters.\n"
+            f"Return only the title, using 3-8 words and no more than {_GENERATED_TITLE_MAX_CHARS} characters.\n"
             "Use a compact noun phrase or clear action phrase.\n"
             "Prefer the user's explicit goal.\n"
             "Use assistant context only to resolve vague references or identify concrete terminology.\n"
@@ -4241,7 +4244,7 @@ def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]
             "Identify the real subject and desired outcome, ignoring incidental workflow instructions.\n"
             "Prefer the user's explicit goal; use assistant context only to clarify concrete terminology.\n"
             f"{language_rule}"
-            "Return only a 3-8 word title of no more than 50 characters.\n"
+            f"Return only a 3-8 word title of no more than {_GENERATED_TITLE_MAX_CHARS} characters.\n"
             "Do not use markdown, labels, completion status, or meta commentary."
         ),
     ]
@@ -4821,7 +4824,7 @@ def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Option
             break
 
     if picked:
-        return ' '.join(picked)[:60]
+        return ' '.join(picked)[:_GENERATED_TITLE_MAX_CHARS]
     return 'Conversation topic'
 
 
