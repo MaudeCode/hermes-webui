@@ -13567,10 +13567,18 @@ def handle_get(handler, parsed) -> bool:
         next_path = _safe_login_redirect_path(
             parse_qs(parsed.query or "").get("next", [""])[0]
         )
+        native_flow_id = str(
+            parse_qs(parsed.query or "").get("native_flow", [""])[0] or ""
+        ).strip() or None
         try:
-            location = build_authorization_redirect(
-                _request_base_url(handler), next_path
-            )
+            if native_flow_id:
+                location = build_authorization_redirect(
+                    _request_base_url(handler), next_path, native_flow_id
+                )
+            else:
+                location = build_authorization_redirect(
+                    _request_base_url(handler), next_path
+                )
         except OIDCConfigError as exc:
             return j(handler, {"error": str(exc)}, status=404)
         except OIDCAuthError as exc:
@@ -13585,14 +13593,36 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/auth/oidc/callback":
         from api.auth import create_session, set_auth_cookie
-        from api.auth_oidc import OIDCAuthError, OIDCConfigError, complete_authorization_code_flow
+        from api.auth_oidc import (
+            OIDCAuthError,
+            OIDCConfigError,
+            complete_authorization_code_flow,
+            consume_failed_provider_authorization,
+            fail_native_authorization,
+            finish_native_authorization,
+        )
 
         query = parse_qs(parsed.query or "")
+        state = str(query.get("state", [""])[0] or "").strip()
         error = str(query.get("error", [""])[0] or "").strip()
         if error:
+            native_flow_id = consume_failed_provider_authorization(state)
+            if native_flow_id:
+                try:
+                    location = fail_native_authorization(
+                        _request_base_url(handler), native_flow_id, "provider_error"
+                    )
+                except OIDCAuthError as exc:
+                    return j(handler, {"error": str(exc)}, status=exc.status_code)
+                handler.send_response(302)
+                handler.send_header("Location", location)
+                handler.send_header("Cache-Control", "no-store")
+                _security_headers(handler)
+                handler.send_header("Content-Length", "0")
+                handler.end_headers()
+                return True
             description = str(query.get("error_description", [""])[0] or "").strip()
             return j(handler, {"error": description or error}, status=401)
-        state = str(query.get("state", [""])[0] or "").strip()
         code = str(query.get("code", [""])[0] or "").strip()
         if not state or not code:
             return j(handler, {"error": "Missing OIDC callback state or code"}, status=400)
@@ -13601,9 +13631,61 @@ def handle_get(handler, parsed) -> bool:
                 _request_base_url(handler), state, code
             )
         except OIDCConfigError as exc:
+            native_flow_id = str(getattr(exc, "native_flow_id", None) or "")
+            if native_flow_id:
+                try:
+                    location = fail_native_authorization(
+                        _request_base_url(handler), native_flow_id, "authentication_failed"
+                    )
+                except OIDCAuthError:
+                    pass
+                else:
+                    handler.send_response(302)
+                    handler.send_header("Location", location)
+                    handler.send_header("Cache-Control", "no-store")
+                    _security_headers(handler)
+                    handler.send_header("Content-Length", "0")
+                    handler.end_headers()
+                    return True
             return j(handler, {"error": str(exc)}, status=404)
         except OIDCAuthError as exc:
+            native_flow_id = str(getattr(exc, "native_flow_id", None) or "")
+            if native_flow_id:
+                try:
+                    location = fail_native_authorization(
+                        _request_base_url(handler), native_flow_id, "authentication_failed"
+                    )
+                except OIDCAuthError:
+                    pass
+                else:
+                    handler.send_response(302)
+                    handler.send_header("Location", location)
+                    handler.send_header("Cache-Control", "no-store")
+                    _security_headers(handler)
+                    handler.send_header("Content-Length", "0")
+                    handler.end_headers()
+                    return True
             return j(handler, {"error": str(exc)}, status=exc.status_code)
+        native_flow_id = str(result.get("native_flow_id") or "").strip()
+        if native_flow_id:
+            try:
+                location = finish_native_authorization(
+                    _request_base_url(handler),
+                    native_flow_id,
+                    subject=str(result.get("subject") or ""),
+                    email=str(result.get("email") or ""),
+                    bound_profile=result.get("bound_profile"),
+                )
+            except OIDCAuthError as exc:
+                return j(handler, {"error": str(exc)}, status=exc.status_code)
+            handler.send_response(302)
+            handler.send_header("Location", location)
+            handler.send_header("Cache-Control", "no-store")
+            _security_headers(handler)
+            handler.send_header("Content-Length", "0")
+            handler.end_headers()
+            return True
+
         cookie_val = create_session()
         handler.send_response(302)
         handler.send_header(
@@ -13642,6 +13724,7 @@ def handle_get(handler, parsed) -> bool:
             "auth_enabled": auth_enabled,
             "logged_in": logged_in,
             "oidc_enabled": oidc_enabled,
+            "oidc_native_handoff_enabled": oidc_enabled,
             "password_auth_enabled": password_auth_enabled,
             "passwordless_enabled": bool(passkeys) and not password_auth_enabled,
             "passkeys_enabled": bool(passkeys),
@@ -18306,6 +18389,73 @@ def handle_post(handler, parsed) -> bool:
         return _handle_session_import_cli(handler, body)
 
     # ── Auth endpoints (POST) ──
+    if parsed.path == "/api/auth/oidc/native/start":
+        from api.auth_oidc import (
+            OIDCAuthError,
+            OIDCConfigError,
+            begin_native_authorization,
+        )
+
+        if str(body.get("code_challenge_method") or "") != "S256":
+            return bad(handler, "Native OIDC requires S256 PKCE", status=400)
+        try:
+            return j(
+                handler,
+                begin_native_authorization(
+                    _request_base_url(handler),
+                    str(body.get("callback_url") or ""),
+                    str(body.get("state") or ""),
+                    str(body.get("code_challenge") or ""),
+                ),
+            )
+        except OIDCConfigError as exc:
+            return j(handler, {"error": str(exc)}, status=404)
+        except OIDCAuthError as exc:
+            return j(handler, {"error": str(exc)}, status=exc.status_code)
+
+    if parsed.path == "/api/auth/oidc/native/exchange":
+        from api.auth import create_session, set_auth_cookie
+        from api.auth_oidc import OIDCAuthError, exchange_native_authorization
+
+        try:
+            identity = exchange_native_authorization(
+                _request_base_url(handler),
+                str(body.get("flow_id") or ""),
+                str(body.get("code") or ""),
+                str(body.get("state") or ""),
+                str(body.get("code_verifier") or ""),
+            )
+        except OIDCAuthError as exc:
+            return j(handler, {"error": str(exc)}, status=exc.status_code)
+        cookie_val = create_session(
+            auth_type="oidc",
+            username=str(identity.get("email") or identity.get("subject") or ""),
+            bound_profile=identity.get("bound_profile"),
+        )
+        response_body = json.dumps({"ok": True}).encode()
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(response_body)))
+        handler.send_header("Cache-Control", "no-store")
+        _security_headers(handler)
+        set_auth_cookie(handler, cookie_val)
+        handler.end_headers()
+        handler.wfile.write(response_body)
+        return True
+
+    if parsed.path == "/api/auth/oidc/native/cancel":
+        from api.auth_oidc import cancel_native_authorization
+
+        return j(
+            handler,
+            {
+                "ok": cancel_native_authorization(
+                    str(body.get("flow_id") or ""),
+                    str(body.get("state") or ""),
+                )
+            },
+        )
+
     if parsed.path == "/api/auth/login":
         from api.auth import (
             verify_password,
