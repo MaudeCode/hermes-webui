@@ -157,11 +157,11 @@ class TestLatestExchangeSnippets:
         assert u == 'q2'
 
     def test_truncates_long_content(self):
-        long_text = 'x' * 600
+        long_text = 'x' * 2500
         msgs = [_user_msg(long_text), _asst_msg(long_text)]
         u, a = _latest_exchange_snippets(msgs)
-        assert len(u) == 500
-        assert len(a) == 500
+        assert len(u) == 2000
+        assert len(a) == 2000
 
     def test_no_assistant_message(self):
         msgs = [_user_msg('q')]
