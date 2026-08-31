@@ -354,6 +354,36 @@ def test_profile_switch_accepts_bound_profile(monkeypatch):
     assert any(value.startswith("hermes_profile=") for value in handler.header_values("Set-Cookie"))
 
 
+@pytest.mark.parametrize("path", ["/api/profile/create", "/api/profile/delete"])
+def test_profile_admin_rejects_bound_oidc_session(monkeypatch, path):
+    cookie = auth.create_session(
+        auth_type="oidc",
+        username="alice@example.com",
+        bound_profile="alice",
+    )
+    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}"})
+    handler.command = "POST"
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"name": "victim"})
+    monkeypatch.setattr(
+        "api.profiles.create_profile_api",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("bound session must not create profiles")
+        ),
+    )
+    monkeypatch.setattr(
+        "api.profiles.delete_profile_api",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("bound session must not delete profiles")
+        ),
+    )
+
+    routes.handle_post(handler, SimpleNamespace(path=path, query=""))
+
+    assert handler.status == 403
+    assert "profile-bound" in handler.json_body()["error"].lower()
+
+
 def test_auth_status_reports_trusted_session_fields(monkeypatch):
     _trusted_env(monkeypatch, groups_header="Remote-Groups", group_map={"hermes_devops": "devops"})
     cookie = auth.create_session(

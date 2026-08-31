@@ -15706,6 +15706,12 @@ def handle_get(handler, parsed) -> bool:
 
 # ── POST auth helpers
 
+def _request_bound_profile(handler) -> str | None:
+    from api.auth import parse_cookie, session_bound_profile
+
+    return session_bound_profile(parse_cookie(handler))
+
+
 def _require_passkey_management_auth(handler) -> tuple[bool, str, int]:
     """Require auth, or the existing local-only first-run bootstrap gate.
 
@@ -15713,7 +15719,7 @@ def _require_passkey_management_auth(handler) -> tuple[bool, str, int]:
     can still bootstrap a passkey-only instance, but only through the same
     local/private-network onboarding gate used for first password setup.
     """
-    from api.auth import is_auth_enabled, parse_cookie, session_bound_profile, verify_session
+    from api.auth import is_auth_enabled, parse_cookie, verify_session
 
     auth_enabled = is_auth_enabled()
     if not auth_enabled:
@@ -15723,7 +15729,7 @@ def _require_passkey_management_auth(handler) -> tuple[bool, str, int]:
     cookie_val = parse_cookie(handler)
     if not cookie_val or not verify_session(cookie_val):
         return False, "Authentication required", 401
-    if session_bound_profile(cookie_val):
+    if _request_bound_profile(handler):
         return False, "Profile-bound sessions cannot manage owner authentication credentials", 403
     return True, "", 200
 
@@ -17686,6 +17692,8 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e), 409)
 
     if parsed.path == "/api/profile/create":
+        if _request_bound_profile(handler):
+            return bad(handler, "Profile-bound sessions cannot manage profiles", 403)
         name = body.get("name", "").strip()
         if not name:
             return bad(handler, "name is required")
@@ -17726,6 +17734,8 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
 
     if parsed.path == "/api/profile/delete":
+        if _request_bound_profile(handler):
+            return bad(handler, "Profile-bound sessions cannot manage profiles", 403)
         name = body.get("name", "").strip()
         if not name:
             return bad(handler, "name is required")
@@ -17749,7 +17759,6 @@ def handle_post(handler, parsed) -> bool:
             get_password_hash,
             is_auth_enabled,
             parse_cookie,
-            session_bound_profile,
             set_auth_cookie,
             verify_password,
             verify_session,
@@ -17771,7 +17780,7 @@ def handle_post(handler, parsed) -> bool:
         if requested_passwordless:
             body["_clear_password"] = True
 
-        if (requested_password or requested_clear_password) and session_bound_profile(current_cookie):
+        if (requested_password or requested_clear_password) and _request_bound_profile(handler):
             return bad(
                 handler,
                 "Profile-bound sessions cannot manage owner authentication credentials",
