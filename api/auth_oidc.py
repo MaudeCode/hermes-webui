@@ -14,6 +14,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 from cryptography.exceptions import InvalidSignature
@@ -464,10 +465,22 @@ def _trim_state_map(values: dict[str, dict[str, Any]], maximum: int) -> None:
         values.pop(key, None)
 
 
+def _load_operator_config() -> dict[str, Any]:
+    try:
+        from api.config import _load_yaml_config_file
+        from api.profiles import get_hermes_home_for_profile
+    except ImportError:
+        return get_config()
+
+    configured_path = str(os.getenv("HERMES_CONFIG_PATH") or "").strip()
+    path = Path(configured_path).expanduser() if configured_path else get_hermes_home_for_profile("default") / "config.yaml"
+    return _load_yaml_config_file(path)
+
+
 def _resolve_oidc_config() -> dict[str, Any]:
     raw = {}
     try:
-        cfg = get_config()
+        cfg = _load_operator_config()
         value = cfg.get("webui_oidc") if isinstance(cfg, dict) else None
         if isinstance(value, dict):
             raw.update(value)

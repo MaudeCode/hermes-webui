@@ -243,7 +243,7 @@ def test_oidc_profile_mapping_reads_yaml_and_environment_override(monkeypatch):
 
     monkeypatch.setattr(
         auth_oidc,
-        "get_config",
+        "_load_operator_config",
         lambda: {
             "webui_oidc": {
                 "issuer": "https://issuer.example",
@@ -269,6 +269,44 @@ def test_oidc_profile_mapping_reads_yaml_and_environment_override(monkeypatch):
     assert cfg["profile_map_error"] is None
 
 
+def test_oidc_configuration_stays_pinned_to_operator_profile(monkeypatch, tmp_path):
+    import api.auth_oidc as auth_oidc
+    import api.profiles as profiles
+
+    for name in (
+        "HERMES_CONFIG_PATH",
+        "HERMES_WEBUI_OIDC_ISSUER",
+        "HERMES_WEBUI_OIDC_CLIENT_ID",
+        "HERMES_WEBUI_OIDC_ALLOW_CLAIM",
+        "HERMES_WEBUI_OIDC_ALLOW_VALUES",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    (tmp_path / "config.yaml").write_text(
+        "webui_oidc:\n"
+        "  issuer: https://operator.example\n"
+        "  client_id: operator-client\n"
+        "  allow_claim: groups\n"
+        "  allow_values: [hermes-users]\n",
+        encoding="utf-8",
+    )
+    user_home = tmp_path / "profiles" / "alice"
+    user_home.mkdir(parents=True)
+    (user_home / "config.yaml").write_text(
+        "webui_oidc:\n"
+        "  issuer: https://user-controlled.example\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    profiles.set_request_profile("alice")
+
+    try:
+        cfg = auth_oidc._resolve_oidc_config()
+        assert cfg["issuer"] == "https://operator.example"
+        assert auth_oidc.is_oidc_enabled() is True
+    finally:
+        profiles.clear_request_profile()
+
+
 def test_invalid_oidc_profile_mapping_keeps_auth_gate_and_warns(monkeypatch):
     import api.auth as auth
     import api.auth_oidc as auth_oidc
@@ -282,8 +320,7 @@ def test_invalid_oidc_profile_mapping_keeps_auth_gate_and_warns(monkeypatch):
             "profile_map": ["not", "an", "object"],
         }
     }
-    monkeypatch.setattr(auth, "get_config", lambda: config)
-    monkeypatch.setattr(auth_oidc, "get_config", lambda: config)
+    monkeypatch.setattr(auth_oidc, "_load_operator_config", lambda: config)
 
     assert auth_oidc.is_oidc_enabled() is True
     with pytest.raises(auth_oidc.OIDCConfigError, match="profile_map must be an object"):
@@ -457,7 +494,7 @@ def test_oidc_enablement_requires_explicit_allowlist(monkeypatch):
     monkeypatch.delenv("HERMES_WEBUI_OIDC_ALLOW_VALUES", raising=False)
     monkeypatch.setattr(
         auth_oidc,
-        "get_config",
+        "_load_operator_config",
         lambda: {
             "webui_oidc": {
                 "issuer": "https://issuer.example",
@@ -470,10 +507,11 @@ def test_oidc_enablement_requires_explicit_allowlist(monkeypatch):
 
 def test_oidc_startup_warning_flags_partial_config(monkeypatch):
     import api.auth as auth
+    import api.auth_oidc as auth_oidc
 
     monkeypatch.setattr(
-        auth,
-        "get_config",
+        auth_oidc,
+        "_load_operator_config",
         lambda: {
             "webui_oidc": {
                 "issuer": "https://issuer.example",
@@ -489,10 +527,11 @@ def test_oidc_startup_warning_flags_partial_config(monkeypatch):
 
 def test_oidc_startup_warning_ignores_complete_config(monkeypatch):
     import api.auth as auth
+    import api.auth_oidc as auth_oidc
 
     monkeypatch.setattr(
-        auth,
-        "get_config",
+        auth_oidc,
+        "_load_operator_config",
         lambda: {
             "webui_oidc": {
                 "issuer": "https://issuer.example",

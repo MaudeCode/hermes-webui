@@ -384,6 +384,42 @@ def test_profile_admin_rejects_bound_oidc_session(monkeypatch, path):
     assert "profile-bound" in handler.json_body()["error"].lower()
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/shutdown",
+        "/api/health/restart",
+        "/api/updates/apply",
+        "/api/updates/force",
+        "/api/updates/clear_lock",
+        "/api/extensions/toggle",
+        "/api/extensions/sidecar-proxy-consent",
+        "/api/extensions/install",
+        "/api/extensions/uninstall",
+        "/api/admin/reload",
+        "/api/talaria/relay/pair",
+        "/api/profile/create",
+        "/api/profile/delete",
+        "/api/auth/passkey/register/options",
+        "/api/auth/passkey/register",
+        "/api/auth/passkey/delete",
+        "/api/auth/passkeys",
+    ],
+)
+def test_operator_routes_reject_bound_oidc_session(monkeypatch, path):
+    monkeypatch.setattr(auth, "is_oidc_auth_enabled", lambda: True)
+    cookie = auth.create_session(
+        auth_type="oidc",
+        username="alice@example.com",
+        bound_profile="alice",
+    )
+    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}"})
+
+    assert auth.check_auth(handler, SimpleNamespace(path=path, query="")) is False
+    assert handler.status == 403
+    assert "owner" in handler.json_body()["error"].lower()
+
+
 def test_auth_status_reports_trusted_session_fields(monkeypatch):
     _trusted_env(monkeypatch, groups_header="Remote-Groups", group_map={"hermes_devops": "devops"})
     cookie = auth.create_session(

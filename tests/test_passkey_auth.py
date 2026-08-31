@@ -408,9 +408,12 @@ def test_passkey_feature_flag_via_config(monkeypatch, tmp_path):
     passkeys = _set_paths(monkeypatch, tmp_path)
     passkeys._save_credentials([{"id": "cred-1", "label": "This device"}])
     monkeypatch.delenv("HERMES_WEBUI_PASSKEY", raising=False)
-    # Patch the config import inside _passkey_feature_flag_enabled
-    import api.config
-    monkeypatch.setattr(api.config, "get_config", lambda: {"webui_passkey_enabled": True})
+    import api.auth_oidc
+    monkeypatch.setattr(
+        api.auth_oidc,
+        "_load_operator_config",
+        lambda: {"webui_passkey_enabled": True},
+    )
     assert auth.are_passkeys_enabled() is True
 
 

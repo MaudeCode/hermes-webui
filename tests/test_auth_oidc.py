@@ -40,8 +40,8 @@ def _startup_warning(monkeypatch, allow_values):
     import api.auth as auth
 
     monkeypatch.setattr(
-        auth,
-        "get_config",
+        auth_oidc,
+        "_load_operator_config",
         lambda: {
             "webui_oidc": {
                 "issuer": "https://issuer.example",
@@ -102,7 +102,7 @@ def _resolve(monkeypatch, *, env=None, cfg_list=None):
         webui_cfg = {"allow_values": cfg_list}
     else:
         webui_cfg = {}
-    with patch("api.auth_oidc.get_config", return_value={"webui_oidc": webui_cfg}):
+    with patch("api.auth_oidc._load_operator_config", return_value={"webui_oidc": webui_cfg}):
         return auth_oidc._resolve_oidc_config()
 
 

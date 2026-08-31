@@ -16,7 +16,7 @@ import threading
 import time
 from pathlib import Path
 
-from api.config import STATE_DIR, get_config, load_settings
+from api.config import STATE_DIR, load_settings
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,26 @@ PUBLIC_PATHS = frozenset({
     '/share',
     '/manifest.json', '/manifest.webmanifest',
     '/session/manifest.json', '/session/manifest.webmanifest',
+})
+
+OPERATOR_ONLY_PATHS = frozenset({
+    '/api/shutdown',
+    '/api/health/restart',
+    '/api/updates/apply',
+    '/api/updates/force',
+    '/api/updates/clear_lock',
+    '/api/extensions/toggle',
+    '/api/extensions/sidecar-proxy-consent',
+    '/api/extensions/install',
+    '/api/extensions/uninstall',
+    '/api/admin/reload',
+    '/api/talaria/relay/pair',
+    '/api/profile/create',
+    '/api/profile/delete',
+    '/api/auth/passkey/register/options',
+    '/api/auth/passkey/register',
+    '/api/auth/passkey/delete',
+    '/api/auth/passkeys',
 })
 
 COOKIE_NAME = 'hermes_session'
@@ -456,9 +476,9 @@ def _passkey_feature_flag_enabled() -> bool:
     if env_value:
         return env_value.strip().lower() in {"1", "true", "yes", "on"}
     try:
-        from api.config import get_config
+        from api.auth_oidc import _load_operator_config
 
-        cfg = get_config()
+        cfg = _load_operator_config()
         if isinstance(cfg, dict):
             raw = cfg.get("webui_passkey_enabled")
             if isinstance(raw, bool):
@@ -498,7 +518,9 @@ def get_oidc_startup_warning() -> str | None:
     """Return a startup warning when OIDC auth is only partially configured,
     or when allow_values uses whitespace that is no longer a separator."""
     try:
-        cfg = get_config()
+        from api.auth_oidc import _load_operator_config
+
+        cfg = _load_operator_config()
         raw = cfg.get("webui_oidc") if isinstance(cfg, dict) else {}
         if not isinstance(raw, dict):
             raw = {}
@@ -1123,6 +1145,15 @@ def check_auth(handler, parsed) -> bool:
         return False
     session_info = ensure_trusted_auth_session(handler)
     if session_info:
+        bound_profile = str(session_info.get('bound_profile') or '').strip() or None
+        if bound_profile and parsed.path in OPERATOR_ONLY_PATHS:
+            body = b'{"error":"Owner session required"}'
+            handler.send_response(403)
+            handler.send_header('Content-Type', 'application/json')
+            handler.send_header('Content-Length', str(len(body)))
+            handler.end_headers()
+            handler.wfile.write(body)
+            return False
         if not trusted_session_allows_active_profile(session_info):
             if parsed.path.startswith('/api/'):
                 body = b'{"error":"Profile access forbidden"}'
