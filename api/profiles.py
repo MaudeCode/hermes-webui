@@ -40,6 +40,7 @@ _CLONE_CONFIG_FILES = ['config.yaml', '.env', 'SOUL.md']
 # startup control: a pinned profile's .env may be loaded into live os.environ
 # later, but must not be able to change whether the process is isolated.
 _INITIAL_HERMES_HOME = os.getenv('HERMES_HOME', '').strip()
+_INITIAL_HERMES_CONFIG_PATH = os.getenv('HERMES_CONFIG_PATH', '').strip()
 _INITIAL_ISOLATED_PROFILE_OPT_IN = os.getenv('HERMES_WEBUI_ISOLATED_PROFILE', '').strip().lower()
 _ISOLATED_SYMLINK_WARNING_EMITTED = False
 _ISOLATED_PROFILE_SHAPE_WITHOUT_OPT_IN_WARNING_EMITTED = False
@@ -198,7 +199,21 @@ def _unwrap_profile_home_to_base(home: Path) -> Path:
 # are operator/deployment-level postures, not per-profile toggles. Letting a
 # profile .env set HERMES_WEBUI_ISOLATED_PROFILE=0 would let a contained user
 # escape isolation (#4589).
-_PROTECTED_ENV_KEYS = frozenset({'HERMES_WEBUI_ISOLATED_PROFILE'})
+_OPERATOR_AUTH_ENV_KEYS = frozenset({
+    'HERMES_WEBUI_PASSWORD',
+    'HERMES_WEBUI_PASSKEY',
+    'HERMES_WEBUI_OIDC_ISSUER',
+    'HERMES_WEBUI_OIDC_CLIENT_ID',
+    'HERMES_WEBUI_OIDC_CLIENT_SECRET',
+    'HERMES_WEBUI_OIDC_REDIRECT_URI',
+    'HERMES_WEBUI_OIDC_SCOPES',
+    'HERMES_WEBUI_OIDC_ALLOW_CLAIM',
+    'HERMES_WEBUI_OIDC_ALLOW_VALUES',
+    'HERMES_WEBUI_OIDC_TRUSTED_PRIVATE_HOSTS',
+    'HERMES_WEBUI_OIDC_PROFILE_CLAIM',
+    'HERMES_WEBUI_OIDC_PROFILE_MAP',
+})
+_PROTECTED_ENV_KEYS = frozenset({'HERMES_WEBUI_ISOLATED_PROFILE'}) | _OPERATOR_AUTH_ENV_KEYS
 
 
 def _isolated_profile_opt_in() -> bool:
@@ -934,7 +949,7 @@ _BLOCKED_RUNTIME_ENV_KEYS = {
     # #4589: operator/deployment isolation posture — never overridable by a
     # profile's own env on any runtime/gateway-parity path.
     'HERMES_WEBUI_ISOLATED_PROFILE',
-}
+} | _OPERATOR_AUTH_ENV_KEYS
 
 
 def filter_runtime_env_for_gateway_parity(env: dict[str, str]) -> dict[str, str]:

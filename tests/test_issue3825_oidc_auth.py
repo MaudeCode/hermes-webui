@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import socket
 import time
 from types import SimpleNamespace
@@ -165,6 +166,10 @@ def test_oidc_callback_binds_identity_to_profile(monkeypatch):
             "subject": "issuer-user-123",
             "email": "user@example.com",
             "bound_profile": "user-profile",
+            "oidc_binding": {
+                "mapping_fingerprint": "mapping-fingerprint",
+                "profile_identity": "profile-identity",
+            },
         }
 
     monkeypatch.setattr(
@@ -198,6 +203,10 @@ def test_oidc_callback_binds_identity_to_profile(monkeypatch):
         "auth_type": "oidc",
         "username": "user@example.com",
         "bound_profile": "user-profile",
+        "oidc_binding": {
+            "mapping_fingerprint": "mapping-fingerprint",
+            "profile_identity": "profile-identity",
+        },
     }
     assert resolved_profiles == ["default"]
     cookie_headers = handler.header_values("Set-Cookie")
@@ -297,6 +306,7 @@ def test_oidc_configuration_stays_pinned_to_operator_profile(monkeypatch, tmp_pa
         encoding="utf-8",
     )
     monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_CONFIG_PATH", "")
     profiles.set_request_profile("alice")
 
     try:
@@ -305,6 +315,67 @@ def test_oidc_configuration_stays_pinned_to_operator_profile(monkeypatch, tmp_pa
         assert auth_oidc.is_oidc_enabled() is True
     finally:
         profiles.clear_request_profile()
+
+
+def test_oidc_session_is_revoked_when_profile_mapping_changes(monkeypatch, tmp_path):
+    import api.auth as auth
+    import api.auth_oidc as auth_oidc
+    import api.profiles as profiles
+
+    (tmp_path / "profiles" / "alice").mkdir(parents=True)
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    cfg = {
+        "issuer": "https://issuer.example",
+        "client_id": "webui-client",
+        "allow_claim": "email",
+        "allow_values": ["user@example.com"],
+        "profile_claim": "email",
+        "profile_map": {"user@example.com": "alice"},
+        "profile_map_configured": True,
+        "profile_map_error": None,
+    }
+    monkeypatch.setattr(auth_oidc, "_resolve_oidc_config", lambda: cfg)
+    binding = auth_oidc._oidc_profile_binding(cfg, "alice")
+    cookie = auth.create_session(
+        auth_type="oidc",
+        username="user@example.com",
+        bound_profile="alice",
+        oidc_binding=binding,
+    )
+    handler = RouteFakeHandler()
+    handler.headers["Cookie"] = f"{auth.COOKIE_NAME}={cookie}"
+
+    try:
+        assert auth.ensure_trusted_auth_session(handler)["bound_profile"] == "alice"
+        profiles.clear_request_profile()
+        cfg["profile_map"] = {"user@example.com": "bob"}
+        next_request = RouteFakeHandler()
+        next_request.headers["Cookie"] = f"{auth.COOKIE_NAME}={cookie}"
+        assert auth.ensure_trusted_auth_session(next_request) is None
+        assert auth.verify_session(cookie) is False
+    finally:
+        auth.invalidate_session(cookie)
+        profiles.clear_request_profile()
+
+
+def test_profile_dotenv_cannot_override_operator_oidc(monkeypatch, tmp_path):
+    import api.profiles as profiles
+
+    monkeypatch.setenv("HERMES_WEBUI_OIDC_ISSUER", "https://operator.example")
+    monkeypatch.delenv("HERMES_WEBUI_OIDC_PROFILE_MAP", raising=False)
+    (tmp_path / ".env").write_text(
+        "HERMES_WEBUI_OIDC_ISSUER=https://user-controlled.example\n"
+        'HERMES_WEBUI_OIDC_PROFILE_MAP={"subject":"default"}\n',
+        encoding="utf-8",
+    )
+
+    profiles._reload_dotenv(tmp_path)
+    runtime_env = profiles.get_profile_runtime_env(tmp_path)
+
+    assert os.environ["HERMES_WEBUI_OIDC_ISSUER"] == "https://operator.example"
+    assert "HERMES_WEBUI_OIDC_PROFILE_MAP" not in os.environ
+    assert "HERMES_WEBUI_OIDC_ISSUER" not in runtime_env
+    assert "HERMES_WEBUI_OIDC_PROFILE_MAP" not in runtime_env
 
 
 def test_invalid_oidc_profile_mapping_keeps_auth_gate_and_warns(monkeypatch):
@@ -330,13 +401,19 @@ def test_invalid_oidc_profile_mapping_keeps_auth_gate_and_warns(monkeypatch):
 
 def test_bound_oidc_session_rehydrates_missing_profile_cookie(monkeypatch):
     import api.auth as auth
+    import api.auth_oidc as auth_oidc
     import api.profiles as profiles
 
     monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(auth_oidc, "oidc_session_binding_is_current", lambda _info: True)
     cookie = auth.create_session(
         auth_type="oidc",
         username="user@example.com",
         bound_profile="user-profile",
+        oidc_binding={
+            "mapping_fingerprint": "mapping-fingerprint",
+            "profile_identity": "profile-identity",
+        },
     )
     handler = RouteFakeHandler()
     handler.headers["Cookie"] = f"{auth.COOKIE_NAME}={cookie}"

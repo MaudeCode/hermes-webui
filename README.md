@@ -296,7 +296,7 @@ webui_oidc:
     synthetic-user-2: bob
 ```
 
-Create the named Hermes profiles and any owner recovery password or passkey before enabling the map. Claim values match exactly; `sub` is the default and is preferred over mutable claims such as email. A configured map fails closed when the claim is absent, unmapped, malformed, or points to a profile that does not exist. Password and passkey logins remain unbound owner sessions; profile-bound users cannot manage owner credentials, profiles, extensions, updates, or server lifecycle.
+Create the named Hermes profiles and any owner recovery password or passkey before enabling the map. Claim values match exactly; `sub` is the default and is preferred over mutable claims such as email. A configured map fails closed when the claim is absent, unmapped, malformed, or points to a profile that does not exist. Changing the map, deleting the profile, or recreating its directory revokes existing mapped sessions. Password and passkey logins remain unbound owner sessions; profile-bound users cannot manage owner credentials, profiles, extensions, updates, or server lifecycle. Profile `.env` files cannot override operator authentication variables.
 
 ### Themes
 - Appearance is split into two axes: Theme (`system`, `dark`, `light`) and Skin

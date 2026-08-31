@@ -638,18 +638,27 @@ def verify_password(plain: str) -> bool:
     return False
 
 
-def create_session(*, auth_type: str | None = None, username: str | None = None, bound_profile: str | None = None) -> str:
+def create_session(
+    *,
+    auth_type: str | None = None,
+    username: str | None = None,
+    bound_profile: str | None = None,
+    oidc_binding: dict[str, str] | None = None,
+) -> str:
     """Create a new auth session. Returns signed cookie value."""
     token = secrets.token_hex(32)
     expiry = time.time() + _resolve_session_ttl()
     record: float | dict
-    if any(value is not None for value in (auth_type, username, bound_profile)):
+    if any(value is not None for value in (auth_type, username, bound_profile, oidc_binding)):
         record = {
             'expiry': expiry,
             'auth_type': auth_type,
             'username': username,
             'bound_profile': bound_profile,
         }
+        if oidc_binding:
+            record['oidc_mapping_fingerprint'] = oidc_binding.get('mapping_fingerprint')
+            record['oidc_profile_identity'] = oidc_binding.get('profile_identity')
     else:
         record = expiry
     with _SESSIONS_LOCK:
@@ -925,6 +934,13 @@ def ensure_trusted_auth_session(handler) -> dict | None:
     cookie_value = parse_cookie(handler)
     info = get_session_info(cookie_value) if cookie_value and verify_session(cookie_value) else None
     if info and info.get('auth_type') != 'trusted':
+        if info.get('auth_type') == 'oidc' and info.get('bound_profile'):
+            from api.auth_oidc import oidc_session_binding_is_current
+
+            if not oidc_session_binding_is_current(info):
+                invalidate_session(cookie_value)
+                handler._trusted_auth_session_rejected = True
+                return _remember_trusted_auth_session(handler, None)
         _apply_bound_session_profile(
             handler,
             str(info.get('bound_profile') or '').strip() or None,

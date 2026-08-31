@@ -13755,6 +13755,7 @@ def handle_get(handler, parsed) -> bool:
                     subject=str(result.get("subject") or ""),
                     email=str(result.get("email") or ""),
                     bound_profile=result.get("bound_profile"),
+                    oidc_binding=result.get("oidc_binding"),
                 )
             except OIDCAuthError as exc:
                 return j(handler, {"error": str(exc)}, status=exc.status_code)
@@ -13767,6 +13768,7 @@ def handle_get(handler, parsed) -> bool:
                 auth_type="oidc",
                 username=username,
                 bound_profile=bound_profile,
+                oidc_binding=result.get("oidc_binding"),
             )
             try:
                 profile_cookie = build_profile_cookie(
@@ -18545,6 +18547,7 @@ def handle_post(handler, parsed) -> bool:
             auth_type="oidc",
             username=str(identity.get("email") or identity.get("subject") or ""),
             bound_profile=identity.get("bound_profile"),
+            oidc_binding=identity.get("oidc_binding"),
         )
         response_body = json.dumps({"ok": True}).encode()
         handler.send_response(200)

@@ -170,12 +170,14 @@ def complete_authorization_code_flow(
             allow_values=cfg.get("allow_values") or [],
         )
         bound_profile = _resolve_bound_profile(cfg, claims)
+        oidc_binding = _oidc_profile_binding(cfg, bound_profile)
         return {
             "next_path": pending["next_path"],
             "native_flow_id": pending.get("native_flow_id"),
             "subject": str(claims.get("sub") or ""),
             "email": str(claims.get("email") or ""),
             "bound_profile": bound_profile,
+            "oidc_binding": oidc_binding,
             "claims": claims,
         }
     except (OIDCAuthError, OIDCConfigError) as exc:
@@ -234,6 +236,7 @@ def finish_native_authorization(
     subject: str,
     email: str,
     bound_profile: str | None = None,
+    oidc_binding: dict[str, str] | None = None,
 ) -> str:
     """Turn a successful provider login into one short-lived app exchange code."""
     now = time.time()
@@ -255,6 +258,7 @@ def finish_native_authorization(
             "subject": str(subject or ""),
             "email": str(email or ""),
             "bound_profile": bound_profile,
+            "oidc_binding": oidc_binding,
         }
 
     separator = "&" if urllib.parse.urlsplit(flow["callback_url"]).query else "?"
@@ -323,11 +327,14 @@ def exchange_native_authorization(
     challenge = _b64u(hashlib.sha256(verifier.encode("ascii")).digest())
     if not _constant_time_equal(challenge, exchange["code_challenge"]):
         raise OIDCAuthError("Native OIDC PKCE verifier did not match", status_code=401)
-    return {
+    result = {
         "subject": exchange["subject"],
         "email": exchange["email"],
         "bound_profile": exchange.get("bound_profile"),
     }
+    if exchange.get("oidc_binding"):
+        result["oidc_binding"] = exchange["oidc_binding"]
+    return result
 
 
 def cancel_native_authorization(flow_id: str, client_state: str) -> bool:
@@ -468,11 +475,11 @@ def _trim_state_map(values: dict[str, dict[str, Any]], maximum: int) -> None:
 def _load_operator_config() -> dict[str, Any]:
     try:
         from api.config import _load_yaml_config_file
-        from api.profiles import get_hermes_home_for_profile
+        from api.profiles import _INITIAL_HERMES_CONFIG_PATH, get_hermes_home_for_profile
     except ImportError:
         return get_config()
 
-    configured_path = str(os.getenv("HERMES_CONFIG_PATH") or "").strip()
+    configured_path = str(_INITIAL_HERMES_CONFIG_PATH or "").strip()
     path = Path(configured_path).expanduser() if configured_path else get_hermes_home_for_profile("default") / "config.yaml"
     return _load_yaml_config_file(path)
 
@@ -642,6 +649,48 @@ def _resolve_bound_profile(cfg: dict[str, Any], claims: dict[str, Any]) -> str |
     if not get_hermes_home_for_profile(profile).is_dir():
         raise OIDCConfigError(f"OIDC profile mapping target {profile!r} does not exist")
     return profile
+
+
+def _oidc_profile_binding(cfg: dict[str, Any], profile: str | None) -> dict[str, str] | None:
+    if not profile:
+        return None
+    from api.profiles import get_hermes_home_for_profile
+
+    home = get_hermes_home_for_profile(profile)
+    stat = home.stat()
+    mapping_payload = {
+        "issuer": str(cfg.get("issuer") or ""),
+        "client_id": str(cfg.get("client_id") or ""),
+        "profile_claim": str(cfg.get("profile_claim") or "sub"),
+        "profile_map": cfg.get("profile_map") or {},
+    }
+    mapping_fingerprint = hashlib.sha256(
+        json.dumps(mapping_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return {
+        "mapping_fingerprint": mapping_fingerprint,
+        "profile_identity": f"{stat.st_dev}:{stat.st_ino}",
+    }
+
+
+def oidc_session_binding_is_current(session_info: dict[str, Any]) -> bool:
+    try:
+        cfg = _require_oidc_config()
+        profile = str(session_info.get("bound_profile") or "").strip()
+        expected = _oidc_profile_binding(cfg, profile)
+    except (OSError, OIDCAuthError, OIDCConfigError):
+        return False
+    return bool(
+        expected
+        and secrets.compare_digest(
+            str(session_info.get("oidc_mapping_fingerprint") or ""),
+            expected["mapping_fingerprint"],
+        )
+        and secrets.compare_digest(
+            str(session_info.get("oidc_profile_identity") or ""),
+            expected["profile_identity"],
+        )
+    )
 
 
 def _normalize_text_list(raw: Any) -> list[str]:
