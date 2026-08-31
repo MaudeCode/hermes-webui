@@ -203,7 +203,8 @@ def begin_native_authorization(
     server_id = _server_identity(origin)
     with _pending_lock:
         _prune_native_state(now)
-        _trim_state_map(_native_flows, _MAX_PENDING_FLOWS)
+        if len(_native_flows) >= _MAX_PENDING_FLOWS:
+            raise OIDCAuthError("Too many pending native OIDC flows", status_code=429)
         _native_flows[flow_id] = {
             "created_at": now,
             "callback_url": callback,
@@ -330,6 +331,8 @@ def cancel_native_authorization(flow_id: str, client_state: str) -> bool:
     """Invalidate every pending phase owned by one app flow."""
     flow_id = str(flow_id or "")
     state = str(client_state or "")
+    if not _NATIVE_VALUE_RE.fullmatch(flow_id) or not _NATIVE_VALUE_RE.fullmatch(state):
+        return False
     with _pending_lock:
         flow = _native_flows.get(flow_id)
         if flow is not None and not _constant_time_equal(state, flow["client_state"]):
@@ -349,7 +352,8 @@ def cancel_native_authorization(flow_id: str, client_state: str) -> bool:
             _native_exchange_codes.pop(code, None)
             removed = True
         for provider_state, pending in list(_pending_flows.items()):
-            if _constant_time_equal(str(pending.get("native_flow_id") or ""), flow_id):
+            native_flow_id = str(pending.get("native_flow_id") or "")
+            if native_flow_id and _constant_time_equal(native_flow_id, flow_id):
                 _pending_flows.pop(provider_state, None)
                 removed = True
     return removed

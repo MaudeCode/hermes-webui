@@ -39,9 +39,12 @@ available only when `GET /api/auth/status` reports both `oidc_enabled` and
   cancelled flow invalidates pending provider and exchange phases.
 - Callback URLs never contain the WebUI session cookie, password, OIDC token,
   provider error detail, or any reusable credential.
-- Native pending state is process-local, matching the existing browser OIDC
-  state model. Multi-process deployments require session affinity through the
-  callback and exchange.
+- Native pending state is process-local, so the shipped single-process server
+  works. Multi-process deployments require shared pending state with atomic
+  consume semantics, or deterministic routing that sends native start, browser
+  start and callback, and app exchange to the same process. Ordinary cookie
+  affinity alone is insufficient because the app and external browser are
+  separate clients before they share a cookie.
 
 Password login, passkeys, trusted-header auth, and browser OIDC keep their
 existing behavior. Native clients must fail closed when the capability flag is

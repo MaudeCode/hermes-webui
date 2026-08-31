@@ -287,6 +287,10 @@ _CLIENT_EVENT_RATE_LIMIT: dict[str, list[float]] = {}
 _CLIENT_EVENT_RATE_LIMIT_LOCK = threading.Lock()
 _CLIENT_EVENT_RATE_LIMIT_WINDOW_SECONDS = 60
 _CLIENT_EVENT_RATE_LIMIT_MAX = 30
+_NATIVE_OIDC_START_RATE_LIMIT: dict[str, list[float]] = {}
+_NATIVE_OIDC_START_RATE_LIMIT_LOCK = threading.Lock()
+_NATIVE_OIDC_START_RATE_LIMIT_WINDOW_SECONDS = 60
+_NATIVE_OIDC_START_RATE_LIMIT_MAX = 10
 _CLIENT_EVENT_MAX_BODY_BYTES = 4 * 1024
 _EXTENSION_SIDECAR_PROXY_MAX_RESPONSE_BYTES = 512 * 1024
 _CLIENT_EVENT_ALLOWED_FIELDS = {
@@ -6798,6 +6802,29 @@ def _client_event_rate_limited(handler, *, now: float | None = None) -> bool:
     return False
 
 
+def _native_oidc_start_rate_limited(handler, *, now: float | None = None) -> bool:
+    now = time.time() if now is None else now
+    key = _client_ip_for_rate_limit(handler)
+    if _truthy_env("HERMES_WEBUI_TRUST_FORWARDED_FOR") and _raw_peer_is_trusted_proxy(handler):
+        forwarded_ip = _forwarded_client_ip_from_trusted_proxy(handler)
+        if forwarded_ip is not None:
+            key = forwarded_ip
+    cutoff = now - _NATIVE_OIDC_START_RATE_LIMIT_WINDOW_SECONDS
+    with _NATIVE_OIDC_START_RATE_LIMIT_LOCK:
+        _prune_stale_rate_limit_keys(_NATIVE_OIDC_START_RATE_LIMIT, cutoff)
+        timestamps = [
+            timestamp
+            for timestamp in _NATIVE_OIDC_START_RATE_LIMIT.get(key, [])
+            if timestamp >= cutoff
+        ]
+        if len(timestamps) >= _NATIVE_OIDC_START_RATE_LIMIT_MAX:
+            _NATIVE_OIDC_START_RATE_LIMIT[key] = timestamps
+            return True
+        timestamps.append(now)
+        _NATIVE_OIDC_START_RATE_LIMIT[key] = timestamps
+    return False
+
+
 def _send_no_content(handler, status: int = 204) -> bool:
     handler.send_response(status)
     handler.send_header("Content-Length", "0")
@@ -11640,12 +11667,74 @@ def _safe_login_redirect_path(raw_path: str | None) -> str:
     return path
 
 
+def _validated_request_host(raw_host: str) -> str | None:
+    value = str(raw_host or "").strip()
+    if not value or any(char.isspace() or char in "/\\?#,@%" for char in value):
+        return None
+    try:
+        parts = urlsplit(f"http://{value}")
+        port = parts.port
+    except ValueError:
+        return None
+    if (
+        not parts.hostname
+        or parts.username is not None
+        or parts.password is not None
+        or parts.path
+        or parts.query
+        or parts.fragment
+        or parts.netloc.endswith(":")
+        or (port is not None and not 1 <= port <= 65535)
+    ):
+        return None
+    host, normalized_port = _normalize_host_port(parts.netloc)
+    if not host:
+        return None
+    authority = f"[{host}]" if ":" in host else host
+    return authority + (f":{normalized_port}" if normalized_port else "")
+
+
+def _effective_request_host(handler) -> str:
+    direct_host = _validated_request_host(handler.headers.get("Host")) or "127.0.0.1:8787"
+    if not _truthy_env("HERMES_WEBUI_TRUST_FORWARDED_HOST"):
+        return direct_host
+    forwarded = [
+        str(handler.headers.get(name) or "").strip()
+        for name in ("X-Forwarded-Host", "X-Real-Host")
+        if str(handler.headers.get(name) or "").strip()
+    ]
+    if not forwarded:
+        return direct_host
+    normalized = [_validated_request_host(value) for value in forwarded]
+    if any(value is None for value in normalized) or len(set(normalized)) != 1:
+        return direct_host
+    return normalized[0]
+
+
+def _configured_oidc_origin() -> str | None:
+    from api.auth_oidc import _resolve_oidc_config
+
+    redirect_uri = str(_resolve_oidc_config().get("redirect_uri") or "").strip()
+    if not redirect_uri:
+        return None
+    try:
+        parts = urlsplit(redirect_uri)
+    except ValueError:
+        return None
+    if parts.scheme.lower() not in {"http", "https"}:
+        return None
+    host = _validated_request_host(parts.netloc)
+    return f"{parts.scheme.lower()}://{host}" if host else None
+
+
 def _request_base_url(handler) -> str:
     from api.auth import _is_secure_context
 
+    configured_origin = _configured_oidc_origin()
+    if configured_origin:
+        return configured_origin
     scheme = "https" if _is_secure_context(handler) else "http"
-    host = str(handler.headers.get("Host") or "").strip() or "127.0.0.1:8787"
-    return f"{scheme}://{host}"
+    return f"{scheme}://{_effective_request_host(handler)}"
 
 
 def _redirect_no_store(handler, location: str) -> bool:
@@ -18378,6 +18467,8 @@ def handle_post(handler, parsed) -> bool:
 
         if str(body.get("code_challenge_method") or "") != "S256":
             return bad(handler, "Native OIDC requires S256 PKCE", status=400)
+        if _native_oidc_start_rate_limited(handler):
+            return bad(handler, "Too many native OIDC starts; try again in a minute", status=429)
         try:
             return j(
                 handler,

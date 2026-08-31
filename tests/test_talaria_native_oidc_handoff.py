@@ -3,10 +3,13 @@ import hashlib
 import io
 import json
 import threading
+import time
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec, utils
 
 
 class FakeHeaders(dict):
@@ -69,6 +72,68 @@ def begin_flow(auth_oidc, *, origin="https://server.example", state="app-state-1
         challenge,
     )
     return result, verifier
+
+
+def post_json(routes, path, payload):
+    body = json.dumps(payload).encode()
+    handler = RouteFakeHandler()
+    handler.rfile = io.BytesIO(body)
+    handler.headers["Content-Length"] = str(len(body))
+    routes.handle_post(handler, SimpleNamespace(path=path))
+    return handler
+
+
+def signed_id_token(auth_oidc, private_key, nonce, email):
+    header = auth_oidc._b64u(b'{"alg":"ES256","kid":"test-key"}')
+    claims = auth_oidc._b64u(json.dumps({
+        "iss": "https://issuer.example",
+        "aud": "test-client",
+        "exp": time.time() + 300,
+        "iat": time.time(),
+        "nonce": nonce,
+        "sub": "synthetic-user",
+        "email": email,
+    }, separators=(",", ":")).encode())
+    signing_input = f"{header}.{claims}".encode("ascii")
+    der_signature = private_key.sign(signing_input, ec.ECDSA(hashes.SHA256()))
+    r, s = utils.decode_dss_signature(der_signature)
+    signature = auth_oidc._b64u(r.to_bytes(32, "big") + s.to_bytes(32, "big"))
+    return f"{header}.{claims}.{signature}"
+
+
+def ec_jwk(auth_oidc, private_key):
+    numbers = private_key.public_key().public_numbers()
+    return {
+        "kid": "test-key",
+        "kty": "EC",
+        "alg": "ES256",
+        "crv": "P-256",
+        "x": auth_oidc._b64u(numbers.x.to_bytes(32, "big")),
+        "y": auth_oidc._b64u(numbers.y.to_bytes(32, "big")),
+    }
+
+
+def configure_route_flow(monkeypatch, auth_oidc):
+    monkeypatch.setenv("HERMES_WEBUI_SECURE", "1")
+    monkeypatch.setenv("HERMES_WEBUI_OIDC_ISSUER", "https://issuer.example")
+    monkeypatch.setenv("HERMES_WEBUI_OIDC_CLIENT_ID", "test-client")
+    monkeypatch.setenv("HERMES_WEBUI_OIDC_ALLOW_CLAIM", "email")
+    monkeypatch.setenv("HERMES_WEBUI_OIDC_ALLOW_VALUES", "allowed@example.com")
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    token = {"value": ""}
+    monkeypatch.setattr(auth_oidc, "_get_discovery_document", lambda _issuer: {
+        "issuer": "https://issuer.example",
+        "authorization_endpoint": "https://issuer.example/authorize",
+        "token_endpoint": "https://issuer.example/token",
+        "jwks_uri": "https://issuer.example/jwks",
+    })
+    monkeypatch.setattr(auth_oidc, "_post_form_json", lambda *_args, **_kwargs: {
+        "id_token": token["value"]
+    })
+    monkeypatch.setattr(auth_oidc, "_get_jwks_document", lambda *_args, **_kwargs: {
+        "keys": [ec_jwk(auth_oidc, private_key)]
+    })
+    return private_key, token
 
 
 @pytest.mark.parametrize(
@@ -208,6 +273,63 @@ def test_cancel_cannot_land_between_native_validation_and_provider_state_store(m
     assert errors == []
     assert "provider-state" not in auth_oidc._pending_flows
     assert start["flow_id"] not in auth_oidc._native_flows
+
+
+@pytest.mark.parametrize("payload", [{}, {"flow_id": "short", "state": "short"}])
+def test_malformed_cancel_preserves_browser_and_native_state(payload):
+    import api.auth_oidc as auth_oidc
+    import api.routes as routes
+
+    active, _ = begin_flow(auth_oidc)
+    completed, _ = begin_flow(auth_oidc, state="exchange-state-123")
+    callback = auth_oidc.finish_native_authorization(
+        "https://server.example", completed["flow_id"], subject="user", email=""
+    )
+    exchange_code = parse_qs(urlparse(callback).query)["code"][0]
+    auth_oidc._pending_flows.update({
+        "browser-state": {"created_at": time.time(), "native_flow_id": None},
+        "provider-state": {
+            "created_at": time.time(),
+            "native_flow_id": active["flow_id"],
+        },
+    })
+
+    handler = post_json(routes, "/api/auth/oidc/native/cancel", payload)
+
+    assert handler.status == 200
+    assert handler.json_body() == {"ok": False}
+    assert set(auth_oidc._pending_flows) == {"browser-state", "provider-state"}
+    assert active["flow_id"] in auth_oidc._native_flows
+    assert exchange_code in auth_oidc._native_exchange_codes
+
+
+def test_native_start_capacity_preserves_live_flows_and_expiry_frees_space(monkeypatch):
+    import api.auth_oidc as auth_oidc
+    import api.routes as routes
+
+    now = 1_000.0
+    monkeypatch.setattr(auth_oidc, "_MAX_PENDING_FLOWS", 2)
+    monkeypatch.setattr(auth_oidc.time, "time", lambda: now)
+    first, _ = begin_flow(auth_oidc, state="first-capacity-state")
+    second, _ = begin_flow(auth_oidc, state="second-capacity-state")
+    _, challenge = pkce_pair("third-capacity-state")
+    payload = {
+        "callback_url": "talaria://oidc-callback",
+        "state": "third-capacity-state",
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+    }
+
+    saturated = post_json(routes, "/api/auth/oidc/native/start", payload)
+
+    assert saturated.status == 429
+    assert set(auth_oidc._native_flows) == {first["flow_id"], second["flow_id"]}
+
+    now += auth_oidc._NATIVE_FLOW_TTL_SECONDS + 1
+    admitted = post_json(routes, "/api/auth/oidc/native/start", payload)
+
+    assert admitted.status == 200
+    assert set(auth_oidc._native_flows) == {admitted.json_body()["flow_id"]}
 
 
 def test_wrong_server_or_verifier_consumes_only_that_exchange_code():
@@ -432,6 +554,103 @@ def test_native_exchange_route_sets_normal_http_only_session_cookie():
     assert session_info["username"] == "user@example.com"
     assert session_info["bound_profile"] is None
     auth.invalidate_session(cookie_value)
+
+
+def test_composed_native_route_flow_redirects_bounded_handoff_then_sets_cookie(monkeypatch):
+    import api.auth as auth
+    import api.auth_oidc as auth_oidc
+    import api.routes as routes
+
+    private_key, token = configure_route_flow(monkeypatch, auth_oidc)
+    verifier, challenge = pkce_pair("composed-success")
+    start_handler = post_json(routes, "/api/auth/oidc/native/start", {
+        "callback_url": "talaria://oidc-callback",
+        "state": "composed-success-state",
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+    })
+    assert start_handler.status == 200
+    start = start_handler.json_body()
+
+    browser_handler = RouteFakeHandler()
+    routes.handle_get(browser_handler, urlparse(start["authorization_url"]))
+    assert browser_handler.status == 302
+    [provider_location] = browser_handler.header_values("Location")
+    provider_query = parse_qs(urlparse(provider_location).query)
+    token["value"] = signed_id_token(
+        auth_oidc, private_key, provider_query["nonce"][0], "allowed@example.com"
+    )
+
+    callback_handler = RouteFakeHandler()
+    routes.handle_get(callback_handler, SimpleNamespace(
+        path="/api/auth/oidc/callback",
+        query=f"state={provider_query['state'][0]}&code=synthetic-code",
+    ))
+
+    assert callback_handler.status == 302
+    assert callback_handler.header_values("Set-Cookie") == []
+    [app_location] = callback_handler.header_values("Location")
+    handoff = parse_qs(urlparse(app_location).query)
+    assert set(handoff) == {"code", "state", "flow_id", "server_id"}
+    assert handoff["state"] == ["composed-success-state"]
+    assert handoff["flow_id"] == [start["flow_id"]]
+    assert handoff["server_id"] == [start["server_id"]]
+
+    exchange_handler = post_json(routes, "/api/auth/oidc/native/exchange", {
+        "flow_id": start["flow_id"],
+        "code": handoff["code"][0],
+        "state": "composed-success-state",
+        "code_verifier": verifier,
+    })
+
+    assert exchange_handler.status == 200
+    [cookie] = exchange_handler.header_values("Set-Cookie")
+    assert "HttpOnly" in cookie
+    cookie_value = cookie.split(";", 1)[0].split("=", 1)[1]
+    assert auth.verify_session(cookie_value)
+    assert auth.get_session_info(cookie_value)["username"] == "allowed@example.com"
+    auth.invalidate_session(cookie_value)
+
+
+def test_composed_native_route_flow_sanitizes_allowlist_failure_and_consumes_state(monkeypatch):
+    import api.auth_oidc as auth_oidc
+    import api.routes as routes
+
+    private_key, token = configure_route_flow(monkeypatch, auth_oidc)
+    _, challenge = pkce_pair("composed-failure")
+    start_handler = post_json(routes, "/api/auth/oidc/native/start", {
+        "callback_url": "talaria://oidc-callback",
+        "state": "composed-failure-state",
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+    })
+    start = start_handler.json_body()
+    browser_handler = RouteFakeHandler()
+    routes.handle_get(browser_handler, urlparse(start["authorization_url"]))
+    [provider_location] = browser_handler.header_values("Location")
+    provider_query = parse_qs(urlparse(provider_location).query)
+    provider_state = provider_query["state"][0]
+    token["value"] = signed_id_token(
+        auth_oidc, private_key, provider_query["nonce"][0], "denied@example.com"
+    )
+
+    callback_handler = RouteFakeHandler()
+    routes.handle_get(callback_handler, SimpleNamespace(
+        path="/api/auth/oidc/callback",
+        query=f"state={provider_state}&code=provider-secret-code",
+    ))
+
+    assert callback_handler.status == 302
+    assert callback_handler.header_values("Set-Cookie") == []
+    [app_location] = callback_handler.header_values("Location")
+    callback = parse_qs(urlparse(app_location).query)
+    assert set(callback) == {"error", "state", "flow_id", "server_id"}
+    assert callback["error"] == ["authentication_failed"]
+    assert callback["state"] == ["composed-failure-state"]
+    assert "provider-secret-code" not in app_location
+    assert "denied@example.com" not in app_location
+    assert provider_state not in auth_oidc._pending_flows
+    assert start["flow_id"] not in auth_oidc._native_flows
 
 
 def test_provider_error_returns_sanitized_native_callback(monkeypatch):
