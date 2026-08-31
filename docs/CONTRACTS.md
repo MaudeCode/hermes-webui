@@ -79,6 +79,12 @@ contributor guidance; it does not change runtime behavior or CI gates.
   `/api/chat/stream` wire names) over the aspirational semantic taxonomy when
   writing clients against current source.
 
+## Authentication contracts
+
+- [`docs/native-oidc-auth.md`](native-oidc-auth.md): native-app OIDC handoff
+  endpoints, state ownership, PKCE and server binding, callback contents,
+  single-use exchange, cancellation, and compatibility behavior.
+
 When a change touches streaming, recovery, replay, compression, context
 reconstruction, cancellation, approval/clarify, session metadata, or run state,
 read the relevant RFC before editing. In the PR description, name the state layer

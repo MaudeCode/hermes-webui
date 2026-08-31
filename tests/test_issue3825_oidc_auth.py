@@ -221,6 +221,7 @@ def test_auth_status_reports_oidc_capability_without_regressing_passkey_fields(m
         "auth_enabled": True,
         "logged_in": False,
         "oidc_enabled": True,
+        "oidc_native_handoff_enabled": True,
         "password_auth_enabled": False,
         "passwordless_enabled": False,
         "passkeys_enabled": False,

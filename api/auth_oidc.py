@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import os
+import re
 import secrets
 import socket
 import threading
@@ -28,9 +29,19 @@ _PENDING_TTL_SECONDS = 600
 _MAX_PENDING_FLOWS = 128
 _CLOCK_SKEW_SECONDS = 60
 _CACHE_TTL_SECONDS = 300
+_NATIVE_FLOW_TTL_SECONDS = 600
+_NATIVE_EXCHANGE_TTL_SECONDS = 60
+_NATIVE_CALLBACK_HOST = "oidc-callback"
+_NATIVE_CALLBACK_SCHEMES = {"talaria", "talaria-branch"}
+_NATIVE_VALUE_RE = re.compile(r"^[A-Za-z0-9._~-]{16,256}$")
+_PKCE_CHALLENGE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+_PKCE_VERIFIER_RE = re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
+_CALLBACK_SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]{1,63}$")
 
 _pending_lock = threading.Lock()
 _pending_flows: dict[str, dict[str, Any]] = {}
+_native_flows: dict[str, dict[str, Any]] = {}
+_native_exchange_codes: dict[str, dict[str, Any]] = {}
 
 _discovery_lock = threading.Lock()
 _discovery_cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -77,6 +88,7 @@ def is_oidc_enabled() -> bool:
 def build_authorization_redirect(
     request_base_url: str,
     next_path: str | None = None,
+    native_flow_id: str | None = None,
 ) -> str:
     cfg = _require_oidc_config()
     discovery = _get_discovery_document(cfg["issuer"])
@@ -95,7 +107,9 @@ def build_authorization_redirect(
             "nonce": nonce,
             "code_verifier": verifier,
             "next_path": _safe_next_path(next_path),
+            "native_flow_id": native_flow_id,
         },
+        request_base_url=request_base_url if native_flow_id else None,
     )
     params = {
         "response_type": "code",
@@ -119,46 +133,333 @@ def complete_authorization_code_flow(
     pending = _consume_pending_flow(state)
     if pending is None:
         raise OIDCAuthError("Invalid OIDC state", status_code=401)
-    discovery = _get_discovery_document(cfg["issuer"])
-    discovery_issuer = str(discovery.get("issuer") or "").strip()
-    if discovery_issuer and discovery_issuer != cfg["issuer"]:
-        raise OIDCAuthError("OIDC discovery issuer did not match the configured issuer", status_code=502)
-    token_endpoint = str(discovery.get("token_endpoint") or "").strip()
-    if not token_endpoint:
-        raise OIDCConfigError("OIDC discovery document is missing token_endpoint")
-    redirect_uri = _resolve_redirect_uri(cfg, request_base_url)
-    token_response = _post_form_json(
-        token_endpoint,
-        {
-            "grant_type": "authorization_code",
-            "client_id": cfg["client_id"],
-            "code": code,
-            "code_verifier": pending["code_verifier"],
-            "redirect_uri": redirect_uri,
-            **({"client_secret": cfg["client_secret"]} if cfg.get("client_secret") else {}),
-        },
-    )
-    id_token = str(token_response.get("id_token") or "").strip()
-    if not id_token:
-        raise OIDCAuthError("OIDC token response did not include an id_token", status_code=502)
-    claims = _validate_id_token(
-        id_token,
-        client_id=cfg["client_id"],
-        issuer=cfg["issuer"],
-        nonce=pending["nonce"],
-        jwks_uri=str(discovery.get("jwks_uri") or "").strip(),
-    )
-    _enforce_allowlist(
-        claims,
-        allow_claim=cfg.get("allow_claim"),
-        allow_values=cfg.get("allow_values") or [],
+    try:
+        discovery = _get_discovery_document(cfg["issuer"])
+        discovery_issuer = str(discovery.get("issuer") or "").strip()
+        if discovery_issuer and discovery_issuer != cfg["issuer"]:
+            raise OIDCAuthError("OIDC discovery issuer did not match the configured issuer", status_code=502)
+        token_endpoint = str(discovery.get("token_endpoint") or "").strip()
+        if not token_endpoint:
+            raise OIDCConfigError("OIDC discovery document is missing token_endpoint")
+        redirect_uri = _resolve_redirect_uri(cfg, request_base_url)
+        token_response = _post_form_json(
+            token_endpoint,
+            {
+                "grant_type": "authorization_code",
+                "client_id": cfg["client_id"],
+                "code": code,
+                "code_verifier": pending["code_verifier"],
+                "redirect_uri": redirect_uri,
+                **({"client_secret": cfg["client_secret"]} if cfg.get("client_secret") else {}),
+            },
+        )
+        id_token = str(token_response.get("id_token") or "").strip()
+        if not id_token:
+            raise OIDCAuthError("OIDC token response did not include an id_token", status_code=502)
+        claims = _validate_id_token(
+            id_token,
+            client_id=cfg["client_id"],
+            issuer=cfg["issuer"],
+            nonce=pending["nonce"],
+            jwks_uri=str(discovery.get("jwks_uri") or "").strip(),
+        )
+        _enforce_allowlist(
+            claims,
+            allow_claim=cfg.get("allow_claim"),
+            allow_values=cfg.get("allow_values") or [],
+        )
+        return {
+            "next_path": pending["next_path"],
+            "native_flow_id": pending.get("native_flow_id"),
+            "subject": str(claims.get("sub") or ""),
+            "email": str(claims.get("email") or ""),
+            "claims": claims,
+        }
+    except (OIDCAuthError, OIDCConfigError) as exc:
+        exc.native_flow_id = pending.get("native_flow_id")
+        raise
+
+
+def begin_native_authorization(
+    request_base_url: str,
+    callback_url: str,
+    client_state: str,
+    code_challenge: str,
+) -> dict[str, Any]:
+    """Create the app-bound half of an OIDC flow without exposing credentials."""
+    if not is_oidc_enabled():
+        raise OIDCConfigError("Native OIDC login is not configured")
+    origin = _normalize_server_origin(request_base_url)
+    callback = _validate_native_callback_url(callback_url)
+    state = str(client_state or "").strip()
+    challenge = str(code_challenge or "").strip()
+    if not _NATIVE_VALUE_RE.fullmatch(state):
+        raise OIDCAuthError("Invalid native OIDC state", status_code=400)
+    if not _PKCE_CHALLENGE_RE.fullmatch(challenge):
+        raise OIDCAuthError("Invalid native OIDC PKCE challenge", status_code=400)
+
+    now = time.time()
+    flow_id = secrets.token_urlsafe(24)
+    server_id = _server_identity(origin)
+    with _pending_lock:
+        _prune_native_state(now)
+        if len(_native_flows) >= _MAX_PENDING_FLOWS:
+            raise OIDCAuthError("Too many pending native OIDC flows", status_code=429)
+        _native_flows[flow_id] = {
+            "created_at": now,
+            "callback_url": callback,
+            "client_state": state,
+            "code_challenge": challenge,
+            "server_origin": origin,
+            "server_id": server_id,
+        }
+    authorization_path = "/api/auth/oidc/start?" + urllib.parse.urlencode(
+        {"native_flow": flow_id}
     )
     return {
-        "next_path": pending["next_path"],
-        "subject": str(claims.get("sub") or ""),
-        "email": str(claims.get("email") or ""),
-        "claims": claims,
+        "flow_id": flow_id,
+        "authorization_url": _native_authorization_base_url(origin) + authorization_path,
+        "server_id": server_id,
+        "expires_in": _NATIVE_FLOW_TTL_SECONDS,
     }
+
+
+def finish_native_authorization(
+    request_base_url: str,
+    flow_id: str,
+    *,
+    subject: str,
+    email: str,
+    bound_profile: str | None = None,
+) -> str:
+    """Turn a successful provider login into one short-lived app exchange code."""
+    now = time.time()
+    with _pending_lock:
+        _prune_native_state(now)
+        flow = _native_flows.pop(str(flow_id or ""), None)
+        if flow is None:
+            raise OIDCAuthError("Invalid or expired native OIDC flow", status_code=401)
+        if not _constant_time_equal(_normalize_server_origin(request_base_url), flow["server_origin"]):
+            raise OIDCAuthError("Native OIDC flow belongs to a different server", status_code=401)
+        _trim_state_map(_native_exchange_codes, _MAX_PENDING_FLOWS)
+        code = secrets.token_urlsafe(32)
+        _native_exchange_codes[code] = {
+            "created_at": now,
+            "flow_id": flow_id,
+            "client_state": flow["client_state"],
+            "code_challenge": flow["code_challenge"],
+            "server_origin": flow["server_origin"],
+            "subject": str(subject or ""),
+            "email": str(email or ""),
+            "bound_profile": bound_profile,
+        }
+
+    separator = "&" if urllib.parse.urlsplit(flow["callback_url"]).query else "?"
+    return flow["callback_url"] + separator + urllib.parse.urlencode(
+        {
+            "code": code,
+            "state": flow["client_state"],
+            "flow_id": flow_id,
+            "server_id": flow["server_id"],
+        }
+    )
+
+
+def fail_native_authorization(request_base_url: str, flow_id: str, error: str) -> str:
+    """Return a sanitized app callback for a failed provider flow."""
+    now = time.time()
+    with _pending_lock:
+        _prune_native_state(now)
+        flow = _native_flows.pop(str(flow_id or ""), None)
+    if flow is None:
+        raise OIDCAuthError("Invalid or expired native OIDC flow", status_code=401)
+    if not _constant_time_equal(_normalize_server_origin(request_base_url), flow["server_origin"]):
+        raise OIDCAuthError("Native OIDC flow belongs to a different server", status_code=401)
+    separator = "&" if urllib.parse.urlsplit(flow["callback_url"]).query else "?"
+    return flow["callback_url"] + separator + urllib.parse.urlencode(
+        {
+            "error": str(error or "authentication_failed"),
+            "state": flow["client_state"],
+            "flow_id": flow_id,
+            "server_id": flow["server_id"],
+        }
+    )
+
+
+def consume_failed_provider_authorization(state: str) -> str | None:
+    """Consume a provider-declined flow and return its native owner, if any."""
+    pending = _consume_pending_flow(str(state or ""))
+    if pending is None:
+        return None
+    return str(pending.get("native_flow_id") or "").strip() or None
+
+
+def exchange_native_authorization(
+    request_base_url: str,
+    flow_id: str,
+    code: str,
+    client_state: str,
+    code_verifier: str,
+) -> dict[str, Any]:
+    """Consume a native exchange code and return the server-side session identity."""
+    now = time.time()
+    with _pending_lock:
+        _prune_native_state(now)
+        exchange = _native_exchange_codes.pop(str(code or ""), None)
+    if exchange is None:
+        raise OIDCAuthError("Invalid or expired native OIDC exchange code", status_code=401)
+    if not _constant_time_equal(_normalize_server_origin(request_base_url), exchange["server_origin"]):
+        raise OIDCAuthError("Native OIDC exchange code belongs to a different server", status_code=401)
+    if not _constant_time_equal(str(flow_id or ""), exchange["flow_id"]):
+        raise OIDCAuthError("Native OIDC flow did not match", status_code=401)
+    if not _constant_time_equal(str(client_state or ""), exchange["client_state"]):
+        raise OIDCAuthError("Native OIDC state did not match", status_code=401)
+    verifier = str(code_verifier or "")
+    if not _PKCE_VERIFIER_RE.fullmatch(verifier):
+        raise OIDCAuthError("Native OIDC PKCE verifier did not match", status_code=401)
+    challenge = _b64u(hashlib.sha256(verifier.encode("ascii")).digest())
+    if not _constant_time_equal(challenge, exchange["code_challenge"]):
+        raise OIDCAuthError("Native OIDC PKCE verifier did not match", status_code=401)
+    return {
+        "subject": exchange["subject"],
+        "email": exchange["email"],
+        "bound_profile": exchange.get("bound_profile"),
+    }
+
+
+def cancel_native_authorization(flow_id: str, client_state: str) -> bool:
+    """Invalidate every pending phase owned by one app flow."""
+    flow_id = str(flow_id or "")
+    state = str(client_state or "")
+    if not _NATIVE_VALUE_RE.fullmatch(flow_id) or not _NATIVE_VALUE_RE.fullmatch(state):
+        return False
+    with _pending_lock:
+        flow = _native_flows.get(flow_id)
+        if flow is not None and not _constant_time_equal(state, flow["client_state"]):
+            return False
+        matching_exchanges = [
+            (code, exchange)
+            for code, exchange in _native_exchange_codes.items()
+            if _constant_time_equal(str(exchange.get("flow_id") or ""), flow_id)
+        ]
+        if any(
+            not _constant_time_equal(state, str(exchange.get("client_state") or ""))
+            for _, exchange in matching_exchanges
+        ):
+            return False
+        removed = _native_flows.pop(flow_id, None) is not None
+        for code, _ in matching_exchanges:
+            _native_exchange_codes.pop(code, None)
+            removed = True
+        for provider_state, pending in list(_pending_flows.items()):
+            native_flow_id = str(pending.get("native_flow_id") or "")
+            if native_flow_id and _constant_time_equal(native_flow_id, flow_id):
+                _pending_flows.pop(provider_state, None)
+                removed = True
+    return removed
+
+
+def _validate_native_callback_url(raw_url: str) -> str:
+    value = str(raw_url or "").strip()
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise OIDCAuthError("Invalid native OIDC callback URL", status_code=400) from exc
+    scheme = parsed.scheme.lower()
+    if (
+        not _CALLBACK_SCHEME_RE.fullmatch(scheme)
+        or scheme not in _NATIVE_CALLBACK_SCHEMES
+        or parsed.hostname != _NATIVE_CALLBACK_HOST
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise OIDCAuthError("Invalid native OIDC callback URL", status_code=400)
+    return urllib.parse.urlunsplit((scheme, parsed.netloc.lower(), "", "", ""))
+
+
+def _normalize_server_origin(raw_url: str) -> str:
+    value = str(raw_url or "").strip()
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise OIDCAuthError("Invalid native OIDC server identity", status_code=400) from exc
+    scheme = parsed.scheme.lower()
+    if (
+        scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise OIDCAuthError("Invalid native OIDC server identity", status_code=400)
+    host = parsed.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
+    default_port = (scheme == "https" and port == 443) or (scheme == "http" and port == 80)
+    return f"{scheme}://{host}{'' if port is None or default_port else f':{port}'}"
+
+
+def _native_authorization_base_url(origin: str) -> str:
+    """Preserve a configured public proxy prefix for the browser start URL."""
+    redirect_uri = str(_resolve_oidc_config().get("redirect_uri") or "").strip()
+    if not redirect_uri:
+        return origin
+    try:
+        parsed = urllib.parse.urlsplit(redirect_uri)
+    except ValueError:
+        return origin
+    callback_path = "/api/auth/oidc/callback"
+    if parsed.query or parsed.fragment or not parsed.path.endswith(callback_path):
+        return origin
+    redirect_origin = _normalize_server_origin(
+        urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    )
+    if not _constant_time_equal(redirect_origin, origin):
+        return origin
+    prefix = parsed.path[: -len(callback_path)].rstrip("/")
+    decoded_prefix = urllib.parse.unquote(prefix)
+    if (
+        not prefix
+        or "\\" in decoded_prefix
+        or any(segment in {".", ".."} for segment in decoded_prefix.split("/"))
+        or any(ord(char) < 32 or ord(char) == 127 or char.isspace() for char in decoded_prefix)
+    ):
+        return origin
+    return origin + prefix
+
+
+def _server_identity(origin: str) -> str:
+    return _b64u(hashlib.sha256(origin.encode("utf-8")).digest())
+
+
+def _constant_time_equal(left: str, right: str) -> bool:
+    return secrets.compare_digest(str(left).encode("utf-8"), str(right).encode("utf-8"))
+
+
+def _prune_native_state(now: float) -> None:
+    for flow_id, flow in list(_native_flows.items()):
+        if now - float(flow.get("created_at") or 0) > _NATIVE_FLOW_TTL_SECONDS:
+            _native_flows.pop(flow_id, None)
+    for code, exchange in list(_native_exchange_codes.items()):
+        if now - float(exchange.get("created_at") or 0) > _NATIVE_EXCHANGE_TTL_SECONDS:
+            _native_exchange_codes.pop(code, None)
+
+
+def _trim_state_map(values: dict[str, dict[str, Any]], maximum: int) -> None:
+    overflow = len(values) - maximum + 1
+    if overflow <= 0:
+        return
+    oldest = sorted(values, key=lambda key: float(values[key].get("created_at") or 0))
+    for key in oldest[:overflow]:
+        values.pop(key, None)
 
 
 def _resolve_oidc_config() -> dict[str, Any]:
@@ -312,11 +613,26 @@ def _resolve_redirect_uri(cfg: dict[str, Any], request_base_url: str) -> str:
     return request_base_url.rstrip("/") + "/api/auth/oidc/callback"
 
 
-def _store_pending_flow(state: str, payload: dict[str, Any]) -> None:
+def _store_pending_flow(
+    state: str,
+    payload: dict[str, Any],
+    *,
+    request_base_url: str | None = None,
+) -> None:
     now = time.time()
     with _pending_lock:
+        native_flow_id = str(payload.get("native_flow_id") or "")
+        if native_flow_id:
+            _prune_native_state(now)
+            flow = _native_flows.get(native_flow_id)
+            if flow is None:
+                raise OIDCAuthError("Invalid or expired native OIDC flow", status_code=401)
+            if request_base_url is None or not _constant_time_equal(
+                _normalize_server_origin(request_base_url), flow["server_origin"]
+            ):
+                raise OIDCAuthError("Native OIDC flow belongs to a different server", status_code=401)
         _prune_pending_flows(now)
-        _trim_pending_flows()
+        _trim_state_map(_pending_flows, _MAX_PENDING_FLOWS)
         _pending_flows[state] = payload
 
 
@@ -335,18 +651,6 @@ def _prune_pending_flows(now: float) -> None:
         if now - float(payload.get("created_at") or 0) > _PENDING_TTL_SECONDS
     ]
     for state in expired:
-        _pending_flows.pop(state, None)
-
-
-def _trim_pending_flows() -> None:
-    overflow = len(_pending_flows) - _MAX_PENDING_FLOWS + 1
-    if overflow <= 0:
-        return
-    oldest = sorted(
-        _pending_flows,
-        key=lambda state: float(_pending_flows[state].get("created_at") or 0),
-    )
-    for state in oldest[:overflow]:
         _pending_flows.pop(state, None)
 
 
