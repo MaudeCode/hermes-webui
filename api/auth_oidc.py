@@ -661,6 +661,8 @@ def _oidc_profile_binding(cfg: dict[str, Any], profile: str | None) -> dict[str,
     mapping_payload = {
         "issuer": str(cfg.get("issuer") or ""),
         "client_id": str(cfg.get("client_id") or ""),
+        "allow_claim": str(cfg.get("allow_claim") or ""),
+        "allow_values": sorted(str(value) for value in (cfg.get("allow_values") or [])),
         "profile_claim": str(cfg.get("profile_claim") or "sub"),
         "profile_map": cfg.get("profile_map") or {},
     }

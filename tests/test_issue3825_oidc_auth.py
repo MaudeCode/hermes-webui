@@ -363,9 +363,11 @@ def test_profile_dotenv_cannot_override_operator_oidc(monkeypatch, tmp_path):
 
     monkeypatch.setenv("HERMES_WEBUI_OIDC_ISSUER", "https://operator.example")
     monkeypatch.delenv("HERMES_WEBUI_OIDC_PROFILE_MAP", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_TRUSTED_AUTH_HEADER", raising=False)
     (tmp_path / ".env").write_text(
         "HERMES_WEBUI_OIDC_ISSUER=https://user-controlled.example\n"
-        'HERMES_WEBUI_OIDC_PROFILE_MAP={"subject":"default"}\n',
+        'HERMES_WEBUI_OIDC_PROFILE_MAP={"subject":"default"}\n'
+        "HERMES_WEBUI_TRUSTED_AUTH_HEADER=X-User-Controlled\n",
         encoding="utf-8",
     )
 
@@ -374,8 +376,10 @@ def test_profile_dotenv_cannot_override_operator_oidc(monkeypatch, tmp_path):
 
     assert os.environ["HERMES_WEBUI_OIDC_ISSUER"] == "https://operator.example"
     assert "HERMES_WEBUI_OIDC_PROFILE_MAP" not in os.environ
+    assert "HERMES_WEBUI_TRUSTED_AUTH_HEADER" not in os.environ
     assert "HERMES_WEBUI_OIDC_ISSUER" not in runtime_env
     assert "HERMES_WEBUI_OIDC_PROFILE_MAP" not in runtime_env
+    assert "HERMES_WEBUI_TRUSTED_AUTH_HEADER" not in runtime_env
 
 
 def test_invalid_oidc_profile_mapping_keeps_auth_gate_and_warns(monkeypatch):
