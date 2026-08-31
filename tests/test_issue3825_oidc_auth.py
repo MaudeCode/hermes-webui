@@ -150,6 +150,170 @@ def test_oidc_callback_exchanges_code_and_sets_existing_session_cookie(monkeypat
     assert "session-token.signature" in cookie_headers[0]
 
 
+def test_oidc_callback_binds_identity_to_profile(monkeypatch):
+    import api.auth as auth
+    import api.profiles as profiles
+    import api.routes as routes
+
+    created = {}
+    resolved_profiles = []
+
+    def complete_flow(*_args):
+        resolved_profiles.append(profiles.get_active_profile_name())
+        return {
+            "next_path": "/",
+            "subject": "issuer-user-123",
+            "email": "user@example.com",
+            "bound_profile": "user-profile",
+        }
+
+    monkeypatch.setattr(
+        "api.auth_oidc.complete_authorization_code_flow",
+        complete_flow,
+    )
+
+    def fake_create_session(**kwargs):
+        created.update(kwargs)
+        return "session-token.signature"
+
+    monkeypatch.setattr(auth, "create_session", fake_create_session)
+    monkeypatch.setattr(
+        "api.helpers.build_profile_cookie",
+        lambda profile, **kwargs: f"hermes_profile={profile}.signed",
+    )
+    monkeypatch.setattr(profiles, "_active_profile", "default")
+    profiles.set_request_profile("user-controlled-profile")
+
+    handler = RouteFakeHandler()
+    routes.handle_get(
+        handler,
+        SimpleNamespace(
+            path="/api/auth/oidc/callback",
+            query="state=state-token&code=code-token",
+        ),
+    )
+
+    assert handler.status == 302
+    assert created == {
+        "auth_type": "oidc",
+        "username": "user@example.com",
+        "bound_profile": "user-profile",
+    }
+    assert resolved_profiles == ["default"]
+    cookie_headers = handler.header_values("Set-Cookie")
+    assert len(cookie_headers) == 2
+    assert any("session-token.signature" in value for value in cookie_headers)
+    assert "hermes_profile=user-profile.signed" in cookie_headers
+
+
+def test_oidc_profile_mapping_fails_closed_for_unmapped_identity(monkeypatch):
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    cfg = {
+        "profile_claim": "email",
+        "profile_map": {"known@example.com": "known-user"},
+        "profile_map_configured": True,
+    }
+
+    with pytest.raises(OIDCAuthError, match="not assigned to a profile"):
+        auth_oidc._resolve_bound_profile(cfg, {"email": "unknown@example.com"})
+
+
+def test_oidc_profile_mapping_rejects_missing_profile(monkeypatch, tmp_path):
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCConfigError
+
+    monkeypatch.setattr(
+        "api.profiles.get_hermes_home_for_profile",
+        lambda _profile: tmp_path / "missing-profile",
+    )
+    cfg = {
+        "profile_claim": "sub",
+        "profile_map": {"issuer-user-123": "missing-profile"},
+        "profile_map_configured": True,
+    }
+
+    with pytest.raises(OIDCConfigError, match="does not exist"):
+        auth_oidc._resolve_bound_profile(cfg, {"sub": "issuer-user-123"})
+
+
+def test_oidc_profile_mapping_reads_yaml_and_environment_override(monkeypatch):
+    import api.auth_oidc as auth_oidc
+
+    monkeypatch.setattr(
+        auth_oidc,
+        "get_config",
+        lambda: {
+            "webui_oidc": {
+                "issuer": "https://issuer.example",
+                "client_id": "webui-client",
+                "allow_claim": "groups",
+                "allow_values": ["hermes-users"],
+                "profile_claim": "email",
+                "profile_map": {"yaml@example.com": "yaml-user"},
+            }
+        },
+    )
+    monkeypatch.setenv("HERMES_WEBUI_OIDC_PROFILE_CLAIM", "sub")
+    monkeypatch.setenv(
+        "HERMES_WEBUI_OIDC_PROFILE_MAP",
+        json.dumps({"issuer-user-123": "env-user"}),
+    )
+
+    cfg = auth_oidc._resolve_oidc_config()
+
+    assert cfg["profile_claim"] == "sub"
+    assert cfg["profile_map"] == {"issuer-user-123": "env-user"}
+    assert cfg["profile_map_configured"] is True
+    assert cfg["profile_map_error"] is None
+
+
+def test_invalid_oidc_profile_mapping_keeps_auth_gate_and_warns(monkeypatch):
+    import api.auth as auth
+    import api.auth_oidc as auth_oidc
+
+    config = {
+        "webui_oidc": {
+            "issuer": "https://issuer.example",
+            "client_id": "webui-client",
+            "allow_claim": "groups",
+            "allow_values": ["hermes-users"],
+            "profile_map": ["not", "an", "object"],
+        }
+    }
+    monkeypatch.setattr(auth, "get_config", lambda: config)
+    monkeypatch.setattr(auth_oidc, "get_config", lambda: config)
+
+    assert auth_oidc.is_oidc_enabled() is True
+    with pytest.raises(auth_oidc.OIDCConfigError, match="profile_map must be an object"):
+        auth_oidc._require_oidc_config()
+    assert "profile_map must be an object" in auth.get_oidc_startup_warning()
+
+
+def test_bound_oidc_session_rehydrates_missing_profile_cookie(monkeypatch):
+    import api.auth as auth
+    import api.profiles as profiles
+
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    cookie = auth.create_session(
+        auth_type="oidc",
+        username="user@example.com",
+        bound_profile="user-profile",
+    )
+    handler = RouteFakeHandler()
+    handler.headers["Cookie"] = f"{auth.COOKIE_NAME}={cookie}"
+
+    try:
+        info = auth.ensure_trusted_auth_session(handler)
+        assert info["bound_profile"] == "user-profile"
+        assert profiles.get_active_profile_name() == "user-profile"
+        assert any("hermes_profile=" in value for value in handler._pending_set_cookies)
+    finally:
+        auth.invalidate_session(cookie)
+        profiles.clear_request_profile()
+
+
 def test_oidc_callback_rejects_invalid_state_without_setting_session_cookie(monkeypatch):
     import api.routes as routes
     from api.auth_oidc import OIDCAuthError
@@ -229,6 +393,35 @@ def test_auth_status_reports_oidc_capability_without_regressing_passkey_fields(m
         "passkey_feature_flag": False,
         "auth_disabled_acknowledged": False,
     }
+
+
+def test_auth_status_reports_bound_oidc_identity(monkeypatch):
+    import api.auth as auth
+    import api.passkeys as passkeys
+    import api.routes as routes
+
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(auth, "is_oidc_auth_enabled", lambda: True)
+    monkeypatch.setattr(auth, "_passkey_feature_flag_enabled", lambda: False)
+    monkeypatch.setattr(auth, "get_password_hash", lambda: None)
+    monkeypatch.setattr(
+        auth,
+        "ensure_trusted_auth_session",
+        lambda _handler: {
+            "auth_type": "oidc",
+            "username": "user@example.com",
+            "bound_profile": "user-profile",
+        },
+    )
+    monkeypatch.setattr(passkeys, "registered_credentials", lambda: [])
+
+    handler = RouteFakeHandler()
+    routes.handle_get(handler, urlparse("http://example.com/api/auth/status"))
+
+    payload = handler.json_body()
+    assert payload["auth_type"] == "oidc"
+    assert payload["user"] == "user@example.com"
+    assert payload["bound_profile"] == "user-profile"
 
 
 def test_login_page_renders_absolute_oidc_href_when_enabled(monkeypatch):

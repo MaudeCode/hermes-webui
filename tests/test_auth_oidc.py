@@ -23,6 +23,8 @@ def _clear_oidc_environment(monkeypatch):
         "HERMES_WEBUI_OIDC_CLIENT_ID",
         "HERMES_WEBUI_OIDC_ALLOW_CLAIM",
         "HERMES_WEBUI_OIDC_ALLOW_VALUES",
+        "HERMES_WEBUI_OIDC_PROFILE_CLAIM",
+        "HERMES_WEBUI_OIDC_PROFILE_MAP",
     ):
         monkeypatch.delenv(name, raising=False)
 

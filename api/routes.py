@@ -13662,7 +13662,9 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/auth/oidc/start":
         from api.auth_oidc import OIDCAuthError, OIDCConfigError, build_authorization_redirect
+        from api.profiles import clear_request_profile
 
+        clear_request_profile()
         next_path = _safe_login_redirect_path(
             parse_qs(parsed.query or "").get("next", [""])[0]
         )
@@ -13685,7 +13687,7 @@ def handle_get(handler, parsed) -> bool:
         return _redirect_no_store(handler, location)
 
     if parsed.path == "/api/auth/oidc/callback":
-        from api.auth import create_session, set_auth_cookie
+        from api.auth import create_session, invalidate_session, set_auth_cookie
         from api.auth_oidc import (
             OIDCAuthError,
             OIDCConfigError,
@@ -13694,7 +13696,10 @@ def handle_get(handler, parsed) -> bool:
             fail_native_authorization,
             finish_native_authorization,
         )
+        from api.helpers import build_profile_cookie
+        from api.profiles import clear_request_profile
 
+        clear_request_profile()
         query = parse_qs(parsed.query or "")
         state = str(query.get("state", [""])[0] or "").strip()
         error = str(query.get("error", [""])[0] or "").strip()
@@ -13755,7 +13760,25 @@ def handle_get(handler, parsed) -> bool:
                 return j(handler, {"error": str(exc)}, status=exc.status_code)
             return _redirect_no_store(handler, location)
 
-        cookie_val = create_session()
+        bound_profile = str(result.get("bound_profile") or "").strip() or None
+        if bound_profile:
+            username = str(result.get("email") or result.get("subject") or "").strip()
+            cookie_val = create_session(
+                auth_type="oidc",
+                username=username,
+                bound_profile=bound_profile,
+            )
+            try:
+                profile_cookie = build_profile_cookie(
+                    bound_profile,
+                    session_cookie_value=cookie_val,
+                )
+            except RuntimeError:
+                invalidate_session(cookie_val)
+                return j(handler, {"error": "Failed to establish OIDC profile session"}, status=500)
+        else:
+            cookie_val = create_session()
+            profile_cookie = None
         handler.send_response(302)
         handler.send_header(
             "Location",
@@ -13764,6 +13787,8 @@ def handle_get(handler, parsed) -> bool:
         handler.send_header("Cache-Control", "no-store")
         _security_headers(handler)
         set_auth_cookie(handler, cookie_val)
+        if profile_cookie:
+            handler.send_header("Set-Cookie", profile_cookie)
         handler.send_header("Content-Length", "0")
         handler.end_headers()
         return True
@@ -13803,7 +13828,7 @@ def handle_get(handler, parsed) -> bool:
         }
         if is_trusted_auth_enabled() or (session_info and session_info.get("auth_type") == "trusted"):
             payload["trusted_auth_enabled"] = True
-        if session_info and session_info.get("auth_type") == "trusted":
+        if session_info and session_info.get("auth_type") in {"trusted", "oidc"}:
             payload["auth_type"] = session_info.get("auth_type")
             payload["user"] = session_info.get("username")
             payload["bound_profile"] = session_info.get("bound_profile")

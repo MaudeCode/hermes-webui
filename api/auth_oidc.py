@@ -168,11 +168,13 @@ def complete_authorization_code_flow(
             allow_claim=cfg.get("allow_claim"),
             allow_values=cfg.get("allow_values") or [],
         )
+        bound_profile = _resolve_bound_profile(cfg, claims)
         return {
             "next_path": pending["next_path"],
             "native_flow_id": pending.get("native_flow_id"),
             "subject": str(claims.get("sub") or ""),
             "email": str(claims.get("email") or ""),
+            "bound_profile": bound_profile,
             "claims": claims,
         }
     except (OIDCAuthError, OIDCConfigError) as exc:
@@ -482,6 +484,9 @@ def _resolve_oidc_config() -> dict[str, Any]:
     trusted_private_hosts = _normalize_trusted_private_hosts(
         pick("trusted_private_hosts", "HERMES_WEBUI_OIDC_TRUSTED_PRIVATE_HOSTS")
     )
+    profile_map, profile_map_error, profile_map_configured = _normalize_profile_map(
+        pick("profile_map", "HERMES_WEBUI_OIDC_PROFILE_MAP")
+    )
     if (
         raw_allow is not None
         and not isinstance(raw_allow, (list, tuple, set))
@@ -500,6 +505,10 @@ def _resolve_oidc_config() -> dict[str, Any]:
         "allow_claim": str(pick("allow_claim", "HERMES_WEBUI_OIDC_ALLOW_CLAIM") or "").strip(),
         "allow_values": allow_values,
         "trusted_private_hosts": trusted_private_hosts,
+        "profile_claim": str(pick("profile_claim", "HERMES_WEBUI_OIDC_PROFILE_CLAIM") or "sub").strip(),
+        "profile_map": profile_map,
+        "profile_map_configured": profile_map_configured,
+        "profile_map_error": profile_map_error,
     }
 
 
@@ -511,6 +520,8 @@ def _require_oidc_config() -> dict[str, Any]:
         raise OIDCConfigError(
             "Native OIDC login requires webui_oidc.allow_claim and allow_values"
         )
+    if cfg.get("profile_map_error"):
+        raise OIDCConfigError(str(cfg["profile_map_error"]))
     return cfg
 
 
@@ -578,6 +589,46 @@ def _normalize_trusted_private_hosts(raw: Any) -> list[str]:
             seen.add(hostname)
             trusted.append(hostname)
     return trusted
+
+
+def _normalize_profile_map(raw: Any) -> tuple[dict[str, str] | None, str | None, bool]:
+    if raw is None or raw == "":
+        return None, None, False
+    value = raw
+    if isinstance(raw, str):
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError:
+            return None, "webui_oidc.profile_map must be a JSON object", True
+    if not isinstance(value, dict):
+        return None, "webui_oidc.profile_map must be an object", True
+    mapping = {}
+    for claim_value, profile in value.items():
+        claim_value = str(claim_value or "").strip()
+        profile = str(profile or "").strip()
+        if not claim_value or not profile:
+            return None, "webui_oidc.profile_map entries must have non-empty claim values and profiles", True
+        mapping[claim_value] = profile
+    return mapping, None, True
+
+
+def _resolve_bound_profile(cfg: dict[str, Any], claims: dict[str, Any]) -> str | None:
+    if not cfg.get("profile_map_configured"):
+        return None
+    claim_value = _get_claim_path(claims, str(cfg.get("profile_claim") or "sub"))
+    if isinstance(claim_value, (dict, list, tuple, set)):
+        raise OIDCAuthError("OIDC identity is not assigned to a profile", status_code=403)
+    profile = (cfg.get("profile_map") or {}).get(str(claim_value or "").strip())
+    if not profile:
+        raise OIDCAuthError("OIDC identity is not assigned to a profile", status_code=403)
+
+    from api.profiles import _PROFILE_ID_RE, get_hermes_home_for_profile
+
+    if profile != "default" and not _PROFILE_ID_RE.fullmatch(profile):
+        raise OIDCConfigError(f"OIDC profile mapping targets invalid profile {profile!r}")
+    if not get_hermes_home_for_profile(profile).is_dir():
+        raise OIDCConfigError(f"OIDC profile mapping target {profile!r} does not exist")
+    return profile
 
 
 def _normalize_text_list(raw: Any) -> list[str]:

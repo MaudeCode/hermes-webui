@@ -527,7 +527,18 @@ def get_oidc_startup_warning() -> str | None:
         logger.debug("Failed to normalize OIDC allow_values", exc_info=True)
     allow_values = bool(normalized_allow_values)
 
-    if not any((issuer, client_id, allow_claim, allow_values)):
+    raw_profile_map_env = os.getenv("HERMES_WEBUI_OIDC_PROFILE_MAP")
+    raw_profile_map = raw_profile_map_env if raw_profile_map_env is not None else raw.get("profile_map")
+    profile_map_configured = raw_profile_map is not None and raw_profile_map != ""
+    profile_map_error = None
+    try:
+        from api import auth_oidc
+
+        _, profile_map_error, profile_map_configured = auth_oidc._normalize_profile_map(raw_profile_map)
+    except Exception:
+        logger.debug("Failed to normalize OIDC profile_map", exc_info=True)
+
+    if not any((issuer, client_id, allow_claim, allow_values, profile_map_configured)):
         return None
 
     warnings = []
@@ -547,6 +558,8 @@ def get_oidc_startup_warning() -> str | None:
             "Native OIDC login is only partially configured; missing "
             f"{joined}. The WebUI will not enable OIDC auth until all four fields are set."
         )
+    if profile_map_error:
+        warnings.append(profile_map_error)
 
     # Detect whitespace-only allow_values scalar that may contain multiple intended values.
     # Runs unconditionally so the warning reaches startup even when other auth methods
@@ -873,7 +886,7 @@ def reset_trusted_auth_request_state(handler) -> None:
             pass
 
 
-def _apply_trusted_session_profile(handler, bound_profile: str | None, cookie_value: str) -> None:
+def _apply_bound_session_profile(handler, bound_profile: str | None, cookie_value: str) -> None:
     if bound_profile is None:
         return
     from api.helpers import get_profile_cookie
@@ -890,6 +903,11 @@ def ensure_trusted_auth_session(handler) -> dict | None:
     cookie_value = parse_cookie(handler)
     info = get_session_info(cookie_value) if cookie_value and verify_session(cookie_value) else None
     if info and info.get('auth_type') != 'trusted':
+        _apply_bound_session_profile(
+            handler,
+            str(info.get('bound_profile') or '').strip() or None,
+            cookie_value,
+        )
         return _remember_trusted_auth_session(handler, info)
     if not is_trusted_auth_enabled():
         if info:
@@ -911,7 +929,7 @@ def ensure_trusted_auth_session(handler) -> dict | None:
         return _remember_trusted_auth_session(handler, None)
     bound_profile = _trusted_auth_bound_profile(handler)
     if info and info.get('username') == username and info.get('bound_profile') == bound_profile:
-        _apply_trusted_session_profile(handler, bound_profile, cookie_value)
+        _apply_bound_session_profile(handler, bound_profile, cookie_value)
         return _remember_trusted_auth_session(handler, info, cookie_value)
     if info:
         invalidate_session(cookie_value)
@@ -921,7 +939,7 @@ def ensure_trusted_auth_session(handler) -> dict | None:
         bound_profile=bound_profile,
     )
     _queue_pending_cookie(handler, _auth_cookie_header(cookie_value, handler))
-    _apply_trusted_session_profile(handler, bound_profile, cookie_value)
+    _apply_bound_session_profile(handler, bound_profile, cookie_value)
     info = get_session_info(cookie_value)
     return _remember_trusted_auth_session(handler, info, cookie_value)
 
