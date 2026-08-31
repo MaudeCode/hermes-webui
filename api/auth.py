@@ -16,7 +16,7 @@ import threading
 import time
 from pathlib import Path
 
-from api.config import STATE_DIR, get_config, load_settings
+from api.config import STATE_DIR, load_settings
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,26 @@ PUBLIC_PATHS = frozenset({
     '/share',
     '/manifest.json', '/manifest.webmanifest',
     '/session/manifest.json', '/session/manifest.webmanifest',
+})
+
+OPERATOR_ONLY_PATHS = frozenset({
+    '/api/shutdown',
+    '/api/health/restart',
+    '/api/updates/apply',
+    '/api/updates/force',
+    '/api/updates/clear_lock',
+    '/api/extensions/toggle',
+    '/api/extensions/sidecar-proxy-consent',
+    '/api/extensions/install',
+    '/api/extensions/uninstall',
+    '/api/admin/reload',
+    '/api/talaria/relay/pair',
+    '/api/profile/create',
+    '/api/profile/delete',
+    '/api/auth/passkey/register/options',
+    '/api/auth/passkey/register',
+    '/api/auth/passkey/delete',
+    '/api/auth/passkeys',
 })
 
 COOKIE_NAME = 'hermes_session'
@@ -456,9 +476,9 @@ def _passkey_feature_flag_enabled() -> bool:
     if env_value:
         return env_value.strip().lower() in {"1", "true", "yes", "on"}
     try:
-        from api.config import get_config
+        from api.auth_oidc import _load_operator_config
 
-        cfg = get_config()
+        cfg = _load_operator_config()
         if isinstance(cfg, dict):
             raw = cfg.get("webui_passkey_enabled")
             if isinstance(raw, bool):
@@ -498,7 +518,9 @@ def get_oidc_startup_warning() -> str | None:
     """Return a startup warning when OIDC auth is only partially configured,
     or when allow_values uses whitespace that is no longer a separator."""
     try:
-        cfg = get_config()
+        from api.auth_oidc import _load_operator_config
+
+        cfg = _load_operator_config()
         raw = cfg.get("webui_oidc") if isinstance(cfg, dict) else {}
         if not isinstance(raw, dict):
             raw = {}
@@ -527,7 +549,18 @@ def get_oidc_startup_warning() -> str | None:
         logger.debug("Failed to normalize OIDC allow_values", exc_info=True)
     allow_values = bool(normalized_allow_values)
 
-    if not any((issuer, client_id, allow_claim, allow_values)):
+    raw_profile_map_env = os.getenv("HERMES_WEBUI_OIDC_PROFILE_MAP")
+    raw_profile_map = raw_profile_map_env if raw_profile_map_env is not None else raw.get("profile_map")
+    profile_map_configured = raw_profile_map is not None and raw_profile_map != ""
+    profile_map_error = None
+    try:
+        from api import auth_oidc
+
+        _, profile_map_error, profile_map_configured = auth_oidc._normalize_profile_map(raw_profile_map)
+    except Exception:
+        logger.debug("Failed to normalize OIDC profile_map", exc_info=True)
+
+    if not any((issuer, client_id, allow_claim, allow_values, profile_map_configured)):
         return None
 
     warnings = []
@@ -547,6 +580,8 @@ def get_oidc_startup_warning() -> str | None:
             "Native OIDC login is only partially configured; missing "
             f"{joined}. The WebUI will not enable OIDC auth until all four fields are set."
         )
+    if profile_map_error:
+        warnings.append(profile_map_error)
 
     # Detect whitespace-only allow_values scalar that may contain multiple intended values.
     # Runs unconditionally so the warning reaches startup even when other auth methods
@@ -603,18 +638,27 @@ def verify_password(plain: str) -> bool:
     return False
 
 
-def create_session(*, auth_type: str | None = None, username: str | None = None, bound_profile: str | None = None) -> str:
+def create_session(
+    *,
+    auth_type: str | None = None,
+    username: str | None = None,
+    bound_profile: str | None = None,
+    oidc_binding: dict[str, str] | None = None,
+) -> str:
     """Create a new auth session. Returns signed cookie value."""
     token = secrets.token_hex(32)
     expiry = time.time() + _resolve_session_ttl()
     record: float | dict
-    if any(value is not None for value in (auth_type, username, bound_profile)):
+    if any(value is not None for value in (auth_type, username, bound_profile, oidc_binding)):
         record = {
             'expiry': expiry,
             'auth_type': auth_type,
             'username': username,
             'bound_profile': bound_profile,
         }
+        if oidc_binding:
+            record['oidc_mapping_fingerprint'] = oidc_binding.get('mapping_fingerprint')
+            record['oidc_profile_identity'] = oidc_binding.get('profile_identity')
     else:
         record = expiry
     with _SESSIONS_LOCK:
@@ -873,7 +917,7 @@ def reset_trusted_auth_request_state(handler) -> None:
             pass
 
 
-def _apply_trusted_session_profile(handler, bound_profile: str | None, cookie_value: str) -> None:
+def _apply_bound_session_profile(handler, bound_profile: str | None, cookie_value: str) -> None:
     if bound_profile is None:
         return
     from api.helpers import get_profile_cookie
@@ -890,6 +934,18 @@ def ensure_trusted_auth_session(handler) -> dict | None:
     cookie_value = parse_cookie(handler)
     info = get_session_info(cookie_value) if cookie_value and verify_session(cookie_value) else None
     if info and info.get('auth_type') != 'trusted':
+        if info.get('auth_type') == 'oidc' and info.get('bound_profile'):
+            from api.auth_oidc import oidc_session_binding_is_current
+
+            if not oidc_session_binding_is_current(info):
+                invalidate_session(cookie_value)
+                handler._trusted_auth_session_rejected = True
+                return _remember_trusted_auth_session(handler, None)
+        _apply_bound_session_profile(
+            handler,
+            str(info.get('bound_profile') or '').strip() or None,
+            cookie_value,
+        )
         return _remember_trusted_auth_session(handler, info)
     if not is_trusted_auth_enabled():
         if info:
@@ -911,7 +967,7 @@ def ensure_trusted_auth_session(handler) -> dict | None:
         return _remember_trusted_auth_session(handler, None)
     bound_profile = _trusted_auth_bound_profile(handler)
     if info and info.get('username') == username and info.get('bound_profile') == bound_profile:
-        _apply_trusted_session_profile(handler, bound_profile, cookie_value)
+        _apply_bound_session_profile(handler, bound_profile, cookie_value)
         return _remember_trusted_auth_session(handler, info, cookie_value)
     if info:
         invalidate_session(cookie_value)
@@ -921,7 +977,7 @@ def ensure_trusted_auth_session(handler) -> dict | None:
         bound_profile=bound_profile,
     )
     _queue_pending_cookie(handler, _auth_cookie_header(cookie_value, handler))
-    _apply_trusted_session_profile(handler, bound_profile, cookie_value)
+    _apply_bound_session_profile(handler, bound_profile, cookie_value)
     info = get_session_info(cookie_value)
     return _remember_trusted_auth_session(handler, info, cookie_value)
 
@@ -1105,6 +1161,15 @@ def check_auth(handler, parsed) -> bool:
         return False
     session_info = ensure_trusted_auth_session(handler)
     if session_info:
+        bound_profile = str(session_info.get('bound_profile') or '').strip() or None
+        if bound_profile and parsed.path in OPERATOR_ONLY_PATHS:
+            body = b'{"error":"Owner session required"}'
+            handler.send_response(403)
+            handler.send_header('Content-Type', 'application/json')
+            handler.send_header('Content-Length', str(len(body)))
+            handler.end_headers()
+            handler.wfile.write(body)
+            return False
         if not trusted_session_allows_active_profile(session_info):
             if parsed.path.startswith('/api/'):
                 body = b'{"error":"Profile access forbidden"}'

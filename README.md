@@ -273,6 +273,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Optional passkeys/WebAuthn -- register from Settings -> System after signing in with a password; the login page only shows passkey sign-in after at least one passkey exists
 - After registering at least one passkey, Settings -> System can remove the password and keep passkey-only sign-in enabled. Password auth remains the bootstrap/recovery path until you choose to go passwordless; passkeys are same-origin and stored locally in the WebUI state directory
 - Optional native OIDC login for WebUI sessions -- configure `webui_oidc.issuer`, `client_id`, `allow_claim`, and `allow_values` in `config.yaml`, or set the matching `HERMES_WEBUI_OIDC_*` environment variables. OIDC stays disabled until all four are present, and startup prints a warning if the config is partial. Self-hosted issuers that resolve to private addresses require an exact hostname in `webui_oidc.trusted_private_hosts` or `HERMES_WEBUI_OIDC_TRUSTED_PRIVATE_HOSTS`; IP literals and wildcards are ignored.
+- Native OIDC can bind each identity to an existing Hermes profile. Set `profile_claim` and `profile_map`; mapped sessions cannot switch to another profile, and an unmapped identity is denied. Omitting `profile_map` preserves the existing single-owner OIDC behavior.
 - Native apps can use the state-, server-, and PKCE-bound OIDC handoff described in [`docs/native-oidc-auth.md`](docs/native-oidc-auth.md). It exchanges a short-lived single-use code for the normal HttpOnly WebUI session cookie; no cookie or OIDC token enters the app callback URL.
 - Native OIDC stores pending flow state in process memory, so the shipped single-process server works. Multi-process deployments require shared pending state with atomic consume semantics, or deterministic routing that sends native start, browser start and callback, and app exchange to the same process. Ordinary cookie affinity alone is insufficient because the app and external browser are separate clients before they share a cookie.
 - Signed HMAC HTTP-only cookie with 24h TTL
@@ -280,6 +281,22 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Security headers on all responses (X-Content-Type-Options, X-Frame-Options, Referrer-Policy)
 - 20MB POST body size limit
 - CDN resources pinned with SRI integrity hashes
+
+Example profile-bound OIDC configuration:
+
+```yaml
+webui_oidc:
+  issuer: https://idp.example.com
+  client_id: hermes-webui
+  allow_claim: groups
+  allow_values: [hermes-users]
+  profile_claim: sub
+  profile_map:
+    synthetic-user-1: alice
+    synthetic-user-2: bob
+```
+
+Create the named Hermes profiles and any owner recovery password or passkey before enabling the map. Claim values match exactly; `sub` is the default and is preferred over mutable claims such as email. A configured map fails closed when the claim is absent, unmapped, malformed, or points to a profile that does not exist. Changing the map, deleting the profile, or recreating its directory revokes existing mapped sessions. Password and passkey logins remain unbound owner sessions; profile-bound users cannot manage owner credentials, profiles, extensions, updates, or server lifecycle. Profile `.env` files cannot override operator authentication variables.
 
 ### Themes
 - Appearance is split into two axes: Theme (`system`, `dark`, `light`) and Skin

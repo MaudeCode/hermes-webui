@@ -13662,7 +13662,9 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/auth/oidc/start":
         from api.auth_oidc import OIDCAuthError, OIDCConfigError, build_authorization_redirect
+        from api.profiles import clear_request_profile
 
+        clear_request_profile()
         next_path = _safe_login_redirect_path(
             parse_qs(parsed.query or "").get("next", [""])[0]
         )
@@ -13685,7 +13687,7 @@ def handle_get(handler, parsed) -> bool:
         return _redirect_no_store(handler, location)
 
     if parsed.path == "/api/auth/oidc/callback":
-        from api.auth import create_session, set_auth_cookie
+        from api.auth import create_session, invalidate_session, set_auth_cookie
         from api.auth_oidc import (
             OIDCAuthError,
             OIDCConfigError,
@@ -13694,7 +13696,10 @@ def handle_get(handler, parsed) -> bool:
             fail_native_authorization,
             finish_native_authorization,
         )
+        from api.helpers import build_profile_cookie
+        from api.profiles import clear_request_profile
 
+        clear_request_profile()
         query = parse_qs(parsed.query or "")
         state = str(query.get("state", [""])[0] or "").strip()
         error = str(query.get("error", [""])[0] or "").strip()
@@ -13750,12 +13755,32 @@ def handle_get(handler, parsed) -> bool:
                     subject=str(result.get("subject") or ""),
                     email=str(result.get("email") or ""),
                     bound_profile=result.get("bound_profile"),
+                    oidc_binding=result.get("oidc_binding"),
                 )
             except OIDCAuthError as exc:
                 return j(handler, {"error": str(exc)}, status=exc.status_code)
             return _redirect_no_store(handler, location)
 
-        cookie_val = create_session()
+        bound_profile = str(result.get("bound_profile") or "").strip() or None
+        if bound_profile:
+            username = str(result.get("email") or result.get("subject") or "").strip()
+            cookie_val = create_session(
+                auth_type="oidc",
+                username=username,
+                bound_profile=bound_profile,
+                oidc_binding=result.get("oidc_binding"),
+            )
+            try:
+                profile_cookie = build_profile_cookie(
+                    bound_profile,
+                    session_cookie_value=cookie_val,
+                )
+            except RuntimeError:
+                invalidate_session(cookie_val)
+                return j(handler, {"error": "Failed to establish OIDC profile session"}, status=500)
+        else:
+            cookie_val = create_session()
+            profile_cookie = None
         handler.send_response(302)
         handler.send_header(
             "Location",
@@ -13764,6 +13789,8 @@ def handle_get(handler, parsed) -> bool:
         handler.send_header("Cache-Control", "no-store")
         _security_headers(handler)
         set_auth_cookie(handler, cookie_val)
+        if profile_cookie:
+            handler.send_header("Set-Cookie", profile_cookie)
         handler.send_header("Content-Length", "0")
         handler.end_headers()
         return True
@@ -13803,7 +13830,7 @@ def handle_get(handler, parsed) -> bool:
         }
         if is_trusted_auth_enabled() or (session_info and session_info.get("auth_type") == "trusted"):
             payload["trusted_auth_enabled"] = True
-        if session_info and session_info.get("auth_type") == "trusted":
+        if session_info and session_info.get("auth_type") in {"trusted", "oidc"}:
             payload["auth_type"] = session_info.get("auth_type")
             payload["user"] = session_info.get("username")
             payload["bound_profile"] = session_info.get("bound_profile")
@@ -15681,13 +15708,18 @@ def handle_get(handler, parsed) -> bool:
 
 # ── POST auth helpers
 
-def _require_passkey_registration_auth(handler) -> tuple[bool, str, int]:
+def _request_bound_profile(handler) -> str | None:
+    from api.auth import parse_cookie, session_bound_profile
+
+    return session_bound_profile(parse_cookie(handler))
+
+
+def _require_passkey_management_auth(handler) -> tuple[bool, str, int]:
     """Require auth, or the existing local-only first-run bootstrap gate.
 
-    Registering additional passkeys is an auth-factor enrollment action and
-    requires a valid WebUI session.  The first passkey can still bootstrap a
-    passkey-only instance, but only through the same local/private-network
-    onboarding gate used for first password setup.
+    Managing passkeys requires a valid unbound owner session. The first passkey
+    can still bootstrap a passkey-only instance, but only through the same
+    local/private-network onboarding gate used for first password setup.
     """
     from api.auth import is_auth_enabled, parse_cookie, verify_session
 
@@ -15699,6 +15731,8 @@ def _require_passkey_registration_auth(handler) -> tuple[bool, str, int]:
     cookie_val = parse_cookie(handler)
     if not cookie_val or not verify_session(cookie_val):
         return False, "Authentication required", 401
+    if _request_bound_profile(handler):
+        return False, "Profile-bound sessions cannot manage owner authentication credentials", 403
     return True, "", 200
 
 def _validate_session_toolsets_shape(toolsets):
@@ -17660,6 +17694,8 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e), 409)
 
     if parsed.path == "/api/profile/create":
+        if _request_bound_profile(handler):
+            return bad(handler, "Profile-bound sessions cannot manage profiles", 403)
         name = body.get("name", "").strip()
         if not name:
             return bad(handler, "name is required")
@@ -17700,6 +17736,8 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
 
     if parsed.path == "/api/profile/delete":
+        if _request_bound_profile(handler):
+            return bad(handler, "Profile-bound sessions cannot manage profiles", 403)
         name = body.get("name", "").strip()
         if not name:
             return bad(handler, "name is required")
@@ -17743,6 +17781,13 @@ def handle_post(handler, parsed) -> bool:
         requested_clear_password = bool(body.get("_clear_password") or requested_passwordless)
         if requested_passwordless:
             body["_clear_password"] = True
+
+        if (requested_password or requested_clear_password) and _request_bound_profile(handler):
+            return bad(
+                handler,
+                "Profile-bound sessions cannot manage owner authentication credentials",
+                403,
+            )
 
         current_password = body.pop("_current_password", None)
 
@@ -18502,6 +18547,7 @@ def handle_post(handler, parsed) -> bool:
             auth_type="oidc",
             username=str(identity.get("email") or identity.get("subject") or ""),
             bound_profile=identity.get("bound_profile"),
+            oidc_binding=identity.get("oidc_binding"),
         )
         response_body = json.dumps({"ok": True}).encode()
         handler.send_response(200)
@@ -18612,7 +18658,7 @@ def handle_post(handler, parsed) -> bool:
 
         if not _passkey_feature_flag_enabled():
             return j(handler, {"error": "Passkey support is disabled."}, status=404)
-        ok, error, status = _require_passkey_registration_auth(handler)
+        ok, error, status = _require_passkey_management_auth(handler)
         if not ok:
             return j(handler, {"error": error}, status=status)
         try:
@@ -18628,7 +18674,7 @@ def handle_post(handler, parsed) -> bool:
 
         if not _passkey_feature_flag_enabled():
             return j(handler, {"error": "Passkey support is disabled."}, status=404)
-        ok, error, status = _require_passkey_registration_auth(handler)
+        ok, error, status = _require_passkey_management_auth(handler)
         if not ok:
             return j(handler, {"error": error}, status=status)
         try:
@@ -18644,6 +18690,9 @@ def handle_post(handler, parsed) -> bool:
 
         if not _passkey_feature_flag_enabled():
             return j(handler, {"error": "Passkey support is disabled."}, status=404)
+        ok, error, status = _require_passkey_management_auth(handler)
+        if not ok:
+            return j(handler, {"error": error}, status=status)
         try:
             credential_id = str(body.get("id") or "")
             creds = registered_credentials()
