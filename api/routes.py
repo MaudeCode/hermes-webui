@@ -15706,15 +15706,14 @@ def handle_get(handler, parsed) -> bool:
 
 # ── POST auth helpers
 
-def _require_passkey_registration_auth(handler) -> tuple[bool, str, int]:
+def _require_passkey_management_auth(handler) -> tuple[bool, str, int]:
     """Require auth, or the existing local-only first-run bootstrap gate.
 
-    Registering additional passkeys is an auth-factor enrollment action and
-    requires a valid WebUI session.  The first passkey can still bootstrap a
-    passkey-only instance, but only through the same local/private-network
-    onboarding gate used for first password setup.
+    Managing passkeys requires a valid unbound owner session. The first passkey
+    can still bootstrap a passkey-only instance, but only through the same
+    local/private-network onboarding gate used for first password setup.
     """
-    from api.auth import is_auth_enabled, parse_cookie, verify_session
+    from api.auth import is_auth_enabled, parse_cookie, session_bound_profile, verify_session
 
     auth_enabled = is_auth_enabled()
     if not auth_enabled:
@@ -15724,6 +15723,8 @@ def _require_passkey_registration_auth(handler) -> tuple[bool, str, int]:
     cookie_val = parse_cookie(handler)
     if not cookie_val or not verify_session(cookie_val):
         return False, "Authentication required", 401
+    if session_bound_profile(cookie_val):
+        return False, "Profile-bound sessions cannot manage owner authentication credentials", 403
     return True, "", 200
 
 def _validate_session_toolsets_shape(toolsets):
@@ -17748,6 +17749,7 @@ def handle_post(handler, parsed) -> bool:
             get_password_hash,
             is_auth_enabled,
             parse_cookie,
+            session_bound_profile,
             set_auth_cookie,
             verify_password,
             verify_session,
@@ -17768,6 +17770,13 @@ def handle_post(handler, parsed) -> bool:
         requested_clear_password = bool(body.get("_clear_password") or requested_passwordless)
         if requested_passwordless:
             body["_clear_password"] = True
+
+        if (requested_password or requested_clear_password) and session_bound_profile(current_cookie):
+            return bad(
+                handler,
+                "Profile-bound sessions cannot manage owner authentication credentials",
+                403,
+            )
 
         current_password = body.pop("_current_password", None)
 
@@ -18637,7 +18646,7 @@ def handle_post(handler, parsed) -> bool:
 
         if not _passkey_feature_flag_enabled():
             return j(handler, {"error": "Passkey support is disabled."}, status=404)
-        ok, error, status = _require_passkey_registration_auth(handler)
+        ok, error, status = _require_passkey_management_auth(handler)
         if not ok:
             return j(handler, {"error": error}, status=status)
         try:
@@ -18653,7 +18662,7 @@ def handle_post(handler, parsed) -> bool:
 
         if not _passkey_feature_flag_enabled():
             return j(handler, {"error": "Passkey support is disabled."}, status=404)
-        ok, error, status = _require_passkey_registration_auth(handler)
+        ok, error, status = _require_passkey_management_auth(handler)
         if not ok:
             return j(handler, {"error": error}, status=status)
         try:
@@ -18669,6 +18678,9 @@ def handle_post(handler, parsed) -> bool:
 
         if not _passkey_feature_flag_enabled():
             return j(handler, {"error": "Passkey support is disabled."}, status=404)
+        ok, error, status = _require_passkey_management_auth(handler)
+        if not ok:
+            return j(handler, {"error": error}, status=status)
         try:
             credential_id = str(body.get("id") or "")
             creds = registered_credentials()

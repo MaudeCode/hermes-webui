@@ -175,6 +175,28 @@ class TestFirstTimePasswordNoCurrentRequired:
         payload = handler.json_body()
         assert payload.get("auth_enabled") is False
 
+    def test_profile_bound_oidc_session_cannot_create_owner_password(self, monkeypatch):
+        import api.auth as auth
+        import api.routes as routes
+
+        monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+        monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+        cookie = auth.create_session(
+            auth_type="oidc",
+            username="user@example.com",
+            bound_profile="user-profile",
+        )
+        try:
+            handler = _post_settings(
+                {"_set_password": "owner-password"},
+                f"{auth.COOKIE_NAME}={cookie}",
+            )
+            assert handler.status == 403
+            assert "profile-bound" in handler.json_body()["error"].lower()
+        finally:
+            auth.invalidate_session(cookie)
+            _clear_password_raw()
+
 
 class TestEnvVarPasswordLockStillRejects:
     def test_env_var_lock_rejects_password_change(self):

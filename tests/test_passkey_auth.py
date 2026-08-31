@@ -331,6 +331,37 @@ def test_passkey_registration_requires_valid_session_when_auth_is_enabled(monkey
         assert json.loads(handler.wfile.getvalue())["error"] == "Authentication required"
 
 
+def test_passkey_registration_rejects_profile_bound_oidc_session(monkeypatch):
+    import api.auth as auth
+    import api.passkeys as passkeys
+    import api.routes as routes
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(auth, "_passkey_feature_flag_enabled", lambda: True)
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(
+        passkeys,
+        "registration_options",
+        lambda _handler: (_ for _ in ()).throw(
+            AssertionError("profile-bound sessions must not enroll owner credentials")
+        ),
+    )
+    cookie = auth.create_session(
+        auth_type="oidc",
+        username="user@example.com",
+        bound_profile="user-profile",
+    )
+    handler = RouteFakeHandler()
+    handler.headers["Cookie"] = f"{auth.COOKIE_NAME}={cookie}"
+
+    try:
+        routes.handle_post(handler, SimpleNamespace(path="/api/auth/passkey/register/options"))
+        assert handler.status == 403
+        assert "profile-bound" in json.loads(handler.wfile.getvalue())["error"].lower()
+    finally:
+        auth.invalidate_session(cookie)
+
+
 def test_auth_status_reports_passkey_availability_source_contract():
     src = open("api/routes.py", encoding="utf-8").read()
     assert '"passkeys_enabled"' in src
