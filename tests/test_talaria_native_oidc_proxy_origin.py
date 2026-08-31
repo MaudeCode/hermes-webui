@@ -149,6 +149,29 @@ def test_native_start_uses_the_trusted_public_origin_for_url_and_server_id(monke
     assert result["server_id"] == auth_oidc._server_identity("https://public.example")
 
 
+def test_native_start_preserves_configured_reverse_proxy_subpath(monkeypatch):
+    import api.auth_oidc as auth_oidc
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        auth_oidc,
+        "_resolve_oidc_config",
+        lambda: {
+            "redirect_uri": "https://public.example/hermes/api/auth/oidc/callback"
+        },
+    )
+    handler = _native_start_handler("203.0.113.30")
+
+    routes.handle_post(handler, SimpleNamespace(path="/api/auth/oidc/native/start"))
+
+    result = handler.json_body()
+    assert handler.status == 200
+    assert result["authorization_url"].startswith(
+        "https://public.example/hermes/api/auth/oidc/start?"
+    )
+    assert result["server_id"] == auth_oidc._server_identity("https://public.example")
+
+
 def _native_start_handler(client_ip):
     verifier = base64.urlsafe_b64encode(hashlib.sha256(b"rate-limit").digest()).decode().rstrip("=")
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")

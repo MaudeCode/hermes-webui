@@ -218,7 +218,7 @@ def begin_native_authorization(
     )
     return {
         "flow_id": flow_id,
-        "authorization_url": origin + authorization_path,
+        "authorization_url": _native_authorization_base_url(origin) + authorization_path,
         "server_id": server_id,
         "expires_in": _NATIVE_FLOW_TTL_SECONDS,
     }
@@ -405,6 +405,35 @@ def _normalize_server_origin(raw_url: str) -> str:
         host = f"[{host}]"
     default_port = (scheme == "https" and port == 443) or (scheme == "http" and port == 80)
     return f"{scheme}://{host}{'' if port is None or default_port else f':{port}'}"
+
+
+def _native_authorization_base_url(origin: str) -> str:
+    """Preserve a configured public proxy prefix for the browser start URL."""
+    redirect_uri = str(_resolve_oidc_config().get("redirect_uri") or "").strip()
+    if not redirect_uri:
+        return origin
+    try:
+        parsed = urllib.parse.urlsplit(redirect_uri)
+    except ValueError:
+        return origin
+    callback_path = "/api/auth/oidc/callback"
+    if parsed.query or parsed.fragment or not parsed.path.endswith(callback_path):
+        return origin
+    redirect_origin = _normalize_server_origin(
+        urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    )
+    if not _constant_time_equal(redirect_origin, origin):
+        return origin
+    prefix = parsed.path[: -len(callback_path)].rstrip("/")
+    decoded_prefix = urllib.parse.unquote(prefix)
+    if (
+        not prefix
+        or "\\" in decoded_prefix
+        or any(segment in {".", ".."} for segment in decoded_prefix.split("/"))
+        or any(ord(char) < 32 or ord(char) == 127 or char.isspace() for char in decoded_prefix)
+    ):
+        return origin
+    return origin + prefix
 
 
 def _server_identity(origin: str) -> str:
