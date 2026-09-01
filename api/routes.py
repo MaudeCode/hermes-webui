@@ -2335,19 +2335,15 @@ def _build_session_list_cache_payload(
     webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
     if show_cli_sessions or show_cron_sessions or show_webhook_sessions or show_kanban_sessions:
         diag_stage("get_cli_sessions")
+        cli_kwargs = {
+            "source_filter": source_filter,
+            "all_profiles": all_profiles,
+        }
         if _callable_accepts_kwarg(get_cli_sessions, "include_claude_code"):
-            cli = get_cli_sessions(
-                source_filter=source_filter,
-                all_profiles=all_profiles,
-                include_claude_code=show_cli_sessions and show_claude_code_sessions,
-            )
-        else:
-            # Focused tests sometimes monkeypatch routes.get_cli_sessions with
-            # the historical two-keyword signature.
-            cli = get_cli_sessions(
-                source_filter=source_filter,
-                all_profiles=all_profiles,
-            )
+            cli_kwargs["include_claude_code"] = show_cli_sessions and show_claude_code_sessions
+        if _callable_accepts_kwarg(get_cli_sessions, "profile"):
+            cli_kwargs["profile"] = active_profile
+        cli = get_cli_sessions(**cli_kwargs)
         diag_stage("merge_cli_sessions")
         cli_by_id = {s["session_id"]: s for s in cli}
         # #3238/#4591: reconcile orphaned imported sidecars. When a CLI or

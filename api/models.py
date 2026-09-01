@@ -7439,17 +7439,21 @@ def _path_stat_cache_key(path):
         return None
 
 
-def _callable_accepts_include_claude_code(callable_obj) -> bool:
+def _callable_accepts_kwarg(callable_obj, kwarg_name: str) -> bool:
     try:
         signature = inspect.signature(callable_obj)
     except (TypeError, ValueError):
         return True
-    if 'include_claude_code' in signature.parameters:
+    if kwarg_name in signature.parameters:
         return True
     return any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD
         for parameter in signature.parameters.values()
     )
+
+
+def _callable_accepts_include_claude_code(callable_obj) -> bool:
+    return _callable_accepts_kwarg(callable_obj, 'include_claude_code')
 
 
 def _sqlite_content_fingerprint(db_path: Path):
@@ -7578,7 +7582,12 @@ def _cli_sessions_streaming_freeze_marker():
         return ("streaming",)
 
 
-def _resolve_cli_sessions_context(source_filter=None, include_claude_code: bool = True):
+def _resolve_cli_sessions_context(
+    source_filter=None,
+    include_claude_code: bool = True,
+    *,
+    profile: str | None = None,
+):
     # Use the active WebUI profile's HERMES_HOME to find state.db.
     # The active profile is determined by what the user has selected in the UI
     # (stored in the server's runtime config). This means:
@@ -7587,17 +7596,27 @@ def _resolve_cli_sessions_context(source_filter=None, include_claude_code: bool 
     # We resolve the active profile's home directory rather than just using
     # HERMES_HOME (which is the server's launch profile, not necessarily the
     # active one after a profile switch).
-    try:
-        from api.profiles import get_active_hermes_home
-        hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
-    except Exception:
-        hermes_home = Path(os.getenv('HERMES_HOME', str(HOME / '.hermes'))).expanduser().resolve()
+    from api.profiles import (
+        _PROFILE_ID_RE,
+        _is_root_profile,
+        get_active_profile_name,
+        get_active_hermes_home,
+        get_hermes_home_for_profile,
+    )
 
-    try:
-        from api.profiles import get_active_profile_name
-        cli_profile = get_active_profile_name()
-    except Exception:
-        cli_profile = None
+    cli_profile = str(
+        profile if profile is not None else get_active_profile_name() or ""
+    ).strip()
+    if not cli_profile:
+        raise ValueError("active profile is unavailable")
+    if not (_is_root_profile(cli_profile) or _PROFILE_ID_RE.fullmatch(cli_profile)):
+        raise ValueError(f"invalid active profile {cli_profile!r}")
+    resolved_home = (
+        get_hermes_home_for_profile(cli_profile)
+        if profile is not None
+        else get_active_hermes_home()
+    )
+    hermes_home = Path(resolved_home).expanduser().resolve()
 
     db_path = hermes_home / 'state.db'
     projects_dir = _default_claude_code_projects_dir()
@@ -8139,6 +8158,7 @@ def get_cli_sessions(
     *,
     all_profiles: bool = False,
     include_claude_code: bool = True,
+    profile: str | None = None,
 ) -> list:
     """Read CLI sessions from the agent's SQLite store and return them as
     dicts in a format the WebUI sidebar can render alongside local sessions.
@@ -8172,10 +8192,24 @@ def get_cli_sessions(
         )
         if resolve_supports_include_claude_code:
             resolve_kwargs['include_claude_code'] = include_claude_code
-        hermes_home, db_path, cli_profile, cache_key = _resolve_cli_sessions_context(
-            source_filter,
-            **resolve_kwargs,
+        resolve_supports_profile = _callable_accepts_kwarg(
+            _resolve_cli_sessions_context, 'profile'
         )
+        if resolve_supports_profile:
+            resolve_kwargs['profile'] = profile
+        elif profile is not None:
+            return []
+        try:
+            hermes_home, db_path, cli_profile, cache_key = _resolve_cli_sessions_context(
+                source_filter,
+                **resolve_kwargs,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Refusing CLI session read because the profile home could not be resolved: %s",
+                exc,
+            )
+            return []
         if not resolve_supports_include_claude_code:
             cache_key = cache_key + (bool(include_claude_code),)
     ttl = _cli_sessions_cache_ttl_seconds()
