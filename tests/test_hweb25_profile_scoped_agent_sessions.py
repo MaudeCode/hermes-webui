@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 import api.models as models
 import api.profiles as profiles
 import api.routes as routes
+import pytest
 
 
 class _Handler:
@@ -86,14 +87,16 @@ def _isolate_cli_projection(monkeypatch, tmp_path):
     routes._session_list_cache_clear()
 
 
-def test_talaria_session_list_fails_closed_when_member_home_cannot_resolve(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize("member_home_resolves", [False, True])
+def test_talaria_session_list_never_reads_owner_home(
+    monkeypatch, tmp_path, member_home_resolves
 ):
     import api.auth as auth
     import api.auth_oidc as auth_oidc
 
     owner_home = tmp_path / "owner-default"
-    (tmp_path / "profiles" / "member").mkdir(parents=True)
+    member_home = tmp_path / "profiles" / "member"
+    member_home.mkdir(parents=True)
     _make_state_db(owner_home, "owner-session")
     _isolate_cli_projection(monkeypatch, tmp_path)
 
@@ -105,11 +108,16 @@ def test_talaria_session_list_fails_closed_when_member_home_cannot_resolve(
         "get_active_hermes_home",
         lambda: (_ for _ in ()).throw(RuntimeError("profile lookup failed")),
     )
-    monkeypatch.setattr(
-        profiles,
-        "get_hermes_home_for_profile",
-        lambda _profile: (_ for _ in ()).throw(RuntimeError("profile lookup failed")),
-    )
+    if member_home_resolves:
+        monkeypatch.setattr(
+            profiles, "get_hermes_home_for_profile", lambda _profile: member_home
+        )
+    else:
+        monkeypatch.setattr(
+            profiles,
+            "get_hermes_home_for_profile",
+            lambda _profile: (_ for _ in ()).throw(RuntimeError("profile lookup failed")),
+        )
     monkeypatch.setattr(routes, "all_sessions", lambda diag=None, **_kwargs: [])
     monkeypatch.setattr(
         routes,
@@ -160,7 +168,10 @@ def test_talaria_session_list_fails_closed_when_member_home_cannot_resolve(
     assert handler.status == 200
     assert handler.json_body()["active_profile"] == "member"
     assert handler.json_body()["sessions"] == []
-    assert load_calls == [], "a failed member lookup must never read the owner database"
+    if member_home_resolves:
+        assert load_calls == [(member_home, member_home / "state.db", "member")]
+    else:
+        assert load_calls == [], "a failed member lookup must never read the owner database"
 
 
 def test_stale_session_list_cache_rebuild_pins_captured_profile(monkeypatch):
