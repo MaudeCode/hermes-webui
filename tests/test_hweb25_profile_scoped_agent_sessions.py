@@ -1,7 +1,10 @@
 import io
 import json
 import sqlite3
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from urllib.parse import urlparse
 
 import api.models as models
@@ -90,6 +93,7 @@ def test_talaria_session_list_fails_closed_when_member_home_cannot_resolve(
     import api.auth_oidc as auth_oidc
 
     owner_home = tmp_path / "owner-default"
+    (tmp_path / "profiles" / "member").mkdir(parents=True)
     _make_state_db(owner_home, "owner-session")
     _isolate_cli_projection(monkeypatch, tmp_path)
 
@@ -159,8 +163,9 @@ def test_talaria_session_list_fails_closed_when_member_home_cannot_resolve(
     assert load_calls == [], "a failed member lookup must never read the owner database"
 
 
-def test_background_session_list_builder_pins_cli_lookup_to_captured_profile(monkeypatch):
+def test_stale_session_list_cache_rebuild_pins_captured_profile(monkeypatch):
     captured = []
+    rebuilt = threading.Event()
 
     def fake_get_cli_sessions(
         source_filter=None,
@@ -170,6 +175,7 @@ def test_background_session_list_builder_pins_cli_lookup_to_captured_profile(mon
         profile=None,
     ):
         captured.append(profile)
+        rebuilt.set()
         return [
             {
                 "session_id": "member-session",
@@ -182,10 +188,28 @@ def test_background_session_list_builder_pins_cli_lookup_to_captured_profile(mon
     monkeypatch.setattr(routes, "all_sessions", lambda diag=None, **_kwargs: [])
     monkeypatch.setattr(routes, "get_cli_sessions", fake_get_cli_sessions)
     monkeypatch.setattr(routes, "_enrich_sidebar_lineage_metadata", lambda _rows: None)
+    monkeypatch.setattr(routes, "_session_list_cache_source_stamp", lambda _key: ("stable",))
+    routes._session_list_cache_clear()
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        payload = executor.submit(
-            routes._build_session_list_cache_payload,
+    key = routes._session_list_cache_key(
+        active_profile="member",
+        all_profiles=False,
+        show_cli_sessions=True,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=True,
+        show_claude_code_sessions=True,
+        show_webhook_sessions=True,
+        visible_only=True,
+        request_visibility_overrides=True,
+    )
+    stale = {"sessions": [], "active_profile": "member", "all_profiles": False}
+    routes._session_list_cache_set(key, stale)
+    with routes._SESSIONS_CACHE_LOCK:
+        _timestamp, stamp, payload = routes._SESSIONS_CACHE[key]
+        routes._SESSIONS_CACHE[key] = (time.monotonic() - 60, stamp, payload)
+
+    def rebuild():
+        return routes._build_session_list_cache_payload(
             active_profile="member",
             all_profiles=False,
             show_cli_sessions=True,
@@ -195,10 +219,43 @@ def test_background_session_list_builder_pins_cli_lookup_to_captured_profile(mon
             show_webhook_sessions=True,
             visible_only=True,
             request_visibility_overrides=True,
-        ).result()
+        )
+
+    try:
+        returned = routes._get_cached_session_list_payload(key=key, builder=rebuild)
+        assert returned == stale
+        assert rebuilt.wait(2), "stale cache did not rebuild"
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            with routes._SESSIONS_CACHE_LOCK:
+                if key not in routes._SESSIONS_CACHE_INFLIGHT:
+                    break
+            time.sleep(0.01)
+        with routes._SESSIONS_CACHE_LOCK:
+            assert key not in routes._SESSIONS_CACHE_INFLIGHT
+        rebuilt_payload, fresh = routes._session_list_cache_get(key)
+        assert fresh is True
+        assert [row["session_id"] for row in rebuilt_payload["sessions"]] == [
+            "member-session"
+        ]
+    finally:
+        routes._session_list_cache_clear()
 
     assert captured == ["member"]
-    assert [row["session_id"] for row in payload["sessions"]] == ["member-session"]
+
+
+def test_get_cli_sessions_rejects_unknown_explicit_profile(monkeypatch):
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name == "default")
+    monkeypatch.setattr(
+        models,
+        "_load_cli_sessions_uncached",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("profile failure reached the database reader")
+        ),
+    )
+
+    assert models.get_cli_sessions(profile=None) == []
+    assert models.get_cli_sessions(profile="../owner") == []
 
 
 def test_explicit_profile_cli_caches_do_not_cross_under_concurrency(monkeypatch, tmp_path):
@@ -216,6 +273,15 @@ def test_explicit_profile_cli_caches_do_not_cross_under_concurrency(monkeypatch,
     )
     monkeypatch.setattr(profiles, "get_hermes_home_for_profile", homes.__getitem__)
 
+    loads = []
+    original_loader = models._load_cli_sessions_uncached
+
+    def recording_loader(home, db_path, profile, *args, **kwargs):
+        loads.append((Path(home), Path(db_path), profile))
+        return original_loader(home, db_path, profile, *args, **kwargs)
+
+    monkeypatch.setattr(models, "_load_cli_sessions_uncached", recording_loader)
+
     def load(profile):
         return {
             row["session_id"]
@@ -232,3 +298,19 @@ def test_explicit_profile_cli_caches_do_not_cross_under_concurrency(monkeypatch,
     for profile, session_ids in zip(requested, results, strict=True):
         prefix = "member" if profile == "member" else "owner"
         assert session_ids == {f"{prefix}-session-0", f"{prefix}-session-1"}
+
+    expected_loads = {
+        (owner_home, owner_home / "state.db", "default"),
+        (member_home, member_home / "state.db", "member"),
+    }
+    assert set(loads) == expected_loads
+
+    cached_load_count = len(loads)
+    assert load("default") == {"owner-session-0", "owner-session-1"}
+    assert load("member") == {"member-session-0", "member-session-1"}
+    assert len(loads) == cached_load_count
+
+    monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 0.0)
+    models.clear_cli_sessions_cache()
+    assert load("default") == {"owner-session-0", "owner-session-1"}
+    assert load("member") == {"member-session-0", "member-session-1"}

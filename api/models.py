@@ -86,6 +86,7 @@ _CLI_SESSIONS_CACHE_MAX_ENTRIES = 8
 _CLI_SESSIONS_CACHE_WAIT_SECONDS = 1.0
 # Event waits that keep stale rows visible while a rebuild is in flight.
 _CLI_SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
+_CLI_PROFILE_UNSET = object()
 
 # Per-file parse cache for Claude Code JSONL transcripts (#4718/#4662 phase 4).
 # ``~/.claude/projects`` is a GLOBAL, profile-independent directory, but the
@@ -7586,7 +7587,7 @@ def _resolve_cli_sessions_context(
     source_filter=None,
     include_claude_code: bool = True,
     *,
-    profile: str | None = None,
+    profile=_CLI_PROFILE_UNSET,
 ):
     # Use the active WebUI profile's HERMES_HOME to find state.db.
     # The active profile is determined by what the user has selected in the UI
@@ -7600,23 +7601,17 @@ def _resolve_cli_sessions_context(
         _PROFILE_ID_RE,
         _is_root_profile,
         get_active_profile_name,
-        get_active_hermes_home,
         get_hermes_home_for_profile,
     )
 
     cli_profile = str(
-        profile if profile is not None else get_active_profile_name() or ""
+        get_active_profile_name() if profile is _CLI_PROFILE_UNSET else profile or ""
     ).strip()
     if not cli_profile:
         raise ValueError("active profile is unavailable")
     if not (_is_root_profile(cli_profile) or _PROFILE_ID_RE.fullmatch(cli_profile)):
         raise ValueError(f"invalid active profile {cli_profile!r}")
-    resolved_home = (
-        get_hermes_home_for_profile(cli_profile)
-        if profile is not None
-        else get_active_hermes_home()
-    )
-    hermes_home = Path(resolved_home).expanduser().resolve()
+    hermes_home = Path(get_hermes_home_for_profile(cli_profile)).expanduser().resolve()
 
     db_path = hermes_home / 'state.db'
     projects_dir = _default_claude_code_projects_dir()
@@ -8158,7 +8153,7 @@ def get_cli_sessions(
     *,
     all_profiles: bool = False,
     include_claude_code: bool = True,
-    profile: str | None = None,
+    profile=_CLI_PROFILE_UNSET,
 ) -> list:
     """Read CLI sessions from the agent's SQLite store and return them as
     dicts in a format the WebUI sidebar can render alongside local sessions.
@@ -8197,7 +8192,7 @@ def get_cli_sessions(
         )
         if resolve_supports_profile:
             resolve_kwargs['profile'] = profile
-        elif profile is not None:
+        elif profile is not _CLI_PROFILE_UNSET:
             return []
         try:
             hermes_home, db_path, cli_profile, cache_key = _resolve_cli_sessions_context(

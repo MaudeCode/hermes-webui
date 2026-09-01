@@ -17,7 +17,7 @@ def test_cli_cache_key_stays_frozen_during_streaming(monkeypatch, tmp_path):
 
     hermes_home = tmp_path / "hermes"
     hermes_home.mkdir()
-    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: str(hermes_home))
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _profile: hermes_home)
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
     monkeypatch.setattr(
         models,
@@ -53,7 +53,7 @@ def test_cli_cache_key_stays_frozen_during_streaming(monkeypatch, tmp_path):
 def test_get_cli_sessions_follower_reuses_stale_rows_during_slow_rebuild(monkeypatch, tmp_path):
     hermes_home = tmp_path / "hermes"
     hermes_home.mkdir()
-    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: str(hermes_home))
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _profile: hermes_home)
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
     models.clear_cli_sessions_cache()
     monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 60.0, raising=False)
@@ -103,7 +103,7 @@ def test_get_cli_sessions_follower_reuses_stale_rows_during_slow_rebuild(monkeyp
 def test_get_cli_sessions_cold_followers_join_single_rebuild(monkeypatch, tmp_path):
     hermes_home = tmp_path / "hermes"
     hermes_home.mkdir()
-    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: str(hermes_home))
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _profile: hermes_home)
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
     models.clear_cli_sessions_cache()
     monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 60.0, raising=False)
@@ -156,7 +156,7 @@ def test_get_cli_sessions_cold_followers_join_single_rebuild(monkeypatch, tmp_pa
 def test_get_cli_sessions_cold_follower_times_out_to_independent_rebuild(monkeypatch, tmp_path):
     hermes_home = tmp_path / "hermes"
     hermes_home.mkdir()
-    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: str(hermes_home))
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _profile: hermes_home)
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
     models.clear_cli_sessions_cache()
     monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 60.0, raising=False)
@@ -211,7 +211,7 @@ def test_get_cli_sessions_cold_follower_times_out_to_independent_rebuild(monkeyp
 def test_get_cli_sessions_clear_during_rebuild_does_not_restore_stale_rows(monkeypatch, tmp_path):
     hermes_home = tmp_path / "hermes"
     hermes_home.mkdir()
-    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: str(hermes_home))
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _profile: hermes_home)
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
     models.clear_cli_sessions_cache()
     monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 60.0, raising=False)
@@ -255,7 +255,7 @@ def test_get_cli_sessions_clear_during_rebuild_does_not_restore_stale_rows(monke
 def test_get_cli_sessions_clear_during_rebuild_preserves_joiners(monkeypatch, tmp_path):
     hermes_home = tmp_path / "hermes"
     hermes_home.mkdir()
-    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: str(hermes_home))
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _profile: hermes_home)
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
     models.clear_cli_sessions_cache()
     monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 60.0, raising=False)
@@ -326,7 +326,7 @@ def test_get_cli_sessions_clear_during_rebuild_preserves_joiners(monkeypatch, tm
 def test_get_cli_sessions_clear_during_rebuild_reclaims_after_invalidated_wait(monkeypatch, tmp_path):
     hermes_home = tmp_path / "hermes"
     hermes_home.mkdir()
-    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: str(hermes_home))
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _profile: hermes_home)
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
     models.clear_cli_sessions_cache()
     monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 60.0, raising=False)
@@ -391,7 +391,7 @@ def test_get_cli_sessions_clear_during_rebuild_reclaims_after_invalidated_wait(m
 def test_cache_cli_sessions_if_current_skips_stale_store(monkeypatch, tmp_path):
     hermes_home = tmp_path / "hermes"
     hermes_home.mkdir()
-    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: str(hermes_home))
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _profile: hermes_home)
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
     models.clear_cli_sessions_cache()
     monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 60.0, raising=False)
