@@ -70,8 +70,8 @@ def fake_hermes_home(tmp_path, monkeypatch):
     # Both profile helpers are imported lazily inside get_cli_sessions(),
     # so patching the api.profiles module reaches them.
     import api.profiles as profiles
-    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: home)
-    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: None)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _profile: home)
 
     return home
 

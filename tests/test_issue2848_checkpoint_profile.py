@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import threading
 
+import pytest
+
 
 def test_checkpoint_save_uses_session_profile_env(monkeypatch, tmp_path):
     """Checkpoint saves run on their own thread, outside request TLS.
@@ -25,7 +27,10 @@ def test_checkpoint_save_uses_session_profile_env(monkeypatch, tmp_path):
     monkeypatch.setattr(
         profiles,
         "get_profile_runtime_env",
-        lambda home: {"HERMES_CONFIG_PATH": str(Path(home) / "config.yaml")},
+        lambda home: {
+            "HERMES_CONFIG_PATH": str(Path(home) / "config.yaml"),
+            "HERMES_EXEC_ASK": "profile-config-value",
+        },
     )
 
     def fake_save(self, *args, **kwargs):
@@ -43,8 +48,17 @@ def test_checkpoint_save_uses_session_profile_env(monkeypatch, tmp_path):
     assert captured["thread_env"]["HERMES_CONFIG_PATH"] == str(profile_home / "config.yaml")
 
 
-def test_checkpoint_save_completes_without_skill_lock(monkeypatch, tmp_path):
-    """Checkpoint saves must not block on the legacy skill module lock."""
+@pytest.mark.parametrize(
+    ("held_lock_name", "shared_env_scope_held"),
+    [
+        ("_SKILL_HOME_MODULE_PATCH_LOCK", False),
+        ("_PROFILE_ENV_SCOPE_LOCK", True),
+    ],
+)
+def test_checkpoint_save_completes_with_parent_scope_lock_held(
+    monkeypatch, tmp_path, held_lock_name, shared_env_scope_held
+):
+    """Checkpoint children reuse stream scope without blocking on its locks."""
 
     from api.models import Session
     from api.streaming import _save_streaming_checkpoint
@@ -59,7 +73,10 @@ def test_checkpoint_save_completes_without_skill_lock(monkeypatch, tmp_path):
     monkeypatch.setattr(
         profiles,
         "get_profile_runtime_env",
-        lambda home: {"HERMES_CONFIG_PATH": str(Path(home) / "config.yaml")},
+        lambda home: {
+            "HERMES_CONFIG_PATH": str(Path(home) / "config.yaml"),
+            "HERMES_EXEC_ASK": "profile-config-value",
+        },
     )
     monkeypatch.setattr(profiles, "_resolve_hermes_home_override", lambda: None)
 
@@ -69,6 +86,7 @@ def test_checkpoint_save_completes_without_skill_lock(monkeypatch, tmp_path):
         captured["kwargs"] = kwargs
         captured["thread_env"] = dict(getattr(config._thread_ctx, "env", {}) or {})
         captured["env_hermes_home"] = os.environ.get("HERMES_HOME")
+        captured["env_exec_ask"] = os.environ.get("HERMES_EXEC_ASK")
 
     def patch_skill_home_modules(*_):
         patch_calls.append({"patched": True})
@@ -79,14 +97,20 @@ def test_checkpoint_save_completes_without_skill_lock(monkeypatch, tmp_path):
     completion = threading.Event()
 
     session = Session(session_id="issue2848-lock", profile="maiko")
+    monkeypatch.setenv("HERMES_HOME", str(profile_home))
+    monkeypatch.setenv("HERMES_EXEC_ASK", "1")
 
-    acquired_lock = profiles._SKILL_HOME_MODULE_PATCH_LOCK.acquire(timeout=1)
+    held_lock = getattr(profiles, held_lock_name)
+    acquired_lock = held_lock.acquire(timeout=1)
     assert acquired_lock, "lock was unexpectedly unavailable before checkpoint test"
 
     try:
         def _worker() -> None:
             try:
-                _save_streaming_checkpoint(session)
+                _save_streaming_checkpoint(
+                    session,
+                    _shared_env_scope_held=shared_env_scope_held,
+                )
                 completion.set()
             except Exception as exc:  # pragma: no cover - defensive
                 captured["error"] = exc
@@ -99,7 +123,7 @@ def test_checkpoint_save_completes_without_skill_lock(monkeypatch, tmp_path):
             "checkpoint worker should not block on skill module lock"
         )
     finally:
-        profiles._SKILL_HOME_MODULE_PATCH_LOCK.release()
+        held_lock.release()
         worker.join(timeout=1)
 
     assert captured.get("kwargs") == {"skip_index": True}
@@ -109,5 +133,8 @@ def test_checkpoint_save_completes_without_skill_lock(monkeypatch, tmp_path):
         == str(profile_home / "config.yaml")
     )
     assert captured.get("env_hermes_home") == str(profile_home)
+    assert captured.get("env_exec_ask") == (
+        "1" if shared_env_scope_held else "profile-config-value"
+    )
     assert not patch_calls
     assert "error" not in captured

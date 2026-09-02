@@ -160,7 +160,7 @@ def test_read_importable_agent_session_rows_uses_parameterized_include_filter(mo
 def test_get_cli_sessions_source_filter_uses_distinct_cache_key(monkeypatch, tmp_path):
     hermes_home = tmp_path / "hermes"
     hermes_home.mkdir()
-    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: str(hermes_home))
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _profile: hermes_home)
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
     monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 60.0, raising=False)
     models.clear_cli_sessions_cache()
@@ -190,7 +190,7 @@ def test_get_cli_sessions_all_profiles_pushes_source_filter_to_every_context(mon
     a filtered key (Codex SILENT finding on the #4067 re-gate)."""
     hermes_home = tmp_path / "hermes"
     hermes_home.mkdir()
-    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: str(hermes_home))
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _profile: hermes_home)
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
     monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 60.0, raising=False)
     models.clear_cli_sessions_cache()

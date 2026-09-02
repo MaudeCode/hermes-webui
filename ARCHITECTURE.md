@@ -244,6 +244,12 @@ interactive sources (CLI, TUI, ACP, messaging, and similar user-facing sessions)
 in a bounded 20-row candidate window. Background sources use independent recovery
 passes so a high-volume worker source cannot consume that interactive window:
 
+Ordinary request projections pin the captured profile name to its exact profile
+home before reading `state.db`, including detached cache rebuilds. If that pairing
+cannot be resolved, the projection returns no Agent/CLI rows; it never falls back
+to the process-global/root `HERMES_HOME`, because the Agent database has no
+per-row profile owner that could repair a read from the wrong file.
+
 - Cron: up to `CRON_PROJECT_CHIP_LIMIT` rows.
 - Webhook: up to `WEBHOOK_PROJECT_CHIP_LIMIT` rows.
 - Kanban: up to `KANBAN_PROJECT_CHIP_LIMIT` rows.

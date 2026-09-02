@@ -59,6 +59,9 @@ _tls = threading.local()
 
 _SKILL_HOME_MODULES = ("tools.skills_tool", "tools.skill_manager_tool")
 _SKILL_HOME_MODULE_PATCH_LOCK = threading.RLock()
+# Serializes every scope that mirrors profile state into process globals while
+# keeping the narrower skill-module lock available to unrelated checkpoint work.
+_PROFILE_ENV_SCOPE_LOCK = threading.RLock()
 
 
 def snapshot_skill_home_modules() -> dict[str, dict[str, object]]:
@@ -572,9 +575,9 @@ def get_active_hermes_home() -> Path:
 # Thread-safety note on os.environ mutation:
 # CPython's os.environ assignment is GIL-protected at the bytecode level, but
 # multi-step read-modify-write sequences (snapshot prev → assign new → restore
-# on exit) are NOT atomic without explicit serialization. The _cron_env_lock
-# below makes the entire context-manager body run-to-completion serially, so
-# all webui access to HERMES_HOME goes through one thread at a time. Any
+# on exit) are NOT atomic without explicit serialization. The shared profile
+# environment lock coordinates cron with every other process-global profile
+# scope; the cron lock also protects cron module globals. Any
 # subprocess.Popen() call inside `run_job` inherits the env at fork time,
 # which is also under the lock — so child processes always see a consistent
 # (own-profile) HERMES_HOME, never a half-swapped state.
@@ -684,10 +687,15 @@ class cron_profile_context_for_home:
     resolves the home via TLS.
     """
 
-    def __init__(self, home: Path):
+    def __init__(self, home: Path, *, _shared_env_scope_held: bool = False):
         self._home = Path(home)
+        self._shared_env_scope_held = _shared_env_scope_held
+        self._acquired_profile_env_scope_lock = False
 
     def __enter__(self):
+        if not self._shared_env_scope_held:
+            _PROFILE_ENV_SCOPE_LOCK.acquire()
+            self._acquired_profile_env_scope_lock = True
         _cron_env_lock.acquire()
         _push_cron_profile_context_depth()
         try:
@@ -727,6 +735,9 @@ class cron_profile_context_for_home:
         except Exception:
             _pop_cron_profile_context_depth()
             _cron_env_lock.release()
+            if self._acquired_profile_env_scope_lock:
+                _PROFILE_ENV_SCOPE_LOCK.release()
+                self._acquired_profile_env_scope_lock = False
             raise
         return self
 
@@ -751,6 +762,9 @@ class cron_profile_context_for_home:
         finally:
             _pop_cron_profile_context_depth()
             _cron_env_lock.release()
+            if self._acquired_profile_env_scope_lock:
+                _PROFILE_ENV_SCOPE_LOCK.release()
+                self._acquired_profile_env_scope_lock = False
         return False
 
 
@@ -767,6 +781,7 @@ class cron_profile_context:
     """
 
     def __enter__(self):
+        _PROFILE_ENV_SCOPE_LOCK.acquire()
         _cron_env_lock.acquire()
         _push_cron_profile_context_depth()
         try:
@@ -805,6 +820,7 @@ class cron_profile_context:
         except Exception:
             _pop_cron_profile_context_depth()
             _cron_env_lock.release()
+            _PROFILE_ENV_SCOPE_LOCK.release()
             raise
         return self
 
@@ -832,6 +848,7 @@ class cron_profile_context:
         finally:
             _pop_cron_profile_context_depth()
             _cron_env_lock.release()
+            _PROFILE_ENV_SCOPE_LOCK.release()
         return False
 
 
@@ -1192,6 +1209,7 @@ def profile_env_for_background_worker(
     logger_override: Optional[logging.Logger] = None,
     *,
     scope_skill_modules: bool = True,
+    _shared_env_scope_held: bool = False,
 ):
     """Temporarily route detached worker config reads through a profile.
 
@@ -1205,7 +1223,11 @@ def profile_env_for_background_worker(
     raw_profile = session if isinstance(session, str) else getattr(session, "profile", "")
     profile = str(raw_profile or "").strip()
     if not profile or profile == "default":
-        yield
+        if _shared_env_scope_held:
+            yield
+        else:
+            with _PROFILE_ENV_SCOPE_LOCK:
+                yield
         return
 
     try:
@@ -1253,6 +1275,10 @@ def profile_env_for_background_worker(
     has_profile_skill_home = False
     should_restore_skill_modules = False
     _acquired_skill_home_patch_lock = False
+    _acquired_profile_env_scope_lock = False
+    if not _shared_env_scope_held:
+        _PROFILE_ENV_SCOPE_LOCK.acquire()
+        _acquired_profile_env_scope_lock = True
     try:
         _set_thread_env(**thread_env)
         _thread_ctx.block_process_env_fallback = True
@@ -1307,37 +1333,39 @@ def profile_env_for_background_worker(
                 _SKILL_HOME_MODULE_PATCH_LOCK.acquire()
                 _acquired_skill_home_patch_lock = True
 
-        with _ENV_LOCK:
-            if scope_skill_modules and should_restore_skill_modules:
-                # Snapshot and patch before mutating process env so setup
-                # failures can unwind without leaking either state.
-                skill_home_snapshot = snapshot_skill_home_modules()
-                patch_skill_home_modules(profile_home_path)
+        if not _shared_env_scope_held:
+            with _ENV_LOCK:
+                if scope_skill_modules and should_restore_skill_modules:
+                    # Snapshot and patch before mutating process env so setup
+                    # failures can unwind without leaking either state.
+                    skill_home_snapshot = snapshot_skill_home_modules()
+                    patch_skill_home_modules(profile_home_path)
 
-            old_runtime_env = _apply_profile_env_to_process(
-                os.environ,
-                safe_runtime_env,
-                secret_env_names=secret_env_names,
-            )
-            had_hermes_home = "HERMES_HOME" in os.environ
-            old_hermes_home = os.environ.get("HERMES_HOME")
-            os.environ.update(safe_runtime_env)
-            os.environ["HERMES_HOME"] = str(profile_home_path)
+                old_runtime_env = _apply_profile_env_to_process(
+                    os.environ,
+                    safe_runtime_env,
+                    secret_env_names=secret_env_names,
+                )
+                had_hermes_home = "HERMES_HOME" in os.environ
+                old_hermes_home = os.environ.get("HERMES_HOME")
+                os.environ.update(safe_runtime_env)
+                os.environ["HERMES_HOME"] = str(profile_home_path)
         yield
     finally:
         try:
-            with _ENV_LOCK:
-                for key, old_value in old_runtime_env.items():
-                    if old_value is None:
-                        os.environ.pop(key, None)
+            if not _shared_env_scope_held:
+                with _ENV_LOCK:
+                    for key, old_value in old_runtime_env.items():
+                        if old_value is None:
+                            os.environ.pop(key, None)
+                        else:
+                            os.environ[key] = old_value
+                    if had_hermes_home:
+                        os.environ["HERMES_HOME"] = old_hermes_home or ""
                     else:
-                        os.environ[key] = old_value
-                if had_hermes_home:
-                    os.environ["HERMES_HOME"] = old_hermes_home or ""
-                else:
-                    os.environ.pop("HERMES_HOME", None)
-                if should_restore_skill_modules and skill_home_snapshot is not None:
-                    restore_skill_home_modules(skill_home_snapshot)
+                        os.environ.pop("HERMES_HOME", None)
+                    if should_restore_skill_modules and skill_home_snapshot is not None:
+                        restore_skill_home_modules(skill_home_snapshot)
         finally:
             if _acquired_skill_home_patch_lock:
                 _SKILL_HOME_MODULE_PATCH_LOCK.release()
@@ -1353,11 +1381,16 @@ def profile_env_for_background_worker(
                     _secret_scope_mod.reset_secret_scope(_scope_token)
                 except Exception:
                     pass
-            _thread_ctx.block_process_env_fallback = previous_block_process_env
-            if previous_thread_env:
-                _set_thread_env(**previous_thread_env)
-            else:
-                _clear_thread_env()
+            try:
+                _thread_ctx.block_process_env_fallback = previous_block_process_env
+                if previous_thread_env:
+                    _set_thread_env(**previous_thread_env)
+                else:
+                    _clear_thread_env()
+            finally:
+                if _acquired_profile_env_scope_lock:
+                    _PROFILE_ENV_SCOPE_LOCK.release()
+                    _acquired_profile_env_scope_lock = False
 
 
 @contextmanager
@@ -1384,7 +1417,8 @@ def profile_env_for_active_request_readonly(
     """
     profile = (get_active_profile_name() or "").strip()
     if not profile or _is_root_profile(profile):
-        yield
+        with _PROFILE_ENV_SCOPE_LOCK:
+            yield
         return
     try:
         from api.config import _clear_thread_env, _set_thread_env, _thread_ctx
@@ -1480,9 +1514,6 @@ def profile_env_for_active_request(
     stay on the mirrored scope until they are fully audited.
     """
     profile = (get_active_profile_name() or "").strip()
-    if not profile or _is_root_profile(profile):
-        yield
-        return
     with profile_env_for_background_worker(
         profile, purpose, logger_override=logger_override
     ):
@@ -1495,7 +1526,7 @@ def profile_scope_for_detached_worker(
     purpose: str = "detached worker",
     logger_override: Optional[logging.Logger] = None,
 ):
-    """Bind BOTH the per-request profile TLS and the profile env on a NEW thread (#3957).
+    """Bind BOTH the per-request profile TLS and profile env for worker-owned work (#3957).
 
     A detached worker thread (e.g. the ``models-catalog-rebuild`` daemon that
     ``get_available_models`` spawns for a bounded rebuild) inherits neither the
@@ -1519,17 +1550,25 @@ def profile_scope_for_detached_worker(
     thread that has no other use for it.
     """
     name = (profile_name or "").strip()
-    if not name or _is_root_profile(name):
+    if not name:
         yield
         return
+    previous_profile = getattr(_tls, "profile", None)
     set_request_profile(name)
     try:
-        with profile_env_for_background_worker(
-            name, purpose, logger_override=logger_override
-        ):
-            yield
+        if _is_root_profile(name):
+            with _PROFILE_ENV_SCOPE_LOCK:
+                yield
+        else:
+            with profile_env_for_background_worker(
+                name, purpose, logger_override=logger_override
+            ):
+                yield
     finally:
-        clear_request_profile()
+        if previous_profile is None:
+            clear_request_profile()
+        else:
+            set_request_profile(previous_profile)
 
 
 def _set_hermes_home(home: Path):
