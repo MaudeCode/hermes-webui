@@ -5,8 +5,10 @@ import logging
 import os
 import stat
 import urllib.error
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
+from threading import Event, Lock
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -54,10 +56,20 @@ def test_pairing_persists_private_key_and_starts_publisher(tmp_path, monkeypatch
     assert captured["request"].full_url == "https://relay.example.com/v1/pairings/publisher/redeem"
     assert captured["timeout"] == 10
     assert request_body["invitation"] == "invite-once"
+    assert request_body["profileId"].startswith("prf_")
     assert len(base64.urlsafe_b64decode(request_body["publicKey"] + "==")) == 32
     assert saved["key_id"] == "key-created"
     assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
-    assert configured == [RelayConfig("https://relay.example.com", "https://hermes.example.com", "key-created", key_path)]
+    assert saved["version"] == 2
+    assert saved["profiles"]["default"]["profile_id"] == request_body["profileId"]
+    assert saved["profiles"]["default"]["identity"]
+    assert configured == [RelayConfig(
+        "https://relay.example.com",
+        "https://hermes.example.com",
+        "key-created",
+        key_path,
+        saved["profiles"],
+    )]
 
 
 def test_pairing_private_key_is_0600_before_any_post_write_failure(tmp_path, monkeypatch):
@@ -102,8 +114,10 @@ def test_pairing_private_key_is_0600_before_any_post_write_failure(tmp_path, mon
     finally:
         os.umask(previous_umask)
 
-    saved = json.loads((tmp_path / "talaria-relay.json").read_text())
-    assert stat.S_IMODE(Path(saved["private_key_path"]).stat().st_mode) == 0o600
+    assert not (tmp_path / "talaria-relay.json").exists()
+    key_paths = list(tmp_path.glob("talaria-relay-publisher-*.pem"))
+    assert len(key_paths) == 1
+    assert stat.S_IMODE(key_paths[0].stat().st_mode) == 0o600
 
 
 def test_pairing_rejects_an_untrusted_relay_origin():
@@ -113,6 +127,20 @@ def test_pairing_rejects_an_untrusted_relay_origin():
             "publisher_id": "https://hermes.example.com",
             "publisher_invitation": "invite-once",
         })
+
+
+def test_v1_relay_state_requires_registration_again(tmp_path, monkeypatch):
+    from api import config
+
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    (tmp_path / "talaria-relay.json").write_text(json.dumps({
+        "url": "https://relay.example.com",
+        "publisher_id": "https://hermes.example.com",
+        "key_id": "legacy-key",
+        "private_key_path": str(tmp_path / "legacy.pem"),
+    }))
+
+    assert RelayConfig.from_state() is None
 
 
 def test_pairing_confirms_initial_snapshot_before_switching_publishers(monkeypatch):
@@ -150,20 +178,284 @@ def test_pairing_confirms_initial_snapshot_before_switching_publishers(monkeypat
     ]
 
 
-def test_profile_bound_session_cannot_pair_relay(monkeypatch):
+def test_publisher_reconfiguration_preserves_unpublished_terminal_state(monkeypatch):
+    from api import session_events, talaria_relay
+
+    published = []
+
+    class Candidate:
+        def __init__(self, config):
+            self.config = config
+            self.changed = object()
+            self._terminal_lock = Lock()
+            self._revision_lock = Lock()
+            self._terminal = {}
+            self._last_revision = 0
+
+        def publish_snapshot(self):
+            published.append(dict(self._terminal))
+
+        def start(self, *, publish_initial):
+            assert publish_initial is False
+
+        def stop(self):
+            pass
+
+    old = Candidate(RelayConfig("https://relay.example", "https://hermes.example", "key", Path("key.pem")))
+    old._terminal["session-1"] = {"phase": "completed"}
+    monkeypatch.setattr(talaria_relay, "TalariaRelayPublisher", Candidate)
+    monkeypatch.setattr(talaria_relay, "_publisher", old)
+    monkeypatch.setattr(session_events, "add_session_list_changed_listener", lambda _listener: None)
+    monkeypatch.setattr(session_events, "remove_session_list_changed_listener", lambda _listener: None)
+    monkeypatch.setattr(talaria_relay.atexit, "register", lambda _callback: None)
+
+    talaria_relay.configure_talaria_relay_publisher(
+        RelayConfig("https://relay.example", "https://hermes.example", "key", Path("key.pem")),
+    )
+
+    assert published == [{"session-1": {"phase": "completed"}}]
+
+
+def test_profile_bound_session_can_enroll_without_operator_access(monkeypatch):
     from api import auth, routes
+    from api import talaria_relay
 
     monkeypatch.setattr(auth, "ensure_trusted_auth_session", lambda _handler: {"bound_profile": "work"})
     handler = type("Handler", (), {"headers": {}})()
     responses = []
-    monkeypatch.setattr(routes, "bad", lambda _handler, message, status: responses.append((status, message)) or True)
+    monkeypatch.setattr(routes, "j", lambda _handler, payload: responses.append((200, payload)) or True)
+    monkeypatch.setattr(
+        talaria_relay,
+        "pair_talaria_relay",
+        lambda body, *, profile, operator: {"profile": profile, "operator": operator, "body": body},
+    )
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
     monkeypatch.setattr(routes, "_handle_extension_sidecar_proxy", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(routes, "read_body", lambda _handler: {})
     monkeypatch.setattr(routes, "_guard_request_session_visibility", lambda *_args, **_kwargs: True)
 
     assert routes.handle_post(handler, type("Parsed", (), {"path": "/api/talaria/relay/pair"})()) is True
-    assert responses == [(403, "Talaria Relay pairing requires an operator session")]
+    assert responses == [(200, {"profile": "work", "operator": False, "body": {}})]
+
+
+def test_profile_enrollment_requires_an_existing_owner_registration(tmp_path, monkeypatch):
+    from api import config, talaria_relay
+
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    monkeypatch.setenv("HERMES_WEBUI_TALARIA_RELAY_URL", "https://relay.example.com")
+    monkeypatch.setattr(talaria_relay, "_profile_identity", lambda _profile: "profile-identity")
+    with pytest.raises(RelayPairingError, match="owner must register") as raised:
+        pair_talaria_relay(
+            {
+                "relay_url": "https://relay.example.com",
+                "publisher_id": "https://hermes.example.com",
+                "publisher_invitation": "invite-once",
+            },
+            profile="work",
+            operator=False,
+        )
+    assert raised.value.status == 409
+
+
+def test_profile_enrollment_reuses_the_registered_publisher_key(tmp_path, monkeypatch):
+    from api import config, talaria_relay
+
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    monkeypatch.setenv("HERMES_WEBUI_TALARIA_RELAY_URL", "https://relay.example.com")
+    monkeypatch.setattr(talaria_relay, "configure_talaria_relay_publisher", lambda _config: None)
+    monkeypatch.setattr(talaria_relay, "_profile_identity", lambda _profile: "profile-identity")
+    key = Ed25519PrivateKey.generate()
+    key_path = tmp_path / "publisher.pem"
+    key_path.write_bytes(key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()))
+    (tmp_path / "talaria-relay.json").write_text(json.dumps({
+        "version": 2,
+        "url": "https://relay.example.com",
+        "publisher_id": "https://hermes.example.com",
+        "key_id": "key-1",
+        "private_key_path": str(key_path),
+        "profiles": {"default": {"identity": "default-identity", "profile_id": "prf_default"}},
+    }))
+    captured = {}
+
+    @contextmanager
+    def opener(request, timeout):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        body = json.loads(request.data)
+        yield type("Response", (), {
+            "status": 201,
+            "read": lambda self: json.dumps({
+                "publisherId": body["publisherId"],
+                "profileId": body["profileId"],
+            }).encode(),
+        })()
+
+    assert pair_talaria_relay(
+        {
+            "relay_url": "https://relay.example.com",
+            "publisher_id": "https://hermes.example.com",
+            "publisher_invitation": "invite-work",
+        },
+        profile="work",
+        operator=False,
+        opener=opener,
+    ) == {"ok": True, "publisher_id": "https://hermes.example.com"}
+
+    request = captured["request"]
+    body = json.loads(request.data)
+    saved = json.loads((tmp_path / "talaria-relay.json").read_text())
+    assert request.full_url == "https://relay.example.com/v1/pairings/profile/redeem"
+    assert request.headers["X-talaria-key-id"] == "key-1"
+    assert body["invitation"] == "invite-work"
+    assert "publicKey" not in body
+    assert saved["profiles"] == {
+        "default": {"identity": "default-identity", "profile_id": "prf_default"},
+        "work": {"identity": "profile-identity", "profile_id": body["profileId"]},
+    }
+
+
+def test_concurrent_profile_enrollments_preserve_both_mappings(tmp_path, monkeypatch):
+    from api import config, talaria_relay
+
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    monkeypatch.setenv("HERMES_WEBUI_TALARIA_RELAY_URL", "https://relay.example.com")
+    monkeypatch.setattr(talaria_relay, "configure_talaria_relay_publisher", lambda _config: None)
+    monkeypatch.setattr(talaria_relay, "_profile_identity", lambda profile: f"identity-{profile}")
+    key = Ed25519PrivateKey.generate()
+    key_path = tmp_path / "publisher.pem"
+    key_path.write_bytes(key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()))
+    (tmp_path / "talaria-relay.json").write_text(json.dumps({
+        "version": 2,
+        "url": "https://relay.example.com",
+        "publisher_id": "https://hermes.example.com",
+        "key_id": "key-1",
+        "private_key_path": str(key_path),
+        "profiles": {"default": {"identity": "identity-default", "profile_id": "prf_default"}},
+    }))
+    alice_opened = Event()
+    bob_opened = Event()
+
+    @contextmanager
+    def opener(request, timeout):
+        assert timeout == 10
+        body = json.loads(request.data)
+        if body["invitation"] == "invite-alice":
+            alice_opened.set()
+            bob_opened.wait(0.1)
+        else:
+            bob_opened.set()
+        yield type("Response", (), {
+            "status": 201,
+            "read": lambda self: json.dumps({
+                "publisherId": body["publisherId"],
+                "profileId": body["profileId"],
+            }).encode(),
+        })()
+
+    def enroll(profile):
+        return pair_talaria_relay({
+            "relay_url": "https://relay.example.com",
+            "publisher_id": "https://hermes.example.com",
+            "publisher_invitation": f"invite-{profile}",
+        }, profile=profile, operator=False, opener=opener)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        alice = executor.submit(enroll, "alice")
+        assert alice_opened.wait(1)
+        bob = executor.submit(enroll, "bob")
+        assert alice.result()["ok"] is True
+        assert bob.result()["ok"] is True
+
+    saved = json.loads((tmp_path / "talaria-relay.json").read_text())
+    assert set(saved["profiles"]) == {"default", "alice", "bob"}
+
+
+def test_recreated_profile_receives_a_new_relay_scope(tmp_path, monkeypatch):
+    from api import config, talaria_relay
+
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    monkeypatch.setenv("HERMES_WEBUI_TALARIA_RELAY_URL", "https://relay.example.com")
+    monkeypatch.setattr(talaria_relay, "configure_talaria_relay_publisher", lambda _config: None)
+    monkeypatch.setattr(talaria_relay, "_profile_identity", lambda _profile: "new-identity")
+    key = Ed25519PrivateKey.generate()
+    key_path = tmp_path / "publisher.pem"
+    key_path.write_bytes(key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()))
+    (tmp_path / "talaria-relay.json").write_text(json.dumps({
+        "version": 2,
+        "url": "https://relay.example.com",
+        "publisher_id": "https://hermes.example.com",
+        "key_id": "key-1",
+        "private_key_path": str(key_path),
+        "profiles": {"work": {"identity": "old-identity", "profile_id": "prf_old"}},
+    }))
+    captured = {}
+
+    @contextmanager
+    def opener(request, timeout):
+        assert timeout == 10
+        captured.update(json.loads(request.data))
+        yield type("Response", (), {
+            "status": 201,
+            "read": lambda self: json.dumps({
+                "publisherId": captured["publisherId"],
+                "profileId": captured["profileId"],
+            }).encode(),
+        })()
+
+    TalariaRelayPublisher(
+        RelayConfig(
+            "https://relay.example.com",
+            "https://hermes.example.com",
+            "key-1",
+            key_path,
+            {"work": {"identity": "old-identity", "profile_id": "prf_old"}},
+        ),
+        opener=opener,
+    ).publish_snapshot()
+    assert captured == {}
+
+    pair_talaria_relay({
+        "relay_url": "https://relay.example.com",
+        "publisher_id": "https://hermes.example.com",
+        "publisher_invitation": "invite-new",
+    }, profile="work", operator=False, opener=opener)
+
+    assert captured["profileId"] != "prf_old"
+    saved = json.loads((tmp_path / "talaria-relay.json").read_text())
+    assert saved["profiles"]["work"] == {
+        "identity": "new-identity",
+        "profile_id": captured["profileId"],
+    }
+
+
+def test_profile_enrollment_http_rejection_is_not_reported_as_reachability(tmp_path, monkeypatch):
+    from api import config, talaria_relay
+
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    monkeypatch.setenv("HERMES_WEBUI_TALARIA_RELAY_URL", "https://relay.example.com")
+    monkeypatch.setattr(talaria_relay, "_profile_identity", lambda _profile: "profile-identity")
+    key = Ed25519PrivateKey.generate()
+    key_path = tmp_path / "publisher.pem"
+    key_path.write_bytes(key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()))
+    (tmp_path / "talaria-relay.json").write_text(json.dumps({
+        "version": 2,
+        "url": "https://relay.example.com",
+        "publisher_id": "https://hermes.example.com",
+        "key_id": "key-1",
+        "private_key_path": str(key_path),
+        "profiles": {"work": {"identity": "profile-identity", "profile_id": "prf_work"}},
+    }))
+
+    def opener(request, timeout):
+        raise urllib.error.HTTPError(request.full_url, 401, "Unauthorized", {}, None)
+
+    with pytest.raises(RelayPairingError, match="rejected.*HTTP 401") as raised:
+        pair_talaria_relay({
+            "relay_url": "https://relay.example.com",
+            "publisher_id": "https://hermes.example.com",
+            "publisher_invitation": "invite-work",
+        }, profile="work", operator=False, opener=opener)
+    assert raised.value.status == 409
 
 
 def test_signed_snapshot_contains_all_active_sessions(tmp_path, monkeypatch):
@@ -202,7 +494,8 @@ def test_signed_snapshot_contains_all_active_sessions(tmp_path, monkeypatch):
 
     request = captured["request"]
     body = json.loads(request.data)
-    assert request.full_url == "https://relay.example/v1/publishers/publisher%2Fid/snapshot"
+    expected_path = "/v1/publishers/publisher%2Fid/profiles/prf_default/snapshot"
+    assert request.full_url == f"https://relay.example{expected_path}"
     assert captured["timeout"] == 10
     assert {state["sessionId"] for state in body["states"]} == {"a", "b"}
     assert next(state for state in body["states"] if state["sessionId"] == "b")["phase"] == "starting"
@@ -213,8 +506,58 @@ def test_signed_snapshot_contains_all_active_sessions(tmp_path, monkeypatch):
     signature += "=" * (-len(signature) % 4)
     key.public_key().verify(
         base64.urlsafe_b64decode(signature),
-        f"PUT\n/v1/publishers/publisher%2Fid/snapshot\n{timestamp}\n{nonce}\n{body_hash}".encode(),
+        f"PUT\n{expected_path}\n{timestamp}\n{nonce}\n{body_hash}".encode(),
     )
+
+
+def test_signed_snapshot_contains_only_the_enrolled_profile(tmp_path, monkeypatch):
+    key = Ed25519PrivateKey.generate()
+    key_path = tmp_path / "publisher.pem"
+    key_path.write_bytes(key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()))
+    captured = []
+
+    @contextmanager
+    def opener(request, timeout):
+        assert timeout == 10
+        captured.append((request.full_url, json.loads(request.data)))
+        yield type("Response", (), {"status": 200})()
+
+    from api import config, models
+
+    sessions = {
+        "a": type("S", (), {"title": "A", "profile": "alice"})(),
+        "b": type("S", (), {"title": "B", "profile": "bob"})(),
+    }
+    monkeypatch.setattr(models, "get_session", lambda sid, metadata_only: sessions[sid])
+    with config.ACTIVE_RUNS_LOCK:
+        previous = dict(config.ACTIVE_RUNS)
+        config.ACTIVE_RUNS.clear()
+        config.ACTIVE_RUNS.update({
+            "stream-a": {"stream_id": "stream-a", "session_id": "a", "started_at": 1},
+            "stream-b": {"stream_id": "stream-b", "session_id": "b", "started_at": 2},
+        })
+    try:
+        TalariaRelayPublisher(
+            RelayConfig(
+                "https://relay.example",
+                "https://hermes.example",
+                "key-1",
+                key_path,
+                {
+                    "alice": {"identity": "", "profile_id": "prf_alice"},
+                    "bob": {"identity": "", "profile_id": "prf_bob"},
+                },
+            ),
+            opener=opener,
+        ).publish_snapshot()
+    finally:
+        with config.ACTIVE_RUNS_LOCK:
+            config.ACTIVE_RUNS.clear()
+            config.ACTIVE_RUNS.update(previous)
+
+    assert [body["states"][0]["sessionId"] for _, body in captured] == ["a", "b"]
+    assert captured[0][0].endswith("/profiles/prf_alice/snapshot")
+    assert captured[1][0].endswith("/profiles/prf_bob/snapshot")
 
 
 def test_terminal_state_survives_active_run_teardown(tmp_path, monkeypatch):
@@ -232,7 +575,7 @@ def test_terminal_state_survives_active_run_teardown(tmp_path, monkeypatch):
         publisher.note_terminal("stream", "completed")
         with config.ACTIVE_RUNS_LOCK:
             config.ACTIVE_RUNS.clear()
-        states = publisher.build_states()
+        states = publisher.build_states("default")
     finally:
         with config.ACTIVE_RUNS_LOCK:
             config.ACTIVE_RUNS.clear()

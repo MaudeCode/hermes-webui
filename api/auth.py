@@ -71,7 +71,6 @@ OPERATOR_ONLY_PATHS = frozenset({
     '/api/extensions/install',
     '/api/extensions/uninstall',
     '/api/admin/reload',
-    '/api/talaria/relay/pair',
     '/api/profile/create',
     '/api/profile/delete',
     '/api/auth/passkey/register/options',

@@ -9577,6 +9577,17 @@ def register_active_run(stream_id: str, **metadata) -> None:
     entry.setdefault("stream_id", stream_id)
     entry.setdefault("started_at", now)
     entry.setdefault("phase", "running")
+    if "profile" not in entry and entry.get("session_id"):
+        try:
+            from api.models import get_session
+
+            entry["profile"] = getattr(
+                get_session(str(entry["session_id"]), metadata_only=True),
+                "profile",
+                None,
+            )
+        except Exception:
+            entry["profile_unresolved"] = True
     # ACTIVE_RUNS is the worker-lifecycle authority, not merely an SSE
     # connection registry.  Record the owning thread so admission can
     # distinguish a legitimately long-running worker whose browser stream was
@@ -9593,7 +9604,11 @@ def register_active_run(stream_id: str, **metadata) -> None:
         from api.talaria_relay import start_talaria_relay_publisher
         from api.session_events import publish_session_list_changed
         start_talaria_relay_publisher()
-        publish_session_list_changed("run_started", session_id=entry.get("session_id"))
+        publish_session_list_changed(
+            "run_started",
+            profile=entry.get("profile") if not entry.get("profile_unresolved") else None,
+            session_id=entry.get("session_id"),
+        )
     except Exception:
         logger.debug("Failed to publish active-run start", exc_info=True)
 
@@ -9607,12 +9622,14 @@ def update_active_run(stream_id: str, **metadata) -> None:
         if entry is not None:
             entry.update(metadata)
             session_id = entry.get("session_id")
+            profile = entry.get("profile") if not entry.get("profile_unresolved") else None
         else:
             session_id = None
+            profile = None
     if session_id:
         try:
             from api.session_events import publish_session_list_changed
-            publish_session_list_changed("run_updated", session_id=session_id)
+            publish_session_list_changed("run_updated", profile=profile, session_id=session_id)
         except Exception:
             logger.debug("Failed to publish active-run update", exc_info=True)
 
@@ -9630,6 +9647,7 @@ def unregister_active_run(stream_id: str) -> None:
         from api.session_events import publish_session_list_changed
         publish_session_list_changed(
             "run_finished",
+            profile=(entry or {}).get("profile") if isinstance(entry, dict) and not entry.get("profile_unresolved") else None,
             session_id=entry.get("session_id") if isinstance(entry, dict) else None,
         )
     except Exception:
