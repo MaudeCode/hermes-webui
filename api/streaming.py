@@ -9512,6 +9512,8 @@ def _run_agent_streaming(
     _streaming_skill_home_snapshot = None
     _restore_streaming_skill_home_modules = False
     _acquired_streaming_skill_home_patch_lock = False
+    _PROFILE_ENV_SCOPE_LOCK = None
+    _acquired_streaming_profile_env_scope_lock = False
     # Initialised here (before any code that may raise) so the outer `finally`
     # block can safely check `if _checkpoint_stop is not None` even when an
     # exception fires before the checkpoint thread is created (Issue #765).
@@ -9625,6 +9627,7 @@ def _run_agent_streaming(
                 get_profile_runtime_env,
                 _skill_modules_support_profile_home,
                 _SKILL_HOME_MODULE_PATCH_LOCK,
+                _PROFILE_ENV_SCOPE_LOCK,
             )
             _profile_home_path = get_hermes_home_for_profile(getattr(s, 'profile', None))
             _profile_home = str(_profile_home_path)
@@ -9640,6 +9643,7 @@ def _run_agent_streaming(
             restore_skill_home_modules = None
             _skill_modules_support_profile_home = None
             _SKILL_HOME_MODULE_PATCH_LOCK = None
+            _PROFILE_ENV_SCOPE_LOCK = None
 
         # Profile-aware provider/model enrichment: when the session belongs
         # to a profile that specifies model.provider and model.default, use
@@ -9711,6 +9715,9 @@ def _run_agent_streaming(
         # Dynamic-capable modules continue concurrent execution.
         _streaming_override_installed = bool(_streaming_hermes_home_override_ctx[2])
         _streaming_modules_are_dynamic = False
+        if _PROFILE_ENV_SCOPE_LOCK is not None:
+            _PROFILE_ENV_SCOPE_LOCK.acquire()
+            _acquired_streaming_profile_env_scope_lock = True
         if patch_skill_home_modules is not None and snapshot_skill_home_modules is not None:
             if _streaming_override_installed and _skill_modules_support_profile_home is not None:
                 try:
@@ -13366,7 +13373,12 @@ def _run_agent_streaming(
         if _acquired_streaming_skill_home_patch_lock:
             _SKILL_HOME_MODULE_PATCH_LOCK.release()
             _acquired_streaming_skill_home_patch_lock = False
-        _reset_streaming_hermes_home_override(*_streaming_hermes_home_override_ctx)
+        try:
+            _reset_streaming_hermes_home_override(*_streaming_hermes_home_override_ctx)
+        finally:
+            if _acquired_streaming_profile_env_scope_lock:
+                _PROFILE_ENV_SCOPE_LOCK.release()
+                _acquired_streaming_profile_env_scope_lock = False
         # xsession wakeup misroute root fix (Option 1): restore the per-turn
         # session-identity context-locals (reset-token semantics). MUST run on
         # every exit path so a reused thread-pool worker leaks no identity and
