@@ -58,10 +58,10 @@ _loaded_profile_env_keys: set[str] = set()
 _tls = threading.local()
 
 _SKILL_HOME_MODULES = ("tools.skills_tool", "tools.skill_manager_tool")
-# Serializes every scope that mirrors profile state into process globals. The
-# lock also guards legacy skill-module patching, so one RLock owns both pieces
-# of process-wide compatibility state and nested same-thread scopes stay safe.
 _SKILL_HOME_MODULE_PATCH_LOCK = threading.RLock()
+# Serializes every scope that mirrors profile state into process globals while
+# keeping the narrower skill-module lock available to unrelated checkpoint work.
+_PROFILE_ENV_SCOPE_LOCK = threading.RLock()
 
 
 def snapshot_skill_home_modules() -> dict[str, dict[str, object]]:
@@ -1256,8 +1256,9 @@ def profile_env_for_background_worker(
     has_profile_skill_home = False
     should_restore_skill_modules = False
     _acquired_skill_home_patch_lock = False
-    _SKILL_HOME_MODULE_PATCH_LOCK.acquire()
-    _acquired_skill_home_patch_lock = True
+    _acquired_profile_env_scope_lock = False
+    _PROFILE_ENV_SCOPE_LOCK.acquire()
+    _acquired_profile_env_scope_lock = True
     try:
         _set_thread_env(**thread_env)
         _thread_ctx.block_process_env_fallback = True
@@ -1308,6 +1309,9 @@ def profile_env_for_background_worker(
             should_restore_skill_modules = not (
                 _home_override_installed and has_profile_skill_home
             )
+            if should_restore_skill_modules:
+                _SKILL_HOME_MODULE_PATCH_LOCK.acquire()
+                _acquired_skill_home_patch_lock = True
 
         with _ENV_LOCK:
             if scope_skill_modules and should_restore_skill_modules:
@@ -1355,11 +1359,16 @@ def profile_env_for_background_worker(
                     _secret_scope_mod.reset_secret_scope(_scope_token)
                 except Exception:
                     pass
-            _thread_ctx.block_process_env_fallback = previous_block_process_env
-            if previous_thread_env:
-                _set_thread_env(**previous_thread_env)
-            else:
-                _clear_thread_env()
+            try:
+                _thread_ctx.block_process_env_fallback = previous_block_process_env
+                if previous_thread_env:
+                    _set_thread_env(**previous_thread_env)
+                else:
+                    _clear_thread_env()
+            finally:
+                if _acquired_profile_env_scope_lock:
+                    _PROFILE_ENV_SCOPE_LOCK.release()
+                    _acquired_profile_env_scope_lock = False
 
 
 @contextmanager
@@ -1528,7 +1537,7 @@ def profile_scope_for_detached_worker(
     set_request_profile(name)
     try:
         if _is_root_profile(name):
-            with _SKILL_HOME_MODULE_PATCH_LOCK:
+            with _PROFILE_ENV_SCOPE_LOCK:
                 yield
         else:
             with profile_env_for_background_worker(
