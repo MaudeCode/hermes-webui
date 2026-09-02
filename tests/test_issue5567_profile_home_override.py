@@ -258,6 +258,7 @@ def test_run_agent_streaming_installs_and_resets_profile_home_override(tmp_path,
 
         def run_conversation(self, *args, **kwargs):
             _events["run_conversation"] = True
+            _events["process_home_during_run"] = os.environ.get("HERMES_HOME")
             raise RuntimeError("streaming test sentinel")
 
     def _get_ai_agent():
@@ -291,7 +292,26 @@ def test_run_agent_streaming_installs_and_resets_profile_home_override(tmp_path,
     monkeypatch.setattr(_streaming, "_runtime_preferred_base_url", lambda rt, provider, configured_base_url: configured_base_url)
     import api.profiles as profiles_api
 
+    class _SecretScope:
+        @staticmethod
+        def set_secret_scope(env):
+            _events["secret_scope_home"] = env.get("HERMES_HOME")
+            return "secret-token"
+
+        @staticmethod
+        def reset_secret_scope(token):
+            _events["secret_scope_reset"] = token
+
+    class _UnexpectedProfileScopeLock:
+        def acquire(self):
+            raise AssertionError("dynamic streaming must not acquire the global profile lock")
+
+        def release(self):
+            raise AssertionError("dynamic streaming did not acquire this lock")
+
     monkeypatch.setattr(profiles_api, "_skill_modules_support_profile_home", lambda profile_home: True)
+    monkeypatch.setattr(profiles_api, "_resolve_secret_scope_module", lambda: _SecretScope)
+    monkeypatch.setattr(profiles_api, "_PROFILE_ENV_SCOPE_LOCK", _UnexpectedProfileScopeLock())
     import api.config as _config_mod
     monkeypatch.setattr(_config_mod, "_resolve_cli_toolsets", lambda cfg: [])
     monkeypatch.setattr(_config_mod, "get_config_for_profile_home", lambda profile_home: {})
@@ -303,6 +323,7 @@ def test_run_agent_streaming_installs_and_resets_profile_home_override(tmp_path,
     monkeypatch.setattr(profiles_api, "get_profile_runtime_env", lambda home: {})
     monkeypatch.setattr(profiles_api, "filter_runtime_env_for_gateway_parity", lambda env: {})
     monkeypatch.setattr(profiles_api, "patch_skill_home_modules", _patch_skill_home_modules)
+    monkeypatch.setenv("HERMES_HOME", "process-default-home")
     monkeypatch.setattr(_streaming, "_apply_profile_home_context_to_streaming_model",
                         lambda model, provider_context, profile_home, has_profile: (model, provider_context, False))
 
@@ -319,6 +340,9 @@ def test_run_agent_streaming_installs_and_resets_profile_home_override(tmp_path,
     assert _events.get("run_conversation") is True
     assert _events.get("discover_mcp_tools", 0) == 1
     assert _events.get("set_thread_env") is True
+    assert _events.get("secret_scope_home") == str(_home)
+    assert _events.get("secret_scope_reset") == "secret-token"
+    assert _events.get("process_home_during_run") == "process-default-home"
     assert _events.get("patch_skill_home_modules", 0) == 0
     assert _stream_id not in _streaming.STREAMS
 

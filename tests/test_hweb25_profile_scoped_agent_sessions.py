@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 import api.models as models
 import api.profiles as profiles
 import api.routes as routes
+import api.streaming as streaming
 import pytest
 
 
@@ -30,6 +31,37 @@ class _Handler:
 
     def json_body(self):
         return json.loads(self.wfile.getvalue().decode("utf-8"))
+
+
+@pytest.mark.parametrize(
+    (
+        "home_override_installed",
+        "skill_modules_dynamic",
+        "profile_is_named",
+        "secret_scope_installed",
+        "expected",
+    ),
+    [
+        (True, True, True, True, False),
+        (True, True, False, False, False),
+        (True, True, True, False, True),
+        (True, False, True, True, True),
+        (False, True, True, True, True),
+    ],
+)
+def test_streaming_process_env_fallback_is_limited_to_legacy_capabilities(
+    home_override_installed,
+    skill_modules_dynamic,
+    profile_is_named,
+    secret_scope_installed,
+    expected,
+):
+    assert streaming._streaming_requires_process_env_fallback(
+        home_override_installed=home_override_installed,
+        skill_modules_dynamic=skill_modules_dynamic,
+        profile_is_named=profile_is_named,
+        secret_scope_installed=secret_scope_installed,
+    ) is expected
 
 
 def _make_state_db(home, prefix):

@@ -425,9 +425,11 @@ def test_streaming_cronjob_wrapper_uses_profile_context_only_for_tool_call(tmp_p
     assert events == [("register", "cronjob")]
 
     token = st._STREAMING_CRON_PROFILE_HOME.set(str(profile_home))
+    scope_token = st._STREAMING_PROFILE_ENV_SCOPE_HELD.set(True)
     try:
         assert entry.handler({"action": "list"}, task_id="t1") == "ok"
     finally:
+        st._STREAMING_PROFILE_ENV_SCOPE_HELD.reset(scope_token)
         st._STREAMING_CRON_PROFILE_HOME.reset(token)
 
     assert events == [
@@ -505,9 +507,11 @@ def test_streaming_cronjob_wrapper_context_survives_threadpool_context_copy(tmp_
 
     st._install_streaming_cronjob_profile_wrapper()
     token = st._STREAMING_CRON_PROFILE_HOME.set(str(profile_home))
+    scope_token = st._STREAMING_PROFILE_ENV_SCOPE_HELD.set(True)
     try:
         copied_context = contextvars.copy_context()
     finally:
+        st._STREAMING_PROFILE_ENV_SCOPE_HELD.reset(scope_token)
         st._STREAMING_CRON_PROFILE_HOME.reset(token)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
