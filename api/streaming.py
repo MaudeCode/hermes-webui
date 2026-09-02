@@ -6689,7 +6689,7 @@ def _strip_stale_user_merge_from_messages(
     return out
 
 
-def _save_streaming_checkpoint(session):
+def _save_streaming_checkpoint(session, *, _shared_env_scope_held=False):
     """Persist a streaming checkpoint under the session's profile context."""
     from api import profiles as profiles_api
 
@@ -6698,6 +6698,7 @@ def _save_streaming_checkpoint(session):
         "streaming checkpoint",
         logger_override=logger,
         scope_skill_modules=False,
+        _shared_env_scope_held=_shared_env_scope_held,
     ):
         session.save(skip_index=True)
 
@@ -11162,7 +11163,9 @@ def _run_agent_streaming(
                                     or fingerprint != last_fingerprint
                                     or stale
                                 ):
-                                    _save_streaming_checkpoint(s)
+                                    _save_streaming_checkpoint(
+                                        s, _shared_env_scope_held=True
+                                    )
                                     last_fingerprint = fingerprint
                                     last_write_at = now
                             last_saved_activity = cur

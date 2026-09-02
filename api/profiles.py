@@ -1209,6 +1209,7 @@ def profile_env_for_background_worker(
     logger_override: Optional[logging.Logger] = None,
     *,
     scope_skill_modules: bool = True,
+    _shared_env_scope_held: bool = False,
 ):
     """Temporarily route detached worker config reads through a profile.
 
@@ -1222,8 +1223,11 @@ def profile_env_for_background_worker(
     raw_profile = session if isinstance(session, str) else getattr(session, "profile", "")
     profile = str(raw_profile or "").strip()
     if not profile or profile == "default":
-        with _PROFILE_ENV_SCOPE_LOCK:
+        if _shared_env_scope_held:
             yield
+        else:
+            with _PROFILE_ENV_SCOPE_LOCK:
+                yield
         return
 
     try:
@@ -1272,8 +1276,9 @@ def profile_env_for_background_worker(
     should_restore_skill_modules = False
     _acquired_skill_home_patch_lock = False
     _acquired_profile_env_scope_lock = False
-    _PROFILE_ENV_SCOPE_LOCK.acquire()
-    _acquired_profile_env_scope_lock = True
+    if not _shared_env_scope_held:
+        _PROFILE_ENV_SCOPE_LOCK.acquire()
+        _acquired_profile_env_scope_lock = True
     try:
         _set_thread_env(**thread_env)
         _thread_ctx.block_process_env_fallback = True

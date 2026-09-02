@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import threading
 
+import pytest
+
 
 def test_checkpoint_save_uses_session_profile_env(monkeypatch, tmp_path):
     """Checkpoint saves run on their own thread, outside request TLS.
@@ -43,8 +45,17 @@ def test_checkpoint_save_uses_session_profile_env(monkeypatch, tmp_path):
     assert captured["thread_env"]["HERMES_CONFIG_PATH"] == str(profile_home / "config.yaml")
 
 
-def test_checkpoint_save_completes_without_skill_lock(monkeypatch, tmp_path):
-    """Checkpoint saves must not block on the legacy skill module lock."""
+@pytest.mark.parametrize(
+    ("held_lock_name", "shared_env_scope_held"),
+    [
+        ("_SKILL_HOME_MODULE_PATCH_LOCK", False),
+        ("_PROFILE_ENV_SCOPE_LOCK", True),
+    ],
+)
+def test_checkpoint_save_completes_with_parent_scope_lock_held(
+    monkeypatch, tmp_path, held_lock_name, shared_env_scope_held
+):
+    """Checkpoint children reuse stream scope without blocking on its locks."""
 
     from api.models import Session
     from api.streaming import _save_streaming_checkpoint
@@ -80,13 +91,17 @@ def test_checkpoint_save_completes_without_skill_lock(monkeypatch, tmp_path):
 
     session = Session(session_id="issue2848-lock", profile="maiko")
 
-    acquired_lock = profiles._SKILL_HOME_MODULE_PATCH_LOCK.acquire(timeout=1)
+    held_lock = getattr(profiles, held_lock_name)
+    acquired_lock = held_lock.acquire(timeout=1)
     assert acquired_lock, "lock was unexpectedly unavailable before checkpoint test"
 
     try:
         def _worker() -> None:
             try:
-                _save_streaming_checkpoint(session)
+                _save_streaming_checkpoint(
+                    session,
+                    _shared_env_scope_held=shared_env_scope_held,
+                )
                 completion.set()
             except Exception as exc:  # pragma: no cover - defensive
                 captured["error"] = exc
@@ -99,7 +114,7 @@ def test_checkpoint_save_completes_without_skill_lock(monkeypatch, tmp_path):
             "checkpoint worker should not block on skill module lock"
         )
     finally:
-        profiles._SKILL_HOME_MODULE_PATCH_LOCK.release()
+        held_lock.release()
         worker.join(timeout=1)
 
     assert captured.get("kwargs") == {"skip_index": True}
