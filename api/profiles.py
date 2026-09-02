@@ -58,6 +58,9 @@ _loaded_profile_env_keys: set[str] = set()
 _tls = threading.local()
 
 _SKILL_HOME_MODULES = ("tools.skills_tool", "tools.skill_manager_tool")
+# Serializes every scope that mirrors profile state into process globals. The
+# lock also guards legacy skill-module patching, so one RLock owns both pieces
+# of process-wide compatibility state and nested same-thread scopes stay safe.
 _SKILL_HOME_MODULE_PATCH_LOCK = threading.RLock()
 
 
@@ -1253,6 +1256,8 @@ def profile_env_for_background_worker(
     has_profile_skill_home = False
     should_restore_skill_modules = False
     _acquired_skill_home_patch_lock = False
+    _SKILL_HOME_MODULE_PATCH_LOCK.acquire()
+    _acquired_skill_home_patch_lock = True
     try:
         _set_thread_env(**thread_env)
         _thread_ctx.block_process_env_fallback = True
@@ -1303,9 +1308,6 @@ def profile_env_for_background_worker(
             should_restore_skill_modules = not (
                 _home_override_installed and has_profile_skill_home
             )
-            if should_restore_skill_modules:
-                _SKILL_HOME_MODULE_PATCH_LOCK.acquire()
-                _acquired_skill_home_patch_lock = True
 
         with _ENV_LOCK:
             if scope_skill_modules and should_restore_skill_modules:
@@ -1526,7 +1528,8 @@ def profile_scope_for_detached_worker(
     set_request_profile(name)
     try:
         if _is_root_profile(name):
-            yield
+            with _SKILL_HOME_MODULE_PATCH_LOCK:
+                yield
         else:
             with profile_env_for_background_worker(
                 name, purpose, logger_override=logger_override
