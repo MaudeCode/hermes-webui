@@ -1208,7 +1208,8 @@ def profile_env_for_background_worker(
     raw_profile = session if isinstance(session, str) else getattr(session, "profile", "")
     profile = str(raw_profile or "").strip()
     if not profile or profile == "default":
-        yield
+        with _PROFILE_ENV_SCOPE_LOCK:
+            yield
         return
 
     try:

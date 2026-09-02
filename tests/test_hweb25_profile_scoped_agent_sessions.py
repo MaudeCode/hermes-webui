@@ -297,6 +297,49 @@ def test_detached_cli_projection_scopes_ambient_helpers(monkeypatch, tmp_path):
     assert observed_profiles == ["member"]
 
 
+def test_default_environment_scope_waits_for_named_profile_scope(monkeypatch, tmp_path):
+    member_home = tmp_path / "profiles" / "member"
+    member_home.mkdir(parents=True)
+    monkeypatch.setattr(
+        profiles, "get_hermes_home_for_profile", lambda _profile: member_home
+    )
+    monkeypatch.setattr(profiles, "get_profile_runtime_env", lambda _home: {})
+    monkeypatch.setattr(
+        profiles, "filter_runtime_env_for_gateway_parity", lambda env: env
+    )
+    monkeypatch.setattr(profiles, "_profile_secret_env_names", lambda _home: set())
+
+    named_entered = threading.Event()
+    release_named = threading.Event()
+    default_entered = threading.Event()
+
+    def named_worker():
+        with profiles.profile_env_for_background_worker(
+            "member", "named holder", scope_skill_modules=False
+        ):
+            named_entered.set()
+            assert release_named.wait(2)
+
+    def default_worker():
+        with profiles.profile_env_for_background_worker(
+            "default", "default waiter", scope_skill_modules=False
+        ):
+            default_entered.set()
+
+    named = threading.Thread(target=named_worker)
+    default = threading.Thread(target=default_worker)
+    named.start()
+    assert named_entered.wait(2)
+    default.start()
+    assert default_entered.wait(0.1) is False
+    release_named.set()
+    assert default_entered.wait(2)
+    named.join(2)
+    default.join(2)
+    assert named.is_alive() is False
+    assert default.is_alive() is False
+
+
 def test_explicit_profile_cli_caches_do_not_cross_under_concurrency(monkeypatch, tmp_path):
     owner_home = tmp_path / "owner-default"
     member_home = tmp_path / "profiles" / "member"
