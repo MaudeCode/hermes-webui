@@ -8211,6 +8211,8 @@ def get_cli_sessions(
     now = time.monotonic()
 
     def _load_sessions():
+        from api.profiles import profile_scope_for_detached_worker
+
         loader_supports_include_claude_code = _callable_accepts_include_claude_code(
             _load_cli_sessions_uncached
         )
@@ -8226,24 +8228,33 @@ def get_cli_sessions(
                 }
                 if loader_supports_include_claude_code:
                     load_kwargs['include_claude_code'] = include_claude_code and idx == 0
-                merged.extend(
-                    _load_cli_sessions_uncached(
+                with profile_scope_for_detached_worker(
+                    ctx_profile,
+                    "CLI session projection",
+                    logger_override=logger,
+                ):
+                    projected = _load_cli_sessions_uncached(
                         ctx_home,
                         ctx_db_path,
                         ctx_profile,
                         **load_kwargs,
                     )
-                )
+                merged.extend(projected)
             return merged
         load_kwargs = {'source_filter': source_filter}
         if loader_supports_include_claude_code:
             load_kwargs['include_claude_code'] = include_claude_code
-        return _load_cli_sessions_uncached(
-            hermes_home,
-            db_path,
+        with profile_scope_for_detached_worker(
             cli_profile,
-            **load_kwargs,
-        )
+            "CLI session projection",
+            logger_override=logger,
+        ):
+            return _load_cli_sessions_uncached(
+                hermes_home,
+                db_path,
+                cli_profile,
+                **load_kwargs,
+            )
 
     if ttl > 0:
         stale_sessions = None

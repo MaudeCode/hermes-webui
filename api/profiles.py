@@ -1495,7 +1495,7 @@ def profile_scope_for_detached_worker(
     purpose: str = "detached worker",
     logger_override: Optional[logging.Logger] = None,
 ):
-    """Bind BOTH the per-request profile TLS and the profile env on a NEW thread (#3957).
+    """Bind BOTH the per-request profile TLS and profile env for worker-owned work (#3957).
 
     A detached worker thread (e.g. the ``models-catalog-rebuild`` daemon that
     ``get_available_models`` spawns for a bounded rebuild) inherits neither the
@@ -1519,17 +1519,24 @@ def profile_scope_for_detached_worker(
     thread that has no other use for it.
     """
     name = (profile_name or "").strip()
-    if not name or _is_root_profile(name):
+    if not name:
         yield
         return
+    previous_profile = getattr(_tls, "profile", None)
     set_request_profile(name)
     try:
-        with profile_env_for_background_worker(
-            name, purpose, logger_override=logger_override
-        ):
+        if _is_root_profile(name):
             yield
+        else:
+            with profile_env_for_background_worker(
+                name, purpose, logger_override=logger_override
+            ):
+                yield
     finally:
-        clear_request_profile()
+        if previous_profile is None:
+            clear_request_profile()
+        else:
+            set_request_profile(previous_profile)
 
 
 def _set_hermes_home(home: Path):

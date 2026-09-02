@@ -269,6 +269,34 @@ def test_get_cli_sessions_rejects_unknown_explicit_profile(monkeypatch):
     assert models.get_cli_sessions(profile="../owner") == []
 
 
+def test_detached_cli_projection_scopes_ambient_helpers(monkeypatch, tmp_path):
+    member_home = tmp_path / "profiles" / "member"
+    member_home.mkdir(parents=True)
+    _isolate_cli_projection(monkeypatch, tmp_path)
+    monkeypatch.setattr(profiles, "_active_profile", "default")
+    monkeypatch.setattr(
+        profiles, "get_hermes_home_for_profile", lambda _profile: member_home
+    )
+
+    observed_profiles = []
+
+    def fake_loader(*_args, **_kwargs):
+        observed_profiles.append(profiles.get_active_profile_name())
+        return []
+
+    monkeypatch.setattr(models, "_load_cli_sessions_uncached", fake_loader)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        result = executor.submit(
+            models.get_cli_sessions,
+            profile="member",
+            include_claude_code=False,
+        ).result()
+
+    assert result == []
+    assert observed_profiles == ["member"]
+
+
 def test_explicit_profile_cli_caches_do_not_cross_under_concurrency(monkeypatch, tmp_path):
     owner_home = tmp_path / "owner-default"
     member_home = tmp_path / "profiles" / "member"
