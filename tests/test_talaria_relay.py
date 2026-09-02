@@ -35,7 +35,12 @@ def test_pairing_persists_private_key_and_starts_publisher(tmp_path, monkeypatch
             (),
             {
                 "status": 201,
-                "read": lambda self: b'{"keyId":"key-created","publisherId":"https://hermes.example.com"}',
+                "read": lambda self: json.dumps({
+                    "protocolVersion": 2,
+                    "keyId": "key-created",
+                    "publisherId": "https://hermes.example.com",
+                    "profileId": json.loads(request.data)["profileId"],
+                }).encode(),
             },
         )()
 
@@ -89,14 +94,19 @@ def test_pairing_private_key_is_0600_before_any_post_write_failure(tmp_path, mon
     )
 
     @contextmanager
-    def opener(_request, timeout):
+    def opener(request, timeout):
         assert timeout == 10
         yield type(
             "Response",
             (),
             {
                 "status": 201,
-                "read": lambda self: b'{"keyId":"key-created","publisherId":"https://hermes.example.com"}',
+                "read": lambda self: json.dumps({
+                    "protocolVersion": 2,
+                    "keyId": "key-created",
+                    "publisherId": "https://hermes.example.com",
+                    "profileId": json.loads(request.data)["profileId"],
+                }).encode(),
             },
         )()
 
@@ -114,10 +124,31 @@ def test_pairing_private_key_is_0600_before_any_post_write_failure(tmp_path, mon
     finally:
         os.umask(previous_umask)
 
+    saved = json.loads((tmp_path / "talaria-relay.json").read_text())
+    assert stat.S_IMODE(Path(saved["private_key_path"]).stat().st_mode) == 0o600
+
+
+def test_server_registration_rejects_v1_relay_response_without_persisting(tmp_path, monkeypatch):
+    from api import config
+
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    monkeypatch.setenv("HERMES_WEBUI_TALARIA_RELAY_URL", "https://relay.example.com")
+
+    @contextmanager
+    def opener(_request, timeout):
+        assert timeout == 10
+        yield type("Response", (), {
+            "status": 201,
+            "read": lambda self: b'{"keyId":"legacy-key","publisherId":"https://hermes.example.com"}',
+        })()
+
+    with pytest.raises(RelayPairingError, match="invalid response"):
+        pair_talaria_relay({
+            "relay_url": "https://relay.example.com",
+            "publisher_id": "https://hermes.example.com",
+            "publisher_invitation": "invite-once",
+        }, opener=opener)
     assert not (tmp_path / "talaria-relay.json").exists()
-    key_paths = list(tmp_path.glob("talaria-relay-publisher-*.pem"))
-    assert len(key_paths) == 1
-    assert stat.S_IMODE(key_paths[0].stat().st_mode) == 0o600
 
 
 def test_pairing_rejects_an_untrusted_relay_origin():
@@ -141,6 +172,23 @@ def test_v1_relay_state_requires_registration_again(tmp_path, monkeypatch):
     }))
 
     assert RelayConfig.from_state() is None
+
+
+def test_profile_identity_is_persistent_and_changes_after_recreation(tmp_path, monkeypatch):
+    from api import profiles, talaria_relay
+
+    profile_home = tmp_path / "profiles" / "work"
+    profile_home.mkdir(parents=True)
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _profile: profile_home)
+
+    first = talaria_relay._profile_identity("work")
+    assert stat.S_IMODE((profile_home / ".talaria-relay-profile-id").stat().st_mode) == 0o600
+    assert talaria_relay._profile_identity("work") == first
+
+    (profile_home / ".talaria-relay-profile-id").unlink()
+    profile_home.rmdir()
+    profile_home.mkdir()
+    assert talaria_relay._profile_identity("work") != first
 
 
 def test_pairing_confirms_initial_snapshot_before_switching_publishers(monkeypatch):
@@ -285,6 +333,7 @@ def test_profile_enrollment_reuses_the_registered_publisher_key(tmp_path, monkey
         yield type("Response", (), {
             "status": 201,
             "read": lambda self: json.dumps({
+                "protocolVersion": 2,
                 "publisherId": body["publisherId"],
                 "profileId": body["profileId"],
             }).encode(),
@@ -347,6 +396,7 @@ def test_concurrent_profile_enrollments_preserve_both_mappings(tmp_path, monkeyp
         yield type("Response", (), {
             "status": 201,
             "read": lambda self: json.dumps({
+                "protocolVersion": 2,
                 "publisherId": body["publisherId"],
                 "profileId": body["profileId"],
             }).encode(),
@@ -397,6 +447,7 @@ def test_recreated_profile_receives_a_new_relay_scope(tmp_path, monkeypatch):
         yield type("Response", (), {
             "status": 201,
             "read": lambda self: json.dumps({
+                "protocolVersion": 2,
                 "publisherId": captured["publisherId"],
                 "profileId": captured["profileId"],
             }).encode(),
@@ -585,27 +636,40 @@ def test_terminal_state_survives_active_run_teardown(tmp_path, monkeypatch):
     assert restarted._next_revision() > states[0]["revision"]
 
 
-def test_publisher_stops_after_permanent_http_failure(tmp_path, caplog):
+def test_publisher_isolates_permanent_failure_to_one_profile(tmp_path, caplog):
     key = Ed25519PrivateKey.generate()
     key_path = tmp_path / "publisher.pem"
     key_path.write_bytes(key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()))
-    attempts = 0
+    attempts = []
 
+    @contextmanager
     def opener(request, timeout):
-        nonlocal attempts
-        attempts += 1
-        raise urllib.error.HTTPError(request.full_url, 401, "Unauthorized", {}, None)
+        assert timeout == 10
+        attempts.append(request.full_url)
+        if "/profiles/prf_bad/" in request.full_url:
+            raise urllib.error.HTTPError(request.full_url, 401, "Unauthorized", {}, None)
+        yield type("Response", (), {"status": 200})()
 
     publisher = TalariaRelayPublisher(
-        RelayConfig("https://relay.example", "publisher", "key", key_path),
+        RelayConfig(
+            "https://relay.example",
+            "publisher",
+            "key",
+            key_path,
+            {
+                "bad": {"identity": "", "profile_id": "prf_bad"},
+                "good": {"identity": "", "profile_id": "prf_good"},
+            },
+        ),
         opener=opener,
     )
-    publisher.changed()
     with caplog.at_level(logging.WARNING, logger="api.talaria_relay"):
-        publisher._run()
+        publisher.publish_snapshot(isolate_permanent=True)
+        publisher.publish_snapshot(isolate_permanent=True)
 
-    assert attempts == 1
-    assert "stopped after permanent HTTP 401" in caplog.text
+    assert sum("/profiles/prf_bad/" in url for url in attempts) == 1
+    assert sum("/profiles/prf_good/" in url for url in attempts) == 2
+    assert "disabled profile after permanent HTTP 401" in caplog.text
     assert all(record.exc_info is None for record in caplog.records)
 
 
