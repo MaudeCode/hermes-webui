@@ -15878,7 +15878,6 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/talaria/relay/pair":
         from api.auth import ensure_trusted_auth_session
-        from api.profiles import get_active_profile_name
         from api.talaria_relay import RelayPairingError, pair_talaria_relay
 
         relay_session = ensure_trusted_auth_session(handler)
@@ -15888,7 +15887,7 @@ def handle_post(handler, parsed) -> bool:
                 handler,
                 pair_talaria_relay(
                     body,
-                    profile=bound_profile or get_active_profile_name(),
+                    profile=bound_profile or _get_active_profile_name(),
                     operator=bound_profile is None,
                 ),
             )
