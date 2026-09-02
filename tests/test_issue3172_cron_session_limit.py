@@ -58,8 +58,8 @@ def fake_hermes_home(tmp_path, monkeypatch):
 
     import api.config as cfg
     import api.profiles as profiles
-    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: home)
-    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: None)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _profile: home)
 
     projects_file = tmp_path / "projects.json"
     monkeypatch.setattr(cfg, "PROJECTS_FILE", projects_file)

@@ -8201,7 +8201,7 @@ def get_cli_sessions(
             )
         except Exception as exc:
             logger.warning(
-                "Refusing CLI session read because the profile home could not be resolved: %s",
+                "Refusing CLI session read because the profile home/db_path could not be resolved: %s",
                 exc,
             )
             return []
