@@ -158,6 +158,38 @@ def test_cron_profile_context_serializes_concurrent_access(tmp_path):
     assert third[0] == "enter" and fourth[0] == "exit" and third[1] == fourth[1]
 
 
+@pytest.mark.parametrize("explicit_home", [False, True])
+def test_cron_profile_contexts_share_profile_environment_lock(
+    tmp_path, monkeypatch, explicit_home
+):
+    from api import profiles as p
+
+    home = tmp_path / "profile"
+    monkeypatch.setattr(p, "get_active_hermes_home", lambda: home)
+    entered = threading.Event()
+
+    def worker():
+        context = (
+            p.cron_profile_context_for_home(home)
+            if explicit_home
+            else p.cron_profile_context()
+        )
+        with context:
+            entered.set()
+
+    p._PROFILE_ENV_SCOPE_LOCK.acquire()
+    thread = threading.Thread(target=worker)
+    try:
+        thread.start()
+        assert entered.wait(0.1) is False
+    finally:
+        p._PROFILE_ENV_SCOPE_LOCK.release()
+
+    assert entered.wait(2)
+    thread.join(2)
+    assert thread.is_alive() is False
+
+
 def test_cron_run_does_not_silently_swallow_profile_resolution_errors():
     """_handle_cron_run must NOT silently fall through to profile_home=None
     when get_active_hermes_home() raises.
@@ -341,7 +373,8 @@ def test_streaming_cronjob_wrapper_uses_profile_context_only_for_tool_call(tmp_p
     events = []
 
     class Ctx:
-        def __init__(self, home):
+        def __init__(self, home, *, _shared_env_scope_held=False):
+            assert _shared_env_scope_held is True
             self.home = str(home)
 
         def __enter__(self):
@@ -424,7 +457,8 @@ def test_streaming_cronjob_wrapper_context_survives_threadpool_context_copy(tmp_
     events = []
 
     class Ctx:
-        def __init__(self, home):
+        def __init__(self, home, *, _shared_env_scope_held=False):
+            assert _shared_env_scope_held is True
             self.home = str(home)
 
         def __enter__(self):

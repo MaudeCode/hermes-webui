@@ -575,9 +575,9 @@ def get_active_hermes_home() -> Path:
 # Thread-safety note on os.environ mutation:
 # CPython's os.environ assignment is GIL-protected at the bytecode level, but
 # multi-step read-modify-write sequences (snapshot prev → assign new → restore
-# on exit) are NOT atomic without explicit serialization. The _cron_env_lock
-# below makes the entire context-manager body run-to-completion serially, so
-# all webui access to HERMES_HOME goes through one thread at a time. Any
+# on exit) are NOT atomic without explicit serialization. The shared profile
+# environment lock coordinates cron with every other process-global profile
+# scope; the cron lock also protects cron module globals. Any
 # subprocess.Popen() call inside `run_job` inherits the env at fork time,
 # which is also under the lock — so child processes always see a consistent
 # (own-profile) HERMES_HOME, never a half-swapped state.
@@ -687,10 +687,15 @@ class cron_profile_context_for_home:
     resolves the home via TLS.
     """
 
-    def __init__(self, home: Path):
+    def __init__(self, home: Path, *, _shared_env_scope_held: bool = False):
         self._home = Path(home)
+        self._shared_env_scope_held = _shared_env_scope_held
+        self._acquired_profile_env_scope_lock = False
 
     def __enter__(self):
+        if not self._shared_env_scope_held:
+            _PROFILE_ENV_SCOPE_LOCK.acquire()
+            self._acquired_profile_env_scope_lock = True
         _cron_env_lock.acquire()
         _push_cron_profile_context_depth()
         try:
@@ -730,6 +735,9 @@ class cron_profile_context_for_home:
         except Exception:
             _pop_cron_profile_context_depth()
             _cron_env_lock.release()
+            if self._acquired_profile_env_scope_lock:
+                _PROFILE_ENV_SCOPE_LOCK.release()
+                self._acquired_profile_env_scope_lock = False
             raise
         return self
 
@@ -754,6 +762,9 @@ class cron_profile_context_for_home:
         finally:
             _pop_cron_profile_context_depth()
             _cron_env_lock.release()
+            if self._acquired_profile_env_scope_lock:
+                _PROFILE_ENV_SCOPE_LOCK.release()
+                self._acquired_profile_env_scope_lock = False
         return False
 
 
@@ -770,6 +781,7 @@ class cron_profile_context:
     """
 
     def __enter__(self):
+        _PROFILE_ENV_SCOPE_LOCK.acquire()
         _cron_env_lock.acquire()
         _push_cron_profile_context_depth()
         try:
@@ -808,6 +820,7 @@ class cron_profile_context:
         except Exception:
             _pop_cron_profile_context_depth()
             _cron_env_lock.release()
+            _PROFILE_ENV_SCOPE_LOCK.release()
             raise
         return self
 
@@ -835,6 +848,7 @@ class cron_profile_context:
         finally:
             _pop_cron_profile_context_depth()
             _cron_env_lock.release()
+            _PROFILE_ENV_SCOPE_LOCK.release()
         return False
 
 

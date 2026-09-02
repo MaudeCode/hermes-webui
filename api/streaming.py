@@ -424,7 +424,10 @@ def _install_streaming_cronjob_profile_wrapper() -> None:
         if not profile_home:
             return original_handler(args, **kwargs)
         from api.profiles import cron_profile_context_for_home
-        with cron_profile_context_for_home(Path(profile_home)):
+        # The streaming thread owns the shared profile-environment scope for
+        # this handler's full lifetime; acquiring its RLock from this child
+        # executor thread would deadlock.
+        with cron_profile_context_for_home(Path(profile_home), _shared_env_scope_held=True):
             return original_handler(args, **kwargs)
 
     _profile_scoped_cronjob_handler.__dict__["_webui_streaming_profile_wrapper"] = True
