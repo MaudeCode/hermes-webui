@@ -44,6 +44,7 @@ def test_pairing_persists_private_key_and_starts_publisher(tmp_path, monkeypatch
                     "keyId": "key-created",
                     "publisherId": "https://hermes.example.com",
                     "profileId": json.loads(request.data)["profileId"],
+                    "profileIdPreserved": False,
                 }).encode(),
             },
         )()
@@ -110,6 +111,7 @@ def test_pairing_private_key_is_0600_before_any_post_write_failure(tmp_path, mon
                     "keyId": "key-created",
                     "publisherId": "https://hermes.example.com",
                     "profileId": json.loads(request.data)["profileId"],
+                    "profileIdPreserved": False,
                 }).encode(),
             },
         )()
@@ -144,6 +146,35 @@ def test_server_registration_rejects_v1_relay_response_without_persisting(tmp_pa
         yield type("Response", (), {
             "status": 201,
             "read": lambda self: b'{"keyId":"legacy-key","publisherId":"https://hermes.example.com"}',
+        })()
+
+    with pytest.raises(RelayPairingError, match="invalid response"):
+        pair_talaria_relay({
+            "relay_url": "https://relay.example.com",
+            "publisher_id": "https://hermes.example.com",
+            "publisher_invitation": "invite-once",
+        }, opener=opener)
+    assert not (tmp_path / "talaria-relay.json").exists()
+
+
+def test_server_registration_rejects_unmarked_profile_scope_mismatch(tmp_path, monkeypatch):
+    from api import config
+
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    monkeypatch.setenv("HERMES_WEBUI_TALARIA_RELAY_URL", "https://relay.example.com")
+
+    @contextmanager
+    def opener(_request, timeout):
+        assert timeout == 10
+        yield type("Response", (), {
+            "status": 201,
+            "read": lambda self: json.dumps({
+                "protocolVersion": 2,
+                "keyId": "key-created",
+                "publisherId": "https://hermes.example.com",
+                "profileId": "prf_mismatched",
+                "profileIdPreserved": False,
+            }).encode(),
         })()
 
     with pytest.raises(RelayPairingError, match="invalid response"):
@@ -193,6 +224,28 @@ def test_profile_identity_is_persistent_and_changes_after_recreation(tmp_path, m
     profile_home.rmdir()
     profile_home.mkdir()
     assert talaria_relay._profile_identity("work") != first
+
+
+def test_enrollment_snapshot_revalidates_captured_profile_identity(tmp_path, monkeypatch):
+    from api import talaria_relay
+
+    key = Ed25519PrivateKey.generate()
+    key_path = tmp_path / "publisher.pem"
+    key_path.write_bytes(key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()))
+    monkeypatch.setattr(talaria_relay, "_profile_identity", lambda _profile: "new-identity")
+    publisher = TalariaRelayPublisher(
+        RelayConfig(
+            "https://relay.example",
+            "https://hermes.example",
+            "key-1",
+            key_path,
+            {"work": {"identity": "old-identity", "profile_id": "prf_work"}},
+        ),
+    )
+
+    with pytest.raises(RelayPairingError, match="changed during relay enrollment") as raised:
+        publisher.publish_profile("prf_work", "old-identity")
+    assert raised.value.status == 409
 
 
 def test_pairing_confirms_initial_snapshot_before_switching_publishers(monkeypatch):
@@ -280,8 +333,8 @@ def test_publisher_reconfiguration_validates_only_new_profile(monkeypatch):
         def publish_snapshot(self):
             raise AssertionError("full snapshot must not gate one profile enrollment")
 
-        def publish_profile(self, profile_id):
-            validated.append(profile_id)
+        def publish_profile(self, profile_id, expected_identity):
+            validated.append((profile_id, expected_identity))
 
         def start(self, *, publish_initial):
             assert publish_initial is False
@@ -294,9 +347,10 @@ def test_publisher_reconfiguration_validates_only_new_profile(monkeypatch):
     talaria_relay.configure_talaria_relay_publisher(
         RelayConfig("https://relay.example", "https://hermes.example", "key", Path("key.pem")),
         validate_profile_id="prf_new",
+        validate_profile_identity="identity-new",
     )
 
-    assert validated == ["prf_new"]
+    assert validated == [("prf_new", "identity-new")]
 
 
 def test_profile_bound_session_can_enroll_without_operator_access(monkeypatch):

@@ -287,7 +287,11 @@ def _pair_talaria_relay_unlocked(
             },
         )
         _save_config(config)
-        configure_talaria_relay_publisher(config, validate_profile_id=profile_id)
+        configure_talaria_relay_publisher(
+            config,
+            validate_profile_id=profile_id,
+            validate_profile_identity=profile_identity,
+        )
         return {"ok": True, "publisher_id": publisher_id}
 
     if not operator:
@@ -331,6 +335,7 @@ def _pair_talaria_relay_unlocked(
     key_id = payload.get("keyId") if isinstance(payload, dict) else None
     paired_publisher_id = payload.get("publisherId") if isinstance(payload, dict) else None
     paired_profile_id = payload.get("profileId") if isinstance(payload, dict) else None
+    profile_id_preserved = payload.get("profileIdPreserved") if isinstance(payload, dict) else None
     if (
         not isinstance(payload, dict)
         or payload.get("protocolVersion") != 2
@@ -339,6 +344,8 @@ def _pair_talaria_relay_unlocked(
         or not isinstance(paired_publisher_id, str)
         or not isinstance(paired_profile_id, str)
         or not paired_profile_id
+        or not isinstance(profile_id_preserved, bool)
+        or (paired_profile_id != profile_id and not profile_id_preserved)
     ):
         raise RelayPairingError("Talaria Relay returned an invalid response", status=502)
     try:
@@ -369,7 +376,11 @@ def _pair_talaria_relay_unlocked(
         {profile: {"identity": profile_identity, "profile_id": profile_id}},
     )
     _save_config(config)
-    configure_talaria_relay_publisher(config, validate_profile_id=profile_id)
+    configure_talaria_relay_publisher(
+        config,
+        validate_profile_id=profile_id,
+        validate_profile_identity=profile_identity,
+    )
     return {"ok": True, "publisher_id": publisher_id}
 
 
@@ -583,9 +594,14 @@ class TalariaRelayPublisher:
         if retryable_error is not None:
             raise retryable_error
 
-    def publish_profile(self, profile_id: str) -> None:
+    def publish_profile(self, profile_id: str, expected_identity: str) -> None:
         for profile, profile_config in self.config.profiles.items():
             if profile_config["profile_id"] == profile_id:
+                if (
+                    profile_config["identity"] != expected_identity
+                    or _profile_identity(profile) != expected_identity
+                ):
+                    raise RelayPairingError("Hermes profile changed during relay enrollment", status=409)
                 self._publish_profile_snapshot(profile, profile_id)
                 return
         raise RelayPairingError("Talaria Relay profile enrollment is unavailable", status=502)
@@ -660,6 +676,7 @@ def configure_talaria_relay_publisher(
     config: RelayConfig,
     *,
     validate_profile_id: str | None = None,
+    validate_profile_identity: str | None = None,
 ) -> None:
     global _publisher
     with _publisher_lock:
@@ -673,7 +690,9 @@ def configure_talaria_relay_publisher(
             if validate_profile_id is None:
                 candidate.publish_snapshot()
             else:
-                candidate.publish_profile(validate_profile_id)
+                if validate_profile_identity is None:
+                    raise RelayPairingError("Hermes profile enrollment is unavailable", status=502)
+                candidate.publish_profile(validate_profile_id, validate_profile_identity)
         except Exception as exc:
             raise RelayPairingError("Could not publish the initial Talaria Relay snapshot", status=502) from exc
         stop_talaria_relay_publisher()
