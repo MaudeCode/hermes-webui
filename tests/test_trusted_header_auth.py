@@ -397,7 +397,6 @@ def test_profile_admin_rejects_bound_oidc_session(monkeypatch, path):
         "/api/extensions/install",
         "/api/extensions/uninstall",
         "/api/admin/reload",
-        "/api/talaria/relay/pair",
         "/api/profile/create",
         "/api/profile/delete",
         "/api/auth/passkey/register/options",
@@ -425,6 +424,28 @@ def test_operator_routes_reject_bound_oidc_session(monkeypatch, path):
     assert auth.check_auth(handler, SimpleNamespace(path=path, query="")) is False
     assert handler.status == 403
     assert "owner" in handler.json_body()["error"].lower()
+
+
+def test_relay_profile_enrollment_allows_bound_oidc_session(monkeypatch):
+    import api.auth_oidc as auth_oidc
+
+    monkeypatch.setattr(auth, "is_oidc_auth_enabled", lambda: True)
+    monkeypatch.setattr(auth_oidc, "oidc_session_binding_is_current", lambda _info: True)
+    cookie = auth.create_session(
+        auth_type="oidc",
+        username="alice@example.com",
+        bound_profile="alice",
+        oidc_binding={
+            "mapping_fingerprint": "mapping-fingerprint",
+            "profile_identity": "profile-identity",
+        },
+    )
+    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}"})
+
+    assert auth.check_auth(
+        handler,
+        SimpleNamespace(path="/api/talaria/relay/pair", query=""),
+    ) is True
 
 
 def test_auth_status_reports_trusted_session_fields(monkeypatch):

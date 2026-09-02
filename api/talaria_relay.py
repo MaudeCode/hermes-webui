@@ -16,7 +16,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -29,6 +29,7 @@ from cryptography.hazmat.primitives.serialization import (
 )
 
 logger = logging.getLogger(__name__)
+_publisher_lock = threading.RLock()
 
 
 def _b64url(value: bytes) -> str:
@@ -41,6 +42,9 @@ class RelayConfig:
     publisher_id: str
     key_id: str
     private_key_path: Path
+    profiles: dict[str, dict[str, str]] = field(default_factory=lambda: {
+        "default": {"identity": "", "profile_id": "prf_default"},
+    })
 
     @staticmethod
     def _validated_origin(value: str, *, https_only: bool = False) -> str:
@@ -67,11 +71,33 @@ class RelayConfig:
             values = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(values, dict):
                 raise ValueError("saved relay configuration is not an object")
+            if values.get("version") != 2:
+                return None
+            profiles = values.get("profiles")
+            if not isinstance(profiles, dict) or not profiles:
+                raise ValueError("saved relay profiles are invalid")
+            normalized_profiles = {}
+            for name, profile in profiles.items():
+                if (
+                    not isinstance(name, str)
+                    or not name
+                    or not isinstance(profile, dict)
+                    or not isinstance(profile.get("identity"), str)
+                    or not profile["identity"]
+                    or not isinstance(profile.get("profile_id"), str)
+                    or not profile["profile_id"]
+                ):
+                    raise ValueError("saved relay profiles are invalid")
+                normalized_profiles[name] = {
+                    "identity": profile["identity"],
+                    "profile_id": profile["profile_id"],
+                }
             return cls(
                 url=cls._validated_origin(str(values["url"])),
                 publisher_id=cls._validated_origin(str(values["publisher_id"])),
                 key_id=str(values["key_id"]),
                 private_key_path=Path(str(values["private_key_path"])),
+                profiles=normalized_profiles,
             )
         except FileNotFoundError:
             return None
@@ -90,7 +116,95 @@ def _state_paths() -> tuple[Path, Path]:
     return state_dir / "talaria-relay.json", state_dir / "talaria-relay-publisher.pem"
 
 
-def pair_talaria_relay(body: object, *, opener=urllib.request.urlopen) -> dict[str, str | bool]:
+def _canonical_profile(profile: str) -> str:
+    from api.profiles import _is_root_profile
+
+    return "default" if _is_root_profile(profile) else profile
+
+
+def _profile_identity(profile: str) -> str:
+    from api.profiles import get_hermes_home_for_profile
+
+    path = get_hermes_home_for_profile(profile) / ".talaria-relay-profile-id"
+    try:
+        identity = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        from api.paths import _atomic_write_text
+
+        identity = f"pfi_{uuid.uuid4().hex}"
+        _atomic_write_text(path, identity + "\n", file_mode=0o600)
+    if (
+        len(identity) != 36
+        or not identity.startswith("pfi_")
+        or any(character not in "0123456789abcdef" for character in identity[4:])
+    ):
+        raise ValueError("invalid Talaria Relay profile identity")
+    return identity
+
+
+def _save_config(config: RelayConfig) -> None:
+    from api.paths import _atomic_write_text
+
+    config_path, _ = _state_paths()
+    _atomic_write_text(
+        config_path,
+        json.dumps(
+            {
+                "version": 2,
+                "url": config.url,
+                "publisher_id": config.publisher_id,
+                "key_id": config.key_id,
+                "private_key_path": str(config.private_key_path),
+                "profiles": config.profiles,
+            },
+            indent=2,
+            sort_keys=True,
+        ) + "\n",
+    )
+
+
+def _signed_request(config: RelayConfig, path: str, body: bytes, *, method: str) -> urllib.request.Request:
+    key = TalariaRelayPublisher._load_key(config.private_key_path)
+    timestamp = str(int(time.time()))
+    nonce = uuid.uuid4().hex
+    signed = "\n".join((method, path, timestamp, nonce, _b64url(hashlib.sha256(body).digest())))
+    return urllib.request.Request(
+        config.url + path,
+        data=body,
+        method=method,
+        headers={
+            "Content-Type": "application/json",
+            "X-Talaria-Key-Id": config.key_id,
+            "X-Talaria-Timestamp": timestamp,
+            "X-Talaria-Nonce": nonce,
+            "X-Talaria-Signature": _b64url(key.sign(signed.encode("utf-8"))),
+        },
+    )
+
+
+def pair_talaria_relay(
+    body: object,
+    *,
+    profile: str = "default",
+    operator: bool = True,
+    opener=urllib.request.urlopen,
+) -> dict[str, str | bool]:
+    with _publisher_lock:
+        return _pair_talaria_relay_unlocked(
+            body,
+            profile=profile,
+            operator=operator,
+            opener=opener,
+        )
+
+
+def _pair_talaria_relay_unlocked(
+    body: object,
+    *,
+    profile: str,
+    operator: bool,
+    opener,
+) -> dict[str, str | bool]:
     if not isinstance(body, dict):
         raise RelayPairingError("Invalid pairing request", status=400)
     relay_url = body.get("relay_url")
@@ -113,13 +227,88 @@ def pair_talaria_relay(body: object, *, opener=urllib.request.urlopen) -> dict[s
     if not 1 <= len(invitation) <= 256 or not 1 <= len(label) <= 80:
         raise RelayPairingError("Invalid relay pairing fields", status=400)
 
+    profile = str(profile or "").strip()
+    if not profile:
+        raise RelayPairingError("Hermes profile is unavailable", status=403)
+    try:
+        profile = _canonical_profile(profile)
+        profile_identity = _profile_identity(profile)
+    except (OSError, ValueError) as exc:
+        raise RelayPairingError("Hermes profile is unavailable", status=403) from exc
+    existing = RelayConfig.from_state()
+    if existing is not None:
+        if existing.url != relay_url or existing.publisher_id != publisher_id:
+            raise RelayPairingError("This Hermes server is registered to a different relay", status=409)
+        existing_profile = existing.profiles.get(profile)
+        profile_id = (
+            existing_profile["profile_id"]
+            if existing_profile and existing_profile["identity"] == profile_identity
+            else f"prf_{uuid.uuid4().hex}"
+        )
+        request_body = json.dumps(
+            {
+                "invitation": invitation,
+                "publisherId": publisher_id,
+                "profileId": profile_id,
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        request = _signed_request(existing, "/v1/pairings/profile/redeem", request_body, method="POST")
+        try:
+            with opener(request, timeout=10) as response:
+                payload = json.loads(response.read())
+                if not 200 <= response.status < 300:
+                    raise RelayPairingError("Talaria Relay rejected the profile enrollment", status=502)
+        except RelayPairingError:
+            raise
+        except urllib.error.HTTPError as exc:
+            status = 409 if 400 <= exc.code < 500 else 502
+            raise RelayPairingError(
+                f"Talaria Relay rejected the profile enrollment (HTTP {exc.code})",
+                status=status,
+            ) from exc
+        except Exception as exc:
+            raise RelayPairingError("Could not reach Talaria Relay", status=502) from exc
+        if (
+            not isinstance(payload, dict)
+            or payload.get("protocolVersion") != 2
+            or payload.get("publisherId") != publisher_id
+            or payload.get("profileId") != profile_id
+        ):
+            raise RelayPairingError("Talaria Relay returned an invalid response", status=502)
+        config = RelayConfig(
+            existing.url,
+            existing.publisher_id,
+            existing.key_id,
+            existing.private_key_path,
+            {
+                **existing.profiles,
+                profile: {"identity": profile_identity, "profile_id": profile_id},
+            },
+        )
+        _save_config(config)
+        configure_talaria_relay_publisher(
+            config,
+            validate_profile_id=profile_id,
+            validate_profile_identity=profile_identity,
+        )
+        return {"ok": True, "publisher_id": publisher_id}
+
+    if not operator:
+        raise RelayPairingError(
+            "An owner must register this Hermes server with Talaria Relay before profile enrollment",
+            status=409,
+        )
+
     key = Ed25519PrivateKey.generate()
+    profile_id = f"prf_{uuid.uuid4().hex}"
     request = urllib.request.Request(
         relay_url + "/v1/pairings/publisher/redeem",
         data=json.dumps(
             {
                 "invitation": invitation,
                 "publisherId": publisher_id,
+                "profileId": profile_id,
                 "label": label,
                 "publicKey": _b64url(key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)),
             },
@@ -135,11 +324,29 @@ def pair_talaria_relay(body: object, *, opener=urllib.request.urlopen) -> dict[s
                 raise RelayPairingError("Talaria Relay rejected the invitation", status=502)
     except RelayPairingError:
         raise
+    except urllib.error.HTTPError as exc:
+        status = 409 if 400 <= exc.code < 500 else 502
+        raise RelayPairingError(
+            f"Talaria Relay rejected server registration (HTTP {exc.code})",
+            status=status,
+        ) from exc
     except Exception as exc:
         raise RelayPairingError("Could not reach Talaria Relay", status=502) from exc
     key_id = payload.get("keyId") if isinstance(payload, dict) else None
     paired_publisher_id = payload.get("publisherId") if isinstance(payload, dict) else None
-    if not isinstance(key_id, str) or not key_id or not isinstance(paired_publisher_id, str):
+    paired_profile_id = payload.get("profileId") if isinstance(payload, dict) else None
+    profile_id_preserved = payload.get("profileIdPreserved") if isinstance(payload, dict) else None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("protocolVersion") != 2
+        or not isinstance(key_id, str)
+        or not key_id
+        or not isinstance(paired_publisher_id, str)
+        or not isinstance(paired_profile_id, str)
+        or not paired_profile_id
+        or not isinstance(profile_id_preserved, bool)
+        or (paired_profile_id != profile_id and not profile_id_preserved)
+    ):
         raise RelayPairingError("Talaria Relay returned an invalid response", status=502)
     try:
         publisher_id = RelayConfig._validated_origin(paired_publisher_id)
@@ -160,20 +367,20 @@ def pair_talaria_relay(body: object, *, opener=urllib.request.urlopen) -> dict[s
         key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode("ascii"),
         file_mode=0o600,
     )
-    config = RelayConfig(relay_url, publisher_id, key_id, key_path)
-    _atomic_write_text(
-        config_path,
-        json.dumps(
-            {
-                "url": config.url,
-                "publisher_id": config.publisher_id,
-                "key_id": config.key_id,
-                "private_key_path": str(config.private_key_path),
-            },
-            indent=2,
-        ) + "\n",
+    profile_id = paired_profile_id
+    config = RelayConfig(
+        relay_url,
+        publisher_id,
+        key_id,
+        key_path,
+        {profile: {"identity": profile_identity, "profile_id": profile_id}},
     )
-    configure_talaria_relay_publisher(config)
+    _save_config(config)
+    configure_talaria_relay_publisher(
+        config,
+        validate_profile_id=profile_id,
+        validate_profile_identity=profile_identity,
+    )
     return {"ok": True, "publisher_id": publisher_id}
 
 
@@ -195,6 +402,7 @@ class TalariaRelayPublisher:
             self._last_revision = 0
         self._terminal_lock = threading.Lock()
         self._terminal: dict[str, dict] = {}
+        self._disabled_profiles: set[str] = set()
 
     @staticmethod
     def _load_key(path: Path) -> Ed25519PrivateKey:
@@ -252,7 +460,7 @@ class TalariaRelayPublisher:
             if self._stop.is_set():
                 return
             try:
-                self.publish_snapshot()
+                self.publish_snapshot(isolate_permanent=True)
             except Exception as exc:
                 if isinstance(exc, _RelayHTTPError) and not exc.retryable:
                     logger.error(
@@ -285,9 +493,10 @@ class TalariaRelayPublisher:
                     logger.info("Talaria relay snapshot recovered")
                 failures = 0
 
-    def build_states(self) -> list[dict]:
+    def build_states(self, profile: str) -> list[dict]:
         from api.config import ACTIVE_RUNS, ACTIVE_RUNS_LOCK
         from api.models import get_session
+        from api.profiles import _profiles_match
 
         with ACTIVE_RUNS_LOCK:
             runs = [dict(item) for item in ACTIVE_RUNS.values() if isinstance(item, dict)]
@@ -313,11 +522,14 @@ class TalariaRelayPublisher:
 
         states = []
         for sid, run in by_session.items():
-            revision = self._next_revision()
             try:
-                title = str(get_session(sid, metadata_only=True).title or "Untitled")[:120]
+                session = get_session(sid, metadata_only=True)
             except Exception:
-                title = "Hermes session"
+                continue
+            if not _profiles_match(getattr(session, "profile", None), profile):
+                continue
+            revision = self._next_revision()
+            title = str(session.title or "Untitled")[:120]
             phase = str(run.get("relay_phase") or "running")
             try:
                 from api.route_approvals import _lock as approval_lock, _pending as approvals
@@ -353,14 +565,58 @@ class TalariaRelayPublisher:
             _atomic_write_text(self._revision_path, f"{self._last_revision}\n")
         return states
 
-    def publish_snapshot(self) -> None:
-        states = self.build_states()
+    def publish_snapshot(self, *, isolate_permanent: bool = False) -> None:
+        retryable_error = None
+        for profile, profile_config in self.config.profiles.items():
+            identity = profile_config["identity"]
+            if identity:
+                try:
+                    if _profile_identity(profile) != identity:
+                        continue
+                except (OSError, ValueError):
+                    continue
+            profile_id = profile_config["profile_id"]
+            if profile_id in self._disabled_profiles:
+                continue
+            try:
+                self._publish_profile_snapshot(profile, profile_id)
+            except _RelayHTTPError as exc:
+                if not isolate_permanent:
+                    raise
+                if exc.retryable:
+                    retryable_error = retryable_error or exc
+                    continue
+                self._disabled_profiles.add(profile_id)
+                logger.error(
+                    "Talaria relay disabled profile after permanent HTTP %s",
+                    exc.status,
+                )
+        if retryable_error is not None:
+            raise retryable_error
+
+    def publish_profile(self, profile_id: str, expected_identity: str) -> None:
+        for profile, profile_config in self.config.profiles.items():
+            if profile_config["profile_id"] == profile_id:
+                if (
+                    profile_config["identity"] != expected_identity
+                    or _profile_identity(profile) != expected_identity
+                ):
+                    raise RelayPairingError("Hermes profile changed during relay enrollment", status=409)
+                self._publish_profile_snapshot(profile, profile_id)
+                return
+        raise RelayPairingError("Talaria Relay profile enrollment is unavailable", status=502)
+
+    def _publish_profile_snapshot(self, profile: str, profile_id: str) -> None:
+        states = self.build_states(profile)
         body = json.dumps(
             {"snapshotId": f"webui:{uuid.uuid4().hex}", "states": states},
             separators=(",", ":"),
         ).encode("utf-8")
         publisher = urllib.parse.quote(self.config.publisher_id, safe="")
-        path = f"/v1/publishers/{publisher}/snapshot"
+        path = (
+            f"/v1/publishers/{publisher}/profiles/"
+            f"{urllib.parse.quote(profile_id, safe='')}/snapshot"
+        )
         timestamp = str(int(time.time()))
         nonce = uuid.uuid4().hex
         signed = "\n".join(("PUT", path, timestamp, nonce, _b64url(hashlib.sha256(body).digest())))
@@ -397,49 +653,68 @@ _publisher: TalariaRelayPublisher | None = None
 
 def start_talaria_relay_publisher(config: RelayConfig | None = None) -> bool:
     global _publisher
-    if _publisher is not None:
-        return True
-    try:
-        config = config or RelayConfig.from_state()
-        if config is None:
+    with _publisher_lock:
+        if _publisher is not None:
+            return True
+        try:
+            config = config or RelayConfig.from_state()
+            if config is None:
+                return False
+            _publisher = TalariaRelayPublisher(config)
+            from api.session_events import add_session_list_changed_listener
+            add_session_list_changed_listener(_publisher.changed)
+            _publisher.start(publish_initial=False)
+            atexit.register(stop_talaria_relay_publisher)
+            return True
+        except Exception:
+            _publisher = None
+            logger.warning("Talaria relay publisher disabled: invalid configuration", exc_info=True)
             return False
-        _publisher = TalariaRelayPublisher(config)
-        from api.session_events import add_session_list_changed_listener
-        add_session_list_changed_listener(_publisher.changed)
-        _publisher.start(publish_initial=False)
-        atexit.register(stop_talaria_relay_publisher)
-        return True
-    except Exception:
-        _publisher = None
-        logger.warning("Talaria relay publisher disabled: invalid configuration", exc_info=True)
-        return False
 
 
-def configure_talaria_relay_publisher(config: RelayConfig) -> None:
+def configure_talaria_relay_publisher(
+    config: RelayConfig,
+    *,
+    validate_profile_id: str | None = None,
+    validate_profile_identity: str | None = None,
+) -> None:
     global _publisher
-    candidate = TalariaRelayPublisher(config)
-    try:
-        candidate.publish_snapshot()
-    except Exception as exc:
-        raise RelayPairingError("Could not publish the initial Talaria Relay snapshot", status=502) from exc
-    stop_talaria_relay_publisher()
-    _publisher = candidate
-    from api.session_events import add_session_list_changed_listener
+    with _publisher_lock:
+        candidate = TalariaRelayPublisher(config)
+        if _publisher is not None:
+            with _publisher._terminal_lock, candidate._terminal_lock:
+                candidate._terminal = dict(_publisher._terminal)
+            with _publisher._revision_lock, candidate._revision_lock:
+                candidate._last_revision = max(candidate._last_revision, _publisher._last_revision)
+        try:
+            if validate_profile_id is None:
+                candidate.publish_snapshot()
+            else:
+                if validate_profile_identity is None:
+                    raise RelayPairingError("Hermes profile enrollment is unavailable", status=502)
+                candidate.publish_profile(validate_profile_id, validate_profile_identity)
+        except Exception as exc:
+            raise RelayPairingError("Could not publish the initial Talaria Relay snapshot", status=502) from exc
+        stop_talaria_relay_publisher()
+        _publisher = candidate
+        from api.session_events import add_session_list_changed_listener
 
-    add_session_list_changed_listener(candidate.changed)
-    candidate.start(publish_initial=False)
-    atexit.register(stop_talaria_relay_publisher)
+        add_session_list_changed_listener(candidate.changed)
+        candidate.start(publish_initial=False)
+        atexit.register(stop_talaria_relay_publisher)
 
 
 def stop_talaria_relay_publisher() -> None:
     global _publisher
-    if _publisher is not None:
-        from api.session_events import remove_session_list_changed_listener
-        remove_session_list_changed_listener(_publisher.changed)
-        _publisher.stop()
-        _publisher = None
+    with _publisher_lock:
+        if _publisher is not None:
+            from api.session_events import remove_session_list_changed_listener
+            remove_session_list_changed_listener(_publisher.changed)
+            _publisher.stop()
+            _publisher = None
 
 
 def note_talaria_terminal(stream_id: str, phase: str) -> None:
-    if _publisher is not None and phase in ("completed", "failed", "cancelled"):
-        _publisher.note_terminal(stream_id, phase)
+    with _publisher_lock:
+        if _publisher is not None and phase in ("completed", "failed", "cancelled"):
+            _publisher.note_terminal(stream_id, phase)
