@@ -27,7 +27,10 @@ def test_checkpoint_save_uses_session_profile_env(monkeypatch, tmp_path):
     monkeypatch.setattr(
         profiles,
         "get_profile_runtime_env",
-        lambda home: {"HERMES_CONFIG_PATH": str(Path(home) / "config.yaml")},
+        lambda home: {
+            "HERMES_CONFIG_PATH": str(Path(home) / "config.yaml"),
+            "HERMES_EXEC_ASK": "profile-config-value",
+        },
     )
 
     def fake_save(self, *args, **kwargs):
@@ -70,7 +73,10 @@ def test_checkpoint_save_completes_with_parent_scope_lock_held(
     monkeypatch.setattr(
         profiles,
         "get_profile_runtime_env",
-        lambda home: {"HERMES_CONFIG_PATH": str(Path(home) / "config.yaml")},
+        lambda home: {
+            "HERMES_CONFIG_PATH": str(Path(home) / "config.yaml"),
+            "HERMES_EXEC_ASK": "profile-config-value",
+        },
     )
     monkeypatch.setattr(profiles, "_resolve_hermes_home_override", lambda: None)
 
@@ -80,6 +86,7 @@ def test_checkpoint_save_completes_with_parent_scope_lock_held(
         captured["kwargs"] = kwargs
         captured["thread_env"] = dict(getattr(config._thread_ctx, "env", {}) or {})
         captured["env_hermes_home"] = os.environ.get("HERMES_HOME")
+        captured["env_exec_ask"] = os.environ.get("HERMES_EXEC_ASK")
 
     def patch_skill_home_modules(*_):
         patch_calls.append({"patched": True})
@@ -90,6 +97,8 @@ def test_checkpoint_save_completes_with_parent_scope_lock_held(
     completion = threading.Event()
 
     session = Session(session_id="issue2848-lock", profile="maiko")
+    monkeypatch.setenv("HERMES_HOME", str(profile_home))
+    monkeypatch.setenv("HERMES_EXEC_ASK", "1")
 
     held_lock = getattr(profiles, held_lock_name)
     acquired_lock = held_lock.acquire(timeout=1)
@@ -124,5 +133,8 @@ def test_checkpoint_save_completes_with_parent_scope_lock_held(
         == str(profile_home / "config.yaml")
     )
     assert captured.get("env_hermes_home") == str(profile_home)
+    assert captured.get("env_exec_ask") == (
+        "1" if shared_env_scope_held else "profile-config-value"
+    )
     assert not patch_calls
     assert "error" not in captured

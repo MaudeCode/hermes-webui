@@ -2913,7 +2913,7 @@ def _set_turn_session_identity(session_id: str):
     """Bind THIS turn's session identity to the current (task/thread-local)
     context and return an opaque token for _reset_turn_session_identity.
 
-    Binds three context-locals so every session-key / UI-owner consumer is
+    Binds five context-locals so every session-key / UI-owner consumer is
     covered without a race:
       * ``tools.approval._approval_session_key`` — checked FIRST by
         ``get_current_session_key`` (the exact call terminal_tool.py makes for
@@ -2924,12 +2924,11 @@ def _set_turn_session_identity(session_id: str):
         return address stamped onto ProcessSession.origin_ui_session_id and
         completion events by modern hermes-agent builds. Authoritative for
         wakeup routing when present (see ``_resolve_completion_target``).
+      * ``_SESSION_PLATFORM`` / ``_SESSION_CHAT_ID`` — bind the WebUI routing
+        gate without relying on the optional process-environment fallback.
 
-    It deliberately does NOT call ``gateway.session_context.set_session_vars``:
-    that blanket setter also zeroes the platform/chat_id/user contextvars,
-    flipping ``HERMES_SESSION_PLATFORM`` from its env fallback (``'webui'``,
-    still written to os.environ at turn-start) to an explicit ``""`` — which
-    would break the ``notify_on_complete`` watcher registration gate.
+    It deliberately does NOT call ``gateway.session_context.set_session_vars``
+    because that blanket setter also zeroes unrelated user/source contextvars.
     """
     sid = str(session_id or "")
     tokens: dict = {}
@@ -2948,6 +2947,16 @@ def _set_turn_session_identity(session_id: str):
         tokens["ui_session_id"] = _UI_SID.set(sid)
     except Exception:
         logger.debug("per-turn _SESSION_UI_SESSION_ID bind failed", exc_info=True)
+    try:
+        from gateway.session_context import _SESSION_PLATFORM as _PLATFORM
+        tokens["platform"] = _PLATFORM.set("webui")
+    except Exception:
+        logger.debug("per-turn _SESSION_PLATFORM bind failed", exc_info=True)
+    try:
+        from gateway.session_context import _SESSION_CHAT_ID as _CHAT_ID
+        tokens["chat_id"] = _CHAT_ID.set(sid)
+    except Exception:
+        logger.debug("per-turn _SESSION_CHAT_ID bind failed", exc_info=True)
     return tokens
 
 
@@ -2962,6 +2971,20 @@ def _reset_turn_session_identity(tokens) -> None:
     """
     if not tokens:
         return
+    tok = tokens.get("chat_id")
+    if tok is not None:
+        try:
+            from gateway.session_context import _SESSION_CHAT_ID as _CHAT_ID
+            _CHAT_ID.reset(tok)
+        except Exception:
+            logger.debug("per-turn _SESSION_CHAT_ID reset failed", exc_info=True)
+    tok = tokens.get("platform")
+    if tok is not None:
+        try:
+            from gateway.session_context import _SESSION_PLATFORM as _PLATFORM
+            _PLATFORM.reset(tok)
+        except Exception:
+            logger.debug("per-turn _SESSION_PLATFORM reset failed", exc_info=True)
     tok = tokens.get("ui_session_id")
     if tok is not None:
         try:

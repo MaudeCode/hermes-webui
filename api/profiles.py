@@ -1333,37 +1333,39 @@ def profile_env_for_background_worker(
                 _SKILL_HOME_MODULE_PATCH_LOCK.acquire()
                 _acquired_skill_home_patch_lock = True
 
-        with _ENV_LOCK:
-            if scope_skill_modules and should_restore_skill_modules:
-                # Snapshot and patch before mutating process env so setup
-                # failures can unwind without leaking either state.
-                skill_home_snapshot = snapshot_skill_home_modules()
-                patch_skill_home_modules(profile_home_path)
+        if not _shared_env_scope_held:
+            with _ENV_LOCK:
+                if scope_skill_modules and should_restore_skill_modules:
+                    # Snapshot and patch before mutating process env so setup
+                    # failures can unwind without leaking either state.
+                    skill_home_snapshot = snapshot_skill_home_modules()
+                    patch_skill_home_modules(profile_home_path)
 
-            old_runtime_env = _apply_profile_env_to_process(
-                os.environ,
-                safe_runtime_env,
-                secret_env_names=secret_env_names,
-            )
-            had_hermes_home = "HERMES_HOME" in os.environ
-            old_hermes_home = os.environ.get("HERMES_HOME")
-            os.environ.update(safe_runtime_env)
-            os.environ["HERMES_HOME"] = str(profile_home_path)
+                old_runtime_env = _apply_profile_env_to_process(
+                    os.environ,
+                    safe_runtime_env,
+                    secret_env_names=secret_env_names,
+                )
+                had_hermes_home = "HERMES_HOME" in os.environ
+                old_hermes_home = os.environ.get("HERMES_HOME")
+                os.environ.update(safe_runtime_env)
+                os.environ["HERMES_HOME"] = str(profile_home_path)
         yield
     finally:
         try:
-            with _ENV_LOCK:
-                for key, old_value in old_runtime_env.items():
-                    if old_value is None:
-                        os.environ.pop(key, None)
+            if not _shared_env_scope_held:
+                with _ENV_LOCK:
+                    for key, old_value in old_runtime_env.items():
+                        if old_value is None:
+                            os.environ.pop(key, None)
+                        else:
+                            os.environ[key] = old_value
+                    if had_hermes_home:
+                        os.environ["HERMES_HOME"] = old_hermes_home or ""
                     else:
-                        os.environ[key] = old_value
-                if had_hermes_home:
-                    os.environ["HERMES_HOME"] = old_hermes_home or ""
-                else:
-                    os.environ.pop("HERMES_HOME", None)
-                if should_restore_skill_modules and skill_home_snapshot is not None:
-                    restore_skill_home_modules(skill_home_snapshot)
+                        os.environ.pop("HERMES_HOME", None)
+                    if should_restore_skill_modules and skill_home_snapshot is not None:
+                        restore_skill_home_modules(skill_home_snapshot)
         finally:
             if _acquired_skill_home_patch_lock:
                 _SKILL_HOME_MODULE_PATCH_LOCK.release()
