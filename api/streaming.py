@@ -2886,11 +2886,15 @@ def _streaming_requires_process_env_fallback(
     skill_modules_dynamic: bool,
     profile_is_named: bool,
     secret_scope_installed: bool,
+    terminal_context_installed: bool = True,
+    terminal_process_env_required: bool = False,
 ) -> bool:
     """Return whether a turn still needs process-global profile state."""
     return not (
         home_override_installed
         and skill_modules_dynamic
+        and terminal_context_installed
+        and not terminal_process_env_required
         and (not profile_is_named or secret_scope_installed)
     )
 
@@ -9562,6 +9566,11 @@ def _run_agent_streaming(
     _streaming_secret_scope_token = None
     _streaming_secret_scope_installed = False
     _streaming_previous_block_process_env_fallback = False
+    _streaming_runtime_cwd_var = None
+    _streaming_runtime_cwd_token = None
+    _streaming_terminal_context_installed = False
+    _streaming_get_session_cwd = None
+    _streaming_record_session_cwd = None
     _streaming_skill_home_snapshot = None
     _restore_streaming_skill_home_modules = False
     _acquired_streaming_skill_home_patch_lock = False
@@ -9753,6 +9762,25 @@ def _run_agent_streaming(
         )
         _streaming_hermes_home_override_ctx = _set_streaming_hermes_home_override(_profile_home)
         _set_thread_env(**_thread_env)
+        try:
+            from agent.runtime_cwd import (
+                _SESSION_CWD as _streaming_runtime_cwd_var,
+                set_session_cwd as _set_streaming_session_cwd,
+            )
+            from tools.terminal_tool import (
+                get_session_cwd as _streaming_get_session_cwd,
+                record_session_cwd as _streaming_record_session_cwd,
+            )
+
+            _streaming_runtime_cwd_token = _set_streaming_session_cwd(
+                str(s.workspace)
+            )
+            if not _streaming_get_session_cwd(session_id):
+                _streaming_record_session_cwd(session_id, str(s.workspace))
+            _streaming_terminal_context_installed = True
+        except Exception:
+            _streaming_runtime_cwd_var = None
+            _streaming_runtime_cwd_token = None
         _streaming_previous_block_process_env_fallback = bool(
             getattr(_thread_ctx, "block_process_env_fallback", False)
         )
@@ -9812,6 +9840,13 @@ def _run_agent_streaming(
                     skill_modules_dynamic=_streaming_modules_are_dynamic,
                     profile_is_named=_streaming_profile_is_named,
                     secret_scope_installed=_streaming_secret_scope_installed,
+                    terminal_context_installed=(
+                        _streaming_terminal_context_installed
+                    ),
+                    terminal_process_env_required=any(
+                        key.startswith("TERMINAL_") and key != "TERMINAL_CWD"
+                        for key in _safe_profile_runtime_env
+                    ),
                 )
             )
             if _streaming_uses_process_env_fallback:
@@ -10550,6 +10585,14 @@ def _run_agent_streaming(
                 _state_db_path,
                 session_id,
             )
+            if (
+                _streaming_terminal_context_installed
+                and _agent_session_id != session_id
+                and not _streaming_get_session_cwd(_agent_session_id)
+            ):
+                _streaming_record_session_cwd(
+                    _agent_session_id, str(s.workspace)
+                )
             # #5979: publish catalog provenance from the durable disk cache when
             # memory is cold, so the custom-proxy resolver below sees the
             # endpoint-advertised model ids (non-blocking, disk-only, never
@@ -13458,6 +13501,14 @@ def _run_agent_streaming(
                 _streaming_secret_scope_mod.reset_secret_scope(
                     _streaming_secret_scope_token
                 )
+            except Exception:
+                pass
+        if (
+            _streaming_runtime_cwd_var is not None
+            and _streaming_runtime_cwd_token is not None
+        ):
+            try:
+                _streaming_runtime_cwd_var.reset(_streaming_runtime_cwd_token)
             except Exception:
                 pass
         _thread_ctx.block_process_env_fallback = (

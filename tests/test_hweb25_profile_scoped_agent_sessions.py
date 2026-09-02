@@ -64,6 +64,25 @@ def test_streaming_process_env_fallback_is_limited_to_legacy_capabilities(
     ) is expected
 
 
+@pytest.mark.parametrize(
+    "terminal_kwargs",
+    [
+        {"terminal_context_installed": False},
+        {"terminal_process_env_required": True},
+    ],
+)
+def test_streaming_process_env_fallback_requires_safe_terminal_context(
+    terminal_kwargs,
+):
+    assert streaming._streaming_requires_process_env_fallback(
+        home_override_installed=True,
+        skill_modules_dynamic=True,
+        profile_is_named=True,
+        secret_scope_installed=True,
+        **terminal_kwargs,
+    ) is True
+
+
 def _make_state_db(home, prefix):
     home.mkdir(parents=True)
     db = home / "state.db"
