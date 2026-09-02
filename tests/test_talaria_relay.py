@@ -23,7 +23,11 @@ def test_pairing_persists_private_key_and_starts_publisher(tmp_path, monkeypatch
     monkeypatch.setattr(config, "STATE_DIR", tmp_path)
     monkeypatch.setenv("HERMES_WEBUI_TALARIA_RELAY_URL", "https://relay.example.com")
     configured = []
-    monkeypatch.setattr(talaria_relay, "configure_talaria_relay_publisher", configured.append)
+    monkeypatch.setattr(
+        talaria_relay,
+        "configure_talaria_relay_publisher",
+        lambda config, **_kwargs: configured.append(config),
+    )
     captured = {}
 
     @contextmanager
@@ -85,7 +89,7 @@ def test_pairing_private_key_is_0600_before_any_post_write_failure(tmp_path, mon
     monkeypatch.setattr(
         talaria_relay,
         "configure_talaria_relay_publisher",
-        lambda _config: (_ for _ in ()).throw(RuntimeError("startup failed")),
+        lambda _config, **_kwargs: (_ for _ in ()).throw(RuntimeError("startup failed")),
     )
     monkeypatch.setattr(
         type(tmp_path),
@@ -264,6 +268,37 @@ def test_publisher_reconfiguration_preserves_unpublished_terminal_state(monkeypa
     assert published == [{"session-1": {"phase": "completed"}}]
 
 
+def test_publisher_reconfiguration_validates_only_new_profile(monkeypatch):
+    from api import session_events, talaria_relay
+
+    validated = []
+
+    class Candidate:
+        def __init__(self, _config):
+            self.changed = object()
+
+        def publish_snapshot(self):
+            raise AssertionError("full snapshot must not gate one profile enrollment")
+
+        def publish_profile(self, profile_id):
+            validated.append(profile_id)
+
+        def start(self, *, publish_initial):
+            assert publish_initial is False
+
+    monkeypatch.setattr(talaria_relay, "TalariaRelayPublisher", Candidate)
+    monkeypatch.setattr(talaria_relay, "_publisher", None)
+    monkeypatch.setattr(session_events, "add_session_list_changed_listener", lambda _listener: None)
+    monkeypatch.setattr(talaria_relay.atexit, "register", lambda _callback: None)
+
+    talaria_relay.configure_talaria_relay_publisher(
+        RelayConfig("https://relay.example", "https://hermes.example", "key", Path("key.pem")),
+        validate_profile_id="prf_new",
+    )
+
+    assert validated == ["prf_new"]
+
+
 def test_profile_bound_session_can_enroll_without_operator_access(monkeypatch):
     from api import auth, routes
     from api import talaria_relay
@@ -310,7 +345,7 @@ def test_profile_enrollment_reuses_the_registered_publisher_key(tmp_path, monkey
 
     monkeypatch.setattr(config, "STATE_DIR", tmp_path)
     monkeypatch.setenv("HERMES_WEBUI_TALARIA_RELAY_URL", "https://relay.example.com")
-    monkeypatch.setattr(talaria_relay, "configure_talaria_relay_publisher", lambda _config: None)
+    monkeypatch.setattr(talaria_relay, "configure_talaria_relay_publisher", lambda _config, **_kwargs: None)
     monkeypatch.setattr(talaria_relay, "_profile_identity", lambda _profile: "profile-identity")
     key = Ed25519PrivateKey.generate()
     key_path = tmp_path / "publisher.pem"
@@ -368,7 +403,7 @@ def test_concurrent_profile_enrollments_preserve_both_mappings(tmp_path, monkeyp
 
     monkeypatch.setattr(config, "STATE_DIR", tmp_path)
     monkeypatch.setenv("HERMES_WEBUI_TALARIA_RELAY_URL", "https://relay.example.com")
-    monkeypatch.setattr(talaria_relay, "configure_talaria_relay_publisher", lambda _config: None)
+    monkeypatch.setattr(talaria_relay, "configure_talaria_relay_publisher", lambda _config, **_kwargs: None)
     monkeypatch.setattr(talaria_relay, "_profile_identity", lambda profile: f"identity-{profile}")
     key = Ed25519PrivateKey.generate()
     key_path = tmp_path / "publisher.pem"
@@ -425,7 +460,7 @@ def test_recreated_profile_receives_a_new_relay_scope(tmp_path, monkeypatch):
 
     monkeypatch.setattr(config, "STATE_DIR", tmp_path)
     monkeypatch.setenv("HERMES_WEBUI_TALARIA_RELAY_URL", "https://relay.example.com")
-    monkeypatch.setattr(talaria_relay, "configure_talaria_relay_publisher", lambda _config: None)
+    monkeypatch.setattr(talaria_relay, "configure_talaria_relay_publisher", lambda _config, **_kwargs: None)
     monkeypatch.setattr(talaria_relay, "_profile_identity", lambda _profile: "new-identity")
     key = Ed25519PrivateKey.generate()
     key_path = tmp_path / "publisher.pem"
@@ -671,6 +706,43 @@ def test_publisher_isolates_permanent_failure_to_one_profile(tmp_path, caplog):
     assert sum("/profiles/prf_good/" in url for url in attempts) == 2
     assert "disabled profile after permanent HTTP 401" in caplog.text
     assert all(record.exc_info is None for record in caplog.records)
+
+
+def test_publisher_attempts_every_profile_before_retryable_backoff(tmp_path):
+    from api import talaria_relay
+
+    key = Ed25519PrivateKey.generate()
+    key_path = tmp_path / "publisher.pem"
+    key_path.write_bytes(key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()))
+    attempts = []
+
+    @contextmanager
+    def opener(request, timeout):
+        assert timeout == 10
+        attempts.append(request.full_url)
+        if "/profiles/prf_retry/" in request.full_url:
+            raise urllib.error.HTTPError(request.full_url, 429, "Rate limited", {}, None)
+        yield type("Response", (), {"status": 200})()
+
+    publisher = TalariaRelayPublisher(
+        RelayConfig(
+            "https://relay.example",
+            "publisher",
+            "key",
+            key_path,
+            {
+                "retry": {"identity": "", "profile_id": "prf_retry"},
+                "healthy": {"identity": "", "profile_id": "prf_healthy"},
+            },
+        ),
+        opener=opener,
+    )
+
+    with pytest.raises(talaria_relay._RelayHTTPError) as raised:
+        publisher.publish_snapshot(isolate_permanent=True)
+    assert raised.value.status == 429
+    assert any("/profiles/prf_retry/" in url for url in attempts)
+    assert any("/profiles/prf_healthy/" in url for url in attempts)
 
 
 def test_publisher_retries_transient_failures_with_capped_backoff(tmp_path, monkeypatch, caplog):

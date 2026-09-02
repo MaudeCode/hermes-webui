@@ -287,7 +287,7 @@ def _pair_talaria_relay_unlocked(
             },
         )
         _save_config(config)
-        configure_talaria_relay_publisher(config)
+        configure_talaria_relay_publisher(config, validate_profile_id=profile_id)
         return {"ok": True, "publisher_id": publisher_id}
 
     if not operator:
@@ -369,7 +369,7 @@ def _pair_talaria_relay_unlocked(
         {profile: {"identity": profile_identity, "profile_id": profile_id}},
     )
     _save_config(config)
-    configure_talaria_relay_publisher(config)
+    configure_talaria_relay_publisher(config, validate_profile_id=profile_id)
     return {"ok": True, "publisher_id": publisher_id}
 
 
@@ -555,6 +555,7 @@ class TalariaRelayPublisher:
         return states
 
     def publish_snapshot(self, *, isolate_permanent: bool = False) -> None:
+        retryable_error = None
         for profile, profile_config in self.config.profiles.items():
             identity = profile_config["identity"]
             if identity:
@@ -569,13 +570,25 @@ class TalariaRelayPublisher:
             try:
                 self._publish_profile_snapshot(profile, profile_id)
             except _RelayHTTPError as exc:
-                if exc.retryable or not isolate_permanent:
+                if not isolate_permanent:
                     raise
+                if exc.retryable:
+                    retryable_error = retryable_error or exc
+                    continue
                 self._disabled_profiles.add(profile_id)
                 logger.error(
                     "Talaria relay disabled profile after permanent HTTP %s",
                     exc.status,
                 )
+        if retryable_error is not None:
+            raise retryable_error
+
+    def publish_profile(self, profile_id: str) -> None:
+        for profile, profile_config in self.config.profiles.items():
+            if profile_config["profile_id"] == profile_id:
+                self._publish_profile_snapshot(profile, profile_id)
+                return
+        raise RelayPairingError("Talaria Relay profile enrollment is unavailable", status=502)
 
     def _publish_profile_snapshot(self, profile: str, profile_id: str) -> None:
         states = self.build_states(profile)
@@ -643,7 +656,11 @@ def start_talaria_relay_publisher(config: RelayConfig | None = None) -> bool:
             return False
 
 
-def configure_talaria_relay_publisher(config: RelayConfig) -> None:
+def configure_talaria_relay_publisher(
+    config: RelayConfig,
+    *,
+    validate_profile_id: str | None = None,
+) -> None:
     global _publisher
     with _publisher_lock:
         candidate = TalariaRelayPublisher(config)
@@ -653,7 +670,10 @@ def configure_talaria_relay_publisher(config: RelayConfig) -> None:
             with _publisher._revision_lock, candidate._revision_lock:
                 candidate._last_revision = max(candidate._last_revision, _publisher._last_revision)
         try:
-            candidate.publish_snapshot()
+            if validate_profile_id is None:
+                candidate.publish_snapshot()
+            else:
+                candidate.publish_profile(validate_profile_id)
         except Exception as exc:
             raise RelayPairingError("Could not publish the initial Talaria Relay snapshot", status=502) from exc
         stop_talaria_relay_publisher()
