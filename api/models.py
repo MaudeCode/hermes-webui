@@ -68,6 +68,7 @@ _CLI_SESSIONS_CACHE_TTL_SECONDS = 5.0
 # `_streamingPollMs`/1000 (see tests/test_streaming_cache_ttl_vs_poll.py).
 _CLI_SESSIONS_CACHE_STREAMING_TTL_SECONDS = 45.0
 _CLI_SESSIONS_CACHE_LOCK = threading.Lock()
+_CLI_SESSION_PROFILE_SCOPE_LOCK = threading.RLock()
 _CLI_SESSIONS_CACHE_INFLIGHT: "dict[tuple, threading.Event]" = {}
 _CLI_SESSIONS_CACHE_INVALIDATION_VERSION = 0
 # LRU-bounded (drop-oldest) so a long-lived process under churn — where the
@@ -8228,33 +8229,37 @@ def get_cli_sessions(
                 }
                 if loader_supports_include_claude_code:
                     load_kwargs['include_claude_code'] = include_claude_code and idx == 0
-                with profile_scope_for_detached_worker(
-                    ctx_profile,
-                    "CLI session projection",
-                    logger_override=logger,
-                ):
-                    projected = _load_cli_sessions_uncached(
-                        ctx_home,
-                        ctx_db_path,
+                # ponytail: one global projection lock; split per profile only if
+                # uncached multi-profile sidebar throughput becomes measurable.
+                with _CLI_SESSION_PROFILE_SCOPE_LOCK:
+                    with profile_scope_for_detached_worker(
                         ctx_profile,
-                        **load_kwargs,
-                    )
+                        "CLI session projection",
+                        logger_override=logger,
+                    ):
+                        projected = _load_cli_sessions_uncached(
+                            ctx_home,
+                            ctx_db_path,
+                            ctx_profile,
+                            **load_kwargs,
+                        )
                 merged.extend(projected)
             return merged
         load_kwargs = {'source_filter': source_filter}
         if loader_supports_include_claude_code:
             load_kwargs['include_claude_code'] = include_claude_code
-        with profile_scope_for_detached_worker(
-            cli_profile,
-            "CLI session projection",
-            logger_override=logger,
-        ):
-            return _load_cli_sessions_uncached(
-                hermes_home,
-                db_path,
+        with _CLI_SESSION_PROFILE_SCOPE_LOCK:
+            with profile_scope_for_detached_worker(
                 cli_profile,
-                **load_kwargs,
-            )
+                "CLI session projection",
+                logger_override=logger,
+            ):
+                return _load_cli_sessions_uncached(
+                    hermes_home,
+                    db_path,
+                    cli_profile,
+                    **load_kwargs,
+                )
 
     if ttl > 0:
         stale_sessions = None

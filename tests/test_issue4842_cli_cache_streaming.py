@@ -153,7 +153,7 @@ def test_get_cli_sessions_cold_followers_join_single_rebuild(monkeypatch, tmp_pa
     assert results.get("follower") == [{"session_id": "fresh", "title": "fresh-row"}]
 
 
-def test_get_cli_sessions_cold_follower_times_out_to_independent_rebuild(monkeypatch, tmp_path):
+def test_get_cli_sessions_cold_follower_serializes_timeout_rebuild(monkeypatch, tmp_path):
     hermes_home = tmp_path / "hermes"
     hermes_home.mkdir()
     monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _profile: hermes_home)
@@ -194,18 +194,22 @@ def test_get_cli_sessions_cold_follower_times_out_to_independent_rebuild(monkeyp
     owner.start()
     assert owner_started.wait(1.0), "owner did not start"
     follower.start()
-    assert fallback_started.wait(1.0), "follower did not start fallback rebuild"
-    follower.join(1.0)
+    time.sleep(0.15)
 
-    assert not follower.is_alive()
+    assert fallback_started.is_set() is False
+    assert follower.is_alive()
     assert owner.is_alive()
-    assert load_count["value"] == 2
-    assert results.get("follower") == [{"session_id": "fresh", "title": "fresh-row"}]
+    assert load_count["value"] == 1
 
     owner_block.set()
+    assert fallback_started.wait(1.0), "serialized fallback rebuild did not start"
     owner.join(2.0)
+    follower.join(2.0)
     assert not owner.is_alive()
+    assert not follower.is_alive()
+    assert load_count["value"] == 2
     assert results.get("owner") == [{"session_id": "fresh", "title": "fresh-row"}]
+    assert results.get("follower") == [{"session_id": "fresh", "title": "fresh-row"}]
 
 
 def test_get_cli_sessions_clear_during_rebuild_does_not_restore_stale_rows(monkeypatch, tmp_path):

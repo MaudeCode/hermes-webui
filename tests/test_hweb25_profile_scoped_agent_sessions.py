@@ -313,11 +313,23 @@ def test_explicit_profile_cli_caches_do_not_cross_under_concurrency(monkeypatch,
     monkeypatch.setattr(profiles, "get_hermes_home_for_profile", homes.__getitem__)
 
     loads = []
+    active_loads = 0
+    max_active_loads = 0
+    load_lock = threading.Lock()
     original_loader = models._load_cli_sessions_uncached
 
     def recording_loader(home, db_path, profile, *args, **kwargs):
-        loads.append((Path(home), Path(db_path), profile))
-        return original_loader(home, db_path, profile, *args, **kwargs)
+        nonlocal active_loads, max_active_loads
+        with load_lock:
+            loads.append((Path(home), Path(db_path), profile))
+            active_loads += 1
+            max_active_loads = max(max_active_loads, active_loads)
+        try:
+            time.sleep(0.01)
+            return original_loader(home, db_path, profile, *args, **kwargs)
+        finally:
+            with load_lock:
+                active_loads -= 1
 
     monkeypatch.setattr(models, "_load_cli_sessions_uncached", recording_loader)
 
@@ -337,6 +349,7 @@ def test_explicit_profile_cli_caches_do_not_cross_under_concurrency(monkeypatch,
     for profile, session_ids in zip(requested, results, strict=True):
         prefix = "member" if profile == "member" else "owner"
         assert session_ids == {f"{prefix}-session-0", f"{prefix}-session-1"}
+    assert max_active_loads == 1
 
     expected_loads = {
         (owner_home, owner_home / "state.db", "default"),
