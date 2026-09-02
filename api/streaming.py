@@ -13373,12 +13373,10 @@ def _run_agent_streaming(
         if _acquired_streaming_skill_home_patch_lock:
             _SKILL_HOME_MODULE_PATCH_LOCK.release()
             _acquired_streaming_skill_home_patch_lock = False
-        try:
-            _reset_streaming_hermes_home_override(*_streaming_hermes_home_override_ctx)
-        finally:
-            if _acquired_streaming_profile_env_scope_lock:
-                _PROFILE_ENV_SCOPE_LOCK.release()
-                _acquired_streaming_profile_env_scope_lock = False
+        _reset_streaming_hermes_home_override(*_streaming_hermes_home_override_ctx)
+        if _acquired_streaming_profile_env_scope_lock:
+            _PROFILE_ENV_SCOPE_LOCK.release()
+            _acquired_streaming_profile_env_scope_lock = False
         # xsession wakeup misroute root fix (Option 1): restore the per-turn
         # session-identity context-locals (reset-token semantics). MUST run on
         # every exit path so a reused thread-pool worker leaks no identity and
