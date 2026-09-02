@@ -1396,7 +1396,8 @@ def profile_env_for_active_request_readonly(
     """
     profile = (get_active_profile_name() or "").strip()
     if not profile or _is_root_profile(profile):
-        yield
+        with _PROFILE_ENV_SCOPE_LOCK:
+            yield
         return
     try:
         from api.config import _clear_thread_env, _set_thread_env, _thread_ctx
@@ -1492,9 +1493,6 @@ def profile_env_for_active_request(
     stay on the mirrored scope until they are fully audited.
     """
     profile = (get_active_profile_name() or "").strip()
-    if not profile or _is_root_profile(profile):
-        yield
-        return
     with profile_env_for_background_worker(
         profile, purpose, logger_override=logger_override
     ):

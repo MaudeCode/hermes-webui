@@ -297,7 +297,17 @@ def test_detached_cli_projection_scopes_ambient_helpers(monkeypatch, tmp_path):
     assert observed_profiles == ["member"]
 
 
-def test_default_environment_scope_waits_for_named_profile_scope(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "default_scope_name",
+    [
+        "profile_env_for_background_worker",
+        "profile_env_for_active_request",
+        "profile_env_for_active_request_readonly",
+    ],
+)
+def test_default_environment_scope_waits_for_named_profile_scope(
+    monkeypatch, tmp_path, default_scope_name
+):
     member_home = tmp_path / "profiles" / "member"
     member_home.mkdir(parents=True)
     monkeypatch.setattr(
@@ -308,6 +318,7 @@ def test_default_environment_scope_waits_for_named_profile_scope(monkeypatch, tm
         profiles, "filter_runtime_env_for_gateway_parity", lambda env: env
     )
     monkeypatch.setattr(profiles, "_profile_secret_env_names", lambda _home: set())
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
 
     named_entered = threading.Event()
     release_named = threading.Event()
@@ -321,9 +332,14 @@ def test_default_environment_scope_waits_for_named_profile_scope(monkeypatch, tm
             assert release_named.wait(2)
 
     def default_worker():
-        with profiles.profile_env_for_background_worker(
-            "default", "default waiter", scope_skill_modules=False
-        ):
+        default_scope = getattr(profiles, default_scope_name)
+        if default_scope_name == "profile_env_for_background_worker":
+            context = default_scope(
+                "default", "default waiter", scope_skill_modules=False
+            )
+        else:
+            context = default_scope("default waiter")
+        with context:
             default_entered.set()
 
     named = threading.Thread(target=named_worker)
