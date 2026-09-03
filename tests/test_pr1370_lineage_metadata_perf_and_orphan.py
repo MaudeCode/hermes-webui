@@ -132,8 +132,8 @@ def test_orphan_parent_reference_not_exposed_in_metadata(tmp_path):
     )
 
 
-def test_old_schema_without_source_or_messages_table_keeps_lineage(tmp_path):
-    """Old state.db schemas may lack optional source/message tables but still carry lineage."""
+def test_old_schema_without_source_or_message_count_keeps_lineage(tmp_path):
+    """Old schemas may lack optional session columns while retaining indexed messages."""
     from api.agent_sessions import read_session_lineage_metadata
 
     db = tmp_path / "state.db"
@@ -148,6 +148,8 @@ def test_old_schema_without_source_or_messages_table_keeps_lineage(tmp_path):
         end_reason TEXT
     );
     CREATE INDEX idx_sessions_parent ON sessions(parent_session_id);
+    CREATE TABLE messages (session_id TEXT, role TEXT, content TEXT, timestamp REAL);
+    CREATE INDEX idx_messages_session ON messages(session_id, timestamp);
     """)
     t0 = time.time() - 100
     conn.execute(
@@ -157,6 +159,10 @@ def test_old_schema_without_source_or_messages_table_keeps_lineage(tmp_path):
     conn.execute(
         "INSERT INTO sessions (id, title, started_at, parent_session_id) VALUES (?, ?, ?, ?)",
         ("old_tip", "old_tip", t0 + 6, "old_root"),
+    )
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+        ("old_tip", "user", "hi", t0 + 7),
     )
     conn.commit()
     conn.close()

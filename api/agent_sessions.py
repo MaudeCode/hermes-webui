@@ -1183,6 +1183,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
             session_source_expr = _optional_col('session_source', session_cols)
             source_expr = _optional_col('source', session_cols)
             message_count_expr = _optional_col('message_count', session_cols, '0')
+            message_count_value = "s.message_count" if 'message_count' in session_cols else "0"
             # Scoped fetch via PRIMARY KEY + idx_sessions_parent rather than a
             # full table scan. The sessions table grows unbounded over time
             # (1000+ rows is normal, 10000+ for power users), and this function
@@ -1296,7 +1297,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                             f"""
                             SELECT s.id AS session_id,
                                    CASE WHEN NOT EXISTS(SELECT 1 FROM messages m WHERE m.session_id = s.id) THEN 0
-                                        WHEN COALESCE(s.message_count, 0) > 0 THEN s.message_count
+                                        WHEN COALESCE({message_count_value}, 0) > 0 THEN {message_count_value}
                                         ELSE (SELECT COUNT(*) FROM (SELECT 1 FROM messages mc
                                               WHERE mc.session_id = s.id LIMIT 2)) END AS actual_message_count,
                                    {last_at_expr}
