@@ -1521,6 +1521,24 @@ def profile_env_for_active_request(
 
 
 @contextmanager
+def profile_identity_for_detached_worker(profile_name):
+    """Bind a captured profile to a detached read that already has explicit paths."""
+    name = (profile_name or "").strip()
+    if not name:
+        yield
+        return
+    previous_profile = getattr(_tls, "profile", None)
+    set_request_profile(name)
+    try:
+        yield
+    finally:
+        if previous_profile is None:
+            clear_request_profile()
+        else:
+            set_request_profile(previous_profile)
+
+
+@contextmanager
 def profile_scope_for_detached_worker(
     profile_name,
     purpose: str = "detached worker",
@@ -1553,9 +1571,7 @@ def profile_scope_for_detached_worker(
     if not name:
         yield
         return
-    previous_profile = getattr(_tls, "profile", None)
-    set_request_profile(name)
-    try:
+    with profile_identity_for_detached_worker(name):
         if _is_root_profile(name):
             with _PROFILE_ENV_SCOPE_LOCK:
                 yield
@@ -1564,11 +1580,6 @@ def profile_scope_for_detached_worker(
                 name, purpose, logger_override=logger_override
             ):
                 yield
-    finally:
-        if previous_profile is None:
-            clear_request_profile()
-        else:
-            set_request_profile(previous_profile)
 
 
 def _set_hermes_home(home: Path):

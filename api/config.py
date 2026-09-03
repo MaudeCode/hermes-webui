@@ -8351,11 +8351,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         }
 
     # ── FAST PATH ─────────────────────────────────────────────────────────────
-    # Mark that a build may be in progress BEFORE acquiring the lock.
-    # If another thread has already started the cold path, we will wait for
-    # its result rather than running the cold path concurrently.
-    should_wait = _cache_build_in_progress
-    force_refresh_started_at = time.monotonic() if force_refresh else None
+    request_started_at = time.monotonic()
+    force_refresh_started_at = request_started_at if force_refresh else None
 
     # Check config mtime OUTSIDE the lock so this cheap check doesn't serialize
     # concurrent requests.  Must come before any config reads in the cold path.
@@ -8380,24 +8377,19 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     with _available_models_cache_lock:
         # If another thread is already building, wait for its result instead
         # of re-entering the cold path (avoids duplicate 10s zai load_pool calls).
-        if should_wait:
-            wait_timeout = 60.0
-            if force_refresh and force_refresh_started_at is not None:
-                if _LIVE_REBUILD_BUDGET_SECONDS <= 0:
-                    # The legacy synchronous path is explicitly unbounded. A
-                    # forced refresh follower should keep coalescing behind
-                    # that live rebuild instead of giving up after 60s and
-                    # duplicating it.
-                    wait_timeout = None
-                else:
-                    wait_timeout = max(
-                        0.0,
-                        _LIVE_REBUILD_BUDGET_SECONDS - (time.monotonic() - force_refresh_started_at),
-                    )
-            _cache_build_cv.wait_for(
-                lambda: not _cache_build_in_progress,
-                timeout=wait_timeout
-            )
+        if _cache_build_in_progress:
+            remaining_budget = None
+            if _LIVE_REBUILD_BUDGET_SECONDS > 0:
+                remaining_budget = max(
+                    0.0,
+                    _LIVE_REBUILD_BUDGET_SECONDS
+                    - (time.monotonic() - request_started_at),
+                )
+            if remaining_budget is None or remaining_budget > 0:
+                _cache_build_cv.wait_for(
+                    lambda: not _cache_build_in_progress,
+                    timeout=remaining_budget,
+                )
             cached = _get_fresh_memory_models_cache(time.monotonic())
             if (
                 cached is not None
@@ -8410,7 +8402,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 )
             ):
                 return cached
-            if force_refresh and _LIVE_REBUILD_BUDGET_SECONDS > 0 and _cache_build_in_progress:
+            if _LIVE_REBUILD_BUDGET_SECONDS > 0 and _cache_build_in_progress:
                 if stale_disk_groups is not None:
                     return copy.deepcopy(stale_disk_groups)
                 return copy.deepcopy(_static_models_catalog_without_live_probes())
@@ -8438,36 +8430,6 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             ):
                 return cached
 
-        # A concurrent forced refresh may have started after this caller sampled
-        # should_wait but before it acquired the lock. Reuse that in-flight build
-        # instead of launching another one, and preserve this caller's budget.
-        if (
-            force_refresh
-            and force_refresh_started_at is not None
-            and _cache_build_in_progress
-        ):
-            remaining_budget = None
-            if _LIVE_REBUILD_BUDGET_SECONDS > 0:
-                remaining_budget = max(
-                    0.0,
-                    _LIVE_REBUILD_BUDGET_SECONDS - (time.monotonic() - force_refresh_started_at),
-                )
-            if remaining_budget is None or remaining_budget > 0:
-                _cache_build_cv.wait_for(
-                    lambda: not _cache_build_in_progress,
-                    timeout=remaining_budget,
-                )
-                cached = _get_fresh_memory_models_cache(time.monotonic())
-                if (
-                    cached is not None
-                    and _available_models_live_rebuild_ts >= force_refresh_started_at
-                ):
-                    return cached
-            if _cache_build_in_progress and _LIVE_REBUILD_BUDGET_SECONDS > 0:
-                if stale_disk_groups is not None:
-                    return copy.deepcopy(stale_disk_groups)
-                return copy.deepcopy(_static_models_catalog_without_live_probes())
-
         # Cold path: disk cache hit — use it (fast, no lock contention)
         if disk_groups is not None and not force_refresh:
             _available_models_cache = disk_groups
@@ -8490,9 +8452,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         if prefer_cache:
             # NOTE (Greptile P1): do NOT touch _cache_build_in_progress here.
             # This branch never set the flag (only the cold path below does),
-            # and `should_wait` is sampled outside the lock (line ~4964). A
-            # concurrent cold-path caller can flip the flag to True after our
-            # sample but before we acquire the lock; clearing it here would
+            # A concurrent cold-path caller can flip the flag to True before we
+            # acquire the lock; clearing it here would
             # prematurely release that rebuild's serialization, waking waiters
             # to an empty cache and triggering a second live rebuild. Just
             # serve the network-free minimal catalog and leave the flag alone.

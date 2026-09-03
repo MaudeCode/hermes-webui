@@ -7376,17 +7376,7 @@ def _reload_cli_sessions_after_inflight(
         if stale_sessions is not None and stale_stamp == _cli_sessions_cache_invalidation_stamp():
             return stale_sessions
         if not wait_finished:
-            fallback_invalidation_stamp = _cli_sessions_cache_invalidation_stamp()
-            return _load_and_cache_cli_sessions(
-                cache_key=cache_key,
-                ttl=ttl,
-                invalidation_stamp=fallback_invalidation_stamp,
-                load_sessions=load_sessions,
-                stale_sessions=stale_sessions,
-                stale_stamp=stale_stamp,
-                all_profiles=all_profiles,
-                db_path=db_path,
-            )
+            return []
     try:
         invalidation_stamp = _cli_sessions_cache_invalidation_stamp()
         return _load_and_cache_cli_sessions(
@@ -8211,7 +8201,7 @@ def get_cli_sessions(
     now = time.monotonic()
 
     def _load_sessions():
-        from api.profiles import profile_scope_for_detached_worker
+        from api.profiles import profile_identity_for_detached_worker
 
         loader_supports_include_claude_code = _callable_accepts_include_claude_code(
             _load_cli_sessions_uncached
@@ -8228,11 +8218,7 @@ def get_cli_sessions(
                 }
                 if loader_supports_include_claude_code:
                     load_kwargs['include_claude_code'] = include_claude_code and idx == 0
-                with profile_scope_for_detached_worker(
-                    ctx_profile,
-                    "CLI session projection",
-                    logger_override=logger,
-                ):
+                with profile_identity_for_detached_worker(ctx_profile):
                     projected = _load_cli_sessions_uncached(
                         ctx_home,
                         ctx_db_path,
@@ -8244,11 +8230,7 @@ def get_cli_sessions(
         load_kwargs = {'source_filter': source_filter}
         if loader_supports_include_claude_code:
             load_kwargs['include_claude_code'] = include_claude_code
-        with profile_scope_for_detached_worker(
-            cli_profile,
-            "CLI session projection",
-            logger_override=logger,
-        ):
+        with profile_identity_for_detached_worker(cli_profile):
             return _load_cli_sessions_uncached(
                 hermes_home,
                 db_path,

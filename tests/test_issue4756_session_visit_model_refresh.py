@@ -336,6 +336,98 @@ def test_force_refresh_bounded_followers_wait_only_remaining_budget(tmp_path, mo
     assert elapsed < 0.1
 
 
+def test_plain_follower_uses_rebuild_budget_and_cached_fallback(tmp_path, monkeypatch):
+    import api.config as cfg
+    import threading
+
+    _reset_models_memory_cache(monkeypatch)
+    stale_catalog = _catalog("stale-model")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("{}", encoding="utf-8")
+    cache_path = tmp_path / "models_cache.profile.json"
+    cache_path.write_text("{}", encoding="utf-8")
+    timeout_waits = []
+    original_wait_for = threading.Condition.wait_for
+
+    monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.05, raising=False)
+    monkeypatch.setattr(cfg, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(cfg, "_cfg_path", config_path, raising=False)
+    monkeypatch.setattr(cfg, "_cfg_mtime", config_path.stat().st_mtime, raising=False)
+    monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: cache_path)
+    monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None)
+    monkeypatch.setattr(cfg, "_load_stale_models_cache_from_disk", lambda: stale_catalog)
+    monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: {"profile": "demo"})
+    monkeypatch.setattr(
+        cfg,
+        "_invoke_models_rebuild",
+        lambda _builder: (_ for _ in ()).throw(
+            AssertionError("a follower must not duplicate the stalled rebuild")
+        ),
+    )
+
+    def _wait_for(self, predicate, timeout=None):
+        if self is not cfg._cache_build_cv:
+            return original_wait_for(self, predicate, timeout)
+        timeout_waits.append(timeout)
+        return False
+
+    monkeypatch.setattr(cfg, "_cache_build_in_progress", True, raising=False)
+    monkeypatch.setattr(threading.Condition, "wait_for", _wait_for)
+
+    assert cfg.get_available_models() == stale_catalog
+    assert len(timeout_waits) == 1
+    assert 0.0 <= timeout_waits[0] <= 0.05
+
+
+def test_plain_caller_joins_rebuild_started_after_flag_sample(tmp_path, monkeypatch):
+    import api.config as cfg
+    import threading
+
+    _reset_models_memory_cache(monkeypatch)
+    stale_catalog = _catalog("stale-model")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("{}", encoding="utf-8")
+    cache_path = tmp_path / "models_cache.profile.json"
+    cache_path.write_text("{}", encoding="utf-8")
+    timeout_waits = []
+    original_wait_for = threading.Condition.wait_for
+
+    monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.05, raising=False)
+    monkeypatch.setattr(cfg, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(cfg, "_cfg_path", config_path, raising=False)
+    monkeypatch.setattr(cfg, "_cfg_mtime", config_path.stat().st_mtime, raising=False)
+    monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: cache_path)
+    monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None)
+
+    def start_rebuild_after_sample():
+        cfg._cache_build_in_progress = True
+        return stale_catalog
+
+    monkeypatch.setattr(
+        cfg, "_load_stale_models_cache_from_disk", start_rebuild_after_sample
+    )
+    monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: {"profile": "demo"})
+    monkeypatch.setattr(
+        cfg,
+        "_invoke_models_rebuild",
+        lambda _builder: (_ for _ in ()).throw(
+            AssertionError("a late follower must not duplicate the stalled rebuild")
+        ),
+    )
+
+    def _wait_for(self, predicate, timeout=None):
+        if self is not cfg._cache_build_cv:
+            return original_wait_for(self, predicate, timeout)
+        timeout_waits.append(timeout)
+        return False
+
+    monkeypatch.setattr(threading.Condition, "wait_for", _wait_for)
+
+    assert cfg.get_available_models() == stale_catalog
+    assert len(timeout_waits) == 1
+    assert 0.0 <= timeout_waits[0] <= 0.05
+
+
 def test_session_visit_overlapping_stale_calls_do_not_duplicate_over_budget_rebuild(tmp_path, monkeypatch):
     import api.config as cfg
     import threading

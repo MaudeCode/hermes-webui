@@ -297,7 +297,7 @@ def test_state_db_only_handoff_uses_active_request_profile(monkeypatch, tmp_path
 
     assert response["fallback"] is True
     assert calls["homes"] == ["work", "work"]
-    assert calls["scopes"] == ["work", "work"]
+    assert calls["scopes"] == ["work"]
     assert calls["configs"] == [profile_cfg]
 
 

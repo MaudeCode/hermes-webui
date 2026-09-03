@@ -348,6 +348,141 @@ def test_detached_cli_projection_scopes_ambient_helpers(monkeypatch, tmp_path):
     assert observed_profiles == ["member"]
 
 
+def test_detached_cli_projection_does_not_wait_for_profile_env_lock(
+    monkeypatch, tmp_path
+):
+    member_home = tmp_path / "profiles" / "member"
+    member_home.mkdir(parents=True)
+    _isolate_cli_projection(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        profiles, "get_hermes_home_for_profile", lambda _profile: member_home
+    )
+
+    observed_profiles = []
+    completed = threading.Event()
+
+    def fake_loader(*_args, **_kwargs):
+        observed_profiles.append(profiles.get_active_profile_name())
+        return []
+
+    monkeypatch.setattr(models, "_load_cli_sessions_uncached", fake_loader)
+
+    def load():
+        try:
+            models.get_cli_sessions(profile="member", include_claude_code=False)
+        finally:
+            completed.set()
+
+    profiles._PROFILE_ENV_SCOPE_LOCK.acquire()
+    worker = threading.Thread(target=load)
+    worker.start()
+    try:
+        completed_while_locked = completed.wait(0.1)
+    finally:
+        profiles._PROFILE_ENV_SCOPE_LOCK.release()
+        worker.join(2)
+
+    assert completed_while_locked is True
+    assert worker.is_alive() is False
+    assert observed_profiles == ["member"]
+
+
+def test_native_bootstrap_routes_stay_responsive_while_profile_env_is_busy(
+    monkeypatch, tmp_path
+):
+    import api.config as config
+    from concurrent.futures import wait
+
+    member_home = tmp_path / "profiles" / "member"
+    member_home.mkdir(parents=True)
+    _isolate_cli_projection(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        profiles, "get_hermes_home_for_profile", lambda _profile: member_home
+    )
+    monkeypatch.setattr(models, "_load_cli_sessions_uncached", lambda *_a, **_k: [])
+    monkeypatch.setattr(routes, "all_sessions", lambda diag=None, **_kwargs: [])
+    monkeypatch.setattr(
+        routes,
+        "load_settings",
+        lambda: {
+            "show_cli_sessions": False,
+            "show_claude_code_sessions": False,
+            "show_cron_sessions": False,
+            "show_webhook_sessions": False,
+            "show_kanban_sessions": False,
+            "api_redact_enabled": False,
+        },
+    )
+    monkeypatch.setattr(
+        profiles,
+        "list_profiles_api",
+        lambda: [{"name": "default"}, {"name": "member"}],
+    )
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("{}", encoding="utf-8")
+    cache_path = tmp_path / "models_cache.member.json"
+    cache_path.write_text("{}", encoding="utf-8")
+    stale_catalog = {
+        "active_provider": None,
+        "default_model": "",
+        "groups": [],
+        "aliases": {},
+    }
+    monkeypatch.setattr(config, "_LIVE_REBUILD_BUDGET_SECONDS", 0.02)
+    monkeypatch.setattr(config, "_available_models_cache", None)
+    monkeypatch.setattr(config, "_available_models_cache_ts", 0.0)
+    monkeypatch.setattr(config, "_available_models_cache_source_fingerprint", None)
+    monkeypatch.setattr(config, "_cache_build_in_progress", True)
+    monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(config, "_cfg_path", config_path)
+    monkeypatch.setattr(config, "_cfg_mtime", config_path.stat().st_mtime)
+    monkeypatch.setattr(config, "_get_models_cache_path", lambda: cache_path)
+    monkeypatch.setattr(config, "_load_models_cache_from_disk", lambda: None)
+    monkeypatch.setattr(
+        config, "_load_stale_models_cache_from_disk", lambda: stale_catalog
+    )
+
+    holder_ready = threading.Event()
+    release_holder = threading.Event()
+
+    def hold_profile_env():
+        with profiles._PROFILE_ENV_SCOPE_LOCK:
+            holder_ready.set()
+            release_holder.wait(2)
+
+    def get(path):
+        profiles.set_request_profile("member")
+        try:
+            handler = _Handler()
+            routes.handle_get(handler, urlparse(f"http://example.test{path}"))
+            return handler.status
+        finally:
+            profiles.clear_request_profile()
+
+    holder = threading.Thread(target=hold_profile_env)
+    holder.start()
+    assert holder_ready.wait(2)
+    paths = [
+        "/api/sessions?show_cli_sessions=1&show_claude_code_sessions=1"
+        "&show_cron_sessions=1&show_webhook_sessions=1",
+        "/api/models",
+        "/api/profiles",
+        "/health",
+    ]
+    with ThreadPoolExecutor(max_workers=len(paths)) as executor:
+        futures = [executor.submit(get, path) for path in paths]
+        finished, unfinished = wait(futures, timeout=0.5)
+        release_holder.set()
+        statuses = [future.result(timeout=2) for future in futures]
+    holder.join(2)
+
+    assert unfinished == set()
+    assert len(finished) == len(paths)
+    assert statuses == [200, 200, 200, 200]
+    assert holder.is_alive() is False
+
+
 @pytest.mark.parametrize(
     "default_scope_name",
     [
@@ -459,7 +594,7 @@ def test_explicit_profile_cli_caches_do_not_cross_under_concurrency(monkeypatch,
     for profile, session_ids in zip(requested, results, strict=True):
         prefix = "member" if profile == "member" else "owner"
         assert session_ids == {f"{prefix}-session-0", f"{prefix}-session-1"}
-    assert max_active_loads == 1
+    assert max_active_loads >= 2
 
     expected_loads = {
         (owner_home, owner_home / "state.db", "default"),
