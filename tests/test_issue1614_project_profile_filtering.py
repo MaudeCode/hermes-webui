@@ -16,6 +16,7 @@ Fix:
 
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -127,6 +128,39 @@ def test_ensure_cron_project_renamed_root_matches_default(tmp_path, monkeypatch)
 
     returned = models.ensure_cron_project()
     assert returned == pid, "Renamed root must reuse the 'default'-tagged cron project"
+
+
+def test_cron_and_webhook_project_creation_share_one_transaction_lock(
+    tmp_path, monkeypatch
+):
+    import api.models as models
+    import api.profiles as profiles
+
+    projects_file = tmp_path / "projects.json"
+    projects_file.write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(models, "PROJECTS_FILE", projects_file)
+    monkeypatch.setattr(models, "_projects_migrated", True)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    original_load = models.load_projects
+    reads = threading.Barrier(2)
+
+    def synchronized_load(*args, **kwargs):
+        projects = original_load(*args, **kwargs)
+        try:
+            reads.wait(0.1)
+        except threading.BrokenBarrierError:
+            pass
+        return projects
+
+    monkeypatch.setattr(models, "load_projects", synchronized_load)
+    with ThreadPoolExecutor(2) as executor:
+        futures = [
+            executor.submit(models.ensure_cron_project),
+            executor.submit(models.ensure_webhook_project),
+        ]
+        [future.result(timeout=2) for future in futures]
+
+    assert {row["name"] for row in original_load()} == {"Cron Jobs", "Webhooks"}
 
 
 # ── load_projects migration ────────────────────────────────────────────────

@@ -254,6 +254,8 @@ database path are already explicit. It does not enter the process-wide profile
 environment scope, so an active Agent turn cannot starve native bootstrap reads.
 If a same-profile cold rebuild exceeds its one-second coalescing wait, a follower
 returns no additive Agent rows while the original owner finishes and fills the cache.
+Cron and webhook project lookup-or-create transactions share one lock so parallel
+profile projections cannot overwrite each other's `projects.json` updates.
 
 Model-catalog rebuild followers use the same bounded wait as the rebuild owner.
 When that budget expires, callers receive the existing cached or static catalog;

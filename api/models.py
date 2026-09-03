@@ -6648,7 +6648,8 @@ def title_from(messages, fallback: str='Untitled'):
 
 # ── Project helpers ──────────────────────────────────────────────────────────
 
-_PROJECTS_MIGRATION_LOCK = threading.Lock()
+_PROJECTS_MUTATION_LOCK = threading.RLock()
+_PROJECTS_MIGRATION_LOCK = _PROJECTS_MUTATION_LOCK
 _projects_migrated = False
 
 
@@ -6739,7 +6740,7 @@ def save_projects(projects) -> None:
 
 
 CRON_PROJECT_NAME = 'Cron Jobs'
-_CRON_PROJECT_LOCK = threading.Lock()
+_CRON_PROJECT_LOCK = _PROJECTS_MUTATION_LOCK
 
 
 def ensure_cron_project(create: bool = True) -> str | None:
@@ -6801,7 +6802,7 @@ def ensure_cron_project(create: bool = True) -> str | None:
 
 
 WEBHOOK_PROJECT_NAME = 'Webhooks'
-_WEBHOOK_PROJECT_LOCK = threading.Lock()
+_WEBHOOK_PROJECT_LOCK = _PROJECTS_MUTATION_LOCK
 
 
 def ensure_webhook_project() -> str:
