@@ -9012,6 +9012,14 @@ def _refresh_cached_agent_primary_runtime_snapshot(agent) -> None:
             rt['is_anthropic_oauth'] = agent._is_anthropic_oauth
 
 
+def _publish_agent_instance(stream_id, agent) -> bool:
+    """Publish one cancel target and return its captured cancel state."""
+    with STREAMS_LOCK:
+        AGENT_INSTANCES[stream_id] = agent
+        flag = CANCEL_FLAGS.get(stream_id)
+        return bool(flag and flag.is_set())
+
+
 def _run_agent_streaming(
     session_id,
     msg_text,
@@ -11099,25 +11107,22 @@ def _run_agent_streaming(
                         logger.debug('[webui] Evicted LRU agent from cache: %s', _evicted_sid)
                     logger.debug('[webui] Created new agent for session %s', session_id)
 
-            # Store agent instance for cancel/interrupt propagation
-            with STREAMS_LOCK:
-                AGENT_INSTANCES[stream_id] = agent
-                # Check if cancel was requested during agent initialization
-                if stream_id in CANCEL_FLAGS and CANCEL_FLAGS[stream_id].is_set():
-                    # Cancel arrived during agent creation - interrupt immediately
-                    try:
-                        agent.interrupt("Cancelled before start")
-                    except Exception:
-                        logger.debug("Failed to interrupt agent before start")
-                    with _agent_lock:
-                        _finalize_cancelled_turn(
-                            s,
-                            ephemeral=ephemeral,
-                            message='Task cancelled before start.',
-                            stream_id=stream_id,
-                        )
-                    put('cancel', _turn_cancel_payload())
-                    return
+            # Store the agent and snapshot cancellation atomically. Interrupt,
+            # persistence, and event publication must stay outside STREAMS_LOCK.
+            if _publish_agent_instance(stream_id, agent):
+                try:
+                    agent.interrupt("Cancelled before start")
+                except Exception:
+                    logger.debug("Failed to interrupt agent before start")
+                with _agent_lock:
+                    _finalize_cancelled_turn(
+                        s,
+                        ephemeral=ephemeral,
+                        message='Task cancelled before start.',
+                        stream_id=stream_id,
+                    )
+                put('cancel', _turn_cancel_payload())
+                return
 
             # Prepend workspace context so the agent always knows which directory
             # to use for file operations, regardless of session age or AGENTS.md defaults.
@@ -11853,8 +11858,7 @@ def _run_agent_streaming(
                             if 'credential_pool' in _agent_params:
                                 _agent_kwargs['credential_pool'] = _heal_rt.get('credential_pool')
                             agent = _AIAgent(**_agent_kwargs)
-                            with STREAMS_LOCK:
-                                AGENT_INSTANCES[stream_id] = agent
+                            _publish_agent_instance(stream_id, agent)
                             from api.config import SESSION_AGENT_CACHE as _SAC, SESSION_AGENT_CACHE_LOCK as _SAC_L
                             with _SAC_L:
                                 _SAC[session_id] = (agent, _agent_sig)
@@ -13191,8 +13195,7 @@ def _run_agent_streaming(
                     if 'credential_pool' in _agent_params:
                         _heal_kwargs['credential_pool'] = _heal_rt.get('credential_pool')
                     _heal_agent = _AIAgent(**_heal_kwargs)
-                    with STREAMS_LOCK:
-                        AGENT_INSTANCES[stream_id] = _heal_agent
+                    _publish_agent_instance(stream_id, _heal_agent)
                     from api.config import SESSION_AGENT_CACHE as _SAC2, SESSION_AGENT_CACHE_LOCK as _SAC2_L
                     with _SAC2_L:
                         _SAC2[session_id] = (_heal_agent, _agent_sig)
@@ -13559,29 +13562,23 @@ def _run_agent_streaming(
             STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)  # Clean up tool calls (#1361 §B)
             STREAM_GOAL_RELATED.pop(stream_id, None)  # Clean up goal-related flag (#1932)
             STREAM_LAST_EVENT_ID.pop(stream_id, None)  # Clean up event_id pointer (stage-364)
-            unregister_active_run(stream_id)
-            # Clean up the stream-owner registry so stale stream_id→session_id
-            # mappings do not accumulate over thousands of completed streams (#6351).
-            unregister_stream_owner(stream_id)
-            # Release the session's writeback-ownership entry only while this
-            # stream still owns it (#6623 re-gate): a successor admitted after
-            # cancel must keep its registry claim.
-            try:
-                clear_session_writeback_owner_if_owned(session_id, stream_id)
-            except Exception:
-                logger.debug(
-                    "Failed to clear session writeback owner for stream %s", stream_id,
-                    exc_info=True,
-                )
-            # NOTE: do NOT discard PENDING_GOAL_CONTINUATION here. The marker
-            # is set by goal_continue (line ~3328) inside the SAME function
-            # call and consumed atomically by `_start_chat_stream_for_session`
-            # in routes.py (around line 6522) when the next stream starts.
-            # Discarding here in the streaming worker's `finally` would
-            # almost always race ahead of the frontend's SSE-receive →
-            # POST /api/chat/start round-trip and erase the marker before
-            # the next stream can read it, breaking the goal-continuation
-            # chain. Stage-326 critical fix per Opus advisor review.
+
+        unregister_active_run(stream_id)
+        # Clean up the stream-owner registry so stale stream_id→session_id
+        # mappings do not accumulate over thousands of completed streams (#6351).
+        unregister_stream_owner(stream_id)
+        # Release the session's writeback-ownership entry only while this
+        # stream still owns it (#6623 re-gate): a successor admitted after
+        # cancel must keep its registry claim.
+        try:
+            clear_session_writeback_owner_if_owned(session_id, stream_id)
+        except Exception:
+            logger.debug(
+                "Failed to clear session writeback owner for stream %s", stream_id,
+                exc_info=True,
+            )
+        # NOTE: do NOT discard PENDING_GOAL_CONTINUATION here. The marker is
+        # consumed atomically when the next stream starts.
 
         # ── Defer-path fix: turn-teardown idle-hook ────────────────────────
         # The session has just transitioned active→idle: unregister_active_run
