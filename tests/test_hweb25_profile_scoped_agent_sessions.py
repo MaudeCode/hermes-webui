@@ -633,6 +633,24 @@ def test_default_title_scope_does_not_block_default_chat_scope():
     assert chat.is_alive() is False
 
 
+def test_default_worker_pins_root_home_while_cron_mutates_process_env(
+    monkeypatch, tmp_path
+):
+    import api.config as config
+
+    root_home = tmp_path / "root"
+    cron_home = tmp_path / "profiles" / "cron"
+    root_home.mkdir()
+    cron_home.mkdir(parents=True)
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", root_home)
+    monkeypatch.setenv("HERMES_HOME", str(cron_home))
+
+    with profiles.profile_env_for_background_worker("default", "background title"):
+        assert config._thread_local_env_value("HERMES_HOME") == str(root_home)
+
+    assert os.environ["HERMES_HOME"] == str(cron_home)
+
+
 def test_explicit_profile_cli_caches_do_not_cross_under_concurrency(monkeypatch, tmp_path):
     owner_home = tmp_path / "owner-default"
     member_home = tmp_path / "profiles" / "member"

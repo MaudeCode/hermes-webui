@@ -1204,10 +1204,7 @@ def profile_env_for_background_worker(
     """
     log = logger_override or logger
     raw_profile = session if isinstance(session, str) else getattr(session, "profile", "")
-    profile = str(raw_profile or "").strip()
-    if not profile or _is_root_profile(profile):
-        yield
-        return
+    profile = str(raw_profile or "").strip() or "default"
 
     try:
         # Lazy imports avoid a module-load cycle: streaming imports this helper.

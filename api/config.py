@@ -3976,11 +3976,11 @@ def _get_lmstudio_reasoning_probe_api_key() -> str | None:
             if config_key:
                 return config_key
 
-    env_key = str(os.getenv("LM_API_KEY") or "").strip()
+    env_key = _thread_local_env_value("LM_API_KEY").strip()
     if env_key:
         return env_key
 
-    legacy_env_key = str(os.getenv("LMSTUDIO_API_KEY") or "").strip()
+    legacy_env_key = _thread_local_env_value("LMSTUDIO_API_KEY").strip()
     if legacy_env_key:
         return legacy_env_key
 

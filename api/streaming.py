@@ -29,6 +29,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 from api.config import (
+    _HERMES_FOUND,
     get_config,
     STREAMS, STREAMS_LOCK, CANCEL_FLAGS, AGENT_INSTANCES, STREAM_PARTIAL_TEXT,
     STREAM_REASONING_TEXT, STREAM_REASONING_TITLES, STREAM_LIVE_TOOL_CALLS,
@@ -9810,7 +9811,7 @@ def _run_agent_streaming(
                     _profile_home,
                     exc_info=True,
                 )
-        if _streaming_profile_is_named and _streaming_requires_process_env_fallback(
+        if _HERMES_FOUND and _streaming_requires_process_env_fallback(
             home_override_installed=_streaming_override_installed,
             skill_modules_dynamic=_streaming_modules_are_dynamic,
             profile_is_named=_streaming_profile_is_named,

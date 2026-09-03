@@ -166,7 +166,7 @@ Per-turn runtime values (bound through context-local Agent/WebUI state):
 Chat and detached profile work do not mutate these names in process-global
 `os.environ`. Runtime values are passed through WebUI thread-local state and the
 Agent's context-local home, secret, terminal, and session APIs. If the installed
-Hermes Agent lacks those isolation capabilities, named-profile chat fails closed
+Hermes Agent lacks those isolation capabilities, Agent chat fails closed
 with an upgrade error instead of serializing the whole turn behind a process-wide
 environment lock.
 
@@ -876,8 +876,8 @@ structured logging, dispatch to routes, TLS wrapping, and main().
 Agent turns use thread-local or explicit context for workspace, approval/session
 identity, profile home, credentials, terminal state, and skill paths. The WebUI
 does not keep a process-wide environment or skill-module lock across Agent, LLM,
-provider, tool, compression, or title work. Named-profile turns on legacy Agent
-builds that still need process-global profile state are rejected before they start.
+provider, tool, compression, or title work. Legacy Agent builds that still need
+process-global profile state are rejected before turns start.
 
 The implementation combines WebUI thread-local configuration with Agent-owned
 context variables. Process-global environment writes that remain elsewhere are
