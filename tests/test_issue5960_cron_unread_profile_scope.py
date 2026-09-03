@@ -34,7 +34,7 @@ def _extract_function(source: str, name: str) -> str:
     return source[start:pos]
 
 
-def test_recent_handler_reuses_dispatcher_cron_context_without_nesting():
+def test_recent_handler_reuses_dispatcher_store_context_without_nesting():
     dispatch_start = ROUTES_PY.index('if parsed.path == "/api/crons/recent":')
     dispatch_end = ROUTES_PY.index('if parsed.path == "/api/crons/status":', dispatch_start)
     dispatch = ROUTES_PY[dispatch_start:dispatch_end]
@@ -42,7 +42,7 @@ def test_recent_handler_reuses_dispatcher_cron_context_without_nesting():
     handler_end = ROUTES_PY.index("\ndef ", handler_start + 1)
     handler = ROUTES_PY[handler_start:handler_end]
 
-    assert "with cron_profile_context():" in dispatch
+    assert "with _active_cron_store():" in dispatch
     assert "cron_profile_context_for_home" not in handler
 
 

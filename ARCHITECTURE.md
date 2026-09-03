@@ -258,6 +258,9 @@ If a same-profile cold rebuild exceeds its one-second coalescing wait, a followe
 returns no additive Agent rows while the original owner finishes and fills the cache.
 Cron and webhook project lookup-or-create transactions share one lock so parallel
 profile projections cannot overwrite each other's `projects.json` updates.
+Cron GET routes use the Agent's context-local cron-store override, so polling one
+profile never waits for or mutates another turn's process-wide credential scope.
+Cron writes and job execution retain their stricter environment isolation.
 
 Model-catalog rebuild followers use the same bounded wait as the rebuild owner.
 When that budget expires, callers receive the existing cached or static catalog;

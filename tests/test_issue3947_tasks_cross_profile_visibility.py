@@ -88,8 +88,27 @@ def _install_cron_jobs(monkeypatch, jobs_by_home, current_home):
         return [dict(job) for job in jobs_by_home[current_home["value"]]]
 
     cron_jobs.list_jobs = _list_jobs
+    cron_jobs.use_cron_store = _store_context(current_home)
     monkeypatch.setitem(sys.modules, "cron", cron_pkg)
     monkeypatch.setitem(sys.modules, "cron.jobs", cron_jobs)
+
+
+def _store_context(current_home):
+    class _Store:
+        def __init__(self, home):
+            self.home = str(home)
+            self.previous = None
+
+        def __enter__(self):
+            self.previous = current_home["value"]
+            current_home["value"] = self.home
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            current_home["value"] = self.previous
+            return False
+
+    return _Store
 
 
 def test_crons_route_hides_other_profiles_by_default_but_reports_count(monkeypatch):
@@ -104,20 +123,6 @@ def test_crons_route_hides_other_profiles_by_default_but_reports_count(monkeypat
     }
     _install_cron_jobs(monkeypatch, jobs_by_home, current_home)
 
-    class _Ctx:
-        def __init__(self, home):
-            self.home = str(home)
-            self.prev = None
-
-        def __enter__(self):
-            self.prev = current_home["value"]
-            current_home["value"] = self.home
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            current_home["value"] = self.prev
-            return False
-
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "alpha")
     monkeypatch.setattr(profiles, "list_profiles_api", lambda: [
         {"name": "alpha", "visible": True},
@@ -128,8 +133,6 @@ def test_crons_route_hides_other_profiles_by_default_but_reports_count(monkeypat
         "get_hermes_home_for_profile",
         lambda name: Path({"alpha": "alpha-home", "beta": "beta-home", "default": "default-home"}[name]),
     )
-    monkeypatch.setattr(profiles, "cron_profile_context_for_home", _Ctx)
-
     handler = _JSONHandler()
     assert routes.handle_get(handler, SimpleNamespace(path="/api/crons", query="")) is not False
     body = _payload(handler)
@@ -176,22 +179,9 @@ def test_crons_route_dedupes_root_aliases_by_resolved_home(monkeypatch):
         return [dict(job) for job in jobs_by_home[current_home["value"]]]
 
     cron_jobs.list_jobs = _list_jobs
+    cron_jobs.use_cron_store = _store_context(current_home)
     monkeypatch.setitem(sys.modules, "cron", cron_pkg)
     monkeypatch.setitem(sys.modules, "cron.jobs", cron_jobs)
-
-    class _Ctx:
-        def __init__(self, home):
-            self.home = str(home)
-            self.prev = None
-
-        def __enter__(self):
-            self.prev = current_home["value"]
-            current_home["value"] = self.home
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            current_home["value"] = self.prev
-            return False
 
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "rootalias")
     monkeypatch.setattr(profiles, "list_profiles_api", lambda: [
@@ -207,8 +197,6 @@ def test_crons_route_dedupes_root_aliases_by_resolved_home(monkeypatch):
             "beta": "beta-home",
         }[name]),
     )
-    monkeypatch.setattr(profiles, "cron_profile_context_for_home", _Ctx)
-
     handler = _JSONHandler()
     assert routes.handle_get(handler, SimpleNamespace(path="/api/crons", query="all_profiles=1")) is not False
     body = _payload(handler)
@@ -229,20 +217,6 @@ def test_crons_route_skips_hidden_default_profile_when_inactive(monkeypatch):
     }
     _install_cron_jobs(monkeypatch, jobs_by_home, current_home)
 
-    class _Ctx:
-        def __init__(self, home):
-            self.home = str(home)
-            self.prev = None
-
-        def __enter__(self):
-            self.prev = current_home["value"]
-            current_home["value"] = self.home
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            current_home["value"] = self.prev
-            return False
-
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "alpha")
     monkeypatch.setattr(profiles, "list_profiles_api", lambda: [
         {"name": "default", "visible": False},
@@ -253,8 +227,6 @@ def test_crons_route_skips_hidden_default_profile_when_inactive(monkeypatch):
         "get_hermes_home_for_profile",
         lambda name: Path({"alpha": "alpha-home", "default": "default-home"}[name]),
     )
-    monkeypatch.setattr(profiles, "cron_profile_context_for_home", _Ctx)
-
     handler = _JSONHandler()
     assert routes.handle_get(handler, SimpleNamespace(path="/api/crons", query="all_profiles=1")) is not False
     body = _payload(handler)
@@ -276,20 +248,6 @@ def test_crons_route_ignores_all_profiles_toggle_in_isolated_mode(monkeypatch):
     _install_cron_jobs(monkeypatch, jobs_by_home, current_home)
     lookups = []
 
-    class _Ctx:
-        def __init__(self, home):
-            self.home = str(home)
-            self.prev = None
-
-        def __enter__(self):
-            self.prev = current_home["value"]
-            current_home["value"] = self.home
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            current_home["value"] = self.prev
-            return False
-
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "alpha")
     monkeypatch.setattr(routes, "_is_isolated_profile_mode", lambda: True)
     monkeypatch.setattr(profiles, "list_profiles_api", lambda: [{"name": "alpha", "visible": True}])
@@ -298,8 +256,6 @@ def test_crons_route_ignores_all_profiles_toggle_in_isolated_mode(monkeypatch):
         "get_hermes_home_for_profile",
         lambda name: lookups.append(name) or Path("alpha-home"),
     )
-    monkeypatch.setattr(profiles, "cron_profile_context_for_home", _Ctx)
-
     handler = _JSONHandler()
     assert routes.handle_get(handler, SimpleNamespace(path="/api/crons", query="all_profiles=1")) is not False
     body = _payload(handler)
@@ -334,22 +290,9 @@ def test_cron_jobs_cross_profile_skips_foreign_failures_but_reraises_active_fail
         return [dict(job) for job in jobs_by_home[home]]
 
     cron_jobs.list_jobs = _list_jobs
+    cron_jobs.use_cron_store = _store_context(current_home)
     monkeypatch.setitem(sys.modules, "cron", cron_pkg)
     monkeypatch.setitem(sys.modules, "cron.jobs", cron_jobs)
-
-    class _Ctx:
-        def __init__(self, home):
-            self.home = str(home)
-            self.prev = None
-
-        def __enter__(self):
-            self.prev = current_home["value"]
-            current_home["value"] = self.home
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            current_home["value"] = self.prev
-            return False
 
     monkeypatch.setattr(profiles, "list_profiles_api", lambda: [
         {"name": "alpha", "visible": True},
@@ -365,8 +308,6 @@ def test_cron_jobs_cross_profile_skips_foreign_failures_but_reraises_active_fail
             "gamma": "gamma-home",
         }[name]),
     )
-    monkeypatch.setattr(profiles, "cron_profile_context_for_home", _Ctx)
-
     active_jobs, other_jobs = routes._cron_jobs_cross_profile("alpha")
 
     assert [job["owner_profile"] for job in active_jobs] == ["alpha"]

@@ -1509,6 +1509,14 @@ def _cron_jobs_for_api(jobs) -> list[dict]:
     return [_cron_job_for_api(job) for job in (jobs or [])]
 
 
+def _active_cron_store():
+    """Return the Agent's request-local cron store context."""
+    from api import profiles
+    from cron.jobs import use_cron_store
+
+    return use_cron_store(profiles.get_active_hermes_home())
+
+
 _AGENT_CRON_IMPORT_PATH_LOCK = threading.Lock()
 _AGENT_CRON_IMPORT_PATH_READY: str | None = None
 
@@ -1564,9 +1572,8 @@ def _cron_jobs_cross_profile(active_profile: str) -> tuple[list[dict], list[dict
     ``profile`` field. The persisted field controls where the job executes;
     ``owner_profile`` tells the UI which profile home the row came from.
     """
-    from cron.jobs import list_jobs
+    from cron.jobs import list_jobs, use_cron_store
     from api.profiles import (
-        cron_profile_context_for_home,
         get_hermes_home_for_profile,
         list_profiles_api,
     )
@@ -1612,7 +1619,7 @@ def _cron_jobs_cross_profile(active_profile: str) -> tuple[list[dict], list[dict
         seen_homes.add(home_key)
         is_active = _profiles_match(owner_profile, active_profile)
         try:
-            with cron_profile_context_for_home(home):
+            with use_cron_store(home):
                 jobs = _cron_jobs_for_api(list_jobs(include_disabled=True))
         except Exception:
             if not is_active:
@@ -15356,45 +15363,31 @@ def handle_get(handler, parsed) -> bool:
         })
 
     if parsed.path == "/api/crons/output":
-        from api.profiles import cron_profile_context
-
-        with cron_profile_context():
-            _ensure_agent_cron_import_path()
+        _ensure_agent_cron_import_path()
+        with _active_cron_store():
             return _handle_cron_output(handler, parsed)
 
     if parsed.path == "/api/crons/history":
-        from api.profiles import cron_profile_context
-
-        with cron_profile_context():
-            _ensure_agent_cron_import_path()
+        _ensure_agent_cron_import_path()
+        with _active_cron_store():
             return _handle_cron_history(handler, parsed)
 
     if parsed.path == "/api/crons/run":
-        from api.profiles import cron_profile_context
-
-        with cron_profile_context():
-            _ensure_agent_cron_import_path()
+        _ensure_agent_cron_import_path()
+        with _active_cron_store():
             return _handle_cron_run_detail(handler, parsed)
 
     if parsed.path == "/api/crons/recent":
-        from api.profiles import cron_profile_context
-
-        with cron_profile_context():
-            _ensure_agent_cron_import_path()
+        _ensure_agent_cron_import_path()
+        with _active_cron_store():
             return _handle_cron_recent(handler, parsed)
 
     if parsed.path == "/api/crons/status":
-        from api.profiles import cron_profile_context
-
-        with cron_profile_context():
-            return _handle_cron_status(handler, parsed)
+        return _handle_cron_status(handler, parsed)
 
     if parsed.path == "/api/crons/delivery-options":
-        from api.profiles import cron_profile_context
-
-        with cron_profile_context():
-            _ensure_agent_cron_import_path()
-            return _handle_cron_delivery_options(handler)
+        _ensure_agent_cron_import_path()
+        return _handle_cron_delivery_options(handler)
 
     # ── Skills API (GET) ──
     if parsed.path == "/api/skills":
@@ -22949,7 +22942,7 @@ def _handle_cron_history(handler, parsed):
     Returns lightweight file listing so the frontend can render a run history
     without fetching full output for every run.
     """
-    from cron.jobs import OUTPUT_DIR as CRON_OUT
+    from cron.jobs import get_cron_output_dir
     import re as _re
 
     qs = parse_qs(parsed.query)
@@ -22970,7 +22963,7 @@ def _handle_cron_history(handler, parsed):
         limit = max(1, min(500, int(qs.get("limit", ["50"])[0])))
     except (ValueError, TypeError):
         return j(handler, {"error": "offset and limit must be integers"}, status=400)
-    out_dir = CRON_OUT / job_id
+    out_dir = get_cron_output_dir() / job_id
     runs = []
     total = 0
     if out_dir.exists():
@@ -22996,7 +22989,7 @@ def _handle_cron_history(handler, parsed):
 
 def _handle_cron_run_detail(handler, parsed):
     """Return full content of a single cron run output file."""
-    from cron.jobs import OUTPUT_DIR as CRON_OUT
+    from cron.jobs import get_cron_output_dir
     import re as _re
 
     qs = parse_qs(parsed.query)
@@ -23011,8 +23004,9 @@ def _handle_cron_run_detail(handler, parsed):
     if not _re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.-]{0,63}", job_id) or job_id in (".", ".."):
         return j(handler, {"error": "invalid job_id"}, status=400)
     # Prevent path traversal — resolve and verify it stays within the job's output dir
-    fpath = (CRON_OUT / job_id / filename).resolve()
-    if not fpath.is_relative_to(CRON_OUT.resolve()):
+    cron_out = get_cron_output_dir()
+    fpath = (cron_out / job_id / filename).resolve()
+    if not fpath.is_relative_to(cron_out.resolve()):
         return j(handler, {"error": "invalid filename"}, status=400)
     if not fpath.exists():
         return j(handler, {"error": "run not found"}, status=404)
@@ -23105,7 +23099,7 @@ def _cron_output_snippet(text: str, limit: int = 600) -> str:
 
 
 def _handle_cron_output(handler, parsed):
-    from cron.jobs import OUTPUT_DIR as CRON_OUT
+    from cron.jobs import get_cron_output_dir
     import re as _re
 
     qs = parse_qs(parsed.query)
@@ -23127,7 +23121,7 @@ def _handle_cron_output(handler, parsed):
         limit = max(1, min(500, int(qs.get("limit", ["5"])[0])))
     except (ValueError, TypeError):
         limit = 5
-    out_dir = CRON_OUT / job_id
+    out_dir = get_cron_output_dir() / job_id
     outputs = []
     if out_dir.exists():
         files = sorted(out_dir.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)[:limit]

@@ -48,6 +48,7 @@ def _stub_cron_jobs(monkeypatch, *, output_dir=None, jobs=None):
     cron_jobs = types.ModuleType("cron.jobs")
     if output_dir is not None:
         cron_jobs.OUTPUT_DIR = output_dir
+        cron_jobs.get_cron_output_dir = lambda: output_dir
     if jobs is not None:
         cron_jobs.list_jobs = lambda include_disabled=True: jobs
     monkeypatch.setitem(sys.modules, "cron", cron_pkg)
