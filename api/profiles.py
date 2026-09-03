@@ -1211,7 +1211,12 @@ def profile_env_for_background_worker(
 
     try:
         # Lazy imports avoid a module-load cycle: streaming imports this helper.
-        from api.config import _clear_thread_env, _set_thread_env, _thread_ctx
+        from api.config import (
+            _HERMES_FOUND,
+            _clear_thread_env,
+            _set_thread_env,
+            _thread_ctx,
+        )
         profile_home_path = Path(get_hermes_home_for_profile(profile))
         runtime_env = get_profile_runtime_env(profile_home_path)
         safe_runtime_env = filter_runtime_env_for_gateway_parity(runtime_env)
@@ -1246,40 +1251,42 @@ def profile_env_for_background_worker(
         _set_thread_env(**thread_env)
         _thread_ctx.block_process_env_fallback = True
         _secret_scope_mod = _resolve_secret_scope_module()
-        if _secret_scope_mod is None:
+        if _secret_scope_mod is None and _HERMES_FOUND:
             raise RuntimeError(
                 f"Cannot safely run {purpose} for profile {profile!r}: "
                 "the installed Hermes Agent lacks context-local secret scopes."
             )
-        try:
-            _scope_token = _secret_scope_mod.set_secret_scope(thread_env)
-            _has_scope = True
-        except Exception as exc:
-            raise RuntimeError(
-                f"Cannot safely run {purpose} for profile {profile!r}: "
-                "the context-local secret scope could not be installed."
-            ) from exc
+        if _secret_scope_mod is not None:
+            try:
+                _scope_token = _secret_scope_mod.set_secret_scope(thread_env)
+                _has_scope = True
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Cannot safely run {purpose} for profile {profile!r}: "
+                    "the context-local secret scope could not be installed."
+                ) from exc
         # #5567: install the context-local Hermes-home override so the agent
         # config reader (get_hermes_home -> get_config_path/load_config) resolves
         # THIS profile's home from task-local state, immune to a concurrent
         # cross-profile os.environ["HERMES_HOME"] clobber during the worker body.
         # Older agents cannot isolate concurrent profiles without global state.
         _home_override_mod = _resolve_hermes_home_override()
-        if _home_override_mod is None:
+        if _home_override_mod is None and _HERMES_FOUND:
             raise RuntimeError(
                 f"Cannot safely run {purpose} for profile {profile!r}: "
                 "the installed Hermes Agent lacks a context-local home override."
             )
-        try:
-            _home_override_token = _home_override_mod.set_hermes_home_override(
-                str(profile_home_path)
-            )
-            _home_override_installed = True
-        except Exception as exc:
-            raise RuntimeError(
-                f"Cannot safely run {purpose} for profile {profile!r}: "
-                "the context-local home override could not be installed."
-            ) from exc
+        if _home_override_mod is not None:
+            try:
+                _home_override_token = _home_override_mod.set_hermes_home_override(
+                    str(profile_home_path)
+                )
+                _home_override_installed = True
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Cannot safely run {purpose} for profile {profile!r}: "
+                    "the context-local home override could not be installed."
+                ) from exc
 
         yield
     finally:
