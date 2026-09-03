@@ -313,6 +313,12 @@ def test_stale_session_stream_cannot_reconnect_or_render_compression():
         opening = source.index("{", source.index(")", start))
         return source[start : _matching_brace(source, opening) + 1]
 
+    compressing_listener = MESSAGES_JS[
+        MESSAGES_JS.index("source.addEventListener('compressing'") : MESSAGES_JS.index(
+            "source.addEventListener('compressed'"
+        )
+    ]
+
     script = "\n".join(
         (
             "const window=globalThis;",
@@ -335,13 +341,21 @@ def test_stale_session_stream_cannot_reconnect_or_render_compression():
             "showLiveRunStatus('session-a',{streamId:'stream-a'});",
             "try{attachLiveStream('session-a','stream-a',[],{reconnecting:true})}catch(_){}",
             "const stale={staleUiAccepted,compressionRendered,compressionEntered,attachEntered,inflightCreated:!!INFLIGHT['session-a'],statusSessionId:_liveRunStatusSessionId,statusStreamId:_liveRunStatusStreamId};",
+            "let compressionListener=null,fallbackCalls=0;",
+            "const source={addEventListener:(_,fn)=>{compressionListener=fn}};",
+            "const activeSid='session-a',streamId='stream-a';",
+            "const _applyToAnchor=()=>{},snapshotLiveTurn=()=>{},clearCompressionUi=()=>{};",
+            "const setCompressionUi=()=>{fallbackCalls++};",
+            "S.session={session_id:'session-a'};S.activeStreamId='stream-new';",
+            compressing_listener,
+            "compressionListener({data:JSON.stringify({session_id:'session-a',stream_id:'stream-a'})});",
             "S.session={session_id:'session-a'};S.activeStreamId='stream-a';",
             "try{attachLiveStream('session-a','stream-a',[],{reconnecting:true})}catch(_){}",
-            "process.stdout.write(JSON.stringify({stale,restoredAttachEntered:attachEntered}));",
+            "process.stdout.write(JSON.stringify({stale,fallbackCalls,restoredAttachEntered:attachEntered}));",
         )
     )
     completed = subprocess.run(
-        [node, "-e", script], text=True, capture_output=True, check=False, timeout=10
+        [node], input=script, text=True, capture_output=True, check=False, timeout=10
     )
     assert completed.returncode == 0, completed.stderr
     assert json.loads(completed.stdout) == {
@@ -354,5 +368,6 @@ def test_stale_session_stream_cannot_reconnect_or_render_compression():
             "statusSessionId": None,
             "statusStreamId": None,
         },
+        "fallbackCalls": 0,
         "restoredAttachEntered": 1,
     }
