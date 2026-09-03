@@ -1,10 +1,40 @@
 """Shared helpers for reading Hermes Agent sessions from state.db."""
 import logging
 import sqlite3
+import threading
 from contextlib import closing
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+_USER_MESSAGE_INDEX_PRIME_LOCK = threading.Lock()
+_USER_MESSAGE_INDEX_PRIME_ATTEMPTED: set[str] = set()
+
+
+def _prime_user_message_index_async(db_path: Path) -> None:
+    """Try the optional user-message index once without blocking a request."""
+    key = str(Path(db_path).resolve())
+    with _USER_MESSAGE_INDEX_PRIME_LOCK:
+        if key in _USER_MESSAGE_INDEX_PRIME_ATTEMPTED:
+            return
+        _USER_MESSAGE_INDEX_PRIME_ATTEMPTED.add(key)
+
+    def worker():
+        try:
+            with closing(sqlite3.connect(str(db_path), timeout=0.0)) as conn:
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_messages_session_user "
+                    "ON messages(session_id) WHERE role = 'user'"
+                )
+                conn.commit()
+        except sqlite3.Error:
+            pass
+
+    threading.Thread(
+        target=worker,
+        daemon=True,
+        name="state-db-user-index-prime",
+    ).start()
 
 
 def open_state_db_readonly(db_path: Path, log: logging.Logger | None = None) -> sqlite3.Connection:
@@ -639,35 +669,56 @@ def read_importable_agent_session_rows(
             # history. If the live database cannot be migrated, the query below
             # falls back to a short-circuiting existence check so listing stays usable.
             if 'role' in message_cols and not user_messages_index_present:
-                try:
-                    with closing(sqlite3.connect(str(db_path))) as _heal:
-                        _heal.execute(
-                            "CREATE INDEX IF NOT EXISTS idx_messages_session_user "
-                            "ON messages(session_id) WHERE role = 'user'"
-                        )
-                        _heal.commit()
-                    user_messages_index_present = True
-                except sqlite3.Error:
-                    pass
+                _prime_user_message_index_async(db_path)
 
         if use_messages_join:
-            actual_count_expr = f"COUNT(m.{count_col})"
-            if 'role' in message_cols:
-                if user_messages_index_present:
-                    user_message_count_expr = (
-                        "(SELECT COUNT(*) FROM messages um "
-                        "WHERE um.session_id = s.id AND um.role = 'user')"
-                    )
+            if messages_index_present:
+                # ``sessions.message_count`` is the Agent-owned aggregate. Use it
+                # instead of recounting every message in each selected history;
+                # the existence fallback preserves rows from older/drifted DBs.
+                actual_count_expr = (
+                    "CASE WHEN NOT EXISTS(SELECT 1 FROM messages am WHERE am.session_id = s.id) THEN 0 "
+                    "WHEN COALESCE(s.message_count, 0) > 0 THEN s.message_count "
+                    "ELSE (SELECT COUNT(*) FROM (SELECT 1 FROM messages ac "
+                    "WHERE ac.session_id = s.id LIMIT 2)) END"
+                )
+                if 'role' in message_cols:
+                    if user_messages_index_present:
+                        # Visibility only distinguishes zero, one, and two-or-more
+                        # user turns. Stop at that threshold instead of counting an
+                        # unbounded multi-GB transcript.
+                        user_message_count_expr = (
+                            "(SELECT COUNT(*) FROM (SELECT 1 FROM messages um "
+                            "WHERE um.session_id = s.id AND um.role = 'user' LIMIT 2))"
+                        )
+                    else:
+                        # Preserve the compatibility path when the partial user
+                        # index cannot be created: stop on the first user row.
+                        user_message_count_expr = (
+                            "EXISTS(SELECT 1 FROM messages um "
+                            "WHERE um.session_id = s.id AND LOWER(um.role) = 'user')"
+                        )
                 else:
+                    user_message_count_expr = actual_count_expr
+                last_activity_expr = (
+                    "(SELECT MAX(lm.timestamp) FROM messages lm "
+                    "WHERE lm.session_id = s.id)"
+                    if messages_has_timestamp else "NULL"
+                )
+                join_clause = ""
+                group_by_clause = ""
+            else:
+                actual_count_expr = f"COUNT(m.{count_col})"
+                if 'role' in message_cols:
                     user_message_count_expr = (
                         "EXISTS(SELECT 1 FROM messages um "
                         "WHERE um.session_id = s.id AND LOWER(um.role) = 'user')"
                     )
-            else:
-                user_message_count_expr = f"COUNT(m.{count_col})"
-            last_activity_expr = "MAX(m.timestamp)" if messages_has_timestamp else "NULL"
-            join_clause = "LEFT JOIN messages m ON m.session_id = s.id"
-            group_by_clause = "GROUP BY s.id"
+                else:
+                    user_message_count_expr = f"COUNT(m.{count_col})"
+                last_activity_expr = "MAX(m.timestamp)" if messages_has_timestamp else "NULL"
+                join_clause = "LEFT JOIN messages m ON m.session_id = s.id"
+                group_by_clause = "GROUP BY s.id"
         else:
             # No usable messages table: use the denormalized per-session counts
             # and ``started_at`` so the rows still surface in the sidebar.
@@ -714,7 +765,11 @@ def read_importable_agent_session_rows(
             )
             candidate_order_clause = "ORDER BY COALESCE(lm.last_message_at, s.started_at) DESC, s.started_at DESC"
         elif use_messages_join and messages_has_timestamp:
-            order_by_clause = "ORDER BY COALESCE(MAX(m.timestamp), s.started_at) DESC"
+            order_by_clause = (
+                "ORDER BY COALESCE(last_activity, s.started_at) DESC"
+                if messages_index_present
+                else "ORDER BY COALESCE(MAX(m.timestamp), s.started_at) DESC"
+            )
             candidate_order_clause = (
                 "ORDER BY COALESCE(\n"
                 "                        (SELECT MAX(mx.timestamp) FROM messages mx WHERE mx.session_id = s.id),\n"
@@ -1157,6 +1212,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
             session_source_expr = _optional_col('session_source', session_cols)
             source_expr = _optional_col('source', session_cols)
             message_count_expr = _optional_col('message_count', session_cols, '0')
+            message_count_value = "s.message_count" if 'message_count' in session_cols else "0"
             # Scoped fetch via PRIMARY KEY + idx_sessions_parent rather than a
             # full table scan. The sessions table grows unbounded over time
             # (1000+ rows is normal, 10000+ for power users), and this function
@@ -1255,18 +1311,40 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
             row_ids = list(rows)
             if use_messages_query:
                 last_at_expr = "MAX(timestamp) AS last_message_at" if messages_has_timestamp else "NULL AS last_message_at"
+                cur.execute("PRAGMA index_list(messages)")
+                message_indexes = {str(row[1]) for row in cur.fetchall()}
+                has_session_index = "idx_messages_session" in message_indexes
                 for i in range(0, len(row_ids), IN_CHUNK):
                     chunk = row_ids[i:i + IN_CHUNK]
                     placeholders = ','.join('?' * len(chunk))
-                    cur.execute(
-                        f"""
-                        SELECT session_id, COUNT(*) AS actual_message_count, {last_at_expr}
-                        FROM messages
-                        WHERE session_id IN ({placeholders})
-                        GROUP BY session_id
-                        """,
-                        chunk,
-                    )
+                    if has_session_index:
+                        last_at_expr = (
+                            "(SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = s.id) AS last_message_at"
+                            if messages_has_timestamp else "NULL AS last_message_at"
+                        )
+                        cur.execute(
+                            f"""
+                            SELECT s.id AS session_id,
+                                   CASE WHEN NOT EXISTS(SELECT 1 FROM messages m WHERE m.session_id = s.id) THEN 0
+                                        WHEN COALESCE({message_count_value}, 0) > 0 THEN {message_count_value}
+                                        ELSE (SELECT COUNT(*) FROM (SELECT 1 FROM messages mc
+                                              WHERE mc.session_id = s.id LIMIT 2)) END AS actual_message_count,
+                                   {last_at_expr}
+                            FROM sessions s
+                            WHERE s.id IN ({placeholders})
+                            """,
+                            chunk,
+                        )
+                    else:
+                        cur.execute(
+                            f"""
+                            SELECT session_id, COUNT(*) AS actual_message_count, {last_at_expr}
+                            FROM messages
+                            WHERE session_id IN ({placeholders})
+                            GROUP BY session_id
+                            """,
+                            chunk,
+                        )
                     for row in cur.fetchall():
                         message_stats[row['session_id']] = dict(row)
             for sid, row in rows.items():

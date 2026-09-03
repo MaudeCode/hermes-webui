@@ -17,6 +17,7 @@ silently on a read-only db without ever failing the listing).
 import os
 import sqlite3
 import stat
+import time
 
 import pytest
 
@@ -74,8 +75,8 @@ def _messages_indexes(path):
     return {r[0] for r in rows}
 
 
-def test_prime_creates_missing_index(tmp_path):
-    """A db missing sidebar indexes gets them primed on the first scan."""
+def test_prime_creates_required_index_without_waiting_for_optional_user_index(tmp_path):
+    """The Agent's required session/timestamp index remains synchronously repaired."""
     db = tmp_path / "state.db"
     _full_schema_db(db)
     assert "idx_messages_session" not in _messages_indexes(db)
@@ -86,9 +87,8 @@ def test_prime_creates_missing_index(tmp_path):
 
     # Listing still returns the sessions ...
     assert {r["id"] for r in rows} == {"sess0", "sess1", "sess2"}
-    # ... and both index-only sidebar paths are now available.
+    # ... and the required index-only timestamp path is now available.
     assert "idx_messages_session" in _messages_indexes(db)
-    assert "idx_messages_session_user" in _messages_indexes(db)
     conn = sqlite3.connect(str(db))
     try:
         sql = conn.execute(
@@ -97,14 +97,18 @@ def test_prime_creates_missing_index(tmp_path):
     finally:
         conn.close()
     assert "session_id" in sql and "timestamp" in sql
-    conn = sqlite3.connect(str(db))
-    try:
-        user_sql = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE name='idx_messages_session_user'"
-        ).fetchone()[0]
-    finally:
-        conn.close()
-    assert "session_id" in user_sql and "role = 'user'" in user_sql
+
+
+def test_optional_user_index_prime_runs_asynchronously(tmp_path):
+    db = tmp_path / "state.db"
+    _full_schema_db(db)
+
+    agent_sessions._prime_user_message_index_async(db)
+
+    deadline = time.monotonic() + 2
+    while "idx_messages_session_user" not in _messages_indexes(db) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert "idx_messages_session_user" in _messages_indexes(db)
 
 
 def test_prime_is_noop_when_index_exists(tmp_path):
@@ -135,10 +139,14 @@ def test_prime_is_noop_when_index_exists(tmp_path):
     assert "idx_messages_session_user" in _messages_indexes(db)
 
 
-def test_user_message_count_uses_partial_index_and_stays_exact(tmp_path):
+def test_user_message_count_uses_partial_index_and_stops_at_visibility_threshold(tmp_path):
     db = tmp_path / "state.db"
     _full_schema_db(db)
     conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE INDEX idx_messages_session_user ON messages(session_id) "
+        "WHERE role = 'user'"
+    )
     conn.executemany(
         "INSERT INTO messages(session_id, role, content, timestamp) VALUES (?,?,?,?)",
         [("sess0", "user", "again", 2001.0), ("sess0", "user", "once more", 2002.0)],
@@ -151,7 +159,7 @@ def test_user_message_count_uses_partial_index_and_stays_exact(tmp_path):
     )
 
     by_id = {row["id"]: row for row in rows}
-    assert by_id["sess0"]["actual_user_message_count"] == 3
+    assert by_id["sess0"]["actual_user_message_count"] == 2
 
 
 def test_prime_skipped_without_timestamp_column(tmp_path):
@@ -211,3 +219,39 @@ def test_prime_degrades_on_readonly_db(tmp_path):
     finally:
         # Restore write so tmp_path cleanup can remove it.
         os.chmod(db, stat.S_IWRITE | stat.S_IREAD)
+
+
+def test_missing_user_index_uses_bounded_first_user_fallback(tmp_path, monkeypatch):
+    db = tmp_path / "state.db"
+    _full_schema_db(db)
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE INDEX idx_messages_session ON messages(session_id, timestamp)")
+    conn.executemany(
+        "INSERT INTO messages(session_id, role, content, timestamp) VALUES ('sess0', 'assistant', '', ?)",
+        ((3000.0 + index,) for index in range(50_000)),
+    )
+    conn.commit()
+    conn.close()
+
+    real_connect = sqlite3.connect
+    steps = {"count": 0}
+
+    def locked_connect(database, *args, **kwargs):
+        if not str(database).startswith("file:"):
+            raise sqlite3.OperationalError("database is locked")
+        connection = real_connect(database, *args, **kwargs)
+
+        def progress():
+            steps["count"] += 1
+            return 0
+
+        connection.set_progress_handler(progress, 100)
+        return connection
+
+    monkeypatch.setattr(agent_sessions.sqlite3, "connect", locked_connect)
+
+    rows = agent_sessions.read_importable_agent_session_rows(db, limit=20, exclude_sources=None)
+
+    by_id = {row["id"]: row for row in rows}
+    assert by_id["sess0"]["actual_user_message_count"] == 1
+    assert steps["count"] < 1_000

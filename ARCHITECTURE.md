@@ -277,6 +277,20 @@ visibility stage decides whether recovered background rows are shown. In
 are merged; cross-profile scoping, visibility, deduplication, and final route
 limits remain downstream responsibilities.
 
+The projection uses the Agent-owned `sessions.message_count` aggregate after a
+bounded existence check, reads the newest message timestamp through the
+Agent's `(session_id, timestamp)` index, and counts at most two user turns (the
+sidebar visibility threshold). Lineage enrichment uses the same bounded
+metadata path. A cold session-list build therefore scales with its candidate
+windows and lineage IDs rather than with the byte size of their transcripts.
+
+These reads do not snapshot, vacuum, prune, or delete Agent history. In
+particular, Hermes Agent may skip its own quick snapshot when `state.db` exceeds
+the Agent's configured snapshot-size limit; WebUI does not treat that skip as a
+backup and does not work around it by cleaning the database. Backup and recovery
+of an oversized Agent database remain Agent/operator-owned and must use the
+Agent's supported procedure.
+
 `GET /api/sessions` accepts optional `show_cli_sessions`,
 `show_claude_code_sessions`, `show_cron_sessions`, `show_webhook_sessions`, and
 `show_kanban_sessions` boolean query values. When absent, the route uses the
