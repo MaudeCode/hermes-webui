@@ -8,7 +8,10 @@ network access is used.
 
 from __future__ import annotations
 
+import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -296,3 +299,60 @@ def test_reverting_cleanup_branch_breaks_owned_running_only(browser):
     for kind in ("manual", "unowned", "stale-owner"):
         result = _run(browser, kind, "session-b", mutated=True)
         assert result["after"]["state"] == result["before"]["state"]
+
+
+def test_stale_session_stream_cannot_reconnect_or_render_compression():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required for the session-ownership regression")
+
+    def function_source(source: str, name: str) -> str:
+        start = source.index(f"function {name}(")
+        if name == "attachLiveStream":
+            return source[start : source.index("\nfunction transcript()", start)]
+        opening = source.index("{", source.index(")", start))
+        return source[start : _matching_brace(source, opening) + 1]
+
+    script = "\n".join(
+        (
+            "const window=globalThis;",
+            "const S={session:{session_id:'session-b'},messages:[{role:'user',content:'session b'}],activeStreamId:'stream-b',busy:true};",
+            "const INFLIGHT={};",
+            "let _liveRunStatusSessionId=null,_liveRunStatusStreamId=null,_liveRunStatusTokens=null;",
+            "const isCompactWorklogMode=()=>true,$=()=>null;",
+            "let compressionEntered=0,attachEntered=0;",
+            "const isLiveAnchorActivitySceneOwner=()=>{compressionEntered++;return true};",
+            "const _isSessionCurrentPane=sid=>!!S.session&&S.session.session_id===sid;",
+            "const _bindStreamHiddenTracker=()=>{attachEntered++;throw new Error('attach entered')};",
+            function_source(UI_JS, "showLiveRunStatus"),
+            function_source(UI_JS, "_compressionStateForCurrentSession"),
+            function_source(UI_JS, "appendLiveCompressionCard"),
+            function_source(MESSAGES_JS, "attachLiveStream"),
+            "window._compressionUi={sessionId:'session-b',streamId:'stream-a',phase:'running',automatic:true};",
+            "const staleUiAccepted=!!_compressionStateForCurrentSession();",
+            "const staleState={sessionId:'session-a',streamId:'stream-a',phase:'running',automatic:true};",
+            "const compressionRendered=appendLiveCompressionCard(staleState);",
+            "showLiveRunStatus('session-a',{streamId:'stream-a'});",
+            "try{attachLiveStream('session-a','stream-a',[],{reconnecting:true})}catch(_){}",
+            "const stale={staleUiAccepted,compressionRendered,compressionEntered,attachEntered,inflightCreated:!!INFLIGHT['session-a'],statusSessionId:_liveRunStatusSessionId,statusStreamId:_liveRunStatusStreamId};",
+            "S.session={session_id:'session-a'};S.activeStreamId='stream-a';",
+            "try{attachLiveStream('session-a','stream-a',[],{reconnecting:true})}catch(_){}",
+            "process.stdout.write(JSON.stringify({stale,restoredAttachEntered:attachEntered}));",
+        )
+    )
+    completed = subprocess.run(
+        [node, "-e", script], text=True, capture_output=True, check=False, timeout=10
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "stale": {
+            "staleUiAccepted": False,
+            "compressionRendered": False,
+            "compressionEntered": 0,
+            "attachEntered": 0,
+            "inflightCreated": False,
+            "statusSessionId": None,
+            "statusStreamId": None,
+        },
+        "restoredAttachEntered": 1,
+    }

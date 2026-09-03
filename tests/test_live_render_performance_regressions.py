@@ -163,7 +163,7 @@ global._renderLiveAnchorActivitySceneForStream=()=>{{renders++;return true;}};
 eval(extractFunc('appendLiveToolCard'));
 eval(extractFunc('appendLiveCompressionCard'));
 appendLiveToolCard({{tid:'tool-1',name:'read_file'}},{{sessionId:'sid-1',streamId:'stream-1'}});
-appendLiveCompressionCard({{sessionId:'sid-1',phase:'running',automatic:true}});
+appendLiveCompressionCard({{sessionId:'sid-1',streamId:'stream-1',phase:'running',automatic:true}});
 process.stdout.write(JSON.stringify({{renders}}));
 """
     assert _run_node(script)["renders"] == 0
