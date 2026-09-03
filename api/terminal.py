@@ -159,6 +159,7 @@ class TerminalSession:
 
 _TERMINALS: dict[str, TerminalSession] = {}
 _LOCK = threading.RLock()
+_STARTING_TERMINALS: dict[str, threading.Event] = {}
 # Hard cap on concurrently live embedded terminals. Each holds a shell process,
 # a pty master fd, and a reader thread; a client that drops its output stream
 # without POSTing /api/terminal/close (tab close, crash, network drop) leaves
@@ -421,7 +422,7 @@ def _enforce_terminal_cap(*, exclude_sid: str | None = None) -> None:
             # Reuse/restart of an existing sid replaces in place — no growth.
             if exclude_sid in _TERMINALS:
                 return
-            if len(_TERMINALS) < _MAX_TERMINALS:
+            if len(_TERMINALS) + len(_STARTING_TERMINALS) < _MAX_TERMINALS:
                 return
             candidates = [
                 (sid, term) for sid, term in _TERMINALS.items() if sid != exclude_sid
@@ -550,73 +551,80 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
     # than adds an entry.
     _enforce_terminal_cap(exclude_sid=sid)
 
-    with _LOCK:
-        current = _TERMINALS.get(sid)
-        if current and current.is_alive() and not restart and current.workspace == cwd:
-            _set_size(current, rows, cols)
-            return current
-        if current:
-            close_terminal(sid)
+    while True:
+        with _LOCK:
+            current = _TERMINALS.get(sid)
+            if current and current.is_alive() and not restart and current.workspace == cwd:
+                break
+            pending = _STARTING_TERMINALS.get(sid)
+            if pending is None:
+                if current is None and len(_TERMINALS) + len(_STARTING_TERMINALS) >= _MAX_TERMINALS:
+                    raise RuntimeError("terminal capacity is busy")
+                pending = threading.Event()
+                _STARTING_TERMINALS[sid] = pending
+                replaced = _TERMINALS.pop(sid, None)
+                current = None
+                break
+        if not pending.wait(timeout=5.0):
+            raise TimeoutError("terminal start already in progress")
 
-        master_fd, slave_fd = os.openpty()
-        # Build a safe env: allowlist common shell vars, strip API keys and secrets.
-        # The PTY shell is an interactive UI surface — do not leak server credentials.
-        _SAFE_ENV_KEYS = {
-            "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL",
-            "LC_CTYPE", "LC_MESSAGES", "LANGUAGE", "TZ", "TMPDIR", "TEMP",
-            "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+    if current is not None:
+        _set_size(current, rows, cols)
+        return current
+
+    if replaced is not None:
+        _teardown_terminal(replaced)
+
+    master_fd, slave_fd = os.openpty()
+    # Build a safe env: allowlist common shell vars, strip API keys and secrets.
+    _SAFE_ENV_KEYS = {
+        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL",
+        "LC_CTYPE", "LC_MESSAGES", "LANGUAGE", "TZ", "TMPDIR", "TEMP",
+        "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+    }
+    env = {k: v for k, v in os.environ.items() if k in _SAFE_ENV_KEYS}
+    env.update(
+        {
+            "TERM": "xterm-256color",
+            "COLORTERM": "truecolor",
+            "COLUMNS": str(cols),
+            "LINES": str(rows),
+            "PWD": cwd,
+            "HERMES_WEBUI_TERMINAL": "1",
         }
-        env = {k: v for k, v in os.environ.items() if k in _SAFE_ENV_KEYS}
-        env.update(
-            {
-                "TERM": "xterm-256color",
-                "COLORTERM": "truecolor",
-                "COLUMNS": str(cols),
-                "LINES": str(rows),
-                "PWD": cwd,
-                "HERMES_WEBUI_TERMINAL": "1",
-            }
-        )
-        shell = _shell_path()
-        # Keep the shell in its own process group for explicit cleanup via
-        # close_terminal()/close_all_terminals(); do not use PDEATHSIG here.
-        request = _SpawnRequest(
-            {
-                "args": _shell_argv(shell),
-                "cwd": cwd,
-                "env": env,
-                "stdin": slave_fd,
-                "stdout": slave_fd,
-                "stderr": slave_fd,
-                "close_fds": True,
-                # Required so cleanup can signal the whole interactive shell tree.
-                "start_new_session": True,
-            }
-        )
+    )
+    shell = _shell_path()
+    request = _SpawnRequest(
+        {
+            "args": _shell_argv(shell),
+            "cwd": cwd,
+            "env": env,
+            "stdin": slave_fd,
+            "stdout": slave_fd,
+            "stderr": slave_fd,
+            "close_fds": True,
+            "start_new_session": True,
+        }
+    )
+    proc = None
+    term = None
+    try:
         _ensure_spawn_supervisor()
         _ensure_terminal_reaper()
         _spawn_queue.put(request)
-        try:
-            if not request.done.wait(timeout=5.0):
-                timed_out = False
-                with request.lock:
-                    if not request.done.is_set():
-                        request.timed_out.set()
-                        timed_out = True
-                if timed_out:
+        if not request.done.wait(timeout=5.0):
+            with request.lock:
+                if not request.done.is_set():
+                    request.timed_out.set()
                     raise TimeoutError("terminal spawn timeout - supervisor unresponsive")
-            if request.error:
-                raise request.error
-            proc = request.proc
-            if proc is None:
-                raise RuntimeError("terminal spawn failed without process")
-        except BaseException:
-            _safe_close_fd(master_fd)
-            _safe_close_fd(slave_fd)
-            raise
+        if request.error:
+            raise request.error
+        proc = request.proc
+        if proc is None:
+            raise RuntimeError("terminal spawn failed without process")
         os.close(slave_fd)
+        slave_fd = -1
         _set_nonblocking(master_fd)
-
         term = TerminalSession(
             session_id=sid,
             workspace=cwd,
@@ -627,9 +635,29 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
         )
         _set_size(term, rows, cols)
         term.reader = threading.Thread(target=_reader_loop, args=(term,), daemon=True)
-        term.reader.start()
-        _TERMINALS[sid] = term
+        with _LOCK:
+            if _STARTING_TERMINALS.get(sid) is not pending:
+                raise RuntimeError("terminal start was cancelled")
+            _TERMINALS[sid] = term
+            term.reader.start()
+            _STARTING_TERMINALS.pop(sid, None)
+            pending.set()
         return term
+    except BaseException:
+        if term is not None:
+            _teardown_terminal(term)
+            master_fd = -1
+        elif proc is not None:
+            _reap_abandoned_spawn(proc)
+        if master_fd >= 0:
+            _safe_close_fd(master_fd)
+        if slave_fd >= 0:
+            _safe_close_fd(slave_fd)
+        with _LOCK:
+            if _STARTING_TERMINALS.get(sid) is pending:
+                _STARTING_TERMINALS.pop(sid, None)
+                pending.set()
+        raise
 
 
 def get_terminal(session_id: str) -> TerminalSession | None:
@@ -718,9 +746,12 @@ def close_terminal(session_id: str, *, expected: TerminalSession | None = None) 
     with _LOCK:
         if expected is not None and _TERMINALS.get(sid) is not expected:
             return False
+        pending = _STARTING_TERMINALS.pop(sid, None)
         term = _TERMINALS.pop(sid, None)
+    if pending is not None:
+        pending.set()
     if not term:
-        return False
+        return pending is not None
     _teardown_terminal(term)
     return True
 

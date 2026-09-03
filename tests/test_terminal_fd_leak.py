@@ -20,6 +20,8 @@ These use fakes for the shell/pty so they run without spawning real processes;
 the real-shell path is covered by test_terminal_linux_lifecycle.
 """
 import os
+import threading
+import types
 
 import pytest
 
@@ -72,6 +74,10 @@ def _clean_terminals(monkeypatch):
     yield
     with terminal._LOCK:
         sids = list(terminal._TERMINALS)
+        pending = list(terminal._STARTING_TERMINALS.values())
+        terminal._STARTING_TERMINALS.clear()
+    for event in pending:
+        event.set()
     for sid in sids:
         try:
             terminal.close_terminal(sid)
@@ -157,6 +163,47 @@ def test_cap_reuse_of_existing_sid_evicts_nothing(monkeypatch):
 
     with terminal._LOCK:
         assert {"keep-a", "keep-b"} <= set(terminal._TERMINALS)
+
+
+def test_blocked_spawn_does_not_delay_unrelated_close(monkeypatch, tmp_path):
+    other = _make_registered_term(monkeypatch, "other", alive=False)
+    request_ready = threading.Event()
+    captured = {}
+    errors = []
+
+    def put(request):
+        captured["request"] = request
+        request_ready.set()
+
+    monkeypatch.setattr(terminal, "_spawn_queue", types.SimpleNamespace(put=put))
+    monkeypatch.setattr(terminal, "_ensure_spawn_supervisor", lambda: None)
+    monkeypatch.setattr(terminal, "_ensure_terminal_reaper", lambda: None)
+
+    def start_and_capture():
+        try:
+            terminal.start_terminal("blocked", tmp_path)
+        except Exception as exc:
+            errors.append(exc)
+
+    starter = threading.Thread(target=start_and_capture)
+    starter.start()
+    assert request_ready.wait(1)
+
+    closed = threading.Event()
+    closer = threading.Thread(
+        target=lambda: (terminal.close_terminal("other", expected=other), closed.set())
+    )
+    closer.start()
+    unrelated_close_progressed = closed.wait(0.2)
+
+    captured["request"].error = RuntimeError("synthetic spawn failure")
+    captured["request"].done.set()
+    starter.join(1)
+    closer.join(1)
+
+    assert unrelated_close_progressed is True
+    assert errors and str(errors[0]) == "synthetic spawn failure"
+    assert "blocked" not in terminal._STARTING_TERMINALS
 
 
 # ── F1: writes/resizes are serialized against close (no fd-reuse injection) ───

@@ -456,6 +456,11 @@ read_file_content(workspace, rel):
     - Reads as UTF-8 with errors='replace' (binary files show replacement chars)
     - Returns {path, content, size, lines}
 
+Embedded terminal starts reserve a session id under `api.terminal._LOCK`, then
+perform PTY allocation, supervisor waits, process setup, replacement teardown,
+and failure cleanup after releasing the registry lock. Same-session starts wait
+on that reservation; unrelated attach/close/start operations remain responsive.
+
 ### 4.8 Persistent Goal Profile Boundary
 
 `api/goals.py` exposes the WebUI `/goal` command payloads and post-turn evaluation hook.
