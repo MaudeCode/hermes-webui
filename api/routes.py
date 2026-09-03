@@ -31,7 +31,7 @@ import http.client
 import socket as _socket
 from collections import defaultdict, deque, OrderedDict
 from pathlib import Path
-from contextlib import closing
+from contextlib import closing, nullcontext
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
@@ -1512,7 +1512,12 @@ def _cron_jobs_for_api(jobs) -> list[dict]:
 def _active_cron_store():
     """Return the Agent's request-local cron store context."""
     from api import profiles
-    from cron.jobs import use_cron_store
+    try:
+        from cron.jobs import use_cron_store
+    except ModuleNotFoundError as exc:
+        if exc.name in ("cron", "cron.jobs"):
+            return nullcontext()
+        raise
 
     return use_cron_store(profiles.get_active_hermes_home())
 

@@ -422,12 +422,31 @@ def test_native_bootstrap_routes_stay_responsive_while_profile_env_is_busy(
         "list_profiles_api",
         lambda: [{"name": "default"}, {"name": "member"}],
     )
-    routes._ensure_agent_cron_import_path()
-    import cron.jobs as cron_jobs
+    import contextvars
+    import sys
+    import types
+    from contextlib import contextmanager
+
+    cron_pkg = types.ModuleType("cron")
+    cron_pkg.__path__ = []
+    cron_jobs = types.ModuleType("cron.jobs")
+    active_cron_home = contextvars.ContextVar("active_cron_home", default=None)
+
+    @contextmanager
+    def use_cron_store(home):
+        token = active_cron_home.set(Path(home))
+        try:
+            yield
+        finally:
+            active_cron_home.reset(token)
+
+    def get_cron_output_dir():
+        assert active_cron_home.get() == member_home
+        return member_home / "cron" / "output"
 
     def list_jobs(*, include_disabled=False):
         assert include_disabled is True
-        assert cron_jobs.get_cron_output_dir() == member_home / "cron" / "output"
+        assert active_cron_home.get() == member_home
         return [
             {
                 "id": "member-job",
@@ -437,7 +456,11 @@ def test_native_bootstrap_routes_stay_responsive_while_profile_env_is_busy(
             }
         ]
 
-    monkeypatch.setattr(cron_jobs, "list_jobs", list_jobs)
+    cron_jobs.use_cron_store = use_cron_store
+    cron_jobs.get_cron_output_dir = get_cron_output_dir
+    cron_jobs.list_jobs = list_jobs
+    monkeypatch.setitem(sys.modules, "cron", cron_pkg)
+    monkeypatch.setitem(sys.modules, "cron.jobs", cron_jobs)
 
     config_path = tmp_path / "config.yaml"
     config_path.write_text("{}", encoding="utf-8")
