@@ -78,7 +78,7 @@ def test_active_compact_activity_elapsed_timer_uses_persisted_start_time():
         "send() should copy chat-start pending_started_at into S.session before "
         "attaching the live stream."
     )
-    assert "showLiveRunStatus(activeSid,{startedAt:_startedAt});" in MESSAGES_JS, (
+    assert "showLiveRunStatus(activeSid,{streamId,startedAt:_startedAt});" in MESSAGES_JS, (
         "The first chat-start path should show the bottom live footer timer as soon "
         "as stream_id and pending_started_at are known; reconnect should not be the "
         "only path that restores it."
@@ -109,7 +109,7 @@ def test_live_footer_timer_is_re_synced_after_message_rerender():
         "renderMessages() should call the live-status sync helper after it "
         "rebuilds msgInner."
     )
-    assert "showLiveRunStatus(sid,{startedAt,tokens:_liveRunStatusTokens});" in UI_JS, (
+    assert "showLiveRunStatus(sid,{streamId:S.activeStreamId,startedAt,tokens:_liveRunStatusTokens});" in UI_JS, (
         "If the timer node was torn down during a rerender, the helper should "
         "recreate it for the active session."
     )

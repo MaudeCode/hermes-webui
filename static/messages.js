@@ -2251,7 +2251,7 @@ async function send(){
       const _startedAt=typeof startData?.pending_started_at==='number'
         ? startData.pending_started_at
         : (S.session.pending_started_at||Date.now()/1000);
-      showLiveRunStatus(activeSid,{startedAt:_startedAt});
+      showLiveRunStatus(activeSid,{streamId,startedAt:_startedAt});
     }
     if(typeof upsertActiveSessionForLocalTurn==='function'){
       // Third optimistic pass: stream_id is now known, so the row can reconcile
@@ -2314,7 +2314,7 @@ async function startRegeneration(sessionId, regenerationRevision){
     if(!INFLIGHT[sid])INFLIGHT[sid]={messages:S.messages.slice(),uploaded:[],toolCalls:[]};
     markInflight(sid,streamId);
     if(typeof saveInflightState==='function')saveInflightState(sid,{streamId,messages:S.messages.slice(),uploaded:[],toolCalls:[]});
-    if(typeof showLiveRunStatus==='function')showLiveRunStatus(sid,{startedAt:S.session.pending_started_at||Date.now()/1000});
+    if(typeof showLiveRunStatus==='function')showLiveRunStatus(sid,{streamId,startedAt:S.session.pending_started_at||Date.now()/1000});
     if(typeof updateSendBtn==='function')updateSendBtn();
     if(typeof renderSessionList==='function')void renderSessionList();
     attachLiveStream(sid,streamId,[]);
@@ -2506,6 +2506,8 @@ function _dispatchExtensionTurnLifecycle(type,sessionId,streamId,details={}){
 
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
+  if(typeof _isSessionCurrentPane==='function'&&!_isSessionCurrentPane(activeSid)) return;
+  if(!S.session||S.session.session_id!==activeSid) return;
   const reconnecting=!!options.reconnecting;
   const _extensionTurnStartedAt=(S.session&&S.session.session_id===activeSid&&Number.isFinite(S.session.pending_started_at))
     ?S.session.pending_started_at
@@ -2562,7 +2564,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // exists. There is no stale transport teardown in this branch.
     if(reconnecting && S.activeStreamId && typeof showLiveRunStatus==='function'){
       const _startedAt=(S.session&&S.session.pending_started_at)||Date.now()/1000;
-      showLiveRunStatus(activeSid,{startedAt:_startedAt});
+      showLiveRunStatus(activeSid,{streamId,startedAt:_startedAt});
     }
     return;
   }
@@ -2576,7 +2578,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // hides the status while tearing down stale EventSource ownership.
   if(reconnecting && S.activeStreamId && typeof showLiveRunStatus==='function'){
     const _startedAt=(S.session&&S.session.pending_started_at)||Date.now()/1000;
-    showLiveRunStatus(activeSid,{startedAt:_startedAt});
+    showLiveRunStatus(activeSid,{streamId,startedAt:_startedAt});
   }
   _suspendSessionStreamForLiveChat(activeSid);
 
@@ -6299,6 +6301,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(typeof appendLiveCompressionCard==='function'){
       appendLiveCompressionCard({
         sessionId:sid,
+        streamId,
         phase:'done',
         automatic:true,
         message:'Context auto-compressed',
@@ -7101,13 +7104,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('compressing',e=>{
       // Context auto-compression is starting. Surface the same calm running
       // compression card as manual /compress while the summarizer LLM call runs.
-      if(!S.session||S.session.session_id!==activeSid) return;
+      if(!S.session||S.session.session_id!==activeSid||S.activeStreamId!==streamId) return;
       let d={};
       try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }
       if(d.session_id&&d.session_id!==activeSid) return;
       _applyToAnchor('compressing',d,e);
       const state={
         sessionId:activeSid,
+        streamId,
         phase:'running',
         automatic:true,
         message:'Compressing context',
@@ -7132,7 +7136,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Context was auto-compressed during this turn. Keep the live timeline
       // honest by transitioning the running divider into a completed divider;
       // final settlement removes live-only compression rows from the Worklog.
-      if(!S.session) return;
+      if(!S.session||S.activeStreamId!==streamId) return;
       const currentSid=S.session.session_id;
       let d={};
       try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }
@@ -7151,6 +7155,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof appendLiveCompressionCard==='function'){
         appendLiveCompressionCard({
           sessionId:displaySid,
+          streamId,
           phase:'done',
           automatic:true,
           message:'Context auto-compressed',

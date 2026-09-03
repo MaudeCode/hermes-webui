@@ -15628,6 +15628,7 @@ function ensureRunActivityGroup(inner, opts){
 const _liveRunStatusTimers={};  // keyed by sessionId, max 1 active
 let _liveRunStatusTokens=null;
 let _liveRunStatusSessionId=null;
+let _liveRunStatusStreamId=null;
 function _formatRunElapsed(seconds){
   const n=Number(seconds);
   if(!Number.isFinite(n)||n<0)return'00:00';
@@ -15670,8 +15671,11 @@ function placeLiveRunStatusHost(){
   return _moveLiveRunStatusToTurnEnd(el);
 }
 function showLiveRunStatus(sid,opts){
+  const streamId=String(opts&&opts.streamId||'');
+  if(!sid||!streamId||!S.session||S.session.session_id!==sid||S.activeStreamId!==streamId) return false;
   if(typeof isCompactWorklogMode==='function'&&isCompactWorklogMode()){
     _liveRunStatusSessionId=sid;
+    _liveRunStatusStreamId=streamId;
     _liveRunStatusTokens=opts&&opts.tokens||null;
     const el=$('liveRunStatus');
     if(el){el.hidden=true;el.innerHTML='';}
@@ -15680,6 +15684,7 @@ function showLiveRunStatus(sid,opts){
   const el=placeLiveRunStatusHost();
   if(!el)return;
   _liveRunStatusSessionId=sid;
+  _liveRunStatusStreamId=streamId;
   const startedAt=opts&&opts.startedAt||null;
   _liveRunStatusTokens=opts&&opts.tokens||null;
   el.hidden=false;
@@ -15695,7 +15700,9 @@ function _renderLiveRunStatusContent(el,startedAt){
   el.innerHTML=`<span class="live-run-status-dot tool-card-running-dot"></span><span class="live-run-status-text lf-time">${timeStr}</span>${tokens?`<span class="lf-sep">·</span><span class="lf-tokens">${_fmtTokens(tokens)} tokens</span>`:''}<span class="lf-sep">·</span><span class="lf-status">Running</span>`;
 }
 function updateLiveRunStatus(opts){
+  if(!_liveRunStatusSessionId||!_liveRunStatusStreamId||!S.session||S.session.session_id!==_liveRunStatusSessionId||S.activeStreamId!==_liveRunStatusStreamId) return;
   if(opts&&opts.sessionId&&_liveRunStatusSessionId&&opts.sessionId!==_liveRunStatusSessionId) return;
+  if(opts&&opts.streamId&&_liveRunStatusStreamId&&opts.streamId!==_liveRunStatusStreamId) return;
   if(opts&&opts.tokens!==undefined)_liveRunStatusTokens=opts.tokens;
   const el=$('liveRunStatus');
   if(el&&!el.hidden){
@@ -15708,6 +15715,9 @@ function updateLiveRunStatus(opts){
 function _syncLiveRunStatusAfterRender(){
   const sid=S.session&&S.session.session_id;
   if(!sid||!S.activeStreamId||!S.busy) return;
+  if(_liveRunStatusSessionId!==sid||_liveRunStatusStreamId!==S.activeStreamId){
+    hideLiveRunStatus(_liveRunStatusSessionId);
+  }
   const timer=_liveRunStatusTimers[sid];
   const startedAt=(timer&&timer.startedAt)||((S.session&&S.session.pending_started_at)||Date.now()/1000);
   if(typeof isCompactWorklogMode==='function'&&isCompactWorklogMode()){
@@ -15721,7 +15731,7 @@ function _syncLiveRunStatusAfterRender(){
     _renderLiveRunStatusContent(el,startedAt);
     return;
   }
-  showLiveRunStatus(sid,{startedAt,tokens:_liveRunStatusTokens});
+  showLiveRunStatus(sid,{streamId:S.activeStreamId,startedAt,tokens:_liveRunStatusTokens});
 }
 function hideLiveRunStatus(sid){
   if(sid&&_liveRunStatusSessionId&&sid!==_liveRunStatusSessionId) return;
@@ -15730,6 +15740,7 @@ function hideLiveRunStatus(sid){
   _clearLiveRunStatusTimer(sid||_liveRunStatusSessionId);
   _liveRunStatusTokens=null;
   _liveRunStatusSessionId=null;
+  _liveRunStatusStreamId=null;
 }
 function _startLiveRunStatusTimer(sid,startedAt){
   if(!sid)return;
@@ -15752,6 +15763,7 @@ function ensureRunActivityForCurrentTurn(){
 function _compressionStateForCurrentSession(){
   const state=window._compressionUi;
   if(!state||!S.session||state.sessionId!==S.session.session_id) return null;
+  if(state.automatic&&(!state.streamId||state.streamId!==S.activeStreamId)) return null;
   return state;
 }
 function isCompressionUiRunning(){
@@ -15913,6 +15925,7 @@ function _compressionCardsNode(state){
 }
 function appendLiveCompressionCard(state){
   if(!S.session||!S.activeStreamId||!state) return false;
+  if(String(state.sessionId||'')!==String(S.session.session_id||'')||String(state.streamId||'')!==String(S.activeStreamId||'')) return false;
   if(isLiveAnchorActivitySceneOwner(S.activeStreamId)){
     // Anchor source-event application already projected and painted this state.
     // Repainting here rebuilt the same long Worklog twice per compression event.
@@ -15934,6 +15947,8 @@ function appendLiveCompressionCard(state){
     const list=_toolWorklogListEl(group);
     if(!group||!list){ if(scrollRebuildGuard.release) scrollRebuildGuard.release(); return false; }
     const node=_autoCompressionWorklogNode(state);
+    node.setAttribute('data-session-id',String(state.sessionId));
+    node.setAttribute('data-stream-id',String(state.streamId));
     node.setAttribute('data-live-compression-card','1');
     node.setAttribute('data-compression-phase',String(state.phase||''));
     if(state.phase==='running'){
@@ -15961,6 +15976,8 @@ function appendLiveCompressionCard(state){
   }
   const node=_compressionCardsNode(state);
   if(!node) return false;
+  node.setAttribute('data-session-id',String(state.sessionId));
+  node.setAttribute('data-stream-id',String(state.streamId));
   node.setAttribute('data-live-compression-card','1');
   if(state.automatic&&state.phase==='running'){
     const started=_compressionElapsedStartedAt(state)||Date.now()/1000;
