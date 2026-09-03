@@ -1397,6 +1397,8 @@ def profile_env_for_background_worker(
 def profile_env_for_active_request_readonly(
     purpose: str = "provider/model read",
     logger_override: Optional[logging.Logger] = None,
+    *,
+    isolate_root: bool = False,
 ):
     """Apply the active per-request profile's env to thread-local state only (#3957).
 
@@ -1416,7 +1418,7 @@ def profile_env_for_active_request_readonly(
     deployment case.
     """
     profile = (get_active_profile_name() or "").strip()
-    if not profile or _is_root_profile(profile):
+    if (not profile or _is_root_profile(profile)) and not isolate_root:
         with _PROFILE_ENV_SCOPE_LOCK:
             yield
         return

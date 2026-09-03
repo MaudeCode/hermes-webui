@@ -131,7 +131,7 @@ def _make_state_db(home, prefix):
 
 def _isolate_cli_projection(monkeypatch, tmp_path):
     monkeypatch.setattr(models, "get_claude_code_sessions", lambda: [])
-    monkeypatch.setattr(models, "get_last_workspace", lambda: tmp_path)
+    monkeypatch.setattr(models, "get_last_workspace", lambda **_kwargs: tmp_path)
     monkeypatch.setattr(models.Session, "load_metadata_only", lambda _sid: None)
     monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name == "default")
     models.clear_cli_sessions_cache()
@@ -550,11 +550,13 @@ def test_explicit_profile_cli_caches_do_not_cross_under_concurrency(monkeypatch,
     _isolate_cli_projection(monkeypatch, tmp_path)
 
     homes = {"default": owner_home, "member": member_home}
-    monkeypatch.setattr(
-        profiles,
-        "get_active_profile_name",
-        lambda: (_ for _ in ()).throw(AssertionError("explicit profile was ignored")),
-    )
+    def active_profile():
+        profile = getattr(profiles._tls, "profile", None)
+        if profile:
+            return profile
+        raise AssertionError("explicit profile was ignored")
+
+    monkeypatch.setattr(profiles, "get_active_profile_name", active_profile)
     monkeypatch.setattr(profiles, "get_hermes_home_for_profile", homes.__getitem__)
 
     loads = []
@@ -611,3 +613,52 @@ def test_explicit_profile_cli_caches_do_not_cross_under_concurrency(monkeypatch,
     models.clear_cli_sessions_cache()
     assert load("default") == {"owner-session-0", "owner-session-1"}
     assert load("member") == {"member-session-0", "member-session-1"}
+
+
+def test_concurrent_cli_projection_uses_profile_owned_workspace_snapshot(
+    monkeypatch, tmp_path
+):
+    import api.config as config
+    import api.workspace as workspace
+
+    homes = {
+        "alpha": tmp_path / "profiles" / "alpha",
+        "beta": tmp_path / "profiles" / "beta",
+    }
+    workspaces = {
+        name: tmp_path / f"{name}-workspace" for name in homes
+    }
+    for name, home in homes.items():
+        _make_state_db(home, f"{name}-session")
+        workspaces[name].mkdir()
+        (home / "config.yaml").write_text(
+            f"workspace: {workspaces[name]}\n", encoding="utf-8"
+        )
+    _isolate_cli_projection(monkeypatch, tmp_path)
+    monkeypatch.setattr(models, "get_last_workspace", workspace.get_last_workspace)
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", homes.__getitem__)
+    monkeypatch.setattr(workspace, "_GLOBAL_LW_FILE", tmp_path / "missing-global")
+    monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 0.0)
+
+    shared_config = {}
+    readers = threading.Barrier(2)
+
+    def racing_get_config():
+        name = profiles.get_active_profile_name()
+        shared_config.clear()
+        shared_config["workspace"] = str(workspaces[name])
+        readers.wait(2)
+        return shared_config
+
+    monkeypatch.setattr(config, "get_config", racing_get_config)
+
+    def load(name):
+        return models.get_cli_sessions(profile=name, include_claude_code=False)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = dict(
+            zip(homes, executor.map(load, homes), strict=True)
+        )
+
+    for name, rows in results.items():
+        assert {row["workspace"] for row in rows} == {str(workspaces[name])}

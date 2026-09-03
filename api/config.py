@@ -697,7 +697,9 @@ def _load_yaml_config_file(config_path: Path) -> dict:
     return expanded if isinstance(expanded, dict) else {}
 
 
-def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
+def get_config_for_profile_home(
+    profile_home: "Path | str | None", *, use_ambient_cache: bool = True
+) -> dict:
     """Return the config dict for an explicit profile home directory.
 
     The streaming agent runs on a detached worker thread that does NOT inherit
@@ -724,23 +726,25 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
         target = Path(profile_home).expanduser()
     except Exception:
         return get_config()
-    try:
-        from api.profiles import get_active_hermes_home
+    if use_ambient_cache:
+        try:
+            from api.profiles import get_active_hermes_home
 
-        if Path(get_active_hermes_home()).expanduser() == target:
-            return get_config()
-    except Exception:
-        pass
+            if Path(get_active_hermes_home()).expanduser() == target:
+                return get_config()
+        except Exception:
+            pass
     # If the ambient resolver already points at this profile home, defer to
     # get_config() so in-memory overrides (monkeypatched cfg) are honored. This
     # MUST run before the nonexistent-home guard below: a matching ambient home
     # whose directory doesn't physically exist yet (fresh install, monkeypatched
     # cfg) must still resolve through get_config(), not return {} (#4516 gate).
-    try:
-        if _get_config_path().parent == target:
-            return get_config()
-    except Exception:
-        pass
+    if use_ambient_cache:
+        try:
+            if _get_config_path().parent == target:
+                return get_config()
+        except Exception:
+            pass
     if not target.exists():
         return {}
     # Read the profile file directly and apply documented defaults locally so the
@@ -5459,19 +5463,20 @@ def _configured_model_badges_from_static_catalog(
     return badges
 
 
-def _minimal_static_models_catalog() -> dict:
+def _minimal_static_models_catalog(config_data: dict | None = None) -> dict:
     """Return the emergency one-model fallback for /api/models."""
     try:
+        active_cfg = config_data if isinstance(config_data, dict) else cfg
         active_provider = None
         cfg_base_url = ""
-        model_cfg = cfg.get("model", {}) if isinstance(cfg, dict) else {}
+        model_cfg = active_cfg.get("model", {}) if isinstance(active_cfg, dict) else {}
         if isinstance(model_cfg, dict):
             active_provider = model_cfg.get("provider")
             cfg_base_url = model_cfg.get("base_url", "") or ""
         if active_provider:
             try:
                 active_provider = _resolve_configured_provider_id(
-                    active_provider, cfg, base_url=cfg_base_url
+                    active_provider, active_cfg, base_url=cfg_base_url
                 )
             except Exception:
                 active_provider = str(active_provider or "").strip() or None
@@ -5482,13 +5487,13 @@ def _minimal_static_models_catalog() -> dict:
                     _store = json.loads(_ap.read_text(encoding="utf-8"))
                     active_provider = (
                         _resolve_configured_provider_id(
-                            _store.get("active_provider"), cfg, base_url=cfg_base_url
+                            _store.get("active_provider"), active_cfg, base_url=cfg_base_url
                         )
                         or None
                     )
             except Exception:
                 pass
-        default_model = get_effective_default_model(cfg)
+        default_model = get_effective_default_model(active_cfg)
         groups: list[dict] = []
         if default_model:
             try:
@@ -5520,14 +5525,17 @@ def _minimal_static_models_catalog() -> dict:
         }
 
 
-def _static_models_catalog_without_live_probes() -> dict:
+def _static_models_catalog_without_live_probes(
+    config_data: dict | None = None,
+) -> dict:
     """Return a network-free /api/models catalog from local config/auth only."""
     try:
         from api.providers import _provider_has_key
 
+        active_cfg = config_data if isinstance(config_data, dict) else cfg
         active_provider = None
         cfg_base_url = ""
-        model_cfg = cfg.get("model", {}) if isinstance(cfg, dict) else {}
+        model_cfg = active_cfg.get("model", {}) if isinstance(active_cfg, dict) else {}
         if isinstance(model_cfg, dict):
             active_provider = model_cfg.get("provider")
             cfg_base_url = model_cfg.get("base_url", "") or ""
@@ -5535,7 +5543,7 @@ def _static_models_catalog_without_live_probes() -> dict:
             try:
                 active_provider = _resolve_configured_provider_id(
                     active_provider,
-                    cfg,
+                    active_cfg,
                     base_url=cfg_base_url,
                 )
             except Exception:
@@ -5550,7 +5558,7 @@ def _static_models_catalog_without_live_probes() -> dict:
                     active_provider = (
                         _resolve_configured_provider_id(
                             auth_store.get("active_provider"),
-                            cfg,
+                            active_cfg,
                             base_url=cfg_base_url,
                         )
                         or None
@@ -5558,13 +5566,15 @@ def _static_models_catalog_without_live_probes() -> dict:
         except Exception:
             logger.debug("Failed to load auth store for static models catalog", exc_info=True)
 
-        default_model = get_effective_default_model(cfg)
+        default_model = get_effective_default_model(active_cfg)
         detected_providers: set[str] = set()
         configured_model_ids: dict[str, list[str]] = {}
         named_custom_groups: dict[str, dict[str, object]] = {}
         custom_group_models: list[dict] = []
         canonical_to_raw_provider_key: dict[str, str] = {}
-        providers_cfg = _get_providers_cfg()
+        providers_cfg = active_cfg.get("providers", {})
+        if not isinstance(providers_cfg, dict):
+            providers_cfg = {}
 
         def _append_model_id(provider_id: str | None, model_id: object) -> None:
             pid = _canonicalise_provider_id(provider_id)
@@ -5626,7 +5636,7 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         for provider_id in set(_PROVIDER_MODELS) | set(_PROVIDER_DISPLAY):
             canonical = _canonicalise_provider_id(provider_id)
-            if canonical and _provider_has_key(canonical):
+            if canonical and _provider_has_key(canonical, config_data=active_cfg):
                 detected_providers.add(canonical)
 
         # Plugin-only providers (e.g. 9router) are not in the static
@@ -5638,7 +5648,9 @@ def _static_models_catalog_without_live_probes() -> dict:
         # group when the live-rebuild cache is cold.
         try:
             for _plugin_pid in list(_plugin_model_provider_profiles().keys()):
-                if not _plugin_pid or not _provider_has_key(_plugin_pid):
+                if not _plugin_pid or not _provider_has_key(
+                    _plugin_pid, config_data=active_cfg
+                ):
                     continue
                 _canonical = _canonicalise_provider_id(_plugin_pid) or _plugin_pid
                 if _canonical:
@@ -5646,7 +5658,7 @@ def _static_models_catalog_without_live_probes() -> dict:
         except Exception:
             logger.debug("Plugin provider detection failed in static catalog", exc_info=True)
 
-        fallback_cfg = cfg.get("fallback_providers", []) if isinstance(cfg, dict) else []
+        fallback_cfg = active_cfg.get("fallback_providers", [])
         if isinstance(fallback_cfg, list):
             for entry in fallback_cfg:
                 if not isinstance(entry, dict):
@@ -5656,7 +5668,7 @@ def _static_models_catalog_without_live_probes() -> dict:
                     detected_providers.add(provider)
                     _append_model_id(provider, entry.get("model"))
 
-        for entry in _custom_provider_entries(cfg):
+        for entry in _custom_provider_entries(active_cfg):
             provider_name = str(entry.get("name") or "").strip()
             provider_slug = _custom_provider_slug_from_name(provider_name) or "custom"
             if provider_slug != "custom":
@@ -5686,7 +5698,7 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         if cfg_base_url:
             detected_providers.add(
-                _named_custom_provider_slug_for_base_url(cfg_base_url, cfg)
+                _named_custom_provider_slug_for_base_url(cfg_base_url, active_cfg)
                 or active_provider
                 or "custom"
             )
@@ -5740,7 +5752,7 @@ def _static_models_catalog_without_live_probes() -> dict:
 
             provider_name = _PROVIDER_DISPLAY.get(pid, pid.replace("-", " ").title())
             raw_key = canonical_to_raw_provider_key.get(pid, pid)
-            provider_cfg = _get_provider_cfg(raw_key)
+            provider_cfg = providers_cfg.get(raw_key, {})
             raw_models = []
             if isinstance(provider_cfg, dict) and "models" in provider_cfg:
                 raw_models = _configured_model_options(provider_cfg["models"])
@@ -5854,7 +5866,7 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         model_aliases: dict[str, str] = {}
         try:
-            raw_aliases = cfg.get("model", {}).get("aliases", {})
+            raw_aliases = active_cfg.get("model", {}).get("aliases", {})
             if isinstance(raw_aliases, dict):
                 model_aliases = {
                     str(k).strip(): str(v).strip()
@@ -5865,7 +5877,7 @@ def _static_models_catalog_without_live_probes() -> dict:
             pass
 
         if not groups and default_model:
-            return copy.deepcopy(_minimal_static_models_catalog())
+            return copy.deepcopy(_minimal_static_models_catalog(active_cfg))
 
         return _annotate_fast_tier_model_groups({
             "active_provider": active_provider,
@@ -5880,7 +5892,17 @@ def _static_models_catalog_without_live_probes() -> dict:
         })
     except Exception:
         logger.debug("static models catalog build failed", exc_info=True)
-        return copy.deepcopy(_minimal_static_models_catalog())
+        return copy.deepcopy(_minimal_static_models_catalog(config_data))
+
+
+def _profile_safe_static_models_catalog() -> dict:
+    """Build a static catalog without reading another profile's process env."""
+    from api.profiles import profile_env_for_active_request_readonly
+
+    with profile_env_for_active_request_readonly(
+        "models static fallback", isolate_root=True
+    ):
+        return _static_models_catalog_without_live_probes(get_config_snapshot())
 
 # Cache for credential pool results -- calling load_pool() per-provider per-server
 # session is expensive (~10s for zai due to endpoint probing).  The credential pool
@@ -8405,7 +8427,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             if _LIVE_REBUILD_BUDGET_SECONDS > 0 and _cache_build_in_progress:
                 if stale_disk_groups is not None:
                     return copy.deepcopy(stale_disk_groups)
-                return copy.deepcopy(_static_models_catalog_without_live_probes())
+                return copy.deepcopy(_profile_safe_static_models_catalog())
 
         # Reload config if changed
         if _cfg_changed:
@@ -8661,7 +8683,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # does not extend the lock hold while the worker is ready to publish.
         if stale_disk_groups is not None:
             return copy.deepcopy(stale_disk_groups)
-        return copy.deepcopy(_static_models_catalog_without_live_probes())
+        return copy.deepcopy(_profile_safe_static_models_catalog())
 
 
 def _models_cache_file_age_seconds(cache_path: Path, now: float) -> float | None:

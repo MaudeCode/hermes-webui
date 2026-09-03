@@ -426,6 +426,8 @@ def test_default_group_survives_only_as_emergency_last_resort(
     monkeypatch,
     isolate_models_catalog_state,
 ):
+    import api.providers as providers
+
     cfg.cfg = {
         "model": {
             "provider": "anthropic",
@@ -433,9 +435,9 @@ def test_default_group_survives_only_as_emergency_last_resort(
         }
     }
     monkeypatch.setattr(
-        cfg,
-        "_get_providers_cfg",
-        lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+        providers,
+        "_provider_has_key",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
     )
 
     catalog = cfg._static_models_catalog_without_live_probes()

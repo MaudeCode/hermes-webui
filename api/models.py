@@ -7753,6 +7753,7 @@ def _load_cli_sessions_uncached(
     webhook_project_limit: int | None | bool = WEBHOOK_PROJECT_CHIP_LIMIT,
     kanban_project_limit: int | None | bool = KANBAN_PROJECT_CHIP_LIMIT,
     include_claude_code: bool = True,
+    workspace_config: dict | None = None,
 ) -> list:
     cli_sessions = []
     if source_filter in (None, CLAUDE_CODE_SOURCE) and include_claude_code:
@@ -7822,7 +7823,11 @@ def _load_cli_sessions_uncached(
     _cli_workspace_cache: list = [None]  # list-as-cell; None = not yet resolved
     def _cli_workspace():
         if _cli_workspace_cache[0] is None:
-            _cli_workspace_cache[0] = str(get_last_workspace())
+            _cli_workspace_cache[0] = str(
+                get_last_workspace()
+                if workspace_config is None
+                else get_last_workspace(config_data=workspace_config)
+            )
         return _cli_workspace_cache[0]
 
     _webhook_pid_cache: list[str | None] = [None]
@@ -8036,7 +8041,7 @@ def _load_cli_sessions_uncached(
                 cli_sessions.append({
                     'session_id': sid,
                     'title': _display_title,
-                    'workspace': str(get_last_workspace()),
+                    'workspace': _cli_workspace(),
                     'model': row['model'] or None,
                     'message_count': row['message_count'] or row['actual_message_count'] or 0,
                     'created_at': row['started_at'],
@@ -8202,10 +8207,25 @@ def get_cli_sessions(
     now = time.monotonic()
 
     def _load_sessions():
-        from api.profiles import profile_identity_for_detached_worker
+        from api.config import get_config_for_profile_home
+        from api.profiles import (
+            profile_env_for_active_request_readonly,
+            profile_identity_for_detached_worker,
+        )
+
+        def _workspace_config(profile_home):
+            with profile_env_for_active_request_readonly(
+                "CLI workspace snapshot", isolate_root=True
+            ):
+                return get_config_for_profile_home(
+                    profile_home, use_ambient_cache=False
+                )
 
         loader_supports_include_claude_code = _callable_accepts_include_claude_code(
             _load_cli_sessions_uncached
+        )
+        loader_supports_workspace_config = _callable_accepts_kwarg(
+            _load_cli_sessions_uncached, 'workspace_config'
         )
         if all_profiles:
             merged: list[dict] = []
@@ -8220,6 +8240,8 @@ def get_cli_sessions(
                 if loader_supports_include_claude_code:
                     load_kwargs['include_claude_code'] = include_claude_code and idx == 0
                 with profile_identity_for_detached_worker(ctx_profile):
+                    if loader_supports_workspace_config:
+                        load_kwargs['workspace_config'] = _workspace_config(ctx_home)
                     projected = _load_cli_sessions_uncached(
                         ctx_home,
                         ctx_db_path,
@@ -8232,6 +8254,8 @@ def get_cli_sessions(
         if loader_supports_include_claude_code:
             load_kwargs['include_claude_code'] = include_claude_code
         with profile_identity_for_detached_worker(cli_profile):
+            if loader_supports_workspace_config:
+                load_kwargs['workspace_config'] = _workspace_config(hermes_home)
             return _load_cli_sessions_uncached(
                 hermes_home,
                 db_path,

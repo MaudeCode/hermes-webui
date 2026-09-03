@@ -267,7 +267,9 @@ def test_state_db_only_handoff_uses_active_request_profile(monkeypatch, tmp_path
         yield
 
     monkeypatch.setattr(profiles, "profile_env_for_background_worker", profile_scope)
-    monkeypatch.setattr(cfg, "get_config_for_profile_home", lambda home: profile_cfg)
+    monkeypatch.setattr(
+        cfg, "get_config_for_profile_home", lambda home, **_kwargs: profile_cfg
+    )
 
     def resolve_model(model_id=None, **kwargs):
         calls["configs"].append(kwargs.get("config_data"))
@@ -296,7 +298,7 @@ def test_state_db_only_handoff_uses_active_request_profile(monkeypatch, tmp_path
     )
 
     assert response["fallback"] is True
-    assert calls["homes"] == ["work", "work"]
+    assert calls["homes"] == ["work", "work", "work"]
     assert calls["scopes"] == ["work"]
     assert calls["configs"] == [profile_cfg]
 

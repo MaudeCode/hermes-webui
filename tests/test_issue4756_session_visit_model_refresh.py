@@ -428,6 +428,63 @@ def test_plain_caller_joins_rebuild_started_after_flag_sample(tmp_path, monkeypa
     assert 0.0 <= timeout_waits[0] <= 0.05
 
 
+def test_plain_follower_static_fallback_blocks_foreign_process_credentials(
+    tmp_path, monkeypatch
+):
+    import api.config as cfg
+    import api.profiles as profiles
+    import threading
+
+    _reset_models_memory_cache(monkeypatch)
+    base = tmp_path / ".hermes"
+    alpha_home = base / "profiles" / "alpha"
+    beta_home = base / "profiles" / "beta"
+    alpha_home.mkdir(parents=True)
+    beta_home.mkdir(parents=True)
+    (alpha_home / ".env").write_text(
+        "OPENAI_API_KEY=alpha-private-key\n", encoding="utf-8"
+    )
+    config_path = beta_home / "config.yaml"
+    config_path.write_text("{}", encoding="utf-8")
+    cache_path = tmp_path / "models_cache.beta.json"
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.01)
+    monkeypatch.setattr(cfg, "_cache_build_in_progress", True)
+    monkeypatch.setattr(cfg, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(cfg, "_cfg_path", config_path)
+    monkeypatch.setattr(cfg, "_cfg_mtime", config_path.stat().st_mtime)
+    monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: cache_path)
+    monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None)
+    monkeypatch.setattr(cfg, "_load_stale_models_cache_from_disk", lambda: None)
+
+    holder_ready = threading.Event()
+    release_holder = threading.Event()
+
+    def hold_alpha_process_env():
+        with profiles.profile_env_for_background_worker(
+            "alpha", "test holder", scope_skill_modules=False
+        ):
+            holder_ready.set()
+            release_holder.wait(2)
+
+    holder = threading.Thread(target=hold_alpha_process_env)
+    holder.start()
+    assert holder_ready.wait(2)
+    profiles.set_request_profile("beta")
+    try:
+        catalog = cfg.get_available_models()
+    finally:
+        profiles.clear_request_profile()
+        release_holder.set()
+        holder.join(2)
+
+    assert "openai" not in {
+        group.get("provider_id") for group in catalog.get("groups", [])
+    }
+    assert holder.is_alive() is False
+
+
 def test_session_visit_overlapping_stale_calls_do_not_duplicate_over_budget_rebuild(tmp_path, monkeypatch):
     import api.config as cfg
     import threading
