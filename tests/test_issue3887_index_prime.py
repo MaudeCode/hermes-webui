@@ -17,6 +17,7 @@ silently on a read-only db without ever failing the listing).
 import os
 import sqlite3
 import stat
+import time
 
 import pytest
 
@@ -84,6 +85,10 @@ def test_prime_creates_missing_index(tmp_path):
         db, limit=20, exclude_sources=None
     )
 
+    deadline = time.monotonic() + 2
+    while "idx_messages_session_user" not in _messages_indexes(db) and time.monotonic() < deadline:
+        time.sleep(0.01)
+
     # Listing still returns the sessions ...
     assert {r["id"] for r in rows} == {"sess0", "sess1", "sess2"}
     # ... and both index-only sidebar paths are now available.
@@ -139,6 +144,10 @@ def test_user_message_count_uses_partial_index_and_stops_at_visibility_threshold
     db = tmp_path / "state.db"
     _full_schema_db(db)
     conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE INDEX idx_messages_session_user ON messages(session_id) "
+        "WHERE role = 'user'"
+    )
     conn.executemany(
         "INSERT INTO messages(session_id, role, content, timestamp) VALUES (?,?,?,?)",
         [("sess0", "user", "again", 2001.0), ("sess0", "user", "once more", 2002.0)],

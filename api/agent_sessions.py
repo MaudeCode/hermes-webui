@@ -1,10 +1,40 @@
 """Shared helpers for reading Hermes Agent sessions from state.db."""
 import logging
 import sqlite3
+import threading
 from contextlib import closing
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+_USER_MESSAGE_INDEX_PRIME_LOCK = threading.Lock()
+_USER_MESSAGE_INDEX_PRIME_ATTEMPTED: set[str] = set()
+
+
+def _prime_user_message_index_async(db_path: Path) -> None:
+    """Try the optional user-message index once without blocking a request."""
+    key = str(Path(db_path).resolve())
+    with _USER_MESSAGE_INDEX_PRIME_LOCK:
+        if key in _USER_MESSAGE_INDEX_PRIME_ATTEMPTED:
+            return
+        _USER_MESSAGE_INDEX_PRIME_ATTEMPTED.add(key)
+
+    def worker():
+        try:
+            with closing(sqlite3.connect(str(db_path), timeout=0.0)) as conn:
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_messages_session_user "
+                    "ON messages(session_id) WHERE role = 'user'"
+                )
+                conn.commit()
+        except sqlite3.Error:
+            pass
+
+    threading.Thread(
+        target=worker,
+        daemon=True,
+        name="state-db-user-index-prime",
+    ).start()
 
 
 def open_state_db_readonly(db_path: Path, log: logging.Logger | None = None) -> sqlite3.Connection:
@@ -639,16 +669,7 @@ def read_importable_agent_session_rows(
             # history. If the live database cannot be migrated, the query below
             # falls back to a short-circuiting existence check so listing stays usable.
             if 'role' in message_cols and not user_messages_index_present:
-                try:
-                    with closing(sqlite3.connect(str(db_path))) as _heal:
-                        _heal.execute(
-                            "CREATE INDEX IF NOT EXISTS idx_messages_session_user "
-                            "ON messages(session_id) WHERE role = 'user'"
-                        )
-                        _heal.commit()
-                    user_messages_index_present = True
-                except sqlite3.Error:
-                    pass
+                _prime_user_message_index_async(db_path)
 
         if use_messages_join:
             if messages_index_present:

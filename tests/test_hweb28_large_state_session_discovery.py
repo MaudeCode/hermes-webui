@@ -32,7 +32,6 @@ def _large_state_db(path, *, history_rows=25_000):
             timestamp REAL
         );
         CREATE INDEX idx_messages_session ON messages(session_id, timestamp);
-        CREATE INDEX idx_messages_session_user ON messages(session_id) WHERE role = 'user';
         """
     )
     rows = []
