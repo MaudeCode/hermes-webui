@@ -38,7 +38,8 @@ from api.config import (
     LOCK, SESSIONS, SESSIONS_MAX, SESSION_DIR,
     _get_session_agent_lock, _alias_session_agent_lock,
     _set_thread_env, _clear_thread_env, _thread_ctx,
-    register_active_run, update_active_run, unregister_active_run,
+    ACTIVE_RUNS, ACTIVE_RUNS_LOCK,
+    register_active_run, update_active_run,
     unregister_stream_owner,
     stream_owner_session_id,
     session_writeback_owner,
@@ -13553,6 +13554,11 @@ def _run_agent_streaming(
         except Exception:
             logger.debug("Failed to close run journal for stream %s", stream_id, exc_info=True)
         with STREAMS_LOCK:
+            # Retire admission and cancel targets atomically. A successor may
+            # reuse the cached agent as soon as ACTIVE_RUNS is gone, so there
+            # must be no window where an old stream still exposes that agent.
+            with ACTIVE_RUNS_LOCK:
+                ACTIVE_RUNS.pop(stream_id, None)
             STREAMS.pop(stream_id, None)
             CANCEL_FLAGS.pop(stream_id, None)
             AGENT_INSTANCES.pop(stream_id, None)  # Clean up agent instance reference
@@ -13563,7 +13569,6 @@ def _run_agent_streaming(
             STREAM_GOAL_RELATED.pop(stream_id, None)  # Clean up goal-related flag (#1932)
             STREAM_LAST_EVENT_ID.pop(stream_id, None)  # Clean up event_id pointer (stage-364)
 
-        unregister_active_run(stream_id)
         # Clean up the stream-owner registry so stale stream_id→session_id
         # mappings do not accumulate over thousands of completed streams (#6351).
         unregister_stream_owner(stream_id)
@@ -13581,9 +13586,9 @@ def _run_agent_streaming(
         # consumed atomically when the next stream starts.
 
         # ── Defer-path fix: turn-teardown idle-hook ────────────────────────
-        # The session has just transitioned active→idle: unregister_active_run
-        # above cleared this stream's ACTIVE_RUNS row (under ACTIVE_RUNS_LOCK,
-        # independent of STREAMS_LOCK), so _session_has_active_turn() is now
+        # The session has just transitioned active→idle: the atomic registry
+        # retirement above cleared this stream's ACTIVE_RUNS row, so
+        # _session_has_active_turn() is now
         # False for this session unless a *different* stream is still active
         # (cancel/reconnect — drain_deferred_wakeups_for_session guards on
         # that and leaves the marker for the later teardown). A FAST
