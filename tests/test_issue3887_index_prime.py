@@ -211,3 +211,39 @@ def test_prime_degrades_on_readonly_db(tmp_path):
     finally:
         # Restore write so tmp_path cleanup can remove it.
         os.chmod(db, stat.S_IWRITE | stat.S_IREAD)
+
+
+def test_missing_user_index_uses_bounded_first_user_fallback(tmp_path, monkeypatch):
+    db = tmp_path / "state.db"
+    _full_schema_db(db)
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE INDEX idx_messages_session ON messages(session_id, timestamp)")
+    conn.executemany(
+        "INSERT INTO messages(session_id, role, content, timestamp) VALUES ('sess0', 'assistant', '', ?)",
+        ((3000.0 + index,) for index in range(50_000)),
+    )
+    conn.commit()
+    conn.close()
+
+    real_connect = sqlite3.connect
+    steps = {"count": 0}
+
+    def locked_connect(database, *args, **kwargs):
+        if not str(database).startswith("file:"):
+            raise sqlite3.OperationalError("database is locked")
+        connection = real_connect(database, *args, **kwargs)
+
+        def progress():
+            steps["count"] += 1
+            return 0
+
+        connection.set_progress_handler(progress, 100)
+        return connection
+
+    monkeypatch.setattr(agent_sessions.sqlite3, "connect", locked_connect)
+
+    rows = agent_sessions.read_importable_agent_session_rows(db, limit=20, exclude_sources=None)
+
+    by_id = {row["id"]: row for row in rows}
+    assert by_id["sess0"]["actual_user_message_count"] == 1
+    assert steps["count"] < 1_000

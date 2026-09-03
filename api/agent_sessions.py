@@ -662,13 +662,21 @@ def read_importable_agent_session_rows(
                     "WHERE ac.session_id = s.id LIMIT 2)) END"
                 )
                 if 'role' in message_cols:
-                    # Visibility only distinguishes zero, one, and two-or-more
-                    # user turns. Stop at that threshold instead of counting an
-                    # unbounded multi-GB transcript.
-                    user_message_count_expr = (
-                        "(SELECT COUNT(*) FROM (SELECT 1 FROM messages um "
-                        "WHERE um.session_id = s.id AND um.role = 'user' LIMIT 2))"
-                    )
+                    if user_messages_index_present:
+                        # Visibility only distinguishes zero, one, and two-or-more
+                        # user turns. Stop at that threshold instead of counting an
+                        # unbounded multi-GB transcript.
+                        user_message_count_expr = (
+                            "(SELECT COUNT(*) FROM (SELECT 1 FROM messages um "
+                            "WHERE um.session_id = s.id AND um.role = 'user' LIMIT 2))"
+                        )
+                    else:
+                        # Preserve the compatibility path when the partial user
+                        # index cannot be created: stop on the first user row.
+                        user_message_count_expr = (
+                            "EXISTS(SELECT 1 FROM messages um "
+                            "WHERE um.session_id = s.id AND LOWER(um.role) = 'user')"
+                        )
                 else:
                     user_message_count_expr = actual_count_expr
                 last_activity_expr = (
