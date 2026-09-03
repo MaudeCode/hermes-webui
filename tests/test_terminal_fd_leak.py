@@ -206,6 +206,19 @@ def test_blocked_spawn_does_not_delay_unrelated_close(monkeypatch, tmp_path):
     assert "blocked" not in terminal._STARTING_TERMINALS
 
 
+def test_pty_setup_failure_releases_start_reservation(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        terminal.os,
+        "openpty",
+        lambda: (_ for _ in ()).throw(OSError("fd exhaustion")),
+    )
+
+    with pytest.raises(OSError, match="fd exhaustion"):
+        terminal.start_terminal("pty-failure", tmp_path)
+
+    assert "pty-failure" not in terminal._STARTING_TERMINALS
+
+
 # ── F1: writes/resizes are serialized against close (no fd-reuse injection) ───
 
 def test_write_after_close_raises_and_never_touches_fd(monkeypatch):

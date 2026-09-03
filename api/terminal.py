@@ -572,43 +572,45 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
         _set_size(current, rows, cols)
         return current
 
-    if replaced is not None:
-        _teardown_terminal(replaced)
-
-    master_fd, slave_fd = os.openpty()
-    # Build a safe env: allowlist common shell vars, strip API keys and secrets.
-    _SAFE_ENV_KEYS = {
-        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL",
-        "LC_CTYPE", "LC_MESSAGES", "LANGUAGE", "TZ", "TMPDIR", "TEMP",
-        "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
-    }
-    env = {k: v for k, v in os.environ.items() if k in _SAFE_ENV_KEYS}
-    env.update(
-        {
-            "TERM": "xterm-256color",
-            "COLORTERM": "truecolor",
-            "COLUMNS": str(cols),
-            "LINES": str(rows),
-            "PWD": cwd,
-            "HERMES_WEBUI_TERMINAL": "1",
-        }
-    )
-    shell = _shell_path()
-    request = _SpawnRequest(
-        {
-            "args": _shell_argv(shell),
-            "cwd": cwd,
-            "env": env,
-            "stdin": slave_fd,
-            "stdout": slave_fd,
-            "stderr": slave_fd,
-            "close_fds": True,
-            "start_new_session": True,
-        }
-    )
+    master_fd = -1
+    slave_fd = -1
     proc = None
     term = None
     try:
+        if replaced is not None:
+            _teardown_terminal(replaced)
+
+        master_fd, slave_fd = os.openpty()
+        # Build a safe env: allowlist common shell vars, strip API keys and secrets.
+        _SAFE_ENV_KEYS = {
+            "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL",
+            "LC_CTYPE", "LC_MESSAGES", "LANGUAGE", "TZ", "TMPDIR", "TEMP",
+            "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+        }
+        env = {k: v for k, v in os.environ.items() if k in _SAFE_ENV_KEYS}
+        env.update(
+            {
+                "TERM": "xterm-256color",
+                "COLORTERM": "truecolor",
+                "COLUMNS": str(cols),
+                "LINES": str(rows),
+                "PWD": cwd,
+                "HERMES_WEBUI_TERMINAL": "1",
+            }
+        )
+        shell = _shell_path()
+        request = _SpawnRequest(
+            {
+                "args": _shell_argv(shell),
+                "cwd": cwd,
+                "env": env,
+                "stdin": slave_fd,
+                "stdout": slave_fd,
+                "stderr": slave_fd,
+                "close_fds": True,
+                "start_new_session": True,
+            }
+        )
         _ensure_spawn_supervisor()
         _ensure_terminal_reaper()
         _spawn_queue.put(request)
