@@ -48,6 +48,7 @@ def _stub_cron_jobs(monkeypatch, *, output_dir=None, jobs=None):
     cron_jobs = types.ModuleType("cron.jobs")
     if output_dir is not None:
         cron_jobs.OUTPUT_DIR = output_dir
+        cron_jobs.get_cron_output_dir = lambda: output_dir
     if jobs is not None:
         cron_jobs.list_jobs = lambda include_disabled=True: jobs
     monkeypatch.setitem(sys.modules, "cron", cron_pkg)
@@ -150,3 +151,22 @@ def test_cron_recent_valid_since_still_filters(monkeypatch):
     body = _payload(handler)
     assert body["since"] == 10.0
     assert {item["job_id"] for item in body["completions"]} == {"new"}
+
+
+def test_cron_recent_without_agent_package_returns_empty(monkeypatch):
+    import api.routes as routes
+
+    cron_pkg = types.ModuleType("cron")
+    cron_pkg.__path__ = []
+    monkeypatch.setitem(sys.modules, "cron", cron_pkg)
+    monkeypatch.delitem(sys.modules, "cron.jobs", raising=False)
+    monkeypatch.setattr(routes, "_ensure_agent_cron_import_path", lambda: None)
+
+    handler = _JSONHandler()
+    routes.handle_get(
+        handler,
+        SimpleNamespace(path="/api/crons/recent", query="since=0"),
+    )
+
+    assert handler.status == 200
+    assert _payload(handler) == {"completions": [], "since": 0.0}

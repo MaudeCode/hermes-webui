@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -394,8 +395,11 @@ def test_native_bootstrap_routes_stay_responsive_while_profile_env_is_busy(
     from concurrent.futures import wait
 
     member_home = tmp_path / "profiles" / "member"
+    process_home = tmp_path / "process-home"
     member_home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(process_home))
     _isolate_cli_projection(monkeypatch, tmp_path)
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: member_home)
     monkeypatch.setattr(
         profiles, "get_hermes_home_for_profile", lambda _profile: member_home
     )
@@ -418,6 +422,45 @@ def test_native_bootstrap_routes_stay_responsive_while_profile_env_is_busy(
         "list_profiles_api",
         lambda: [{"name": "default"}, {"name": "member"}],
     )
+    import contextvars
+    import sys
+    import types
+    from contextlib import contextmanager
+
+    cron_pkg = types.ModuleType("cron")
+    cron_pkg.__path__ = []
+    cron_jobs = types.ModuleType("cron.jobs")
+    active_cron_home = contextvars.ContextVar("active_cron_home", default=None)
+
+    @contextmanager
+    def use_cron_store(home):
+        token = active_cron_home.set(Path(home))
+        try:
+            yield
+        finally:
+            active_cron_home.reset(token)
+
+    def get_cron_output_dir():
+        assert active_cron_home.get() == member_home
+        return member_home / "cron" / "output"
+
+    def list_jobs(*, include_disabled=False):
+        assert include_disabled is True
+        assert active_cron_home.get() == member_home
+        return [
+            {
+                "id": "member-job",
+                "name": "Member job",
+                "last_run_at": "2026-09-03T18:00:00Z",
+                "last_status": "success",
+            }
+        ]
+
+    cron_jobs.use_cron_store = use_cron_store
+    cron_jobs.get_cron_output_dir = get_cron_output_dir
+    cron_jobs.list_jobs = list_jobs
+    monkeypatch.setitem(sys.modules, "cron", cron_pkg)
+    monkeypatch.setitem(sys.modules, "cron.jobs", cron_jobs)
 
     config_path = tmp_path / "config.yaml"
     config_path.write_text("{}", encoding="utf-8")
@@ -456,7 +499,7 @@ def test_native_bootstrap_routes_stay_responsive_while_profile_env_is_busy(
         try:
             handler = _Handler()
             routes.handle_get(handler, urlparse(f"http://example.test{path}"))
-            return handler.status
+            return handler.status, handler.json_body()
         finally:
             profiles.clear_request_profile()
 
@@ -468,18 +511,35 @@ def test_native_bootstrap_routes_stay_responsive_while_profile_env_is_busy(
         "&show_cron_sessions=1&show_webhook_sessions=1",
         "/api/models",
         "/api/profiles",
+        "/api/crons",
+        "/api/crons/output?job_id=test",
+        "/api/crons/history?job_id=test",
+        "/api/crons/run?job_id=test&filename=missing.md",
+        "/api/crons/recent?since=0",
+        "/api/crons/recent?since=0",
+        "/api/crons/recent?since=0",
+        "/api/crons/recent?since=0",
+        "/api/crons/status",
+        "/api/crons/delivery-options",
         "/health",
     ]
     with ThreadPoolExecutor(max_workers=len(paths)) as executor:
         futures = [executor.submit(get, path) for path in paths]
         finished, unfinished = wait(futures, timeout=0.5)
         release_holder.set()
-        statuses = [future.result(timeout=2) for future in futures]
+        responses = [future.result(timeout=2) for future in futures]
     holder.join(2)
 
     assert unfinished == set()
     assert len(finished) == len(paths)
-    assert statuses == [200, 200, 200, 200]
+    assert [status for status, _body in responses] == [
+        200, 200, 200, 200, 200, 200, 404, 200, 200, 200, 200, 200, 200, 200
+    ]
+    assert all(
+        response[1]["completions"][0]["job_id"] == "member-job"
+        for response in responses[7:11]
+    )
+    assert os.environ["HERMES_HOME"] == str(process_home)
     assert holder.is_alive() is False
 
 
