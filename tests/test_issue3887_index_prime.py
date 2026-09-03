@@ -75,8 +75,8 @@ def _messages_indexes(path):
     return {r[0] for r in rows}
 
 
-def test_prime_creates_missing_index(tmp_path):
-    """A db missing sidebar indexes gets them primed on the first scan."""
+def test_prime_creates_required_index_without_waiting_for_optional_user_index(tmp_path):
+    """The Agent's required session/timestamp index remains synchronously repaired."""
     db = tmp_path / "state.db"
     _full_schema_db(db)
     assert "idx_messages_session" not in _messages_indexes(db)
@@ -85,15 +85,10 @@ def test_prime_creates_missing_index(tmp_path):
         db, limit=20, exclude_sources=None
     )
 
-    deadline = time.monotonic() + 2
-    while "idx_messages_session_user" not in _messages_indexes(db) and time.monotonic() < deadline:
-        time.sleep(0.01)
-
     # Listing still returns the sessions ...
     assert {r["id"] for r in rows} == {"sess0", "sess1", "sess2"}
-    # ... and both index-only sidebar paths are now available.
+    # ... and the required index-only timestamp path is now available.
     assert "idx_messages_session" in _messages_indexes(db)
-    assert "idx_messages_session_user" in _messages_indexes(db)
     conn = sqlite3.connect(str(db))
     try:
         sql = conn.execute(
@@ -102,14 +97,18 @@ def test_prime_creates_missing_index(tmp_path):
     finally:
         conn.close()
     assert "session_id" in sql and "timestamp" in sql
-    conn = sqlite3.connect(str(db))
-    try:
-        user_sql = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE name='idx_messages_session_user'"
-        ).fetchone()[0]
-    finally:
-        conn.close()
-    assert "session_id" in user_sql and "role = 'user'" in user_sql
+
+
+def test_optional_user_index_prime_runs_asynchronously(tmp_path):
+    db = tmp_path / "state.db"
+    _full_schema_db(db)
+
+    agent_sessions._prime_user_message_index_async(db)
+
+    deadline = time.monotonic() + 2
+    while "idx_messages_session_user" not in _messages_indexes(db) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert "idx_messages_session_user" in _messages_indexes(db)
 
 
 def test_prime_is_noop_when_index_exists(tmp_path):
