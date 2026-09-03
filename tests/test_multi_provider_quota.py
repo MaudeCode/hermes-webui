@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+import textwrap
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlparse
+
+import pytest
 
 import api.providers as providers
 import api.routes as routes
@@ -496,3 +503,65 @@ def test_multi_provider_quota_route_dispatches_query_in_profile_scope(monkeypatc
         ("json", handler, payload, 200, None),
         ("scope-exit", "/api/provider/quotas", routes.logger),
     ]
+
+
+def test_default_profile_multi_provider_quota_route_does_not_deadlock(tmp_path):
+    script = textwrap.dedent(
+        """
+        from types import SimpleNamespace
+        from urllib.parse import urlparse
+
+        import api.profiles as profiles
+        import api.providers as providers
+        import api.routes as routes
+
+        profiles.get_active_profile_name = lambda: "default"
+        providers.get_providers = lambda: {
+            "active_provider": "alpha",
+            "providers": [
+                {"id": "alpha", "display_name": "Alpha", "has_key": True},
+                {"id": "beta", "display_name": "Beta", "has_key": True},
+            ],
+        }
+        providers._quota_source_descriptors = lambda profile, provider: [{
+            "source_id": f"source-{provider['id']}",
+            "provider_id": provider["id"],
+            "provider_label": provider["display_name"],
+            "account_label": provider["display_name"],
+            "credential_id": None,
+        }]
+        providers._quota_profile_scope_id = lambda profile: "scope-default"
+        providers.get_provider_quota = lambda provider_id, **kwargs: {
+            "supported": True,
+            "status": "available",
+            "account_limits": {},
+        }
+        routes.get_provider_quotas = providers.get_provider_quotas
+        routes._handle_extension_sidecar_proxy = lambda *_args: False
+        routes.j = lambda handler, payload, status=200, extra_headers=None: payload
+
+        payload = routes.handle_get(
+            SimpleNamespace(), urlparse("/api/provider/quotas")
+        )
+        assert payload["version"] == 1
+        assert payload["profile_id"] == "default"
+        assert [source["provider_id"] for source in payload["sources"]] == [
+            "alpha", "beta"
+        ]
+        """
+    )
+    env = os.environ.copy()
+    env["HERMES_HOME"] = str(tmp_path / ".hermes")
+    env["HERMES_WEBUI_STATE_DIR"] = str(tmp_path / "webui")
+    try:
+        subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=str(Path(__file__).resolve().parent.parent),
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("default-profile quota route deadlocked in nested worker scopes")

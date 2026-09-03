@@ -551,7 +551,7 @@ def test_native_bootstrap_routes_stay_responsive_while_profile_env_is_busy(
         "profile_env_for_active_request_readonly",
     ],
 )
-def test_default_environment_scope_waits_for_named_profile_scope(
+def test_default_environment_scope_does_not_wait_for_named_profile_scope(
     monkeypatch, tmp_path, default_scope_name
 ):
     member_home = tmp_path / "profiles" / "member"
@@ -572,7 +572,7 @@ def test_default_environment_scope_waits_for_named_profile_scope(
 
     def named_worker():
         with profiles.profile_env_for_background_worker(
-            "member", "named holder", scope_skill_modules=False
+            "member", "named holder"
         ):
             named_entered.set()
             assert release_named.wait(2)
@@ -580,9 +580,7 @@ def test_default_environment_scope_waits_for_named_profile_scope(
     def default_worker():
         default_scope = getattr(profiles, default_scope_name)
         if default_scope_name == "profile_env_for_background_worker":
-            context = default_scope(
-                "default", "default waiter", scope_skill_modules=False
-            )
+            context = default_scope("default", "default waiter")
         else:
             context = default_scope("default waiter")
         with context:
@@ -593,13 +591,46 @@ def test_default_environment_scope_waits_for_named_profile_scope(
     named.start()
     assert named_entered.wait(2)
     default.start()
-    assert default_entered.wait(0.1) is False
+    default_progressed_while_named_scope_active = default_entered.wait(0.2)
     release_named.set()
-    assert default_entered.wait(2)
     named.join(2)
     default.join(2)
+    assert default_progressed_while_named_scope_active is True
     assert named.is_alive() is False
     assert default.is_alive() is False
+
+
+def test_default_title_scope_does_not_block_default_chat_scope():
+    title_entered = threading.Event()
+    release_title = threading.Event()
+    chat_entered = threading.Event()
+
+    def title_worker():
+        with profiles.profile_env_for_background_worker(
+            "default", "background title"
+        ):
+            title_entered.set()
+            assert release_title.wait(2)
+
+    def chat_worker():
+        with profiles.profile_env_for_background_worker(
+            "default", "chat admission"
+        ):
+            chat_entered.set()
+
+    title = threading.Thread(target=title_worker)
+    chat = threading.Thread(target=chat_worker)
+    title.start()
+    assert title_entered.wait(2)
+    chat.start()
+    chat_progressed_while_title_blocked = chat_entered.wait(0.2)
+    release_title.set()
+    title.join(2)
+    chat.join(2)
+
+    assert chat_progressed_while_title_blocked is True
+    assert title.is_alive() is False
+    assert chat.is_alive() is False
 
 
 def test_explicit_profile_cli_caches_do_not_cross_under_concurrency(monkeypatch, tmp_path):

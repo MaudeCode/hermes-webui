@@ -28205,7 +28205,11 @@ def _run_manual_compression_job(sid, body):
         if session is not None:
             from api import profiles as profiles_api
 
-            with profiles_api.profile_env_for_background_worker(session, "manual compression", logger_override=logger):
+            with profiles_api.profile_env_for_background_worker(
+                session,
+                "manual compression",
+                logger_override=logger,
+            ):
                 _handle_session_compress(memory_handler, body)
         else:
             _handle_session_compress(memory_handler, body)
