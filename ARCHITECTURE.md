@@ -249,6 +249,20 @@ home before reading `state.db`, including detached cache rebuilds. If that pairi
 cannot be resolved, the projection returns no Agent/CLI rows; it never falls back
 to the process-global/root `HERMES_HOME`, because the Agent database has no
 per-row profile owner that could repair a read from the wrong file.
+Detached projection binds only the captured profile identity because its home and
+database path are already explicit. It does not enter the process-wide profile
+environment scope, so an active Agent turn cannot starve native bootstrap reads.
+The projection captures a request-owned config snapshot from that explicit home
+before resolving workspace metadata, so concurrent profile reloads cannot swap it.
+If a same-profile cold rebuild exceeds its one-second coalescing wait, a follower
+returns no additive Agent rows while the original owner finishes and fills the cache.
+Cron and webhook project lookup-or-create transactions share one lock so parallel
+profile projections cannot overwrite each other's `projects.json` updates.
+
+Model-catalog rebuild followers use the same bounded wait as the rebuild owner.
+When that budget expires, callers receive the existing cached or static catalog;
+they never wait for a 60-second client timeout or start a duplicate rebuild. Static
+fallbacks block process-environment inheritance and use the request profile's config.
 
 - Cron: up to `CRON_PROJECT_CHIP_LIMIT` rows.
 - Webhook: up to `WEBHOOK_PROJECT_CHIP_LIMIT` rows.

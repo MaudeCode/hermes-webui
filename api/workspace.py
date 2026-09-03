@@ -148,12 +148,13 @@ def _is_remote_terminal_backend(terminal_cfg: dict | None) -> bool:
     return backend not in ('', 'local')
 
 
-def _remote_terminal_cwd() -> str | None:
+def _remote_terminal_cwd(config_data: dict | None = None) -> str | None:
     """Return target-side terminal cwd for remote profiles, without local stat()."""
     try:
-        from api.config import get_config
-
-        terminal_cfg = get_config().get('terminal', {})
+        if config_data is None:
+            from api.config import get_config
+            config_data = get_config()
+        terminal_cfg = config_data.get('terminal', {})
         if not _is_remote_terminal_backend(terminal_cfg):
             return None
         cwd = str(terminal_cfg.get('cwd') or '').strip()
@@ -165,7 +166,9 @@ def _remote_terminal_cwd() -> str | None:
         return None
 
 
-def _remote_terminal_workspace_candidate(path: str | Path) -> Path | None:
+def _remote_terminal_workspace_candidate(
+    path: str | Path, *, config_data: dict | None = None
+) -> Path | None:
     """Return a non-stat'ed target-side Path when it is under terminal.cwd.
 
     Remote workspace paths live on the target host (e.g., remote SSH/Docker
@@ -174,7 +177,7 @@ def _remote_terminal_workspace_candidate(path: str | Path) -> Path | None:
     local host-filesystem resolution (avoiding host-specific firmlink rewriting
     such as macOS synthetic ``/home`` -> ``/System/Volumes/Data/home``).
     """
-    cwd = _remote_terminal_cwd()
+    cwd = _remote_terminal_cwd(config_data)
     if not cwd:
         return None
     raw = _strip_surrounding_quotes(str(path)).strip()
@@ -201,7 +204,7 @@ def _remote_terminal_workspace_candidate(path: str | Path) -> Path | None:
     return None
 
 
-def _profile_default_workspace() -> str:
+def _profile_default_workspace(config_data: dict | None = None) -> str:
     """Read the profile's default workspace from its config.yaml.
 
     Checks keys in priority order:
@@ -217,8 +220,10 @@ def _profile_default_workspace() -> str:
     Falls back to the live DEFAULT_WORKSPACE from api.config.
     """
     try:
-        from api.config import get_config
-        cfg = get_config()
+        if config_data is None:
+            from api.config import get_config
+            config_data = get_config()
+        cfg = config_data
         terminal_cfg = cfg.get('terminal', {})
         remote_terminal = _is_remote_terminal_backend(terminal_cfg)
         # Explicit webui workspace keys first
@@ -428,8 +433,8 @@ def get_profile_default_workspace() -> str:
     return _profile_default_workspace()
 
 
-def get_last_workspace() -> str:
-    remote_cwd = _remote_terminal_cwd()
+def get_last_workspace(*, config_data: dict | None = None) -> str:
+    remote_cwd = _remote_terminal_cwd(config_data)
 
     def valid_last_workspace(raw: str) -> str | None:
         if not raw:
@@ -438,7 +443,9 @@ def get_last_workspace() -> str:
             # For remote/SSH profiles, last_workspace is target-side state. Do
             # not accept stale server-local paths merely because they exist on
             # the WebUI host; require the value to stay under terminal.cwd.
-            if _remote_terminal_workspace_candidate(raw) is not None:
+            if _remote_terminal_workspace_candidate(
+                raw, config_data=config_data
+            ) is not None:
                 return raw
             return None
         if Path(raw).is_dir():
@@ -461,7 +468,7 @@ def get_last_workspace() -> str:
                 return p
         except Exception:
             logger.debug("Failed to read global last workspace")
-    return _profile_default_workspace()
+    return _profile_default_workspace(config_data)
 
 
 def set_last_workspace(path: str) -> None:

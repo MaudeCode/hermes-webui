@@ -1299,7 +1299,7 @@ def _write_env_file(env_path: Path, updates: dict[str, str | None]) -> None:
             pass
 
 
-def _provider_has_key(provider_id: str) -> bool:
+def _provider_has_key(provider_id: str, config_data: dict | None = None) -> bool:
     """Check whether a provider has a configured API key.
 
     Checks (in order):
@@ -1341,7 +1341,7 @@ def _provider_has_key(provider_id: str) -> bool:
     except ImportError:
         pass
 
-    cfg = get_config()
+    cfg = config_data if isinstance(config_data, dict) else get_config()
     # Check model.api_key — only match if this provider is the active one.
     # Previously this checked globally, causing all providers to show
     # "configured" when the active provider had a top-level api_key.

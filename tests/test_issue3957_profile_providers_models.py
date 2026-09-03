@@ -448,6 +448,49 @@ def test_detached_worker_scope_noop_for_default_profile(monkeypatch):
         assert os.environ.get("ISSUE_3957_WPROBE") is None
 
 
+def test_isolated_root_readonly_scope_does_not_wait_or_inherit_named_env(
+    monkeypatch, tmp_path
+):
+    import threading
+    import time
+
+    base = tmp_path / ".hermes"
+    alpha_home = base / "profiles" / "alpha"
+    alpha_home.mkdir(parents=True)
+    (alpha_home / ".env").write_text(
+        "OPENAI_API_KEY=alpha-private-key\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    holder_ready = threading.Event()
+    release_holder = threading.Event()
+
+    def hold_named_env():
+        with profiles.profile_env_for_background_worker(
+            "alpha", "named holder", scope_skill_modules=False
+        ):
+            holder_ready.set()
+            release_holder.wait(2)
+
+    holder = threading.Thread(target=hold_named_env)
+    holder.start()
+    assert holder_ready.wait(2)
+    profiles.set_request_profile("default")
+    started_at = time.monotonic()
+    try:
+        with profiles.profile_env_for_active_request_readonly(
+            "root fallback", isolate_root=True
+        ):
+            assert config._thread_local_env_value("OPENAI_API_KEY") == ""
+    finally:
+        profiles.clear_request_profile()
+        release_holder.set()
+        holder.join(2)
+
+    assert time.monotonic() - started_at < 0.5
+    assert holder.is_alive() is False
+
+
 def test_detached_worker_scope_binds_profile_on_new_thread(monkeypatch, tmp_path):
     """A worker thread re-binds the captured profile's TLS + env + cache path.
 
@@ -912,4 +955,3 @@ def test_expand_env_vars_does_not_leak_process_env_under_block_scope(monkeypatch
             config._thread_ctx.env = {}
         else:
             config._thread_ctx.env = prev_env
-
