@@ -135,7 +135,7 @@ def test_prime_is_noop_when_index_exists(tmp_path):
     assert "idx_messages_session_user" in _messages_indexes(db)
 
 
-def test_user_message_count_uses_partial_index_and_stays_exact(tmp_path):
+def test_user_message_count_uses_partial_index_and_stops_at_visibility_threshold(tmp_path):
     db = tmp_path / "state.db"
     _full_schema_db(db)
     conn = sqlite3.connect(str(db))
@@ -151,7 +151,7 @@ def test_user_message_count_uses_partial_index_and_stays_exact(tmp_path):
     )
 
     by_id = {row["id"]: row for row in rows}
-    assert by_id["sess0"]["actual_user_message_count"] == 3
+    assert by_id["sess0"]["actual_user_message_count"] == 2
 
 
 def test_prime_skipped_without_timestamp_column(tmp_path):
