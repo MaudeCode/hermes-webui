@@ -1359,11 +1359,11 @@ def profile_env_for_active_request_readonly(
     agent-side auth-store reads stay on the active profile without mutating
     process-global ``os.environ``.
 
-    No-ops for the default/root profile, which is the common single-profile
-    deployment case.
+    Root/default reads use the same complete startup-owned overlay as detached
+    workers. ``isolate_root`` remains accepted for call-site compatibility.
     """
     profile = (get_active_profile_name() or "").strip()
-    if (not profile or _is_root_profile(profile)) and not isolate_root:
+    if not profile or _is_root_profile(profile):
         with profile_env_for_background_worker(
             "default", purpose, logger_override=logger_override
         ):

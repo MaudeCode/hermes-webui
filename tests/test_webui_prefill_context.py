@@ -388,9 +388,37 @@ def test_relative_prefill_file_resolves_from_profile_home(monkeypatch, tmp_path)
         HERMES_HOME=str(profile_home),
         HERMES_PREFILL_MESSAGES_FILE="prefill.json",
     )
+    config._thread_ctx.block_process_env_fallback = True
+    try:
+        result = streaming._load_webui_prefill_context({})
+    finally:
+        config._thread_ctx.block_process_env_fallback = False
+        config._clear_thread_env()
+
+    assert result["messages"] == [{"role": "user", "content": "profile"}]
+
+
+def test_relative_prefill_prefers_scoped_config_path(monkeypatch, tmp_path):
+    from api import config, streaming
+
+    profile_home = tmp_path / "profile"
+    config_dir = tmp_path / "deployment-config"
+    profile_home.mkdir()
+    config_dir.mkdir()
+    (profile_home / "prefill.json").write_text(
+        '[{"role":"user","content":"home"}]', encoding="utf-8"
+    )
+    (config_dir / "prefill.json").write_text(
+        '[{"role":"user","content":"config"}]', encoding="utf-8"
+    )
+    config._set_thread_env(
+        HERMES_HOME=str(profile_home),
+        HERMES_CONFIG_PATH=str(config_dir / "hermes.yaml"),
+        HERMES_PREFILL_MESSAGES_FILE="prefill.json",
+    )
     try:
         result = streaming._load_webui_prefill_context({})
     finally:
         config._clear_thread_env()
 
-    assert result["messages"] == [{"role": "user", "content": "profile"}]
+    assert result["messages"] == [{"role": "user", "content": "config"}]

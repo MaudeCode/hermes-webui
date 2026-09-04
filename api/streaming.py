@@ -1047,8 +1047,14 @@ def _valid_prefill_messages(value) -> list[dict]:
 def _resolve_prefill_path(raw: str) -> Path:
     path = Path(str(raw)).expanduser()
     if not path.is_absolute():
+        config_path = _thread_local_env_value("HERMES_CONFIG_PATH")
         profile_home = _thread_local_env_value("HERMES_HOME")
-        path = (Path(profile_home) if profile_home else Path.cwd()) / path
+        base = (
+            Path(config_path).expanduser().parent
+            if config_path
+            else Path(profile_home) if profile_home else Path.cwd()
+        )
+        path = base / path
     return path
 
 
