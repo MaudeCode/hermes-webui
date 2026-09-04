@@ -60,6 +60,10 @@ extension directory under your state dir (`STATE_DIR/extensions`, e.g.
 extensions load automatically on the next app-shell render with no environment
 variables and no restart of your shell.
 
+The gallery registry is cached for five minutes. A refresh runs as a single
+bounded fetch outside the cache lock; concurrent gallery opens receive the
+existing cached list, or a temporary unavailable response when no cache exists.
+
 The managed directory lives alongside your sessions and settings in the
 WebUI-owned state dir. That is a different trust domain from "a world-writable
 directory on a shared box": only the WebUI process (and whoever can already

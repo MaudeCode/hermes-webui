@@ -4,6 +4,8 @@ import hashlib
 import io
 import json
 import socket
+import threading
+import time
 import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -450,6 +452,84 @@ def test_gallery_registry_extensions_format(monkeypatch, tmp_path):
     result = ext_mod.get_extension_registry()
     assert len(result["entries"]) == 1
     assert result["entries"][0]["id"] == "desktop-companion"
+
+
+def test_slow_registry_fetch_does_not_hold_cache_lock(monkeypatch):
+    import api.extensions as ext_mod
+
+    started = threading.Event()
+    release = threading.Event()
+    follower_done = threading.Event()
+    results = {}
+
+    class SlowResponse:
+        def read(self, _limit):
+            started.set()
+            assert release.wait(2)
+            return b'[{"id":"fresh"}]'
+
+        def close(self):
+            pass
+
+    ext_mod._REGISTRY_CACHE.clear()
+    monkeypatch.setattr(
+        ext_mod,
+        "_build_gallery_opener",
+        lambda: MagicMock(open=lambda *_args, **_kwargs: SlowResponse()),
+    )
+
+    owner = threading.Thread(
+        target=lambda: results.setdefault("owner", ext_mod.get_extension_registry())
+    )
+
+    def follower():
+        results["follower"] = ext_mod.get_extension_registry()
+        follower_done.set()
+
+    owner.start()
+    assert started.wait(1)
+    waiter = threading.Thread(target=follower)
+    waiter.start()
+    progressed_while_fetch_blocked = follower_done.wait(0.2)
+    release.set()
+    owner.join(1)
+    waiter.join(1)
+
+    assert progressed_while_fetch_blocked is True
+    assert results["follower"] == {"entries": [], "error": "registry_unavailable"}
+    assert results["owner"] == {"entries": [{"id": "fresh"}]}
+
+
+def test_invalidated_registry_claim_cannot_overwrite_newer_cache(monkeypatch):
+    import api.extensions as ext_mod
+
+    started = threading.Event()
+    release = threading.Event()
+
+    class SlowResponse:
+        def read(self, _limit):
+            started.set()
+            assert release.wait(2)
+            return b'[{"id":"stale"}]'
+
+        def close(self):
+            pass
+
+    ext_mod._REGISTRY_CACHE.clear()
+    monkeypatch.setattr(
+        ext_mod,
+        "_build_gallery_opener",
+        lambda: MagicMock(open=lambda *_args, **_kwargs: SlowResponse()),
+    )
+    owner = threading.Thread(target=ext_mod.get_extension_registry)
+    owner.start()
+    assert started.wait(1)
+    ext_mod._REGISTRY_CACHE.clear()
+    ext_mod._REGISTRY_CACHE.update({"data": [{"id": "newer"}], "fetched_at": time.monotonic()})
+    release.set()
+    owner.join(1)
+
+    assert ext_mod.get_extension_registry() == {"entries": [{"id": "newer"}]}
 
 
 def test_install_rejects_symlinked_ext_dir_outside_root(monkeypatch, tmp_path):

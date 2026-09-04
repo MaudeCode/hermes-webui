@@ -8,7 +8,7 @@ import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
-from threading import Event, Lock
+from threading import Event, Lock, Thread
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -277,10 +277,73 @@ def test_pairing_confirms_initial_snapshot_before_switching_publishers(monkeypat
     assert events == [
         ("create", "key-1"),
         ("publish", None),
-        ("stop", None),
         ("listen", None),
         ("start", False),
     ]
+
+
+@pytest.mark.parametrize("has_previous", [True, False])
+def test_blocked_candidate_publish_does_not_hold_publisher_registry_lock(
+    monkeypatch, has_previous
+):
+    from api import session_events, talaria_relay
+
+    publish_started = Event()
+    release_publish = Event()
+    terminal_noted = Event()
+
+    class Publisher:
+        def __init__(self, config):
+            self.config = config
+            self.changed = object()
+            self._terminal_lock = Lock()
+            self._revision_lock = Lock()
+            self._terminal = {}
+            self._last_revision = 0
+
+        def publish_snapshot(self):
+            publish_started.set()
+            assert release_publish.wait(2)
+
+        def note_terminal(self, _stream_id, _phase):
+            with self._terminal_lock:
+                self._terminal[_stream_id] = {"relay_phase": _phase}
+            terminal_noted.set()
+
+        def start(self, *, publish_initial):
+            assert publish_initial is False
+
+        def stop(self):
+            pass
+
+    old = Publisher(
+        RelayConfig("https://relay.example", "https://old.example", "old", Path("old.pem"))
+    )
+    monkeypatch.setattr(talaria_relay, "_publisher", old if has_previous else None)
+    monkeypatch.setattr(talaria_relay, "_publisher_candidate", None)
+    monkeypatch.setattr(talaria_relay, "TalariaRelayPublisher", Publisher)
+    monkeypatch.setattr(session_events, "add_session_list_changed_listener", lambda _listener: None)
+    monkeypatch.setattr(session_events, "remove_session_list_changed_listener", lambda _listener: None)
+    monkeypatch.setattr(talaria_relay.atexit, "register", lambda _callback: None)
+
+    configuring = Thread(
+        target=lambda: talaria_relay.configure_talaria_relay_publisher(
+            RelayConfig("https://relay.example", "https://new.example", "new", Path("new.pem"))
+        )
+    )
+    configuring.start()
+    assert publish_started.wait(1)
+    noting = Thread(
+        target=lambda: talaria_relay.note_talaria_terminal("stream", "completed")
+    )
+    noting.start()
+    progressed_while_publish_blocked = terminal_noted.wait(0.2)
+    release_publish.set()
+    configuring.join(1)
+    noting.join(1)
+
+    assert progressed_while_publish_blocked is True
+    assert talaria_relay._publisher._terminal["stream"]["relay_phase"] == "completed"
 
 
 def test_publisher_reconfiguration_preserves_unpublished_terminal_state(monkeypatch):

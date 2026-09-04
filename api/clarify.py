@@ -7,9 +7,11 @@ clarification string instead of an approval decision.
 from __future__ import annotations
 
 import queue
+import itertools
 import threading
 import time
 import uuid
+import weakref
 from typing import Optional
 
 from api.session_events import publish_session_list_changed
@@ -23,6 +25,30 @@ _gateway_notify_cbs: dict[str, object] = {}
 
 # ── SSE subscriber registry ─────────────────────────────────────────────
 _clarify_sse_subscribers: dict[str, list[queue.Queue]] = {}
+_clarify_sse_sequence: dict[str, int] = {}
+_clarify_sse_dispatched: dict[str, int] = {}
+_clarify_sse_sequence_source = itertools.count(1)
+_clarify_sse_dispatch_locks = weakref.WeakValueDictionary()
+_clarify_sse_dispatch_locks_lock = threading.Lock()
+
+
+def _clarify_sse_dispatch_lock(session_id: str):
+    with _clarify_sse_dispatch_locks_lock:
+        lock = _clarify_sse_dispatch_locks.get(session_id)
+        if lock is None:
+            lock = threading.RLock()
+            _clarify_sse_dispatch_locks[session_id] = lock
+        return lock
+
+
+def _cleanup_clarify_sse_sequence_locked(session_id: str) -> None:
+    if (
+        _gateway_notify_cbs.get(session_id) is None
+        and not _gateway_queues.get(session_id)
+        and not _clarify_sse_subscribers.get(session_id)
+    ):
+        _clarify_sse_sequence.pop(session_id, None)
+        _clarify_sse_dispatched.pop(session_id, None)
 
 
 class _ClarifyEntry:
@@ -39,8 +65,9 @@ class _ClarifyEntry:
 
 def register_gateway_notify(session_key: str, cb) -> None:
     """Register a per-session callback for sending clarify requests to the UI."""
-    with _lock:
-        _gateway_notify_cbs[session_key] = cb
+    with _clarify_sse_dispatch_lock(session_key):
+        with _lock:
+            _gateway_notify_cbs[session_key] = cb
 
 
 def _clear_queue_locked(session_key: str) -> list[_ClarifyEntry]:
@@ -51,9 +78,14 @@ def _clear_queue_locked(session_key: str) -> list[_ClarifyEntry]:
 
 def unregister_gateway_notify(session_key: str) -> None:
     """Unregister the per-session callback and unblock any waiting clarify prompt."""
-    with _lock:
-        _gateway_notify_cbs.pop(session_key, None)
-        entries = _clear_queue_locked(session_key)
+    with _clarify_sse_dispatch_lock(session_key):
+        with _lock:
+            _gateway_notify_cbs.pop(session_key, None)
+            entries = _clear_queue_locked(session_key)
+            notification = _clarify_sse_snapshot_locked(session_key, None, 0)
+        _dispatch_clarify_sse(notification)
+        with _lock:
+            _cleanup_clarify_sse_sequence_locked(session_key)
     if entries:
         publish_session_list_changed("attention_cleared")
     for entry in entries:
@@ -72,10 +104,8 @@ def clear_pending(session_key: str) -> int:
     """
     with _lock:
         entries = _clear_queue_locked(session_key)
-        # Notify from inside _lock for ordering consistency with submit_pending
-        # and resolve_clarify*, which also publish under the same lock.
-        if entries:
-            _clarify_sse_notify(session_key, None, 0)
+        notification = _clarify_sse_snapshot_locked(session_key, None, 0)
+    _dispatch_clarify_sse(notification)
     if entries:
         publish_session_list_changed("attention_cleared")
     for entry in entries:
@@ -99,14 +129,42 @@ def _with_timeout_metadata(data: dict) -> dict:
     return item
 
 
-def _clarify_sse_notify(session_id: str, head: dict | None, total: int) -> None:
-    """Push a clarify event to all SSE subscribers for a session."""
+def _clarify_sse_snapshot_locked(session_id: str, head: dict | None, total: int):
     payload = {"pending": dict(head) if head else None, "pending_count": total}
-    for q in _clarify_sse_subscribers.get(session_id, ()):
-        try:
-            q.put_nowait(payload)
-        except queue.Full:
-            pass  # drop if subscriber is slow
+    sequence = next(_clarify_sse_sequence_source)
+    _clarify_sse_sequence[session_id] = sequence
+    return session_id, sequence, tuple(_clarify_sse_subscribers.get(session_id, ())), payload
+
+
+def _dispatch_clarify_sse(notification, callback=None, callback_payload=None) -> bool:
+    session_id, sequence, subscribers, payload = notification
+    with _clarify_sse_dispatch_lock(session_id):
+        with _lock:
+            if sequence != _clarify_sse_sequence.get(session_id):
+                return False
+        if sequence <= _clarify_sse_dispatched.get(session_id, 0):
+            return False
+        _clarify_sse_dispatched[session_id] = sequence
+        for q in subscribers:
+            try:
+                q.put_nowait(payload)
+            except queue.Full:
+                pass  # drop if subscriber is slow
+        if callback is not None:
+            try:
+                callback(dict(callback_payload or {}))
+            except Exception:
+                pass
+        with _lock:
+            _cleanup_clarify_sse_sequence_locked(session_id)
+        return True
+
+
+def _clarify_sse_notify(session_id: str, head: dict | None, total: int) -> None:
+    """Push a clarify event without holding the state lock."""
+    with _lock:
+        notification = _clarify_sse_snapshot_locked(session_id, head, total)
+    _dispatch_clarify_sse(notification)
 
 
 def sse_subscribe(session_id: str) -> queue.Queue:
@@ -128,6 +186,7 @@ def sse_unsubscribe(session_id: str, q: queue.Queue) -> None:
                 pass
             if not subs:
                 _clarify_sse_subscribers.pop(session_id, None)
+            _cleanup_clarify_sse_sequence_locked(session_id)
 
 
 def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
@@ -150,33 +209,25 @@ def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
                 # silently discarded here — the original entry's id wins.
                 # Today no caller sets clarify_id (it's generated by __init__),
                 # so this is a non-issue.
-                cb = _gateway_notify_cbs.get(session_key)
                 # Keep _pending aligned to the oldest unresolved entry.
                 _pending[session_key] = gw_queue[0].data
-                if cb:
-                    try:
-                        cb(dict(entry.data))
-                    except Exception:
-                        pass
-                # Safe to call while holding _lock: publish() only takes the
-                # leaf _SESSION_EVENTS_LOCK and never re-acquires this lock.
-                publish_session_list_changed("attention_pending")
-                return entry
-
-        entry = _ClarifyEntry(data)
-        # Ensure clarify_id is present in the serialised data the frontend receives.
-        entry.data["clarify_id"] = entry.clarify_id
-        gw_queue.append(entry)
-        _pending[session_key] = gw_queue[0].data
+            else:
+                entry = _ClarifyEntry(data)
+                entry.data["clarify_id"] = entry.clarify_id
+                gw_queue.append(entry)
+                _pending[session_key] = gw_queue[0].data
+        else:
+            entry = _ClarifyEntry(data)
+            entry.data["clarify_id"] = entry.clarify_id
+            gw_queue.append(entry)
+            _pending[session_key] = gw_queue[0].data
         cb = _gateway_notify_cbs.get(session_key)
-        # Notify SSE subscribers from inside _lock for ordering guarantees.
-        _clarify_sse_notify(session_key, dict(gw_queue[0].data), len(gw_queue))
+        callback_payload = dict(gw_queue[0].data)
+        notification = _clarify_sse_snapshot_locked(
+            session_key, dict(gw_queue[0].data), len(gw_queue)
+        )
+    _dispatch_clarify_sse(notification, cb, callback_payload)
     publish_session_list_changed("attention_pending")
-    if cb:
-        try:
-            cb(data)
-        except Exception:
-            pass
     return entry
 
 
@@ -214,10 +265,17 @@ def resolve_clarify(session_key: str, response: str, resolve_all: bool = False) 
         entries = list(q) if resolve_all else [q.pop(0)]
         if q:
             _pending[session_key] = q[0].data
-            _clarify_sse_notify(session_key, dict(q[0].data), len(q))
+            cb = _gateway_notify_cbs.get(session_key)
+            callback_payload = dict(q[0].data)
+            notification = _clarify_sse_snapshot_locked(
+                session_key, dict(q[0].data), len(q)
+            )
         else:
+            cb = None
+            callback_payload = None
             _clear_queue_locked(session_key)
-            _clarify_sse_notify(session_key, None, 0)
+            notification = _clarify_sse_snapshot_locked(session_key, None, 0)
+    _dispatch_clarify_sse(notification, cb, callback_payload)
     publish_session_list_changed("attention_resolved")
     count = 0
     for entry in entries:
@@ -237,19 +295,28 @@ def resolve_clarify_by_id(session_key: str, clarify_id: str, response: str) -> b
         if not q:
             _pending.pop(session_key, None)
             return False
-        for i, entry in enumerate(q):
-            if entry.clarify_id == clarify_id:
-                q.pop(i)
-                if q:
-                    _pending[session_key] = q[0].data
-                    _clarify_sse_notify(session_key, dict(q[0].data), len(q))
-                else:
-                    _clear_queue_locked(session_key)
-                    _clarify_sse_notify(session_key, None, 0)
-                # Safe to call while holding _lock: publish() only takes the
-                # leaf _SESSION_EVENTS_LOCK and never re-acquires this lock.
-                publish_session_list_changed("attention_resolved")
-                entry.result = response
-                entry.event.set()
-                return True
-        return False
+        match = next(
+            ((i, entry) for i, entry in enumerate(q) if entry.clarify_id == clarify_id),
+            None,
+        )
+        if match is None:
+            return False
+        index, entry = match
+        q.pop(index)
+        if q:
+            _pending[session_key] = q[0].data
+            cb = _gateway_notify_cbs.get(session_key) if index == 0 else None
+            callback_payload = dict(q[0].data) if cb is not None else None
+            notification = _clarify_sse_snapshot_locked(
+                session_key, dict(q[0].data), len(q)
+            )
+        else:
+            cb = None
+            callback_payload = None
+            _clear_queue_locked(session_key)
+            notification = _clarify_sse_snapshot_locked(session_key, None, 0)
+    _dispatch_clarify_sse(notification, cb, callback_payload)
+    publish_session_list_changed("attention_resolved")
+    entry.result = response
+    entry.event.set()
+    return True
