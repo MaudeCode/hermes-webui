@@ -38,8 +38,7 @@ from api.config import (
     LOCK, SESSIONS, SESSIONS_MAX, SESSION_DIR,
     _get_session_agent_lock, _alias_session_agent_lock,
     _set_thread_env, _clear_thread_env, _thread_ctx,
-    ACTIVE_RUNS, ACTIVE_RUNS_LOCK,
-    register_active_run, update_active_run,
+    register_active_run, update_active_run, publish_active_run_finished,
     unregister_stream_owner,
     stream_owner_session_id,
     session_writeback_owner,
@@ -13553,12 +13552,15 @@ def _run_agent_streaming(
                 close_run_journal()
         except Exception:
             logger.debug("Failed to close run journal for stream %s", stream_id, exc_info=True)
+        from api import config as _run_config
+
         with STREAMS_LOCK:
             # Retire admission and cancel targets atomically. A successor may
             # reuse the cached agent as soon as ACTIVE_RUNS is gone, so there
             # must be no window where an old stream still exposes that agent.
-            with ACTIVE_RUNS_LOCK:
-                ACTIVE_RUNS.pop(stream_id, None)
+            with _run_config.ACTIVE_RUNS_LOCK:
+                retired_run = _run_config.ACTIVE_RUNS.pop(stream_id, None)
+                _run_config.LAST_RUN_FINISHED_AT = time.time()
             STREAMS.pop(stream_id, None)
             CANCEL_FLAGS.pop(stream_id, None)
             AGENT_INSTANCES.pop(stream_id, None)  # Clean up agent instance reference
@@ -13569,9 +13571,7 @@ def _run_agent_streaming(
             STREAM_GOAL_RELATED.pop(stream_id, None)  # Clean up goal-related flag (#1932)
             STREAM_LAST_EVENT_ID.pop(stream_id, None)  # Clean up event_id pointer (stage-364)
 
-        # Clean up the stream-owner registry so stale stream_id→session_id
-        # mappings do not accumulate over thousands of completed streams (#6351).
-        unregister_stream_owner(stream_id)
+        publish_active_run_finished(stream_id, retired_run)
         # Release the session's writeback-ownership entry only while this
         # stream still owns it (#6623 re-gate): a successor admitted after
         # cancel must keep its registry claim.
