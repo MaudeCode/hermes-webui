@@ -282,7 +282,10 @@ def test_pairing_confirms_initial_snapshot_before_switching_publishers(monkeypat
     ]
 
 
-def test_blocked_candidate_publish_does_not_hold_publisher_registry_lock(monkeypatch):
+@pytest.mark.parametrize("has_previous", [True, False])
+def test_blocked_candidate_publish_does_not_hold_publisher_registry_lock(
+    monkeypatch, has_previous
+):
     from api import session_events, talaria_relay
 
     publish_started = Event()
@@ -316,7 +319,8 @@ def test_blocked_candidate_publish_does_not_hold_publisher_registry_lock(monkeyp
     old = Publisher(
         RelayConfig("https://relay.example", "https://old.example", "old", Path("old.pem"))
     )
-    monkeypatch.setattr(talaria_relay, "_publisher", old)
+    monkeypatch.setattr(talaria_relay, "_publisher", old if has_previous else None)
+    monkeypatch.setattr(talaria_relay, "_publisher_candidate", None)
     monkeypatch.setattr(talaria_relay, "TalariaRelayPublisher", Publisher)
     monkeypatch.setattr(session_events, "add_session_list_changed_listener", lambda _listener: None)
     monkeypatch.setattr(session_events, "remove_session_list_changed_listener", lambda _listener: None)
