@@ -23942,6 +23942,20 @@ def _chat_admission_timeout_response() -> dict:
     }
 
 
+def _chat_writeback_timeout_response() -> dict:
+    return {
+        "error": "response persistence is uncertain",
+        "code": "chat_writeback_timeout",
+        "message": (
+            "The response finished but could not be persisted because this session "
+            "remained busy. Do not retry automatically; refresh the session first."
+        ),
+        "retryable": False,
+        "outcome_unknown": True,
+        "_status": 503,
+    }
+
+
 @contextmanager
 def _bounded_chat_admission_lock(session_id: str, lock, timeout=None):
     """Expose and bound route-layer waiting for the session write lock."""
@@ -26103,9 +26117,9 @@ def _handle_chat_sync(handler, body):
         s.session_id, _get_session_agent_lock(s.session_id)
     ) as acquired:
         if not acquired:
-            response = _chat_admission_timeout_response()
-            response.pop("_status", None)
-            return j(handler, response, status=409)
+            response = _chat_writeback_timeout_response()
+            status = response.pop("_status")
+            return j(handler, response, status=status)
         _result_messages = result.get("messages") or _previous_context_messages
         _next_context_messages = _restore_reasoning_metadata(
             _previous_context_messages,

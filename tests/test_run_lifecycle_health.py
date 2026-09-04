@@ -218,3 +218,33 @@ def test_public_health_exposes_retained_admission_timeout(monkeypatch):
     assert captured["status"] == 503
     assert captured["payload"]["recent_admission_timeout"] is True
     assert "admission_timeout_age_seconds" in captured["payload"]
+
+
+def test_worker_startup_lock_timeout_is_bounded_and_retained(monkeypatch):
+    import threading
+    from api import config, routes, streaming
+
+    lock = threading.Lock()
+    lock.acquire()
+    config.register_active_run("worker-timeout", session_id="private")
+    monkeypatch.setattr(streaming, "_CHAT_LOCK_WAIT_SECONDS", 0.02)
+    try:
+        with streaming._try_acquire_worker_session_lock(
+            "worker-timeout", lock, "prestream_save"
+        ) as acquired:
+            assert acquired is False
+        assert routes._run_lifecycle_health()["status"] == "degraded"
+        assert config.LAST_CHAT_ADMISSION_TIMEOUT_AT is not None
+    finally:
+        lock.release()
+        config.unregister_active_run("worker-timeout")
+        config.LAST_CHAT_ADMISSION_TIMEOUT_AT = None
+
+
+def test_post_execution_writeback_timeout_is_not_retryable():
+    from api.routes import _chat_writeback_timeout_response
+
+    response = _chat_writeback_timeout_response()
+    assert response["_status"] == 503
+    assert response["retryable"] is False
+    assert response["outcome_unknown"] is True

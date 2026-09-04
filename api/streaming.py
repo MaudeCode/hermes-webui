@@ -9033,6 +9033,46 @@ def _mark_chat_admission_timeout_stale(session, stream_id: str) -> bool:
     return True
 
 
+@contextlib.contextmanager
+def _try_acquire_worker_session_lock(stream_id: str, lock, stage: str):
+    started_at = time.time()
+    update_active_run(
+        stream_id,
+        phase="waiting_for_session_lock",
+        lock_stage=stage,
+        lock_wait_started_at=started_at,
+    )
+    with _try_acquire_chat_lock(lock, _CHAT_LOCK_WAIT_SECONDS) as acquired:
+        if not acquired:
+            note_chat_admission_timeout()
+            update_active_run(
+                stream_id,
+                phase="admission_blocked",
+                lock_stage=stage,
+                lock_wait_seconds=_CHAT_LOCK_WAIT_SECONDS,
+            )
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                update_active_run(
+                    stream_id,
+                    phase="running",
+                    lock_stage=None,
+                    lock_wait_started_at=None,
+                )
+
+
+def _emit_worker_admission_timeout(session, session_id: str, stream_id: str, put) -> None:
+    _mark_chat_admission_timeout_stale(session, stream_id)
+    put('apperror', {
+        'type': 'chat_admission_timeout',
+        'message': 'Chat could not start because this session is busy. Try Stop or retry shortly.',
+        'session_id': getattr(session, 'session_id', session_id),
+        'old_session_id': session_id,
+    })
+
+
 def _publish_agent_instance(stream_id, agent) -> bool:
     """Publish one cancel target and return its captured cancel state."""
     with STREAMS_LOCK:
@@ -9677,28 +9717,12 @@ def _run_agent_streaming(
         # #4251: the route layer already persisted this turn's model under the
         # session lock before dispatch, so a mismatch here means a newer picker
         # write won the race and must not be clobbered by the worker thread.
-        lock_wait_started_at = time.time()
-        update_active_run(
-            stream_id,
-            phase="waiting_for_session_lock",
-            lock_wait_started_at=lock_wait_started_at,
-        )
-        with _try_acquire_chat_lock(_agent_lock, _CHAT_LOCK_WAIT_SECONDS) as acquired:
+        with _try_acquire_worker_session_lock(
+            stream_id, _agent_lock, "initial_model"
+        ) as acquired:
             if not acquired:
                 _admission_lock_timed_out = True
-                note_chat_admission_timeout()
-                _mark_chat_admission_timeout_stale(s, stream_id)
-                update_active_run(
-                    stream_id,
-                    phase="admission_blocked",
-                    lock_wait_seconds=_CHAT_LOCK_WAIT_SECONDS,
-                )
-                put('apperror', {
-                    'type': 'chat_admission_timeout',
-                    'message': 'Chat could not start because this session is busy. Try Stop or retry shortly.',
-                    'session_id': getattr(s, 'session_id', session_id),
-                    'old_session_id': session_id,
-                })
+                _emit_worker_admission_timeout(s, session_id, stream_id, put)
                 return
             _last_persisted_model = getattr(s, "model", None)
             _last_persisted_provider = getattr(s, "model_provider", None)
@@ -9714,12 +9738,16 @@ def _run_agent_streaming(
                 _last_persisted_model = model
                 _last_persisted_provider = provider_context
                 _turn_owns_persisted_model = True
-        update_active_run(stream_id, phase="running", lock_wait_started_at=None)
-
         # TD1: set thread-local env context so concurrent sessions don't clobber globals
         # Check for pre-flight cancel (user cancelled before agent even started)
         if cancel_event.is_set():
-            with _agent_lock:
+            with _try_acquire_worker_session_lock(
+                stream_id, _agent_lock, "preflight_cancel"
+            ) as acquired:
+                if not acquired:
+                    _admission_lock_timed_out = True
+                    _emit_worker_admission_timeout(s, session_id, stream_id, put)
+                    return
                 _finalize_cancelled_turn(
                     s,
                     ephemeral=ephemeral,
@@ -9777,7 +9805,13 @@ def _run_agent_streaming(
         # #4251: only apply the profile-repair persistence if this turn still
         # owns the session model/provider pair it last wrote.
         provider_context = str(provider_context).strip().lower() if provider_context else None
-        with _agent_lock:
+        with _try_acquire_worker_session_lock(
+            stream_id, _agent_lock, "profile_repair"
+        ) as acquired:
+            if not acquired:
+                _admission_lock_timed_out = True
+                _emit_worker_admission_timeout(s, session_id, stream_id, put)
+                return
             _current_provider = getattr(s, "model_provider", None)
             if _current_provider is not None:
                 _current_provider = str(_current_provider).strip().lower() or None
@@ -11159,7 +11193,13 @@ def _run_agent_streaming(
                     agent.interrupt("Cancelled before start")
                 except Exception:
                     logger.debug("Failed to interrupt agent before start")
-                with _agent_lock:
+                with _try_acquire_worker_session_lock(
+                    stream_id, _agent_lock, "prestart_cancel"
+                ) as acquired:
+                    if not acquired:
+                        _admission_lock_timed_out = True
+                        _emit_worker_admission_timeout(s, session_id, stream_id, put)
+                        return
                     _finalize_cancelled_turn(
                         s,
                         ephemeral=ephemeral,
@@ -11356,7 +11396,13 @@ def _run_agent_streaming(
             _checkpoint_stop = threading.Event()
             # Persist the user message BEFORE streaming starts so it's durable even if
             # the server crashes before the first checkpoint fires (every 15s).
-            with _agent_lock:
+            with _try_acquire_worker_session_lock(
+                stream_id, _agent_lock, "prestream_save"
+            ) as acquired:
+                if not acquired:
+                    _admission_lock_timed_out = True
+                    _emit_worker_admission_timeout(s, session_id, stream_id, put)
+                    return
                 s.save(touch_updated_at=True, skip_index=False)
 
             _ckpt_thread = threading.Thread(
