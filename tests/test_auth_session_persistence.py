@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -97,6 +98,36 @@ class TestSessionPersistence(unittest.TestCase):
             auth.verify_session(cookie),
             "Invalidated session must not be reinstated after restart",
         )
+
+    def test_concurrent_idempotent_logout_joins_pending_persistence(self) -> None:
+        cookie = auth.create_session()
+        token = cookie.rsplit('.', 1)[0]
+        first_save_started = threading.Event()
+        release_first_save = threading.Event()
+        snapshots = []
+
+        def blocking_save(snapshot):
+            snapshots.append(dict(snapshot))
+            if len(snapshots) == 1:
+                first_save_started.set()
+                self.assertTrue(release_first_save.wait(timeout=1))
+
+        with mock.patch.object(auth, "_save_sessions", side_effect=blocking_save):
+            first = threading.Thread(target=auth.invalidate_session, args=(cookie,))
+            second = threading.Thread(target=auth.invalidate_session, args=(cookie,))
+            first.start()
+            self.assertTrue(first_save_started.wait(timeout=1))
+            second.start()
+            time.sleep(0.05)
+            self.assertTrue(second.is_alive())
+            release_first_save.set()
+            first.join(timeout=1)
+            second.join(timeout=1)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(len(snapshots), 2)
+        self.assertTrue(all(token not in snapshot for snapshot in snapshots))
 
     def test_expired_sessions_pruned_on_load(self) -> None:
         """Sessions that expire between restarts must not be loaded."""
@@ -234,6 +265,27 @@ class TestSessionPersistence(unittest.TestCase):
         self.assertIn('Ignoring malformed auth session store', warning)
         self.assertIn(str(sessions_file), warning)
         self.assertIn(str(_TEST_STATE), warning)
+
+    def test_slow_session_persistence_does_not_hold_state_lock(self) -> None:
+        write_started = threading.Event()
+        release_write = threading.Event()
+
+        def slow_save(_snapshot):
+            write_started.set()
+            self.assertTrue(release_write.wait(2))
+
+        with mock.patch.object(auth, "_save_sessions", side_effect=slow_save):
+            creator = threading.Thread(target=auth.create_session)
+            creator.start()
+            self.assertTrue(write_started.wait(1))
+            acquired_while_writing = auth._SESSIONS_LOCK.acquire(timeout=0.2)
+            if acquired_while_writing:
+                auth._SESSIONS_LOCK.release()
+            release_write.set()
+            creator.join(1)
+
+        self.assertTrue(acquired_while_writing)
+        self.assertFalse(creator.is_alive())
 
 
 if __name__ == "__main__":

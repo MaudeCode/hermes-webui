@@ -234,6 +234,15 @@ def _save_sessions(sessions: dict[str, float | dict]) -> None:
 # Active sessions: token -> expiry timestamp (persisted across restarts via STATE_DIR)
 _sessions = _load_sessions()
 _SESSIONS_LOCK = threading.Lock()
+_SESSIONS_PERSIST_LOCK = threading.Lock()
+
+
+def _persist_sessions() -> None:
+    """Persist the latest session snapshot without holding the state lock."""
+    with _SESSIONS_PERSIST_LOCK:
+        with _SESSIONS_LOCK:
+            snapshot = dict(_sessions)
+        _save_sessions(snapshot)
 
 # ── Login rate limiter ──────────────────────────────────────────────────────
 _LOGIN_ATTEMPTS_FILE = STATE_DIR / '.login_attempts.json'
@@ -662,7 +671,7 @@ def create_session(
         record = expiry
     with _SESSIONS_LOCK:
         _sessions[token] = record
-        _save_sessions(_sessions)
+    _persist_sessions()
     sig = hmac.new(_signing_key(), token.encode(), hashlib.sha256).hexdigest()
     return f"{token}.{sig}"
 
@@ -670,12 +679,15 @@ def create_session(
 def _prune_expired_sessions():
     """Remove all expired session entries to prevent unbounded memory growth."""
     now = time.time()
+    changed = False
     with _SESSIONS_LOCK:
         expired = [t for t, record in _sessions.items() if (expiry := _session_expiry(record)) is None or now > expiry]
         if expired:
             for token in expired:
                 _sessions.pop(token, None)
-            _save_sessions(_sessions)
+            changed = True
+    if changed:
+        _persist_sessions()
 
 
 def verify_session(cookie_value: str) -> bool:
@@ -693,12 +705,15 @@ def verify_session(cookie_value: str) -> bool:
     )
     if not valid:
         return False
+    expired = False
     with _SESSIONS_LOCK:
         expiry = _session_expiry(_sessions.get(token))
         if expiry is None or time.time() > expiry:
             _sessions.pop(token, None)
-            _save_sessions(_sessions)
-            return False
+            expired = True
+    if expired:
+        _persist_sessions()
+        return False
     return True
 
 
@@ -1070,9 +1085,10 @@ def invalidate_session(cookie_value) -> None:
     if cookie_value and '.' in cookie_value:
         token = cookie_value.rsplit('.', 1)[0]
         with _SESSIONS_LOCK:
-            if token in _sessions:
-                _sessions.pop(token, None)
-                _save_sessions(_sessions)
+            _sessions.pop(token, None)
+        # Always join the serialized persistence lane. A concurrent logout may
+        # have removed this token in memory but not committed that removal yet.
+        _persist_sessions()
 
 
 def parse_cookie(handler) -> str | None:
