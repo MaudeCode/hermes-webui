@@ -1,5 +1,6 @@
 from collections import OrderedDict
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlparse
@@ -70,6 +71,22 @@ def test_resolve_chat_workspace_with_recovery_repairs_missing_implicit_workspace
     assert resolved == str(fallback.resolve())
     assert session.workspace == str(fallback.resolve())
     assert str(fallback.resolve()) in sidecar.read_text(encoding="utf-8")
+
+
+def test_workspace_recovery_lock_wait_is_bounded(monkeypatch, tmp_path):
+    session = SimpleNamespace(session_id="sess-bounded-workspace", workspace="old")
+    _write_session_sidecar(monkeypatch, tmp_path, session)
+    held = threading.Lock()
+    held.acquire()
+    monkeypatch.setattr(models, "_get_session_agent_lock", lambda _sid: held)
+    try:
+        with pytest.raises(
+            models.WorkspaceBindingPersistenceError, match="session is busy"
+        ):
+            models.persist_recovered_workspace_binding(session, tmp_path)
+    finally:
+        held.release()
+        api_config.LAST_CHAT_ADMISSION_TIMEOUT_AT = None
 
 
 def test_chat_recovery_persistence_failure_fails_closed(monkeypatch, tmp_path):

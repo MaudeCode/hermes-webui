@@ -57,6 +57,7 @@ def _isolate_sessions(tmp_path, monkeypatch):
     config.STREAM_SESSION_OWNERS.clear()
     config.SESSION_WRITEBACK_OWNERS.clear()
     config.SESSION_AGENT_LOCKS.clear()
+    config.LAST_CHAT_ADMISSION_TIMEOUT_AT = None
     yield
     models.SESSIONS.clear()
     config.STREAMS.clear()
@@ -66,6 +67,7 @@ def _isolate_sessions(tmp_path, monkeypatch):
     config.STREAM_SESSION_OWNERS.clear()
     config.SESSION_WRITEBACK_OWNERS.clear()
     config.SESSION_AGENT_LOCKS.clear()
+    config.LAST_CHAT_ADMISSION_TIMEOUT_AT = None
 
 
 class _PoppingStreams(dict):
@@ -157,6 +159,7 @@ def test_early_cancel_lock_timeout_still_emits_terminal_event(tmp_path, monkeypa
     assert event == "cancel"
     assert payload["session_id"] == sid
     assert session.pending_started_at is None
+    assert config.LAST_CHAT_ADMISSION_TIMEOUT_AT is not None
 
 
 def test_mature_cancel_lock_timeout_does_not_emit_false_terminal_cancel(

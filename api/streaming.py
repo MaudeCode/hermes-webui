@@ -14327,6 +14327,7 @@ def cancel_stream(stream_id: str) -> bool:
             _CHAT_LOCK_WAIT_SECONDS,
         ) as acquired:
             if not acquired:
+                note_chat_admission_timeout()
                 update_active_run(
                     stream_id,
                     phase="cancelling",

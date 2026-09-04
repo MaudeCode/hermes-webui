@@ -25707,9 +25707,18 @@ def _handle_chat_start(handler, body, diag=None):
                 return j(handler, {"error": "regeneration_revision is required", "code": "stale_regeneration_revision"}, status=409)
             try:
                 from api.session_ops import plan_regeneration, RegenerationUnavailable
-                regeneration = plan_regeneration(
-                    s, expected_revision=body["regeneration_revision"]
-                )
+                with _bounded_chat_admission_lock(
+                    s.session_id, _get_session_agent_lock(s.session_id)
+                ) as acquired:
+                    if not acquired:
+                        response = _chat_admission_timeout_response()
+                        status = response.pop("_status")
+                        return j(handler, response, status=status)
+                    regeneration = plan_regeneration(
+                        s,
+                        expected_revision=body["regeneration_revision"],
+                        lock_held=True,
+                    )
             except RegenerationUnavailable as exc:
                 return j(handler, {"error": str(exc), "code": exc.code}, status=exc.status)
             msg = regeneration.turn.message_text
