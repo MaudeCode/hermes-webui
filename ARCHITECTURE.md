@@ -153,6 +153,10 @@ Tests NEVER talk to the production server (port 8787).
 The test state dir is wiped before each test session and deleted after.
 See: <repo>/tests/conftest.py
 
+The current process-wide filesystem lock inventory and the reason each remaining
+local-I/O critical section is atomic are documented in
+[`docs/lock-ownership.md`](docs/lock-ownership.md).
+
 Per-request environment variables (set by chat handler, restored after):
 
     TERMINAL_CWD         Set to session.workspace before running agent.

@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -234,6 +235,27 @@ class TestSessionPersistence(unittest.TestCase):
         self.assertIn('Ignoring malformed auth session store', warning)
         self.assertIn(str(sessions_file), warning)
         self.assertIn(str(_TEST_STATE), warning)
+
+    def test_slow_session_persistence_does_not_hold_state_lock(self) -> None:
+        write_started = threading.Event()
+        release_write = threading.Event()
+
+        def slow_save(_snapshot):
+            write_started.set()
+            self.assertTrue(release_write.wait(2))
+
+        with mock.patch.object(auth, "_save_sessions", side_effect=slow_save):
+            creator = threading.Thread(target=auth.create_session)
+            creator.start()
+            self.assertTrue(write_started.wait(1))
+            acquired_while_writing = auth._SESSIONS_LOCK.acquire(timeout=0.2)
+            if acquired_while_writing:
+                auth._SESSIONS_LOCK.release()
+            release_write.set()
+            creator.join(1)
+
+        self.assertTrue(acquired_while_writing)
+        self.assertFalse(creator.is_alive())
 
 
 if __name__ == "__main__":
