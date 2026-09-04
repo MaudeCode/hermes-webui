@@ -37,6 +37,7 @@ from api.config import (
 from api.workspace import get_last_workspace
 from api.usage import prompt_cache_hit_percent
 from api.agent_sessions import (
+    STATE_DB_CONNECT_TIMEOUT_S,
     _is_continuation_session,
     is_cli_session_row,
     normalize_agent_session_source,
@@ -11830,7 +11831,14 @@ def _process_stale_cleanup_manifests(hermes_home) -> bool:
         # state.db disappears between the existence check and connect().
         try:
             db_uri = f"{db_path.resolve().as_uri()}?mode=ro"
-            with closing(sqlite3.connect(db_uri, uri=True)) as conn:
+            # Bounded: this runs on the DELETE /api/session request thread, and
+            # the handler below already treats a lock as an expected fail-closed
+            # outcome that a later call retries (HWEB-34).
+            with closing(
+                sqlite3.connect(
+                    db_uri, uri=True, timeout=STATE_DB_CONNECT_TIMEOUT_S
+                )
+            ) as conn:
                 cursor = conn.execute(
                     "SELECT id FROM sessions WHERE id IN ({})".format(
                         ",".join("?" * len(pending_ids))

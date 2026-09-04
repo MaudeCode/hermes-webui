@@ -22,8 +22,10 @@ import api.models as models
 import api.routes as routes
 from api.agent_sessions import (
     STATE_DB_CONNECT_TIMEOUT_S,
+    STATE_DB_RECOVERY_BUSY_TIMEOUT_MS,
     open_state_db_readonly,
     read_importable_agent_session_rows,
+    resolve_live_compression_tip,
 )
 
 # The bound is 250 ms; the pre-fix default was 5 s. Anything under a second
@@ -250,4 +252,80 @@ def test_handoff_marker_write_is_bounded(tmp_path, monkeypatch):
 def test_connect_timeout_matches_the_declared_bound():
     assert STATE_DB_CONNECT_TIMEOUT_S == pytest.approx(
         agent_sessions.STATE_DB_BUSY_TIMEOUT_MS / 1000.0
+    )
+
+
+# ── the bound must NOT reach off-request reads that would fail closed wrong ──
+
+def test_compression_tip_recovery_keeps_the_generous_wait(tmp_path):
+    """A locked DB must not make the streaming worker resolve a compressed
+    session to its CLOSED ancestor — a cold agent built on that id has every
+    durable append rejected. This read waits instead of taking the budget."""
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+    with closing(sqlite3.connect(str(db))) as conn:
+        conn.execute(
+            "INSERT INTO sessions (id, parent_session_id, source, session_source, "
+            "title, model, message_count, started_at, ended_at, end_reason) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("live-tip", "sess-1", "cli", "cli", "Cont", "sonnet", 1, 1200.0, None, None),
+        )
+        conn.execute(
+            "UPDATE sessions SET ended_at = ?, end_reason = ? WHERE id = ?",
+            (1100.0, "compression", "sess-1"),
+        )
+        conn.commit()
+
+    assert resolve_live_compression_tip(db, "sess-1") == "live-tip"
+
+    seen = {}
+    real_open = agent_sessions.open_state_db_readonly
+
+    def spy(path, log=None, **kwargs):
+        seen.update(kwargs)
+        return real_open(path, log, **kwargs)
+
+    orig = agent_sessions.open_state_db_readonly
+    agent_sessions.open_state_db_readonly = spy
+    try:
+        assert resolve_live_compression_tip(db, "sess-1") == "live-tip"
+    finally:
+        agent_sessions.open_state_db_readonly = orig
+
+    assert seen.get("busy_timeout_ms") == STATE_DB_RECOVERY_BUSY_TIMEOUT_MS
+    assert STATE_DB_RECOVERY_BUSY_TIMEOUT_MS > agent_sessions.STATE_DB_BUSY_TIMEOUT_MS
+
+
+def test_opener_honors_an_explicit_busy_timeout(tmp_path):
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+    with closing(open_state_db_readonly(db, busy_timeout_ms=1234)) as conn:
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 1234
+
+
+def test_session_delete_cleanup_manifest_read_is_bounded(tmp_path):
+    """The DELETE /api/session path first runs a fail-closed liveness read;
+    it must not add a second multi-second park on a locked DB."""
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    manifest = sessions_dir / ".cleanup_manifest_deadbeef.json"
+    manifest.write_text('["sess-1"]', encoding="utf-8")
+
+    # Unlocked, the liveness query proves sess-1 is still alive, so the stale
+    # manifest is consumed — proof the test reaches the read, not an early return.
+    assert models._process_stale_cleanup_manifests(tmp_path) is True
+    assert not manifest.exists()
+
+    manifest.write_text('["sess-1"]', encoding="utf-8")
+    with _write_locked(db):
+        t0 = time.monotonic()
+        complete = models._process_stale_cleanup_manifests(tmp_path)
+        elapsed = time.monotonic() - t0
+
+    assert complete is False, "a locked DB must fail closed, not claim success"
+    assert manifest.exists(), "fail-closed must preserve the manifest for a retry"
+    assert elapsed < LOCK_BUDGET_S, (
+        f"stale-cleanup liveness read took {elapsed:.2f}s on a locked state.db"
     )
