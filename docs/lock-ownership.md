@@ -1,9 +1,10 @@
 # Filesystem lock ownership
 
-Process-wide locks may protect an atomic local-state transaction. Except for the
-bounded models-catalog single-flight called out below, they do not cover network,
-model, tool, subprocess, callback, queue-wait, join, or sleep work. The remaining
-local-I/O scopes are:
+Process-wide locks may protect an atomic local-state transaction. The catalog,
+repository Git, and application-update coordination exceptions below include
+bounded waits, subprocesses, or network work because exposing their partially
+mutated shared state would be unsafe. Other listed locks do not cover network,
+model, tool, subprocess, callback, queue-wait, join, or sleep work.
 
 | State owner | Lock and contention domain | I/O kept inside and why |
 |---|---|---|
@@ -29,6 +30,8 @@ local-I/O scopes are:
 | Run journals | Per-journal path lock from `api.run_journal._WRITER_LOCKS` | Append/flush ordering for one `(session, stream, path)` only. Unrelated sessions use different locks; global guards protect lock/cache dictionaries without file I/O. |
 | Project metadata | `api.models._PROJECTS_MUTATION_LOCK`; project/cron/webhook metadata writers | One `projects.json` lookup-or-create/read-modify-atomic-write transaction prevents parallel profile projections from overwriting each other. Session scanning and external work remain outside. |
 | In-place compatibility writes | `api.paths._IN_PLACE_WRITE_LOCK`; rare config/profile targets that cannot use atomic rename | One verified-inode truncate/write/mode-restore/fsync sequence. Normal writes use same-directory temp files and atomic replace without this global lock; the compatibility lock exists only to prevent byte interleaving when inode preservation is mandatory. |
+| Workspace Git mutations | Per-repository lock from `api.workspace_git._git_mutation_lock`; one canonical repository | Subprocess-backed checkout, stage, commit, fetch, pull, and push sequences hold the repository lock across their complete index/worktree/ref transaction. Different repositories use different locks; readers use hardened read-only commands without the mutation lock. |
+| Application update | `api.updates._apply_lock`; all WebUI self-update attempts | One fetch/status/stash/pull-or-fast-forward/stash-pop sequence, including Git network and subprocess work. The process-wide single-flight prevents concurrent update attempts from observing or publishing a half-applied checkout; status/cache reads remain independently available. |
 
 When a local filesystem operation fails, its owning API returns or logs an
 explicit degraded/error result and never silently uses another profile's state.
