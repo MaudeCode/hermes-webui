@@ -4,7 +4,7 @@ import json
 import sys
 import types
 
-from api import config
+from api import config, profiles
 
 
 def _flatten_ids(groups):
@@ -103,6 +103,7 @@ def test_openai_codex_group_merges_visible_codex_cache_models(monkeypatch, tmp_p
         encoding="utf-8",
     )
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setitem(profiles._INITIAL_PROCESS_ENV, "CODEX_HOME", str(codex_home))
 
     result = config.get_available_models()
 

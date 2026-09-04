@@ -1043,6 +1043,25 @@ def main() -> int:
         '"""Empty agent stub for the Gateway-backed browser gate."""\n',
         encoding="utf-8",
     )
+    (agent_dir / "hermes_constants.py").write_text(
+        "from contextvars import ContextVar\n"
+        "_home = ContextVar('home', default=None)\n"
+        "def set_hermes_home_override(value): return _home.set(str(value))\n"
+        "def reset_hermes_home_override(token): _home.reset(token)\n"
+        "def get_hermes_home_override(): return _home.get()\n"
+        "def get_hermes_home(): return _home.get()\n",
+        encoding="utf-8",
+    )
+    secret_scope_dir = agent_dir / "agent"
+    secret_scope_dir.mkdir()
+    (secret_scope_dir / "__init__.py").write_text("", encoding="utf-8")
+    (secret_scope_dir / "secret_scope.py").write_text(
+        "from contextvars import ContextVar\n"
+        "_scope = ContextVar('scope', default={})\n"
+        "def set_secret_scope(value): return _scope.set(dict(value))\n"
+        "def reset_secret_scope(token): _scope.reset(token)\n",
+        encoding="utf-8",
+    )
     env = os.environ.copy()
     for key in list(env):
         if key.endswith("_API_KEY"):

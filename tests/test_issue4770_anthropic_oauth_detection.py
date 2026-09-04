@@ -4,6 +4,7 @@ import builtins
 import sys
 
 import api.config as config
+import api.profiles as profiles
 
 
 def _force_env_fallback(monkeypatch):
@@ -46,6 +47,7 @@ def _clear_provider_env(monkeypatch):
         "LM_BASE_URL",
     ):
         monkeypatch.delenv(key, raising=False)
+        monkeypatch.delitem(profiles._INITIAL_PROCESS_ENV, key, raising=False)
 
 
 def _run_available_models_with_cfg(monkeypatch, tmp_path, cfg):
@@ -81,6 +83,7 @@ def test_anthropic_token_env_var_surfaces_anthropic_models(monkeypatch, tmp_path
     _clear_provider_env(monkeypatch)
     _force_env_fallback(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_TOKEN", "token-only-value")
+    monkeypatch.setitem(profiles._INITIAL_PROCESS_ENV, "ANTHROPIC_TOKEN", "token-only-value")
 
     result = _run_available_models_with_cfg(monkeypatch, tmp_path, {"model": {}})
     groups = _provider_groups(result)
@@ -100,6 +103,7 @@ def test_whitespace_only_anthropic_oauth_env_vars_do_not_surface_anthropic(monke
         _clear_provider_env(monkeypatch)
         _force_env_fallback(monkeypatch)
         monkeypatch.setenv(ws_var, "   \t  ")
+        monkeypatch.setitem(profiles._INITIAL_PROCESS_ENV, ws_var, "   \t  ")
 
         result = _run_available_models_with_cfg(monkeypatch, tmp_path, {"model": {}})
         groups = _provider_groups(result)
@@ -113,6 +117,11 @@ def test_claude_code_oauth_token_env_var_surfaces_anthropic_models(monkeypatch, 
     _clear_provider_env(monkeypatch)
     _force_env_fallback(monkeypatch)
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token-only-value")
+    monkeypatch.setitem(
+        profiles._INITIAL_PROCESS_ENV,
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "oauth-token-only-value",
+    )
 
     result = _run_available_models_with_cfg(monkeypatch, tmp_path, {"model": {}})
     groups = _provider_groups(result)

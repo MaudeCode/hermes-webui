@@ -110,6 +110,15 @@ def test_cron_create_recomputes_unpinned_provider_snapshot_under_selected_profil
     assert handler.status == 200
     assert body["ok"] is True
     assert calls[0] == (
+        "compute",
+        {
+            "provider": None,
+            "model": "gpt-5.4",
+            "base_url": None,
+            "no_agent": False,
+        },
+    )
+    assert calls[1] == (
         "create",
         {
             "prompt": "ping",
@@ -119,15 +128,6 @@ def test_cron_create_recomputes_unpinned_provider_snapshot_under_selected_profil
             "skills": [],
             "model": "gpt-5.4",
             "provider": None,
-        },
-    )
-    assert calls[1] == (
-        "compute",
-        {
-            "provider": None,
-            "model": "gpt-5.4",
-            "base_url": None,
-            "no_agent": False,
         },
     )
     assert calls[2] == (
@@ -203,6 +203,42 @@ def test_cron_create_with_blank_profile_keeps_ambient_snapshot_semantics(monkeyp
         )
     ]
     assert profile_events == []
+
+
+def test_cron_create_rejects_before_persisting_when_profile_scope_fails(monkeypatch):
+    import api.profiles as profiles
+    import api.routes as routes
+
+    calls = []
+    cron_jobs = types.ModuleType("cron.jobs")
+    cron_jobs.create_job = lambda **kwargs: calls.append(kwargs)
+    cron_jobs.update_job = lambda *_args, **_kwargs: None
+    cron_jobs._compute_provider_model_snapshots = lambda **_kwargs: (None, None)
+
+    @contextmanager
+    def fail_closed_profile(*_args, **_kwargs):
+        raise RuntimeError("profile isolation unavailable")
+        yield
+
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [{"name": "research"}])
+    monkeypatch.setattr(
+        profiles, "profile_env_for_background_worker", fail_closed_profile
+    )
+    _install_fake_cron_modules(monkeypatch, cron_jobs)
+
+    handler = _JSONHandler()
+    routes._handle_cron_create(
+        handler,
+        {
+            "prompt": "ping",
+            "schedule": "every 60m",
+            "profile": "research",
+        },
+    )
+
+    assert handler.status == 400
+    assert "Cannot safely resolve cron snapshots" in _payload(handler)["error"]
+    assert calls == []
 
 
 def test_cron_create_with_explicit_provider_and_model_skips_snapshot_override(monkeypatch):
@@ -339,6 +375,15 @@ def test_cron_create_with_explicit_provider_recomputes_only_model_snapshot(monke
     assert body["ok"] is True
     assert calls == [
         (
+            "compute",
+            {
+                "provider": "openai-codex",
+                "model": None,
+                "base_url": None,
+                "no_agent": False,
+            },
+        ),
+        (
             "create",
             {
                 "prompt": "ping",
@@ -348,15 +393,6 @@ def test_cron_create_with_explicit_provider_recomputes_only_model_snapshot(monke
                 "skills": [],
                 "model": None,
                 "provider": "openai-codex",
-            },
-        ),
-        (
-            "compute",
-            {
-                "provider": "openai-codex",
-                "model": None,
-                "base_url": None,
-                "no_agent": False,
             },
         ),
         ("update", "job5130", {"profile": "research", "model_snapshot": "gpt-5.5"}),

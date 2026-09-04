@@ -30,9 +30,8 @@ def test_webui_sets_gateway_session_platform_for_background_watchers():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
 
     assert "'HERMES_SESSION_PLATFORM': 'webui'" in src
-    assert "os.environ['HERMES_SESSION_PLATFORM'] = 'webui'" in src
-    assert "old_session_platform = os.environ.get('HERMES_SESSION_PLATFORM')" in src
-    assert "os.environ.pop('HERMES_SESSION_PLATFORM', None)" in src
+    assert "_set_thread_env(**_thread_env)" in src
+    assert "os.environ['HERMES_SESSION_PLATFORM'] = 'webui'" not in src
 
 
 def test_webui_age_gates_stale_background_completion_events():
@@ -52,4 +51,3 @@ def test_webui_age_gates_stale_background_completion_events():
     # their durable delivery claim. Neither path is added to skipped_events.
     assert "_mark_process_completion_consumed(process_registry, evt_sid)" in src
     assert "complete_async_delegation_delivery(evt, claim)" in src
-

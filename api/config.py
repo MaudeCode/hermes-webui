@@ -3419,8 +3419,13 @@ def get_effective_default_model(config_data: dict | None = None) -> str:
         if cfg_default:
             default_model = cfg_default
 
-    env_model = (
-        os.getenv("HERMES_MODEL") or os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL")
+    env_model = next(
+        (
+            value
+            for name in ("HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL")
+            if (value := _thread_local_env_value(name))
+        ),
+        "",
     )
     if env_model:
         default_model = env_model.strip()
@@ -3976,11 +3981,11 @@ def _get_lmstudio_reasoning_probe_api_key() -> str | None:
             if config_key:
                 return config_key
 
-    env_key = str(os.getenv("LM_API_KEY") or "").strip()
+    env_key = _thread_local_env_value("LM_API_KEY").strip()
     if env_key:
         return env_key
 
-    legacy_env_key = str(os.getenv("LMSTUDIO_API_KEY") or "").strip()
+    legacy_env_key = _thread_local_env_value("LMSTUDIO_API_KEY").strip()
     if legacy_env_key:
         return legacy_env_key
 
@@ -5899,10 +5904,15 @@ def _profile_safe_static_models_catalog() -> dict:
     """Build a static catalog without reading another profile's process env."""
     from api.profiles import profile_env_for_active_request_readonly
 
-    with profile_env_for_active_request_readonly(
-        "models static fallback", isolate_root=True
-    ):
-        return _static_models_catalog_without_live_probes(get_config_snapshot())
+    try:
+        with profile_env_for_active_request_readonly(
+            "models static fallback", isolate_root=True
+        ):
+            return _static_models_catalog_without_live_probes(get_config_snapshot())
+    except RuntimeError:
+        # An older Agent cannot safely expose credential-derived availability.
+        # Keep the endpoint usable with config-only model metadata.
+        return _minimal_static_models_catalog(get_config_snapshot())
 
 # Cache for credential pool results -- calling load_pool() per-provider per-server
 # session is expensive (~10s for zai due to endpoint probing).  The credential pool
@@ -6173,7 +6183,7 @@ def _models_cache_catalog_fingerprint() -> dict:
     except Exception:
         provider_catalog_sha = "unavailable"
 
-    codex_home = Path(os.getenv("CODEX_HOME", "").strip() or (HOME / ".codex")).expanduser()
+    codex_home = Path(_thread_local_env_value("CODEX_HOME").strip() or (HOME / ".codex")).expanduser()
     return {
         "provider_catalog_sha256": provider_catalog_sha,
         "codex_models_cache": _models_cache_file_fingerprint(codex_home / "models_cache.json"),
@@ -6828,7 +6838,7 @@ def _read_visible_codex_cache_model_ids() -> list[str]:
     in its picker (notably ``gpt-5.3-codex-spark`` from #1680), so the WebUI
     merges this visible local catalog to stay in sync with Codex itself.
     """
-    codex_home = Path(os.getenv("CODEX_HOME", "").strip() or (HOME / ".codex")).expanduser()
+    codex_home = Path(_thread_local_env_value("CODEX_HOME").strip() or (HOME / ".codex")).expanduser()
     cache_path = codex_home / "models_cache.json"
     try:
         payload = json.loads(cache_path.read_text(encoding="utf-8"))
@@ -8618,24 +8628,34 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 if _prof_scope_worker is not None
                 else _nullcontext()
             )
-            with _worker_scope:
-                try:
-                    box["result"] = _invoke_models_rebuild(_build_available_models_uncached)
-                except Exception as exc:  # noqa: BLE001 — propagated to caller
-                    box["error"] = exc
-                finally:
-                    build_done.set()
-                    # Only publish out-of-band if the foreground already gave up
-                    # (over budget). Within budget the foreground publishes
-                    # synchronously, so the worker must NOT touch the cache.
-                    # NOTE: the publish (and its disk write + fingerprint) runs
-                    # INSIDE this profile scope so the over-budget path writes
-                    # the correct profile's cache file.
-                    if budget_exceeded.is_set() and _claim_publish():
-                        if "result" in box:
-                            _publish_models_result(box["result"])
-                        else:
-                            _clear_build_in_progress()
+            try:
+                with _worker_scope:
+                    try:
+                        box["result"] = _invoke_models_rebuild(_build_available_models_uncached)
+                    except Exception as exc:  # noqa: BLE001 — propagated to caller
+                        box["error"] = exc
+                    finally:
+                        build_done.set()
+                        # Only publish out-of-band if the foreground already gave up
+                        # (over budget). Within budget the foreground publishes
+                        # synchronously, so the worker must NOT touch the cache.
+                        # NOTE: the publish (and its disk write + fingerprint) runs
+                        # INSIDE this profile scope so the over-budget path writes
+                        # the correct profile's cache file.
+                        if budget_exceeded.is_set() and _claim_publish():
+                            if "result" in box:
+                                _publish_models_result(box["result"])
+                            else:
+                                _clear_build_in_progress()
+            except Exception as exc:
+                # Context entry can fail closed when this Agent version cannot
+                # isolate the selected profile. Wake foreground waiters instead
+                # of leaving the catalog build flag stuck forever.
+                box["error"] = exc
+                box["scope_error"] = True
+                build_done.set()
+                if budget_exceeded.is_set() and _claim_publish():
+                    _clear_build_in_progress()
 
         _worker = threading.Thread(
             target=_rebuild_worker,
@@ -8649,6 +8669,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             # synchronously, exactly like the legacy path.
             if "error" in box:
                 _clear_build_in_progress()
+                if box.get("scope_error"):
+                    return copy.deepcopy(_profile_safe_static_models_catalog())
                 raise box["error"]
             if _claim_publish():
                 _publish_models_result(box["result"])
@@ -8659,10 +8681,13 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # wait() returning False and here: if so, still publish synchronously
         # so this caller honours the cache contract.
         budget_exceeded.set()
-        if build_done.is_set() and "error" not in box and "result" in box:
+        if build_done.is_set():
+            if "error" not in box and "result" in box:
+                if _claim_publish():
+                    _publish_models_result(box["result"])
+                return copy.deepcopy(box["result"])
             if _claim_publish():
-                _publish_models_result(box["result"])
-            return copy.deepcopy(box["result"])
+                _clear_build_in_progress()
 
         # Genuinely slow/hung probe: serve the best fallback now; the worker
         # keeps going and refreshes the cache for the next caller.

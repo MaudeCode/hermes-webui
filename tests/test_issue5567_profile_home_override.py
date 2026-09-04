@@ -132,6 +132,7 @@ def test_graceful_degradation_resolver_is_optional():
         assert mod is None  # older agent: graceful no-op, os.environ mirror stays
 
 
+@pytest.mark.skip(reason="HWEB-47 removed the process-global legacy skill fallback")
 def test_profile_env_for_background_worker_uses_legacy_skill_module_patching(monkeypatch, tmp_path):
     """When override support is unavailable for this run, fallback still patches skill modules."""
     profile_home = tmp_path / "legacy-profile-home"
@@ -174,6 +175,7 @@ def test_profile_env_for_background_worker_uses_legacy_skill_module_patching(mon
     assert os.environ.get("HERMES_TEST_PROFILE_ENV") is None
 
 
+@pytest.mark.skip(reason="superseded by HWEB-47 context-local streaming coverage")
 def test_run_agent_streaming_installs_and_resets_profile_home_override(tmp_path, monkeypatch):
     """Streaming must install the worker home override and clear it in teardown."""
 
@@ -347,6 +349,7 @@ def test_run_agent_streaming_installs_and_resets_profile_home_override(tmp_path,
     assert _stream_id not in _streaming.STREAMS
 
 
+@pytest.mark.skip(reason="HWEB-47 removed the process-global legacy skill fallback")
 def test_run_agent_streaming_falls_back_to_skill_module_patch_for_static_modules(
     tmp_path,
     monkeypatch,
@@ -558,6 +561,7 @@ def test_run_agent_streaming_falls_back_to_skill_module_patch_for_static_modules
     assert _stream_id not in _streaming.STREAMS
 
 
+@pytest.mark.skip(reason="HWEB-47 removed the process-global legacy skill fallback")
 def test_profile_env_for_background_worker_uses_static_modules_fallback_when_dynamic_checks_fail(
     tmp_path,
     monkeypatch,
@@ -636,6 +640,7 @@ def test_profile_env_for_background_worker_uses_static_modules_fallback_when_dyn
     assert fake_skill_manager_module.SKILLS_DIR == "default-home/skills"
 
 
+@pytest.mark.skip(reason="HWEB-47 removed the process-global legacy skill fallback")
 def test_profile_env_for_background_worker_serializes_static_module_scope_with_lock(tmp_path, monkeypatch):
     """`_SKILL_HOME_MODULE_PATCH_LOCK` serializes concurrent static module scopes."""
 
@@ -756,6 +761,7 @@ def test_profile_env_for_background_worker_serializes_static_module_scope_with_l
     not HAS_OVERRIDE,
     reason="requires v0.18.0 context-local home override support",
 )
+@pytest.mark.skip(reason="HWEB-47 removed the process-global legacy skill fallback")
 def test_profile_env_for_background_worker_uses_real_modules_and_serializes_overlap(tmp_path, monkeypatch):
     """Real skill modules should serialize static fallback scopes across profiles."""
 
@@ -945,6 +951,7 @@ def test_profile_env_for_background_worker_uses_real_modules_and_serializes_over
             skill_manager_tool.__dict__.pop("HERMES_HOME", None)
 
 
+@pytest.mark.skip(reason="HWEB-47 removed the process-global legacy skill fallback")
 def test_profile_env_for_background_worker_resets_override_when_dynamic_check_raises(
     tmp_path,
     monkeypatch,

@@ -42,6 +42,7 @@ _CLONE_CONFIG_FILES = ['config.yaml', '.env', 'SOUL.md']
 _INITIAL_HERMES_HOME = os.getenv('HERMES_HOME', '').strip()
 _INITIAL_HERMES_CONFIG_PATH = os.getenv('HERMES_CONFIG_PATH', '').strip()
 _INITIAL_ISOLATED_PROFILE_OPT_IN = os.getenv('HERMES_WEBUI_ISOLATED_PROFILE', '').strip().lower()
+_INITIAL_PROCESS_ENV = dict(os.environ)
 _ISOLATED_SYMLINK_WARNING_EMITTED = False
 _ISOLATED_PROFILE_SHAPE_WITHOUT_OPT_IN_WARNING_EMITTED = False
 _ISOLATED_PROFILE_TRUTHY_VALUES = frozenset({'1', 'true', 'yes', 'on'})
@@ -1127,18 +1128,38 @@ def _profile_secret_env_names(profile_home_path: Path) -> set[str]:
     return names
 
 
-def _apply_profile_env_to_process(
-    process_env,
-    safe_runtime_env: dict[str, str],
-    *,
-    secret_env_names: set[str],
-) -> dict[str, Optional[str]]:
-    scoped_keys = set(safe_runtime_env) | set(secret_env_names)
-    previous_env = {key: process_env.get(key) for key in scoped_keys}
-    for key in secret_env_names:
-        if key not in safe_runtime_env:
-            process_env.pop(key, None)
-    return previous_env
+def _profile_secret_thread_env(profile: str, profile_home_path: Path) -> dict[str, str]:
+    """Return a complete, profile-safe credential overlay for agent readers."""
+    owns_startup_env = _is_root_profile(profile or "default") or (
+        _is_isolated_profile_mode()
+        and (profile or "") == _isolated_profile_name()
+        and Path(profile_home_path).expanduser() == Path(_INITIAL_HERMES_HOME).expanduser()
+    )
+    source = (
+        filter_runtime_env_for_gateway_parity(_INITIAL_PROCESS_ENV)
+        if owns_startup_env
+        else {}
+    )
+    names = _profile_secret_env_names(profile_home_path) | {
+        "HERMES_MODEL",
+        "OPENAI_MODEL",
+        "LLM_MODEL",
+    }
+    result = dict(source)
+    for name in names:
+        result.setdefault(name, "")
+    return result
+
+
+def retire_startup_env_keys_for_home(profile_home_path: Path, names) -> None:
+    """Retire explicitly cleared credentials from their startup-owner baseline."""
+    home = Path(profile_home_path).expanduser()
+    startup_homes = {Path(_DEFAULT_HERMES_HOME).expanduser()}
+    if _INITIAL_HERMES_HOME and _is_isolated_profile_mode():
+        startup_homes.add(Path(_INITIAL_HERMES_HOME).expanduser())
+    if home in startup_homes:
+        for name in names:
+            _INITIAL_PROCESS_ENV.pop(str(name), None)
 
 
 _secret_scope_available = None
@@ -1207,59 +1228,45 @@ def profile_env_for_background_worker(
     session,
     purpose: str = "background worker",
     logger_override: Optional[logging.Logger] = None,
-    *,
-    scope_skill_modules: bool = True,
-    _shared_env_scope_held: bool = False,
 ):
     """Temporarily route detached worker config reads through a profile.
 
     Background WebUI workers run outside the request/streaming thread that
-    established the profile-scoped environment.  Workers that read agent config,
-    runtime provider settings, or skill paths must temporarily apply the
-    session/request profile env or they can fall back to the server-default
-    profile. Pass either a session-like object with `.profile` or a profile name.
+    established the profile scope. Bind their home and credentials through
+    context-local Agent APIs. Unsupported legacy runtimes
+    fail closed instead of holding process-wide locks for the worker lifetime.
+    Pass either a session-like object with `.profile` or a profile name.
     """
     log = logger_override or logger
     raw_profile = session if isinstance(session, str) else getattr(session, "profile", "")
-    profile = str(raw_profile or "").strip()
-    if not profile or profile == "default":
-        if _shared_env_scope_held:
-            yield
-        else:
-            with _PROFILE_ENV_SCOPE_LOCK:
-                yield
-        return
+    profile = str(raw_profile or "").strip() or "default"
 
     try:
         # Lazy imports avoid a module-load cycle: streaming imports this helper.
-        from api.config import _clear_thread_env, _set_thread_env, _thread_ctx
-        from api.streaming import _ENV_LOCK
-
+        from api.config import (
+            _HERMES_FOUND,
+            _clear_thread_env,
+            _set_thread_env,
+            _thread_ctx,
+        )
         profile_home_path = Path(get_hermes_home_for_profile(profile))
         runtime_env = get_profile_runtime_env(profile_home_path)
         safe_runtime_env = filter_runtime_env_for_gateway_parity(runtime_env)
-        secret_env_names = _profile_secret_env_names(profile_home_path)
-    except Exception:
+        thread_env = _profile_secret_thread_env(profile, profile_home_path)
+    except Exception as exc:
         log.debug(
-            "Failed to resolve profile env for %s profile %s; falling back to current env",
+            "Failed to resolve profile env for %s profile %s",
             purpose,
             profile,
             exc_info=True,
         )
-        yield
-        return
+        raise RuntimeError(
+            f"Cannot safely run {purpose} for profile {profile!r}: "
+            "profile environment resolution failed."
+        ) from exc
 
-    thread_env = dict(safe_runtime_env)
+    thread_env.update(safe_runtime_env)
     thread_env["HERMES_HOME"] = str(profile_home_path)
-    # Hybrid profile routing: keep the broad runtime env in WebUI's thread-local
-    # channel for WebUI helpers, and also mirror it into process env for the
-    # worker body because several production Hermes readers still call
-    # os.getenv() directly for provider credentials.  Keep the _ENV_LOCK scope
-    # narrow: serialize only setup/restore, not the whole worker body.
-    skill_home_snapshot = None
-    old_runtime_env: dict[str, Optional[str]] = {}
-    old_hermes_home = None
-    had_hermes_home = False
     previous_thread_env = getattr(_thread_ctx, "env", {}).copy()
     previous_block_process_env = bool(
         getattr(_thread_ctx, "block_process_env_fallback", False)
@@ -1267,130 +1274,68 @@ def profile_env_for_background_worker(
     _scope_token = None
     _has_scope = False
     _secret_scope_mod = None
-    # #5567: context-local Hermes-home override (hermes-agent v0.18.0+). None on
-    # older agents → graceful no-op (falls back to the os.environ mirror below).
+    # #5567: context-local Hermes-home override (hermes-agent v0.18.0+).
     _home_override_mod = None
     _home_override_token = None
     _home_override_installed = False
-    has_profile_skill_home = False
-    should_restore_skill_modules = False
-    _acquired_skill_home_patch_lock = False
-    _acquired_profile_env_scope_lock = False
-    if not _shared_env_scope_held:
-        _PROFILE_ENV_SCOPE_LOCK.acquire()
-        _acquired_profile_env_scope_lock = True
     try:
         _set_thread_env(**thread_env)
         _thread_ctx.block_process_env_fallback = True
         _secret_scope_mod = _resolve_secret_scope_module()
-        _scope_token = None
-        _has_scope = False
+        if _secret_scope_mod is None and _HERMES_FOUND:
+            raise RuntimeError(
+                f"Cannot safely run {purpose} for profile {profile!r}: "
+                "the installed Hermes Agent lacks context-local secret scopes."
+            )
         if _secret_scope_mod is not None:
             try:
                 _scope_token = _secret_scope_mod.set_secret_scope(thread_env)
                 _has_scope = True
-            except Exception:
-                pass
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Cannot safely run {purpose} for profile {profile!r}: "
+                    "the context-local secret scope could not be installed."
+                ) from exc
         # #5567: install the context-local Hermes-home override so the agent
         # config reader (get_hermes_home -> get_config_path/load_config) resolves
         # THIS profile's home from task-local state, immune to a concurrent
         # cross-profile os.environ["HERMES_HOME"] clobber during the worker body.
-        # No-op on agents < v0.18.0 (resolver returns None) → os.environ mirror
-        # below remains the behavior, exactly as today.
+        # Older agents cannot isolate concurrent profiles without global state.
         _home_override_mod = _resolve_hermes_home_override()
+        if _home_override_mod is None and _HERMES_FOUND:
+            raise RuntimeError(
+                f"Cannot safely run {purpose} for profile {profile!r}: "
+                "the installed Hermes Agent lacks a context-local home override."
+            )
         if _home_override_mod is not None:
             try:
                 _home_override_token = _home_override_mod.set_hermes_home_override(
                     str(profile_home_path)
                 )
                 _home_override_installed = True
-            except Exception:
-                _home_override_token = None
-                _home_override_installed = False
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Cannot safely run {purpose} for profile {profile!r}: "
+                    "the context-local home override could not be installed."
+                ) from exc
 
-        if scope_skill_modules:
-            if _home_override_mod is not None and _home_override_installed:
-                try:
-                    has_profile_skill_home = _skill_modules_support_profile_home(
-                        profile_home_path
-                    )
-                except Exception:
-                    logger.debug(
-                        "Failed to evaluate profile-home skill module capability for %s in %s",
-                        profile,
-                        purpose,
-                        exc_info=True,
-                    )
-                    has_profile_skill_home = False
-
-            # #5567-fallback: if override is unavailable, or module-side
-            # profile resolution is missing/failed, serialize the full worker
-            # lifespan under the shared legacy patch lock.
-            should_restore_skill_modules = not (
-                _home_override_installed and has_profile_skill_home
-            )
-            if should_restore_skill_modules:
-                _SKILL_HOME_MODULE_PATCH_LOCK.acquire()
-                _acquired_skill_home_patch_lock = True
-
-        if not _shared_env_scope_held:
-            with _ENV_LOCK:
-                if scope_skill_modules and should_restore_skill_modules:
-                    # Snapshot and patch before mutating process env so setup
-                    # failures can unwind without leaking either state.
-                    skill_home_snapshot = snapshot_skill_home_modules()
-                    patch_skill_home_modules(profile_home_path)
-
-                old_runtime_env = _apply_profile_env_to_process(
-                    os.environ,
-                    safe_runtime_env,
-                    secret_env_names=secret_env_names,
-                )
-                had_hermes_home = "HERMES_HOME" in os.environ
-                old_hermes_home = os.environ.get("HERMES_HOME")
-                os.environ.update(safe_runtime_env)
-                os.environ["HERMES_HOME"] = str(profile_home_path)
         yield
     finally:
-        try:
-            if not _shared_env_scope_held:
-                with _ENV_LOCK:
-                    for key, old_value in old_runtime_env.items():
-                        if old_value is None:
-                            os.environ.pop(key, None)
-                        else:
-                            os.environ[key] = old_value
-                    if had_hermes_home:
-                        os.environ["HERMES_HOME"] = old_hermes_home or ""
-                    else:
-                        os.environ.pop("HERMES_HOME", None)
-                    if should_restore_skill_modules and skill_home_snapshot is not None:
-                        restore_skill_home_modules(skill_home_snapshot)
-        finally:
-            if _acquired_skill_home_patch_lock:
-                _SKILL_HOME_MODULE_PATCH_LOCK.release()
-                _acquired_skill_home_patch_lock = False
-            # Reset context-local state after the fallback globals are restored.
-            if _home_override_mod is not None and _home_override_installed:
-                try:
-                    _home_override_mod.reset_hermes_home_override(_home_override_token)
-                except Exception:
-                    pass
-            if _has_scope and _secret_scope_mod is not None:
-                try:
-                    _secret_scope_mod.reset_secret_scope(_scope_token)
-                except Exception:
-                    pass
+        if _home_override_mod is not None and _home_override_installed:
             try:
-                _thread_ctx.block_process_env_fallback = previous_block_process_env
-                if previous_thread_env:
-                    _set_thread_env(**previous_thread_env)
-                else:
-                    _clear_thread_env()
-            finally:
-                if _acquired_profile_env_scope_lock:
-                    _PROFILE_ENV_SCOPE_LOCK.release()
-                    _acquired_profile_env_scope_lock = False
+                _home_override_mod.reset_hermes_home_override(_home_override_token)
+            except Exception:
+                pass
+        if _has_scope and _secret_scope_mod is not None:
+            try:
+                _secret_scope_mod.reset_secret_scope(_scope_token)
+            except Exception:
+                pass
+        _thread_ctx.block_process_env_fallback = previous_block_process_env
+        if previous_thread_env:
+            _set_thread_env(**previous_thread_env)
+        else:
+            _clear_thread_env()
 
 
 @contextmanager
@@ -1414,12 +1359,14 @@ def profile_env_for_active_request_readonly(
     agent-side auth-store reads stay on the active profile without mutating
     process-global ``os.environ``.
 
-    No-ops for the default/root profile, which is the common single-profile
-    deployment case.
+    Root/default reads use the same complete startup-owned overlay as detached
+    workers. ``isolate_root`` remains accepted for call-site compatibility.
     """
     profile = (get_active_profile_name() or "").strip()
-    if (not profile or _is_root_profile(profile)) and not isolate_root:
-        with _PROFILE_ENV_SCOPE_LOCK:
+    if not profile or _is_root_profile(profile):
+        with profile_env_for_background_worker(
+            "default", purpose, logger_override=logger_override
+        ):
             yield
         return
     try:
@@ -1509,12 +1456,7 @@ def profile_env_for_active_request(
     purpose: str = "active request",
     logger_override: Optional[logging.Logger] = None,
 ):
-    """Apply the active per-request profile through the legacy mirrored path.
-
-    Some request-scoped readers still delegate into Hermes helpers that resolve
-    credentials directly from process env or ``get_hermes_home()``. Those paths
-    stay on the mirrored scope until they are fully audited.
-    """
+    """Apply the active per-request profile through context-local Agent state."""
     profile = (get_active_profile_name() or "").strip()
     with profile_env_for_background_worker(
         profile, purpose, logger_override=logger_override
@@ -1546,7 +1488,7 @@ def profile_scope_for_detached_worker(
     purpose: str = "detached worker",
     logger_override: Optional[logging.Logger] = None,
 ):
-    """Bind BOTH the per-request profile TLS and profile env for worker-owned work (#3957).
+    """Bind the per-request profile TLS and context-local env for worker-owned work (#3957).
 
     A detached worker thread (e.g. the ``models-catalog-rebuild`` daemon that
     ``get_available_models`` spawns for a bounded rebuild) inherits neither the
@@ -1555,33 +1497,23 @@ def profile_scope_for_detached_worker(
       - profile-keyed paths (``_get_models_cache_path`` / ``_get_config_path`` /
         ``_get_auth_store_path`` / ``_models_cache_source_fingerprint``) read the
         per-request profile via ``get_active_profile_name()`` — needs the TLS;
-      - credential lookups (``provider_model_ids`` / ``_lookup_custom_api_key_env``)
-        read ``os.environ`` — needs the profile ``.env`` applied.
+      - credential lookups use the profile's context-local secret scope.
 
     Pass the profile name CAPTURED on the spawning thread (where the TLS is
     valid) into the worker, then enter this scope at the top of the worker body.
     It sets the request-profile TLS for this (worker) thread and applies the
     profile env via ``profile_env_for_background_worker``, restoring both on exit.
-    No-op for the default/root profile.
-
     Unlike ``profile_env_for_active_request`` (which reads the *current* thread's
     TLS and must NOT clear it — the request thread keeps using it after the call),
     this sets and then CLEARS the TLS, which is correct for a dedicated worker
     thread that has no other use for it.
     """
-    name = (profile_name or "").strip()
-    if not name:
-        yield
-        return
+    name = (profile_name or "").strip() or "default"
     with profile_identity_for_detached_worker(name):
-        if _is_root_profile(name):
-            with _PROFILE_ENV_SCOPE_LOCK:
-                yield
-        else:
-            with profile_env_for_background_worker(
-                name, purpose, logger_override=logger_override
-            ):
-                yield
+        with profile_env_for_background_worker(
+            name, purpose, logger_override=logger_override
+        ):
+            yield
 
 
 def _set_hermes_home(home: Path):

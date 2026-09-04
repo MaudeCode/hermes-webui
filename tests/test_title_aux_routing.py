@@ -725,13 +725,12 @@ class TestReasoningModelTitleGeneration(unittest.TestCase):
 
 
 class TestBackgroundTitleProfileRouting(unittest.TestCase):
-    def test_profile_env_context_logs_fail_open_resolution_errors(self):
-        """Profile env setup failures should be diagnosable without breaking workers."""
+    def test_profile_env_context_fails_closed_on_resolution_errors(self):
+        """Profile env setup failures are diagnosable and never use ambient state."""
         import api.profiles as profiles
 
         session = types.SimpleNamespace(profile='work')
-        captured = {}
-
+        original_home = os.environ.get('HERMES_HOME')
         with patch.object(
             profiles,
             'get_hermes_home_for_profile',
@@ -739,14 +738,15 @@ class TestBackgroundTitleProfileRouting(unittest.TestCase):
         ):
             with patch.dict(os.environ, {'HERMES_HOME': 'default-home'}, clear=False):
                 with self.assertLogs('api.profiles', level='DEBUG') as logs:
-                    with profiles.profile_env_for_background_worker(session, 'background title'):
-                        captured['HERMES_HOME'] = os.environ.get('HERMES_HOME')
+                    with self.assertRaisesRegex(RuntimeError, 'profile environment resolution failed'):
+                        with profiles.profile_env_for_background_worker(session, 'background title'):
+                            self.fail('unsafe profile scope entered')
 
         message_found = any(
             'Failed to resolve profile env for background title profile work' in record.getMessage()
             for record in logs.records
         )
-        self.assertEqual(captured['HERMES_HOME'], 'default-home')
+        self.assertEqual(os.environ.get('HERMES_HOME'), original_home)
         self.assertTrue(message_found)
         self.assertTrue(any(record.exc_info for record in logs.records))
 
@@ -815,6 +815,8 @@ class TestBackgroundTitleProfileRouting(unittest.TestCase):
 
         def fake_aux_title(*args, **kwargs):
             captured['hermes_home'] = os.environ.get('HERMES_HOME')
+            from api.config import _thread_ctx
+            captured['thread_home'] = getattr(_thread_ctx, 'env', {}).get('HERMES_HOME')
             captured['skill_module_home'] = getattr(fake_skill_module, 'HERMES_HOME')
             captured['skill_module_dir'] = getattr(fake_skill_module, 'SKILLS_DIR')
             return ('Profile Routed Title', 'llm_aux', '')
@@ -839,19 +841,17 @@ class TestBackgroundTitleProfileRouting(unittest.TestCase):
             else:
                 sys.modules['tools.skills_tool'] = original_skill_module
 
-        self.assertEqual(captured.get('hermes_home'), 'profile-home')
-        self.assertEqual(str(captured.get('skill_module_home')), 'profile-home')
-        self.assertEqual(
-            Path(str(captured.get('skill_module_dir'))),
-            Path('profile-home') / 'skills',
-        )
+        self.assertEqual(captured.get('hermes_home'), 'default-home')
+        self.assertEqual(captured.get('thread_home'), 'profile-home')
+        self.assertEqual(captured.get('skill_module_home'), 'default-home')
+        self.assertEqual(captured.get('skill_module_dir'), 'default-home/skills')
         self.assertEqual(captured.get('restored_hermes_home'), 'default-home')
         self.assertEqual(fake_skill_module.HERMES_HOME, 'default-home')
         self.assertEqual(fake_skill_module.SKILLS_DIR, 'default-home/skills')
         self.assertEqual(mock_session.title, 'Profile Routed Title')
 
     def test_background_profile_env_routes_load_config_and_provider_credentials(self):
-        """Hybrid worker env must satisfy config and os.getenv provider-key readers."""
+        """Context-local worker state must satisfy config and credential readers."""
         import tempfile
 
         import pytest
@@ -886,11 +886,12 @@ class TestBackgroundTitleProfileRouting(unittest.TestCase):
                         os.environ.pop('PROFILE_ONLY_KEY', None)
                         hermes_config._LOAD_CONFIG_CACHE.clear()
                         with profiles.profile_env_for_background_worker(session, 'background title'):
+                            from agent.secret_scope import get_secret
                             loaded = hermes_config.load_config()
                             captured['loaded_provider'] = loaded.get('model', {}).get('provider')
                             captured['process_home'] = os.environ.get('HERMES_HOME')
                             captured['process_runtime_key'] = os.environ.get('PROFILE_ONLY_KEY')
-                            captured['provider_credential'] = os.getenv('OPENROUTER_API_KEY')
+                            captured['provider_credential'] = get_secret('OPENROUTER_API_KEY')
                             captured['thread_home'] = getattr(_thread_ctx, 'env', {}).get('HERMES_HOME')
                             captured['thread_runtime_key'] = getattr(_thread_ctx, 'env', {}).get('PROFILE_ONLY_KEY')
                         captured['restored_home'] = os.environ.get('HERMES_HOME')
@@ -899,8 +900,8 @@ class TestBackgroundTitleProfileRouting(unittest.TestCase):
                         hermes_config._LOAD_CONFIG_CACHE.clear()
 
         self.assertEqual(captured['loaded_provider'], 'profile-provider')
-        self.assertEqual(captured['process_home'], profile_home)
-        self.assertEqual(captured['process_runtime_key'], 'profile-only')
+        self.assertEqual(captured['process_home'], default_home)
+        self.assertIsNone(captured['process_runtime_key'])
         self.assertEqual(captured['provider_credential'], 'profile-openrouter-key')
         self.assertEqual(captured['thread_home'], profile_home)
         self.assertEqual(captured['thread_runtime_key'], 'profile-only')

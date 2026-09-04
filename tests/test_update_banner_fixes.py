@@ -1771,18 +1771,18 @@ class TestUpdateSummaryRouteModelSelection:
         assert payload['generated_by'] == 'llm'
         assert captured['aux_task'] == 'compression'
         assert captured['model_resolution_env'] == {
-            'HERMES_HOME': str(profile_home),
-            'HERMES_TEST_PROFILE_ENV': 'work-runtime',
+            'HERMES_HOME': 'default-home',
+            'HERMES_TEST_PROFILE_ENV': 'default-runtime',
             'THREAD_HERMES_HOME': str(profile_home),
             'THREAD_HERMES_TEST_PROFILE_ENV': 'work-runtime',
         }
         assert captured['aux_env'] == {
-            'HERMES_HOME': str(profile_home),
-            'HERMES_TEST_PROFILE_ENV': 'work-runtime',
+            'HERMES_HOME': 'default-home',
+            'HERMES_TEST_PROFILE_ENV': 'default-runtime',
             'THREAD_HERMES_HOME': str(profile_home),
             'THREAD_HERMES_TEST_PROFILE_ENV': 'work-runtime',
-            'SKILL_MODULE_HOME': profile_home,
-            'SKILL_MODULE_DIR': profile_home / 'skills',
+            'SKILL_MODULE_HOME': 'default-home',
+            'SKILL_MODULE_DIR': 'default-home/skills',
         }
         assert captured['aux_create']['model'] == 'profile-compression-model'
         assert fake_skill_module.HERMES_HOME == 'default-home'

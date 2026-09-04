@@ -286,8 +286,8 @@ def test_active_request_scope_restores_state_when_home_reset_fails(monkeypatch, 
         profiles.clear_request_profile()
 
 
-def test_active_request_legacy_scope_still_mirrors_process_env(monkeypatch, tmp_path):
-    """Live-model request scope still mirrors env for agent-side readers."""
+def test_active_request_scope_keeps_profile_env_context_local(monkeypatch, tmp_path):
+    """Live-model request scope does not mutate the process environment."""
     base = tmp_path / ".hermes"
     (base / "profiles" / "work").mkdir(parents=True)
     (base / "profiles" / "work" / ".env").write_text(
@@ -299,7 +299,8 @@ def test_active_request_legacy_scope_still_mirrors_process_env(monkeypatch, tmp_
     profiles.set_request_profile("work")
     try:
         with profiles.profile_env_for_active_request("test"):
-            assert os.environ.get("ISSUE_3957_PROBE") == "from-work-profile"
+            assert os.environ.get("ISSUE_3957_PROBE") == "from-process-env"
+            assert config._thread_local_env_value("ISSUE_3957_PROBE") == "from-work-profile"
         assert os.environ.get("ISSUE_3957_PROBE") == "from-process-env"
     finally:
         profiles.clear_request_profile()
@@ -364,11 +365,10 @@ def test_providers_and_models_routes_wrap_in_profile_env():
     reintroduce the bug, so pin it at the source level.
       - /api/providers and /api/provider/quota wrap the synchronous read in
         profile_env_for_active_request_readonly.
-      - /api/models/live stays on the mirrored profile_env_for_active_request
-        path because provider_model_ids() still delegates into agent helpers
-        that read process env / HERMES_HOME directly.
-      - /api/models relies on get_available_models() using the mirrored request
-        scope for the budget<=0 sync rebuild plus profile_scope_for_detached_worker
+      - /api/models/live uses profile_env_for_active_request so Agent helpers
+        receive context-local profile state.
+      - /api/models relies on get_available_models() using the request scope for
+        the budget<=0 sync rebuild plus profile_scope_for_detached_worker
         for the detached rebuild worker (the request-thread wrapper cannot reach
         the worker thread — Codex CORE finding).
     """
@@ -383,8 +383,8 @@ def test_providers_and_models_routes_wrap_in_profile_env():
     assert "_get_models_cache_path" in config_src
 
 
-def test_models_sync_rebuild_uses_legacy_mirrored_env(monkeypatch, tmp_path):
-    """The budget<=0 sync rebuild still mirrors profile env into os.environ."""
+def test_models_sync_rebuild_uses_context_local_profile_env(monkeypatch, tmp_path):
+    """The budget<=0 sync rebuild leaves process env unchanged."""
     base = tmp_path / ".hermes"
     (base / "profiles" / "work").mkdir(parents=True)
     (base / "profiles" / "work" / ".env").write_text(
@@ -415,7 +415,7 @@ def test_models_sync_rebuild_uses_legacy_mirrored_env(monkeypatch, tmp_path):
     finally:
         profiles.clear_request_profile()
 
-    assert seen["process_env"] == "from-work-profile"
+    assert seen["process_env"] == "from-process-env"
     assert seen["thread_env"] == "from-work-profile"
     assert os.environ.get("ISSUE_3957_PROBE") == "from-process-env"
     assert result["groups"] == []
@@ -467,7 +467,7 @@ def test_isolated_root_readonly_scope_does_not_wait_or_inherit_named_env(
 
     def hold_named_env():
         with profiles.profile_env_for_background_worker(
-            "alpha", "named holder", scope_skill_modules=False
+            "alpha", "named holder"
         ):
             holder_ready.set()
             release_holder.wait(2)
@@ -522,6 +522,9 @@ def test_detached_worker_scope_binds_profile_on_new_thread(monkeypatch, tmp_path
         with profiles.profile_scope_for_detached_worker("work", "test-worker"):
             out["inside_name"] = config._get_models_cache_path().name
             out["inside_env"] = os.environ.get("ISSUE_3957_WPROBE")
+            out["inside_thread_env"] = config._thread_local_env_value(
+                "ISSUE_3957_WPROBE"
+            )
         out["after_name"] = config._get_models_cache_path().name
         out["after_env"] = os.environ.get("ISSUE_3957_WPROBE")
 
@@ -532,7 +535,8 @@ def test_detached_worker_scope_binds_profile_on_new_thread(monkeypatch, tmp_path
     assert out["before_name"] == "models_cache.json"  # default (no scope)
     assert out["before_env"] is None
     assert out["inside_name"] == "models_cache.work.json"  # profile-scoped
-    assert out["inside_env"] == "worker-env"
+    assert out["inside_env"] is None
+    assert out["inside_thread_env"] == "worker-env"
     assert out["after_name"] == "models_cache.json"  # restored
     assert out["after_env"] is None
 
@@ -579,7 +583,7 @@ def test_detached_worker_scope_blocks_pool_env_seed(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENROUTER_API_KEY", "from-process-env")
 
     with profiles.profile_scope_for_detached_worker("work", "test-worker"):
-        assert os.environ.get("OPENROUTER_API_KEY") is None
+        assert os.environ.get("OPENROUTER_API_KEY") == "from-process-env"
         assert config._has_explicit_pool_credentials("openrouter") is False
         assert getattr(config._thread_ctx, "block_process_env_fallback", False) is True
 
@@ -588,8 +592,8 @@ def test_detached_worker_scope_blocks_pool_env_seed(monkeypatch, tmp_path):
     assert (work_home / "auth.json").exists() is False
 
 
-def test_detached_worker_scope_scrubs_absent_custom_provider_key_env(monkeypatch, tmp_path):
-    """Detached worker scope clears missing custom-provider key_env fallbacks too."""
+def test_detached_worker_scope_blocks_absent_custom_provider_key_env(monkeypatch, tmp_path):
+    """Detached worker state blocks missing custom-provider key fallbacks."""
     base = tmp_path / ".hermes"
     work_home = base / "profiles" / "work"
     work_home.mkdir(parents=True)
@@ -604,7 +608,7 @@ def test_detached_worker_scope_scrubs_absent_custom_provider_key_env(monkeypatch
     monkeypatch.setenv("ISSUE_3957_CUSTOM_KEY", "from-process-env")
 
     with profiles.profile_scope_for_detached_worker("work", "test-worker"):
-        assert os.environ.get("ISSUE_3957_CUSTOM_KEY") is None
+        assert os.environ.get("ISSUE_3957_CUSTOM_KEY") == "from-process-env"
         assert config._thread_local_env_value("ISSUE_3957_CUSTOM_KEY") == ""
 
     assert os.environ.get("ISSUE_3957_CUSTOM_KEY") == "from-process-env"
@@ -739,7 +743,7 @@ def test_detached_worker_scope_installs_secret_scope(monkeypatch, tmp_path):
 
     # Verify the scope was set with profile env only
     assert "set_scope" in call_log
-    assert "OPENROUTER_API_KEY" not in call_log["set_scope"]
+    assert call_log["set_scope"]["OPENROUTER_API_KEY"] == ""
     assert "HERMES_HOME" in call_log["set_scope"]
     # Verify reset was called
     assert call_log.get("reset_called") is True
@@ -828,11 +832,9 @@ def test_account_usage_subprocess_env_strips_anthropic_token_aliases(monkeypatch
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
 
 
-def test_detached_worker_scope_scrubs_anthropic_token_aliases(monkeypatch, tmp_path):
-    """Detached/sync model-rebuild scope must scrub the process-default Anthropic
-    OAuth/token env vars too — verified agent model code can resolve Anthropic
-    models through raw os.getenv() of these names, so an empty named profile
-    must not see the server-process token (#3961 detached-worker leak)."""
+def test_detached_worker_scope_blocks_anthropic_token_aliases(monkeypatch, tmp_path):
+    """Detached model rebuilds block process-default Anthropic aliases in their
+    context-local profile view while leaving process state untouched."""
     base = tmp_path / ".hermes"
     work_home = base / "profiles" / "work"
     work_home.mkdir(parents=True)
@@ -841,8 +843,8 @@ def test_detached_worker_scope_scrubs_anthropic_token_aliases(monkeypatch, tmp_p
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "process-default-oauth-token")
 
     with profiles.profile_scope_for_detached_worker("work", "test-worker"):
-        assert os.environ.get("ANTHROPIC_TOKEN") is None
-        assert os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") is None
+        assert os.environ.get("ANTHROPIC_TOKEN") == "process-default-anthropic-token"
+        assert os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") == "process-default-oauth-token"
         assert config._thread_local_env_value("ANTHROPIC_TOKEN") == ""
         assert config._thread_local_env_value("CLAUDE_CODE_OAUTH_TOKEN") == ""
 
@@ -881,11 +883,9 @@ def test_account_usage_subprocess_env_strips_non_registry_agent_creds(monkeypatc
     assert "AWS_CONTAINER_CREDENTIALS_FULL_URI" not in env
 
 
-def test_detached_worker_scope_scrubs_non_registry_agent_creds(monkeypatch, tmp_path):
-    """Detached/sync model-rebuild scope must scrub the non-registry agent
-    credential env vars (CUSTOM_API_KEY, AWS/Bedrock family) too — the agent's
-    custom-provider and bedrock-adapter paths resolve them via raw os.getenv(),
-    so an empty named profile must not see the server-process value (#3961)."""
+def test_detached_worker_scope_blocks_non_registry_agent_creds(monkeypatch, tmp_path):
+    """Detached model rebuilds block non-registry process credentials in their
+    context-local profile view while leaving process state untouched."""
     base = tmp_path / ".hermes"
     work_home = base / "profiles" / "work"
     work_home.mkdir(parents=True)
@@ -899,13 +899,13 @@ def test_detached_worker_scope_scrubs_non_registry_agent_creds(monkeypatch, tmp_
     monkeypatch.setenv("MSI_ENDPOINT", "http://169.254.169.254/msi")
 
     with profiles.profile_scope_for_detached_worker("work", "test-worker"):
-        assert os.environ.get("CUSTOM_API_KEY") is None
-        assert os.environ.get("AWS_PROFILE") is None
-        assert os.environ.get("AWS_SECRET_ACCESS_KEY") is None
-        assert os.environ.get("AZURE_CLIENT_SECRET") is None
-        assert os.environ.get("AZURE_FOUNDRY_API_KEY") is None
-        assert os.environ.get("IDENTITY_ENDPOINT") is None
-        assert os.environ.get("MSI_ENDPOINT") is None
+        assert os.environ.get("CUSTOM_API_KEY") == "process-default-custom-key"
+        assert os.environ.get("AWS_PROFILE") == "process-default-aws-profile"
+        assert os.environ.get("AWS_SECRET_ACCESS_KEY") == "process-default-aws-secret"
+        assert os.environ.get("AZURE_CLIENT_SECRET") == "process-default-azure-secret"
+        assert os.environ.get("AZURE_FOUNDRY_API_KEY") == "process-default-foundry-key"
+        assert os.environ.get("IDENTITY_ENDPOINT") == "http://169.254.169.254/msi"
+        assert os.environ.get("MSI_ENDPOINT") == "http://169.254.169.254/msi"
         assert config._thread_local_env_value("CUSTOM_API_KEY") == ""
 
     assert os.environ.get("CUSTOM_API_KEY") == "process-default-custom-key"
