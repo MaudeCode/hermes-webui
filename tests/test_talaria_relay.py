@@ -303,6 +303,8 @@ def test_blocked_candidate_publish_does_not_hold_publisher_registry_lock(monkeyp
             assert release_publish.wait(2)
 
         def note_terminal(self, _stream_id, _phase):
+            with self._terminal_lock:
+                self._terminal[_stream_id] = {"relay_phase": _phase}
             terminal_noted.set()
 
         def start(self, *, publish_initial):
@@ -337,6 +339,7 @@ def test_blocked_candidate_publish_does_not_hold_publisher_registry_lock(monkeyp
     noting.join(1)
 
     assert progressed_while_publish_blocked is True
+    assert talaria_relay._publisher._terminal["stream"]["relay_phase"] == "completed"
 
 
 def test_publisher_reconfiguration_preserves_unpublished_terminal_state(monkeypatch):

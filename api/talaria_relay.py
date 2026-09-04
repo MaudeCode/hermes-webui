@@ -723,8 +723,17 @@ def configure_talaria_relay_publisher(
             except Exception:
                 pass
             raise RelayPairingError("Could not start the Talaria Relay publisher", status=502) from exc
+        if previous is not None:
+            # Close the validation-to-swap window: terminal events may have
+            # arrived on the still-current publisher while candidate I/O ran.
+            with previous._terminal_lock, candidate._terminal_lock:
+                candidate._terminal.update(previous._terminal)
+            with previous._revision_lock, candidate._revision_lock:
+                candidate._last_revision = max(candidate._last_revision, previous._last_revision)
         with _publisher_lock:
             _publisher = candidate
+        if callable(candidate.changed):
+            candidate.changed()
         if previous is not None:
             from api.session_events import remove_session_list_changed_listener
             remove_session_list_changed_listener(previous.changed)
@@ -749,3 +758,7 @@ def note_talaria_terminal(stream_id: str, phase: str) -> None:
         publisher = _publisher
     if publisher is not None and phase in ("completed", "failed", "cancelled"):
         publisher.note_terminal(stream_id, phase)
+        with _publisher_lock:
+            current = _publisher
+        if current is not None and current is not publisher:
+            current.note_terminal(stream_id, phase)
