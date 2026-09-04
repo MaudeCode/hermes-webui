@@ -2945,6 +2945,7 @@ from api.config import (
     register_active_run,
     update_active_run,
     note_chat_admission_timeout,
+    note_chat_finalization_timeout,
     register_stream_owner,
     register_session_writeback_owner,
     clear_session_writeback_owner_if_owned,
@@ -24002,7 +24003,9 @@ def _chat_writeback_timeout_response() -> dict:
 
 
 @contextmanager
-def _bounded_chat_admission_lock(session_id: str, lock, timeout=None):
+def _bounded_chat_admission_lock(
+    session_id: str, lock, timeout=None, *, finalization: bool = False
+):
     """Expose and bound route-layer waiting for the session write lock."""
     wait_seconds = _CHAT_LOCK_WAIT_SECONDS if timeout is None else timeout
     admission_id = f"admission-{uuid.uuid4().hex}"
@@ -24021,8 +24024,14 @@ def _bounded_chat_admission_lock(session_id: str, lock, timeout=None):
     try:
         with _try_acquire_chat_lock(lock, wait_seconds) as acquired:
             if not acquired:
-                update_active_run(admission_id, phase="admission_blocked")
-                note_chat_admission_timeout()
+                update_active_run(
+                    admission_id,
+                    phase=("finalization_blocked" if finalization else "admission_blocked"),
+                )
+                if finalization:
+                    note_chat_finalization_timeout()
+                else:
+                    note_chat_admission_timeout()
             else:
                 unregister_active_run(admission_id)
                 registered = False
@@ -26039,7 +26048,8 @@ def _handle_chat_sync(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
     with _bounded_chat_admission_lock(
-        s.session_id, _get_session_agent_lock(s.session_id)
+        s.session_id,
+        _get_session_agent_lock(s.session_id),
     ) as acquired:
         if not acquired:
             response = _chat_admission_timeout_response()
@@ -26229,7 +26239,9 @@ def _handle_chat_sync(handler, body):
                 persist_user_message=msg,
             )
     with _bounded_chat_admission_lock(
-        s.session_id, _get_session_agent_lock(s.session_id)
+        s.session_id,
+        _get_session_agent_lock(s.session_id),
+        finalization=True,
     ) as acquired:
         if not acquired:
             response = _chat_writeback_timeout_response()

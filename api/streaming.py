@@ -2577,12 +2577,25 @@ def _finalize_cancelled_turn(
     if ephemeral:
         _cleanup_ephemeral_cancelled_turn(session)
         return True
+    previous_state = {
+        "messages": copy.deepcopy(getattr(session, "messages", None)),
+        "active_stream_id": getattr(session, "active_stream_id", None),
+        "pending_user_message": getattr(session, "pending_user_message", None),
+        "pending_attachments": copy.deepcopy(
+            getattr(session, "pending_attachments", None)
+        ),
+        "pending_started_at": getattr(session, "pending_started_at", None),
+        "pending_user_source": getattr(session, "pending_user_source", None),
+    }
     if not _persist_cancelled_turn(session, message=message, stream_id=stream_id):
         return False
     try:
         session.save()
     except Exception:
         logger.debug("Failed to persist cancelled turn", exc_info=True)
+        for field, value in previous_state.items():
+            setattr(session, field, value)
+        return False
     return True
 
 def _aiagent_import_error_detail() -> str:

@@ -1741,7 +1741,17 @@ def _run_gateway_chat_streaming(
             # before success writeback. Treat it as cancellation so any
             # credential-exhausted process-wakeup pause stays in place.
             if cancel_event.is_set():
-                put_gateway_event("cancel", {"message": "Cancelled by user"})
+                from api.streaming import _finalize_cancelled_turn
+
+                terminal_writeback_committed = _finalize_cancelled_turn(
+                    s, ephemeral=False, stream_id=stream_id
+                )
+                if terminal_writeback_committed:
+                    put_gateway_event("cancel", {"message": "Cancelled by user"})
+                else:
+                    put_gateway_event(
+                        "apperror", _gateway_writeback_timeout_payload(session_id)
+                    )
                 return
             now = time.time()
             # Preserve subsecond ordering for gateway-backed turns. Using an

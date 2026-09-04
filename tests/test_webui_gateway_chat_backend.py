@@ -880,6 +880,38 @@ def test_gateway_terminal_cancel_durably_clears_pending_turn(tmp_path, monkeypat
     )
 
 
+def test_gateway_terminal_cancel_save_failure_retains_pending_turn(tmp_path, monkeypatch):
+    from api import config
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    session = new_session()
+    stream_id = "stream-gateway-cancel-save-failure"
+    session.active_stream_id = stream_id
+    session.pending_user_message = "Recoverable cancelled prompt"
+    session.pending_started_at = time.time()
+    session.save()
+    monkeypatch.setattr(
+        session,
+        "save",
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    config.register_session_writeback_owner(session.session_id, stream_id)
+    try:
+        assert gateway_chat._settle_gateway_terminal_cancel(
+            session.session_id, stream_id
+        ) is False
+    finally:
+        config.clear_session_writeback_owner_if_owned(session.session_id, stream_id)
+
+    assert session.active_stream_id == stream_id
+    assert session.pending_user_message == "Recoverable cancelled prompt"
+    assert session.messages == []
+
+
 def test_gateway_chat_worker_persists_reasoning_and_tool_state_on_terminal_error(tmp_path, monkeypatch):
     from unittest.mock import MagicMock
 

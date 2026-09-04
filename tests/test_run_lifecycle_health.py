@@ -271,6 +271,28 @@ def test_post_execution_writeback_timeout_is_not_retryable():
     assert response["outcome_unknown"] is True
 
 
+def test_synchronous_writeback_wait_records_finalization_not_admission(monkeypatch):
+    import threading
+    from api import config, routes
+
+    lock = threading.Lock()
+    lock.acquire()
+    config.LAST_CHAT_ADMISSION_TIMEOUT_AT = None
+    config.LAST_CHAT_FINALIZATION_TIMEOUT_AT = None
+    monkeypatch.setattr(routes, "_CHAT_LOCK_WAIT_SECONDS", 0.02)
+    try:
+        with routes._bounded_chat_admission_lock(
+            "sync-writeback", lock, finalization=True
+        ) as acquired:
+            assert acquired is False
+    finally:
+        lock.release()
+
+    assert config.LAST_CHAT_ADMISSION_TIMEOUT_AT is None
+    assert config.LAST_CHAT_FINALIZATION_TIMEOUT_AT is not None
+    config.LAST_CHAT_FINALIZATION_TIMEOUT_AT = None
+
+
 def test_worker_writeback_lock_timeout_emits_terminal_error(monkeypatch):
     import threading
     from api import config, routes, streaming
