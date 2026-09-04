@@ -13059,6 +13059,15 @@ def _run_lifecycle_health() -> dict:
     from api import config as _live_config
 
     now = time.time()
+    admission_timeout_age = (
+        max(0.0, now - float(_LAST_CHAT_ADMISSION_TIMEOUT_AT))
+        if _LAST_CHAT_ADMISSION_TIMEOUT_AT
+        else None
+    )
+    recent_admission_timeout = bool(
+        admission_timeout_age is not None
+        and admission_timeout_age < _CHAT_ADMISSION_HEALTH_WINDOW_SECONDS
+    )
     degraded_runs = 0
     with _live_config.ACTIVE_RUNS_LOCK:
         runs = []
@@ -13094,9 +13103,12 @@ def _run_lifecycle_health() -> dict:
         "active_runs": len(runs),
         "runs": runs,
         "last_run_finished_at": last_finished,
-        "status": "degraded" if degraded_runs else "ok",
+        "status": "degraded" if degraded_runs or recent_admission_timeout else "ok",
         "degraded_runs": degraded_runs,
     }
+    if recent_admission_timeout:
+        payload["recent_admission_timeout"] = True
+        payload["admission_timeout_age_seconds"] = round(admission_timeout_age, 1)
     if runs:
         payload["oldest_run_age_seconds"] = runs[0].get("age_seconds", 0.0)
     elif last_finished:
@@ -23914,9 +23926,24 @@ def _is_hidden_empty_session(s) -> bool:
     )
 
 
+_LAST_CHAT_ADMISSION_TIMEOUT_AT = None
+_CHAT_ADMISSION_HEALTH_WINDOW_SECONDS = 30.0
+
+
+def _chat_admission_timeout_response() -> dict:
+    return {
+        "error": "session is busy",
+        "code": "chat_admission_timeout",
+        "message": "Chat could not start because this session is busy. Try again shortly.",
+        "retryable": True,
+        "_status": 409,
+    }
+
+
 @contextmanager
 def _bounded_chat_admission_lock(session_id: str, lock, timeout=None):
     """Expose and bound route-layer waiting for the session write lock."""
+    global _LAST_CHAT_ADMISSION_TIMEOUT_AT
     wait_seconds = _CHAT_LOCK_WAIT_SECONDS if timeout is None else timeout
     admission_id = f"admission-{uuid.uuid4().hex}"
     started_at = time.time()
@@ -23932,6 +23959,7 @@ def _bounded_chat_admission_lock(session_id: str, lock, timeout=None):
         with _try_acquire_chat_lock(lock, wait_seconds) as acquired:
             if not acquired:
                 update_active_run(admission_id, phase="admission_blocked")
+                _LAST_CHAT_ADMISSION_TIMEOUT_AT = time.time()
             else:
                 unregister_active_run(admission_id)
                 registered = False
@@ -24429,13 +24457,7 @@ def _start_chat_stream_for_session(
     while True:
         with _bounded_chat_admission_lock(s.session_id, session_lock) as acquired:
             if not acquired:
-                return {
-                    "error": "session is busy",
-                    "code": "chat_admission_timeout",
-                    "message": "Chat could not start because this session is busy. Try again shortly.",
-                    "retryable": True,
-                    "_status": 409,
-                }
+                return _chat_admission_timeout_response()
             # Re-resolve under the same lock used by delete/draft/recovery.
             # A caller may hold a stale Session object captured before delete;
             # saving through that handle would recreate the sidecar/index and
@@ -25026,7 +25048,11 @@ def start_session_turn(
         prefer_cached_catalog=True,
     )
     _paused_wakeup_response = None
-    with _get_session_agent_lock(s.session_id):
+    with _bounded_chat_admission_lock(
+        s.session_id, _get_session_agent_lock(s.session_id)
+    ) as acquired:
+        if not acquired:
+            return _chat_admission_timeout_response()
         try:
             s = get_session(session_id)
         except KeyError:
@@ -25928,7 +25954,13 @@ def _handle_chat_sync(handler, body):
         workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
     except ValueError as e:
         return bad(handler, str(e))
-    with _get_session_agent_lock(s.session_id):
+    with _bounded_chat_admission_lock(
+        s.session_id, _get_session_agent_lock(s.session_id)
+    ) as acquired:
+        if not acquired:
+            response = _chat_admission_timeout_response()
+            response.pop("_status", None)
+            return j(handler, response, status=409)
         s.workspace = workspace
         _sync_requested_provider = (
             body.get("model_provider") if "model_provider" in body else getattr(s, "model_provider", None)

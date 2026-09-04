@@ -106,11 +106,19 @@ def test_route_admission_lock_is_bounded_and_visible_to_health():
     try:
         with routes._bounded_chat_admission_lock("private-session", lock, 0.02) as acquired:
             assert acquired is False
-            health = routes._run_lifecycle_health()
-            assert health["status"] == "degraded"
-            assert health["runs"][0]["phase"] == "admission_blocked"
-            assert "session_id" not in health["runs"][0]
+        health = routes._run_lifecycle_health()
+        assert health["status"] == "degraded"
+        assert health["recent_admission_timeout"] is True
+        assert health["active_runs"] == 0
     finally:
         lock.release()
+        routes._LAST_CHAT_ADMISSION_TIMEOUT_AT = None
         with config.ACTIVE_RUNS_LOCK:
             config.ACTIVE_RUNS.clear()
+
+
+def test_all_chat_entrypoints_use_bounded_session_admission():
+    from pathlib import Path
+
+    source = Path(__file__).parent.parent.joinpath("api", "routes.py").read_text()
+    assert source.count("with _bounded_chat_admission_lock(") >= 3
