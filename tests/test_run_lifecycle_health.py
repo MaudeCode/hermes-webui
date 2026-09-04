@@ -1,6 +1,10 @@
 """Regression coverage for restart-safety run lifecycle reporting."""
 
+import io
 import time
+from types import SimpleNamespace
+
+import pytest
 
 
 def test_health_counts_active_runs_even_when_no_sse_streams():
@@ -117,8 +121,100 @@ def test_route_admission_lock_is_bounded_and_visible_to_health():
             config.ACTIVE_RUNS.clear()
 
 
-def test_all_chat_entrypoints_use_bounded_session_admission():
-    from pathlib import Path
+@pytest.mark.parametrize("entrypoint", ["stream", "wakeup", "sync"])
+def test_all_chat_entrypoints_timeout_on_held_session_lock(
+    monkeypatch, tmp_path, entrypoint
+):
+    import threading
+    from api import config, routes
 
-    source = Path(__file__).parent.parent.joinpath("api", "routes.py").read_text()
-    assert source.count("with _bounded_chat_admission_lock(") >= 3
+    session = SimpleNamespace(
+        session_id=f"bounded-{entrypoint}",
+        pre_compression_snapshot=False,
+        active_stream_id=None,
+        pending_user_message=None,
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider=None,
+        title="Bounded",
+        messages=[],
+    )
+    held = threading.Lock()
+    held.acquire()
+    monkeypatch.setattr(routes, "_CHAT_LOCK_WAIT_SECONDS", 0.02)
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: held)
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_kwargs: None)
+    monkeypatch.setattr(routes, "get_session", lambda _sid: session)
+    monkeypatch.setattr(
+        routes, "_resolve_chat_workspace_with_recovery", lambda *_args: str(tmp_path)
+    )
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: value)
+    monkeypatch.setattr(
+        routes, "_read_profile_model_config", lambda *_args: (None, None, {})
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda *_args, **_kwargs: ("test-model", None, False),
+    )
+    try:
+        if entrypoint == "stream":
+            response = routes._start_chat_stream_for_session(
+                session,
+                msg="hello",
+                attachments=[],
+                workspace=str(tmp_path),
+                model="test-model",
+            )
+            status = response["_status"]
+        elif entrypoint == "wakeup":
+            response = routes.start_session_turn(session.session_id, "hello")
+            status = response["_status"]
+        else:
+            handler = SimpleNamespace(
+                wfile=io.BytesIO(),
+                send_response=lambda value: setattr(handler, "status", value),
+                send_header=lambda *_args: None,
+                end_headers=lambda: None,
+            )
+            routes._handle_chat_sync(
+                handler,
+                {"session_id": session.session_id, "message": "hello"},
+            )
+            response = __import__("json").loads(handler.wfile.getvalue())
+            status = handler.status
+    finally:
+        held.release()
+        config.LAST_CHAT_ADMISSION_TIMEOUT_AT = None
+        with config.ACTIVE_RUNS_LOCK:
+            config.ACTIVE_RUNS.clear()
+
+    assert status == 409
+    assert response["code"] == "chat_admission_timeout"
+    assert response["retryable"] is True
+
+
+def test_public_health_exposes_retained_admission_timeout(monkeypatch):
+    from api import config, routes
+
+    captured = {}
+    config.note_chat_admission_timeout()
+    monkeypatch.setattr(
+        routes, "_streams_lock_health", lambda: {"status": "ok", "active_streams": 0}
+    )
+    monkeypatch.setattr(routes, "_accept_loop_health", lambda _handler: {"status": "ok"})
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda _handler, payload, status=200: captured.update(
+            payload=payload, status=status
+        ),
+    )
+    try:
+        routes._handle_health(None, SimpleNamespace(query=""))
+    finally:
+        config.LAST_CHAT_ADMISSION_TIMEOUT_AT = None
+
+    assert captured["status"] == 503
+    assert captured["payload"]["recent_admission_timeout"] is True
+    assert "admission_timeout_age_seconds" in captured["payload"]

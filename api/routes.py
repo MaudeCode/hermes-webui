@@ -13219,6 +13219,11 @@ def _handle_health(handler, parsed):
         payload["oldest_run_age_seconds"] = run_check["oldest_run_age_seconds"]
     if "idle_seconds_since_last_run" in run_check:
         payload["idle_seconds_since_last_run"] = run_check["idle_seconds_since_last_run"]
+    if run_check.get("recent_admission_timeout"):
+        payload["recent_admission_timeout"] = True
+        payload["admission_timeout_age_seconds"] = run_check.get(
+            "admission_timeout_age_seconds", 0.0
+        )
     if deep:
         if stream_check.get("status") != "ok":
             payload["checks"] = {"streams_lock": stream_check}
@@ -26094,7 +26099,13 @@ def _handle_chat_sync(handler, body):
                 os.environ.pop("HERMES_SESSION_KEY", None)
             else:
                 os.environ["HERMES_SESSION_KEY"] = old_session_key
-    with _get_session_agent_lock(s.session_id):
+    with _bounded_chat_admission_lock(
+        s.session_id, _get_session_agent_lock(s.session_id)
+    ) as acquired:
+        if not acquired:
+            response = _chat_admission_timeout_response()
+            response.pop("_status", None)
+            return j(handler, response, status=409)
         _result_messages = result.get("messages") or _previous_context_messages
         _next_context_messages = _restore_reasoning_metadata(
             _previous_context_messages,
