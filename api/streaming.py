@@ -28,6 +28,8 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+_CHAT_LOCK_WAIT_SECONDS = 2.0
+
 from api.config import (
     get_config,
     STREAMS, STREAMS_LOCK, CANCEL_FLAGS, AGENT_INSTANCES, STREAM_PARTIAL_TEXT,
@@ -9012,6 +9014,16 @@ def _refresh_cached_agent_primary_runtime_snapshot(agent) -> None:
             rt['is_anthropic_oauth'] = agent._is_anthropic_oauth
 
 
+@contextlib.contextmanager
+def _try_acquire_chat_lock(lock, timeout: float = _CHAT_LOCK_WAIT_SECONDS):
+    acquired = lock.acquire(timeout=timeout)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            lock.release()
+
+
 def _run_agent_streaming(
     session_id,
     msg_text,
@@ -9647,7 +9659,24 @@ def _run_agent_streaming(
         # #4251: the route layer already persisted this turn's model under the
         # session lock before dispatch, so a mismatch here means a newer picker
         # write won the race and must not be clobbered by the worker thread.
-        with _agent_lock:
+        lock_wait_started_at = time.time()
+        update_active_run(
+            stream_id,
+            phase="waiting_for_session_lock",
+            lock_wait_started_at=lock_wait_started_at,
+        )
+        with _try_acquire_chat_lock(_agent_lock, _CHAT_LOCK_WAIT_SECONDS) as acquired:
+            if not acquired:
+                update_active_run(
+                    stream_id,
+                    phase="admission_blocked",
+                    lock_wait_seconds=_CHAT_LOCK_WAIT_SECONDS,
+                )
+                put('apperror', {
+                    'type': 'chat_admission_timeout',
+                    'message': 'Chat could not start because this session is busy. Try Stop or retry shortly.',
+                })
+                return
             _last_persisted_model = getattr(s, "model", None)
             _last_persisted_provider = getattr(s, "model_provider", None)
             if _last_persisted_provider is not None:
@@ -9662,6 +9691,7 @@ def _run_agent_streaming(
                 _last_persisted_model = model
                 _last_persisted_provider = provider_context
                 _turn_owns_persisted_model = True
+        update_active_run(stream_id, phase="running", lock_wait_started_at=None)
 
         # TD1: set thread-local env context so concurrent sessions don't clobber globals
         # Check for pre-flight cancel (user cancelled before agent even started)
@@ -14227,7 +14257,26 @@ def cancel_stream(stream_id: str) -> bool:
     # so the cancel-path mutation races neither the checkpoint thread nor
     # concurrent undo/retry calls.
     if _cancel_session_id:
-        with _get_session_agent_lock(_cancel_session_id):
+        cancel_lock_wait_started_at = time.time()
+        with _try_acquire_chat_lock(
+            _get_session_agent_lock(_cancel_session_id),
+            _CHAT_LOCK_WAIT_SECONDS,
+        ) as acquired:
+            if not acquired:
+                update_active_run(
+                    stream_id,
+                    phase="cancellation_blocked",
+                    lock_wait_started_at=cancel_lock_wait_started_at,
+                    lock_wait_seconds=_CHAT_LOCK_WAIT_SECONDS,
+                )
+                if q:
+                    try:
+                        q.put_nowait(('cancel', _cancel_event_payload(
+                            'Cancellation is still unwinding; Agent health is degraded.'
+                        )))
+                    except Exception:
+                        logger.debug("Failed to publish bounded cancellation state")
+                return True
             try:
                 _cs = get_session(_cancel_session_id)
                 if not isinstance(getattr(_cs, 'messages', None), list):

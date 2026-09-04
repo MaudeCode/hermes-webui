@@ -55,3 +55,31 @@ def test_run_registry_unregister_records_last_finished_time():
         assert "stream-2" not in config.ACTIVE_RUNS
         assert isinstance(config.LAST_RUN_FINISHED_AT, float)
     assert config.stream_owner_session_id("stream-2") is None
+
+
+def test_health_degrades_for_blocked_admission_without_exposing_session():
+    from api import config, routes
+
+    with config.ACTIVE_RUNS_LOCK:
+        config.ACTIVE_RUNS.clear()
+        config.ACTIVE_RUNS["blocked-stream"] = {
+            "stream_id": "blocked-stream",
+            "session_id": "private-session",
+            "workspace": "/private/workspace",
+            "started_at": time.time() - 10,
+            "phase": "waiting_for_session_lock",
+            "lock_wait_started_at": time.time() - 3,
+            "owner_thread_native_id": 123,
+        }
+    try:
+        health = routes._run_lifecycle_health()
+    finally:
+        with config.ACTIVE_RUNS_LOCK:
+            config.ACTIVE_RUNS.clear()
+
+    assert health["status"] == "degraded"
+    assert health["degraded_runs"] == 1
+    assert health["runs"][0]["degraded"] is True
+    assert health["runs"][0]["lock_wait_age_seconds"] >= 2
+    assert "session_id" not in health["runs"][0]
+    assert "workspace" not in health["runs"][0]

@@ -4,9 +4,10 @@ Tests the integration between cancel_stream() and agent.interrupt().
 """
 import queue
 import threading
+import time
 from unittest.mock import Mock
 
-from api.streaming import cancel_stream
+from api.streaming import _try_acquire_chat_lock, cancel_stream
 from api.config import AGENT_INSTANCES, STREAMS, CANCEL_FLAGS, ACTIVE_RUNS, SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
 
 
@@ -95,6 +96,18 @@ class TestCancelInterrupt:
         """Test cancel for a stream that doesn't exist"""
         result = cancel_stream("nonexistent_stream")
         assert result is False
+
+    def test_chat_lock_wait_is_bounded(self):
+        lock = threading.Lock()
+        lock.acquire()
+        started = time.monotonic()
+        try:
+            with _try_acquire_chat_lock(lock, 0.02) as acquired:
+                assert acquired is False
+        finally:
+            lock.release()
+
+        assert time.monotonic() - started < 0.2
 
     def test_cancel_falls_back_to_active_run_registry(self):
         """Cancel should still work when STREAMS is gone but the worker is alive."""

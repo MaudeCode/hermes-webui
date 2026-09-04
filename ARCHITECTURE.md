@@ -347,6 +347,11 @@ block. If the browser disconnects mid-stream, the daemon thread runs to completi
 then cleans up. The queue fills and the put_nowait() calls fail silently (queue.Full
 is caught).
 
+User-facing session-lock admission and cancellation waits are bounded at two
+seconds. `ACTIVE_RUNS.phase` records the wait stage and start time; `/health`
+returns `degraded` (HTTP 503) when admission/cancellation crosses that budget,
+without exposing session ids, workspaces, prompts, or credentials.
+
 Mid-run steer requests carry a stable `steer_id`. The streaming worker emits
 `steer_consumed` before the first later Agent event that proves the pending
 steer left the runtime slot. The run journal projects that event as a

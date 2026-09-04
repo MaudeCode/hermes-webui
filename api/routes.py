@@ -13054,6 +13054,7 @@ def _run_lifecycle_health() -> dict:
     from api import config as _live_config
 
     now = time.time()
+    degraded_runs = 0
     with _live_config.ACTIVE_RUNS_LOCK:
         runs = []
         for _stream_id, raw in (_live_config.ACTIVE_RUNS or {}).items():
@@ -13067,6 +13068,20 @@ def _run_lifecycle_health() -> dict:
             except Exception:
                 age = 0.0
             item["age_seconds"] = round(age, 1)
+            phase = str(item.get("phase") or "")
+            wait_started_at = item.get("lock_wait_started_at") or item.get("cancelled_at")
+            try:
+                wait_age = max(0.0, now - float(wait_started_at)) if wait_started_at else 0.0
+            except Exception:
+                wait_age = 0.0
+            if wait_started_at:
+                item["lock_wait_age_seconds"] = round(wait_age, 1)
+            degraded = phase in {"admission_blocked", "cancellation_blocked"} or (
+                phase in {"waiting_for_session_lock", "cancelling"} and wait_age >= 2.0
+            )
+            if degraded:
+                item["degraded"] = True
+                degraded_runs += 1
             runs.append(item)
         last_finished = _live_config.LAST_RUN_FINISHED_AT
     runs.sort(key=lambda item: float(item.get("started_at") or 0.0))
@@ -13074,6 +13089,8 @@ def _run_lifecycle_health() -> dict:
         "active_runs": len(runs),
         "runs": runs,
         "last_run_finished_at": last_finished,
+        "status": "degraded" if degraded_runs else "ok",
+        "degraded_runs": degraded_runs,
     }
     if runs:
         payload["oldest_run_age_seconds"] = runs[0].get("age_seconds", 0.0)
@@ -13168,7 +13185,9 @@ def _handle_health(handler, parsed):
     stream_check = _streams_lock_health()
     run_check = _run_lifecycle_health()
     payload = {
-        "status": "ok" if stream_check.get("status") == "ok" else "degraded",
+        "status": "ok" if (
+            stream_check.get("status") == "ok" and run_check.get("status") == "ok"
+        ) else "degraded",
         "sessions": len(SESSIONS),
         "active_streams": int(stream_check.get("active_streams") or 0),
         "active_runs": int(run_check.get("active_runs") or 0),
@@ -13187,6 +13206,7 @@ def _handle_health(handler, parsed):
             payload["checks"] = {"streams_lock": stream_check}
             return j(handler, payload, status=503)
         checks, healthy = _deep_health_checks(stream_check=stream_check)
+        healthy = healthy and run_check.get("status") == "ok"
         payload["checks"] = checks
         if not healthy:
             payload["status"] = "degraded"
