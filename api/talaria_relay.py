@@ -30,6 +30,8 @@ from cryptography.hazmat.primitives.serialization import (
 
 logger = logging.getLogger(__name__)
 _publisher_lock = threading.RLock()
+_publisher_transition_lock = threading.Lock()
+_pairing_lock = threading.Lock()
 
 
 def _b64url(value: bytes) -> str:
@@ -189,7 +191,7 @@ def pair_talaria_relay(
     operator: bool = True,
     opener=urllib.request.urlopen,
 ) -> dict[str, str | bool]:
-    with _publisher_lock:
+    with _pairing_lock:
         return _pair_talaria_relay_unlocked(
             body,
             profile=profile,
@@ -653,21 +655,33 @@ _publisher: TalariaRelayPublisher | None = None
 
 def start_talaria_relay_publisher(config: RelayConfig | None = None) -> bool:
     global _publisher
-    with _publisher_lock:
-        if _publisher is not None:
-            return True
+    with _publisher_transition_lock:
+        with _publisher_lock:
+            if _publisher is not None:
+                return True
+        candidate = None
         try:
             config = config or RelayConfig.from_state()
             if config is None:
                 return False
-            _publisher = TalariaRelayPublisher(config)
+            candidate = TalariaRelayPublisher(config)
             from api.session_events import add_session_list_changed_listener
-            add_session_list_changed_listener(_publisher.changed)
-            _publisher.start(publish_initial=False)
+            add_session_list_changed_listener(candidate.changed)
+            candidate.start(publish_initial=False)
+            with _publisher_lock:
+                _publisher = candidate
             atexit.register(stop_talaria_relay_publisher)
             return True
         except Exception:
-            _publisher = None
+            if candidate is not None:
+                try:
+                    from api.session_events import remove_session_list_changed_listener
+                    remove_session_list_changed_listener(candidate.changed)
+                    candidate.stop()
+                except Exception:
+                    pass
+            with _publisher_lock:
+                _publisher = None
             logger.warning("Talaria relay publisher disabled: invalid configuration", exc_info=True)
             return False
 
@@ -679,13 +693,15 @@ def configure_talaria_relay_publisher(
     validate_profile_identity: str | None = None,
 ) -> None:
     global _publisher
-    with _publisher_lock:
+    with _publisher_transition_lock:
         candidate = TalariaRelayPublisher(config)
-        if _publisher is not None:
-            with _publisher._terminal_lock, candidate._terminal_lock:
-                candidate._terminal = dict(_publisher._terminal)
-            with _publisher._revision_lock, candidate._revision_lock:
-                candidate._last_revision = max(candidate._last_revision, _publisher._last_revision)
+        with _publisher_lock:
+            previous = _publisher
+        if previous is not None:
+            with previous._terminal_lock, candidate._terminal_lock:
+                candidate._terminal = dict(previous._terminal)
+            with previous._revision_lock, candidate._revision_lock:
+                candidate._last_revision = max(candidate._last_revision, previous._last_revision)
         try:
             if validate_profile_id is None:
                 candidate.publish_snapshot()
@@ -695,26 +711,41 @@ def configure_talaria_relay_publisher(
                 candidate.publish_profile(validate_profile_id, validate_profile_identity)
         except Exception as exc:
             raise RelayPairingError("Could not publish the initial Talaria Relay snapshot", status=502) from exc
-        stop_talaria_relay_publisher()
-        _publisher = candidate
         from api.session_events import add_session_list_changed_listener
-
-        add_session_list_changed_listener(candidate.changed)
-        candidate.start(publish_initial=False)
+        try:
+            add_session_list_changed_listener(candidate.changed)
+            candidate.start(publish_initial=False)
+        except Exception as exc:
+            try:
+                from api.session_events import remove_session_list_changed_listener
+                remove_session_list_changed_listener(candidate.changed)
+                candidate.stop()
+            except Exception:
+                pass
+            raise RelayPairingError("Could not start the Talaria Relay publisher", status=502) from exc
+        with _publisher_lock:
+            _publisher = candidate
+        if previous is not None:
+            from api.session_events import remove_session_list_changed_listener
+            remove_session_list_changed_listener(previous.changed)
+            previous.stop()
         atexit.register(stop_talaria_relay_publisher)
 
 
 def stop_talaria_relay_publisher() -> None:
     global _publisher
-    with _publisher_lock:
-        if _publisher is not None:
-            from api.session_events import remove_session_list_changed_listener
-            remove_session_list_changed_listener(_publisher.changed)
-            _publisher.stop()
+    with _publisher_transition_lock:
+        with _publisher_lock:
+            previous = _publisher
             _publisher = None
+        if previous is not None:
+            from api.session_events import remove_session_list_changed_listener
+            remove_session_list_changed_listener(previous.changed)
+            previous.stop()
 
 
 def note_talaria_terminal(stream_id: str, phase: str) -> None:
     with _publisher_lock:
-        if _publisher is not None and phase in ("completed", "failed", "cancelled"):
-            _publisher.note_terminal(stream_id, phase)
+        publisher = _publisher
+    if publisher is not None and phase in ("completed", "failed", "cancelled"):
+        publisher.note_terminal(stream_id, phase)

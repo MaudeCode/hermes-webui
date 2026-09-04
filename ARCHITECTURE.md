@@ -587,6 +587,9 @@ Chat/session durability invariants:
     teardown. The relay grants each Apple-backed account one profile scope per publisher,
     so a profile's session identifiers, titles, phases, counts, and alerts never enter
     another account. Publication is best-effort and never blocks an agent or browser stream.
+    The publisher registry lock protects only pointer snapshots/swaps. Pairing HTTP,
+    initial publication, listener changes, start/stop, and terminal callbacks run after
+    releasing it; a separate transition lock preserves configure/start/stop ordering.
 
 Rendering:
     renderMessages()      Full rebuild of #msgInner from S.messages
