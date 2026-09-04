@@ -5750,6 +5750,10 @@ class WorkspaceBindingPersistenceError(ValueError):
     """A recovered workspace could not be durably bound to its WebUI session."""
 
 
+class WorkspaceBindingBusy(WorkspaceBindingPersistenceError):
+    """Workspace recovery could not acquire its session mutation lock in time."""
+
+
 _EXPECTED_WORKSPACE_UNSET = object()
 
 
@@ -5783,7 +5787,7 @@ def persist_recovered_workspace_binding(
     lock = _get_session_agent_lock(sid)
     if not lock.acquire(timeout=2.0):
         _cfg.note_chat_admission_timeout()
-        raise WorkspaceBindingPersistenceError(
+        raise WorkspaceBindingBusy(
             "Failed to persist recovered workspace: session is busy"
         )
     try:

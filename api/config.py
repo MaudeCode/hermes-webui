@@ -9570,7 +9570,8 @@ def register_active_run(stream_id: str, **metadata) -> None:
     entry.setdefault("stream_id", stream_id)
     entry.setdefault("started_at", now)
     entry.setdefault("phase", "running")
-    if "profile" not in entry and entry.get("session_id"):
+    health_only = bool(entry.get("health_only"))
+    if not health_only and "profile" not in entry and entry.get("session_id"):
         try:
             from api.models import get_session
 
@@ -9593,6 +9594,8 @@ def register_active_run(stream_id: str, **metadata) -> None:
         pass
     with ACTIVE_RUNS_LOCK:
         ACTIVE_RUNS[stream_id] = entry
+    if health_only:
+        return
     try:
         from api.talaria_relay import start_talaria_relay_publisher
         from api.session_events import publish_session_list_changed
@@ -9614,12 +9617,14 @@ def update_active_run(stream_id: str, **metadata) -> None:
         entry = ACTIVE_RUNS.get(stream_id)
         if entry is not None:
             entry.update(metadata)
+            health_only = bool(entry.get("health_only"))
             session_id = entry.get("session_id")
             profile = entry.get("profile") if not entry.get("profile_unresolved") else None
         else:
+            health_only = False
             session_id = None
             profile = None
-    if session_id:
+    if session_id and not health_only:
         try:
             from api.session_events import publish_session_list_changed
             publish_session_list_changed("run_updated", profile=profile, session_id=session_id)
@@ -9630,6 +9635,8 @@ def update_active_run(stream_id: str, **metadata) -> None:
 def publish_active_run_finished(stream_id: str, entry) -> None:
     """Publish side effects after an active-run row is atomically retired."""
     unregister_stream_owner(stream_id)
+    if isinstance(entry, dict) and entry.get("health_only"):
+        return
     try:
         from api.session_events import publish_session_list_changed
         publish_session_list_changed(

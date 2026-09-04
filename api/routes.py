@@ -10906,6 +10906,7 @@ from api.models import (
     find_compression_recovery_session,
     get_session_for_file_ops,
     persist_recovered_workspace_binding,
+    WorkspaceBindingBusy,
     WorkspaceBindingPersistenceError,
     new_session,
     all_sessions,
@@ -19226,6 +19227,10 @@ def _handle_list_dir(handler, parsed):
                 "workspace_recovered": recovered,
             },
         )
+    except WorkspaceBindingBusy:
+        response = _chat_admission_timeout_response()
+        status = response.pop("_status")
+        return j(handler, response, status=status)
     except WorkspaceBindingPersistenceError as e:
         return bad(handler, _sanitize_error(e), 500)
     except (FileNotFoundError, ValueError) as e:
@@ -23969,6 +23974,8 @@ def _bounded_chat_admission_lock(session_id: str, lock, timeout=None):
         phase="waiting_for_session_lock",
         lock_wait_started_at=started_at,
         attachable=False,
+        health_only=True,
+        profile=None,
     )
     registered = True
     try:
@@ -25040,6 +25047,8 @@ def start_session_turn(
 
     try:
         workspace = _resolve_chat_workspace_with_recovery(s, None)
+    except WorkspaceBindingBusy:
+        return _chat_admission_timeout_response()
     except WorkspaceBindingPersistenceError as e:
         return {"error": str(e), "_status": 500}
     except ValueError as e:
@@ -25752,6 +25761,10 @@ def _handle_chat_start(handler, body, diag=None):
                 workspace = _resolve_chat_workspace_for_regeneration(s, body.get("workspace"))
             else:
                 workspace = _resolve_chat_workspace_with_recovery(s, body.get("workspace"))
+        except WorkspaceBindingBusy:
+            response = _chat_admission_timeout_response()
+            status = response.pop("_status")
+            return j(handler, response, status=status)
         except WorkspaceBindingPersistenceError as e:
             return bad(handler, str(e), 500)
         except ValueError as e:
