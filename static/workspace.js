@@ -1,3 +1,9 @@
+// How long api() keeps retrying a startup-readiness 503 before giving up and
+// letting the caller's error path run. Session recovery on a large session
+// directory is the case this covers; a slow-but-correct boot beats a fast boot
+// that silently commits fallback settings for the rest of the page's life.
+const API_STARTUP_RETRY_BUDGET_MS=120000;
+
 async function api(path,opts={}){
   // Strip leading slash so URL resolves relative to location.href (supports subpath mounts)
   const rel = path.startsWith('/') ? path.slice(1) : path;
@@ -11,6 +17,11 @@ async function api(path,opts={}){
   const retryDelayMs=Object.prototype.hasOwnProperty.call(opts,'retryDelayMs')?Math.max(0,Number(opts.retryDelayMs)||0):350;
   // Retry up to 2 times on network errors (e.g. stale keep-alive after long idle).
   // Callers may opt into retrying timeouts / transient server statuses for idempotent GETs.
+  // Startup-readiness 503s get their own wall-clock budget instead of the attempt
+  // cap: session recovery can run for minutes, and each gated attempt already
+  // blocks server-side for up to the readiness bound, so three attempts would give
+  // up after ~31s and let bootstrap callers commit fallback state. (HWEB-35)
+  const startupRetryDeadline=Date.now()+API_STARTUP_RETRY_BUDGET_MS;
   let lastErr;
   for(let attempt=0;attempt<maxAttempts;attempt++){
     let controller=null;
@@ -120,6 +131,17 @@ async function api(path,opts={}){
       let _condition=null;
       try{_condition=JSON.parse(e&&e.body||'{}').condition;}catch(_){}
       const isStartupRecovery503 = e && Number(e.status)===503 && _condition==='startup_recovery';
+      // Keep retrying a startup 503 until readiness actually opens, not just for
+      // the ordinary attempt budget — otherwise the bootstrap catch paths still
+      // install fallback settings, only ~31s later instead of immediately. The
+      // deadline bounds it, and the attempt counter is rewound so these waits
+      // don't consume the network-error retries. Callers that explicitly opted
+      // out of retries (retries:0) keep their single shot.
+      if(isStartupRecovery503 && maxAttempts>1 && Date.now()<startupRetryDeadline){
+        await new Promise(resolve=>setTimeout(resolve,retryDelayMs||350));
+        attempt--;
+        continue;
+      }
       if(attempt<2&&attempt<maxAttempts-1 && (e instanceof TypeError || isStartupRecovery503 || retryStatuses.includes(Number(e.status)))){
         if(retryDelayMs) await new Promise(resolve=>setTimeout(resolve,retryDelayMs*Math.pow(2,attempt)));
         continue;

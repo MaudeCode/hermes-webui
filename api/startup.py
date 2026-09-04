@@ -16,6 +16,17 @@ from pathlib import Path
 STARTUP_READY = threading.Event()
 STARTUP_READY.set()
 STARTUP_WAIT_SECONDS = 10.0
+# Dependency repair is a second, later readiness dimension. Recovery releasing
+# STARTUP_READY lets sessions be read, but agent-dependent actions must not be
+# treated as permanently broken while auto_install_agent_deps() is still
+# mutating the environment (its pip call has a 120s timeout) — the import can
+# succeed once it lands. Same fail-open default as STARTUP_READY.
+AGENT_DEPS_READY = threading.Event()
+AGENT_DEPS_READY.set()
+# How long a chat turn waits on an in-flight repair before reporting it. Well
+# under the pip timeout: the point is an accurate, retryable message, not
+# holding an SSE worker for the whole install.
+AGENT_DEPS_WAIT_SECONDS = 30.0
 # Cap on requests allowed to block on the gate at once. Each waiter occupies one
 # of HTTPWorkerBudgetMixin's request-worker slots (max_request_workers // 2 = 64),
 # and process_request() acquires those non-blocking — so an uncapped wait lets
@@ -163,6 +174,22 @@ def auto_install_agent_deps() -> bool:
         return False
 
 
+def _startup_exempt(path: str) -> bool:
+    """Return True for /api/ paths that must answer while recovery runs.
+
+    The auth surface is reused from api.auth.PUBLIC_PATHS rather than
+    hand-listed: those endpoints are public precisely because they authenticate
+    a caller instead of reading session state, so none of them depend on
+    recovery. Gating them would lock users out of an authenticated deployment
+    for the whole recovery window — static/login.js posts with a bare fetch()
+    and never sees api()'s startup retry.
+    """
+    if path in STARTUP_IMMEDIATE_PATHS:
+        return True
+    from api.auth import PUBLIC_PATHS
+    return path in PUBLIC_PATHS
+
+
 def _send_still_starting(handler) -> None:
     """Answer a gated request with a retryable startup 503."""
     from api.helpers import j
@@ -185,7 +212,7 @@ def await_startup_ready(handler, parsed) -> bool:
     if STARTUP_READY.is_set():
         return True
     path = parsed.path
-    if not path.startswith('/api/') or path in STARTUP_IMMEDIATE_PATHS:
+    if not path.startswith('/api/') or _startup_exempt(path):
         return True
     # Bounded wait, and only for a bounded number of requests at a time, so the
     # gate can never consume the request-worker budget the exempt routes need.
@@ -209,6 +236,7 @@ def start_deferred_startup() -> threading.Thread:
     genuinely in flight.
     """
     STARTUP_READY.clear()
+    AGENT_DEPS_READY.clear()
     thread = threading.Thread(
         target=run_deferred_startup,
         name="webui-deferred-startup",
@@ -248,22 +276,27 @@ def run_deferred_startup() -> None:
         # /api/ request behind the readiness bound for the process lifetime.
         STARTUP_READY.set()
 
-    ok, missing, errors = verify_hermes_imports()
-    if not ok and _HERMES_FOUND:
-        # pip only runs when an agent import actually failed.
-        print(f'[!!] Warning: Hermes agent found but missing modules: {missing}', flush=True)
-        for mod, err in errors.items():
-            print(f'     {mod}: {err}', flush=True)
-        print('     Attempting to install missing dependencies from agent requirements.txt...', flush=True)
-        auto_install_agent_deps()
+    try:
         ok, missing, errors = verify_hermes_imports()
-        if not ok:
-            print(f'[!!] Still missing after install attempt: {missing}', flush=True)
+        if not ok and _HERMES_FOUND:
+            # pip only runs when an agent import actually failed.
+            print(f'[!!] Warning: Hermes agent found but missing modules: {missing}', flush=True)
             for mod, err in errors.items():
                 print(f'     {mod}: {err}', flush=True)
-            print('     Agent features may not work correctly.', flush=True)
-        else:
-            print('[ok] Agent dependencies installed successfully.', flush=True)
+            print('     Attempting to install missing dependencies from agent requirements.txt...', flush=True)
+            auto_install_agent_deps()
+            ok, missing, errors = verify_hermes_imports()
+            if not ok:
+                print(f'[!!] Still missing after install attempt: {missing}', flush=True)
+                for mod, err in errors.items():
+                    print(f'     {mod}: {err}', flush=True)
+                print('     Agent features may not work correctly.', flush=True)
+            else:
+                print('[ok] Agent dependencies installed successfully.', flush=True)
+    finally:
+        # Released on every exit path, so a raising verify/install cannot leave
+        # agent-dependent actions waiting for a repair that is no longer running.
+        AGENT_DEPS_READY.set()
 
     try:
         from api.gateway_watcher import start_watcher
