@@ -630,3 +630,102 @@ def test_live_tool_matching_uses_the_same_aliases_as_live_card_dedup():
         assert key in live_tid_block
         assert key in find_block
         assert key in upsert_block
+
+
+def _run_compression_row_render_probe(rows) -> list:
+    """Render an activity scene through the browser's live dedupe seam."""
+    helpers = "\n".join(
+        [
+            _function_body(UI_SRC, "function _anchorSceneToolRowLogicalKey"),
+            _function_body(UI_SRC, "function _anchorSceneMergeToolRows"),
+            _function_body(UI_SRC, "function _anchorSceneIsSettledSuccessfulCompression"),
+            _function_body(UI_SRC, "function _anchorSceneRowsForRendering"),
+        ]
+    )
+    script = f"""
+{helpers}
+const scene = {{version:'activity_scene_v1', activity_rows:{json.dumps(rows)}}};
+process.stdout.write(JSON.stringify(
+  _anchorSceneRowsForRendering(scene, {{settled:false}}).map(
+    row => [row.role, row.source_event_type, row.status, row.text]
+  )
+));
+"""
+    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    return json.loads(proc.stdout)
+
+
+def _compression_row(pass_index, source_event_type, text, order):
+    row = {
+        "row_id": f"live-compression:stream-1:{order}",
+        "local_id": f"live-compression:stream-1:{order}",
+        "order_index": order,
+        "kind": "lifecycle_status",
+        "role": "lifecycle",
+        "source_event_type": source_event_type,
+        "status": "completed" if source_event_type == "compressed" else "running",
+        "text": text,
+    }
+    if pass_index is not None:
+        row["compression_pass"] = pass_index
+    return row
+
+
+def _prose_row(text, order):
+    return {
+        "row_id": f"live-prose:stream-1:{order}",
+        "local_id": f"live-prose:stream-1:{order}",
+        "order_index": order,
+        "kind": "process_prose",
+        "role": "prose",
+        "source_event_type": "token",
+        "status": "completed",
+        "text": text,
+    }
+
+
+def test_rendered_compression_rows_keep_each_pass_in_place():
+    """Two compaction passes in one turn must not collapse onto one another.
+
+    The rendering seam keys every compression row as `lifecycle:compression`.
+    Without a per-pass identity, a restored `token a -> pass 1 -> token b ->
+    pass 2` scene erases pass 1 and paints pass 2 at pass 1's position, before
+    `b` — reporting an active compaction earlier in the turn than it happened.
+    """
+    rendered = _run_compression_row_render_probe([
+        _prose_row("a", 0),
+        _compression_row(1, "compressed", "Context auto-compressed", 1),
+        _prose_row("b", 2),
+        _compression_row(2, "compressing", "Compressing context", 3),
+    ])
+
+    assert rendered == [
+        ["prose", "token", "completed", "a"],
+        ["lifecycle", "compressed", "completed", "Context auto-compressed"],
+        ["prose", "token", "completed", "b"],
+        ["lifecycle", "compressing", "running", "Compressing context"],
+    ]
+
+
+def test_rendered_compression_rows_fold_one_pass_start_into_its_completion():
+    """A single pass still renders as one row, not a start plus a completion."""
+    rendered = _run_compression_row_render_probe([
+        _compression_row(1, "compressing", "Compressing context", 0),
+        _compression_row(1, "compressed", "Context auto-compressed", 1),
+        _prose_row("answer", 2),
+    ])
+
+    assert rendered == [
+        ["lifecycle", "compressed", "completed", "Context auto-compressed"],
+        ["prose", "token", "completed", "answer"],
+    ]
+
+
+def test_rendered_live_compression_rows_without_pass_stay_folded():
+    """Live SSE rows carry no pass number and keep the single-card behavior."""
+    rendered = _run_compression_row_render_probe([
+        _compression_row(None, "compressing", "Compressing context", 0),
+        _compression_row(None, "compressed", "Context auto-compressed", 1),
+    ])
+
+    assert rendered == [["lifecycle", "compressed", "completed", "Context auto-compressed"]]

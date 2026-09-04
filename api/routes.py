@@ -3576,6 +3576,7 @@ def _run_journal_live_snapshot(
     tool_calls: list[dict] = []
     steer_controls: list[dict] = []
     compression_lifecycles: list[dict] = []
+    compression_pass = 0
     activity_burst_anchors: list[dict] = []
     current_activity_burst_id = 0
     fresh_segment = True
@@ -3751,8 +3752,14 @@ def _run_journal_live_snapshot(
             # generic "Working" row. Project it from the durable journal so a
             # hard refresh mid-compaction restores the same compression row the
             # live stream showed instead of falling back to the generic shell.
+            if event_name == "compressing":
+                compression_pass += 1
             compression_lifecycles.append({
                 "event_name": event_name,
+                # One pass owns its start and its completion. Without this the
+                # single shared "lifecycle:compression" dedupe key folds every
+                # pass of a multi-compaction turn into one row.
+                "compression_pass": max(compression_pass, 1),
                 "message": str(payload.get("message") or ""),
                 "created_at": event.get("created_at"),
                 "event_id": event.get("event_id"),
@@ -4036,6 +4043,7 @@ def _run_journal_live_snapshot(
                 "transparent_stream": "chronological_activity",
             },
             "source_event_type": lifecycle["event_name"],
+            "compression_pass": lifecycle["compression_pass"],
             "event_id": lifecycle.get("event_id"),
             "local_id": local_id,
             "run_id": run_id,
@@ -4115,6 +4123,7 @@ def _run_journal_live_snapshot(
         ),
         default=-1,
     )
+    pre_text_compression_rows: list[tuple[int, dict]] = []
     for lifecycle in compression_lifecycles:
         if (
             lifecycle["event_name"] == "compressing"
@@ -4126,7 +4135,10 @@ def _run_journal_live_snapshot(
         if burst_id:
             control_rows_by_burst.setdefault(burst_id, []).append(item)
         else:
-            ungrouped_control_rows.append(item)
+            # Burst 0 means no assistant text had arrived yet, so this pass
+            # precedes every anchor's prose in journal order. Appending it with
+            # the other ungrouped rows would sort it after that prose instead.
+            pre_text_compression_rows.append(item)
 
     consumed_tools: set[int] = set()
     text_start = 0
@@ -4138,6 +4150,10 @@ def _run_journal_live_snapshot(
         ],
         key=lambda anchor: int(anchor.get("textEnd") or 0),
     )
+    for event_order, row in sorted(pre_text_compression_rows, key=lambda item: item[0]):
+        append_thinking_rows(before_order=event_order)
+        row["order_index"] = len(anchor_activity_rows)
+        anchor_activity_rows.append(row)
     for anchor in sorted_anchors:
         burst_id = int(anchor.get("id") or 0) or None
         text_end = min(len(assistant_text), int(anchor.get("textEnd") or 0))
@@ -4406,6 +4422,8 @@ def _runtime_journal_snapshot_for_session_payload(snapshot: dict | None) -> dict
     row_keys = (
         "row_id", "local_id", "kind", "role", "source_event_type", "status",
         "created_at", "group", "text", "thinking", "tool_call_id", "tool",
+        # Per-pass compression identity; the browser dedupes rendered rows on it.
+        "compression_pass",
     )
     raw_activity_rows = scene.get("activity_rows") or []
     total_activity_rows = len(raw_activity_rows)
@@ -5451,7 +5469,12 @@ def _anchor_scene_row_key(row) -> str:
     if row.get("role") == "lifecycle":
         source_type = str(row.get("source_event_type") or row.get("source") or "")
         if source_type in ("compressing", "compressed"):
-            return "lifecycle:compression"
+            # One key per pass folds a start into its own completion. Live rows
+            # carry no pass number and keep the single-card legacy key.
+            compression_pass = row.get("compression_pass")
+            if compression_pass is None:
+                return "lifecycle:compression"
+            return f"lifecycle:compression:{compression_pass}"
     return f"{row.get('role') or row.get('kind')}:{row.get('source_event_type') or ''}:{row.get('status') or ''}:{row.get('row_id') or ''}"
 
 
@@ -5629,7 +5652,7 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
                     prefer_incoming_body=prefer_incoming_tool_body,
                 )
                 return
-            if key == "lifecycle:compression":
+            if key.startswith("lifecycle:compression"):
                 index = seen[key]
                 next_row = copy.deepcopy(row)
                 next_row["order_index"] = index

@@ -1934,3 +1934,27 @@ def test_live_journal_snapshot_does_not_reclassify_other_lifecycle_events(monkey
     assert _visible_scene_rows(snapshot) == [
         ("lifecycle", "runtime_journal_snapshot", "running", "Working")
     ]
+
+
+def test_live_journal_snapshot_orders_pre_text_compression_before_later_activity(monkeypatch):
+    """Compaction that runs before any assistant text keeps its journal position.
+
+    A pre-API compaction pass is recorded with no assistant text yet, so it owns
+    activity burst 0. Sorting it with the other ungrouped rows would render it
+    after the reasoning and interim prose that the following provider call
+    produced, inverting the journal order the user actually saw.
+    """
+    snapshot = _compression_journal_snapshot(
+        monkeypatch,
+        [
+            ("compressing", {"message": "Compressing context"}),
+            ("reasoning", {"text": "planning after compaction"}),
+            ("interim_assistant", {"text": "here is the answer"}),
+        ],
+    )
+
+    rows = _visible_scene_rows(snapshot)
+    assert rows[0] == ("lifecycle", "compressed", "completed", "Context auto-compressed")
+    # The relative order of the reasoning and interim rows is existing behavior
+    # this fix does not change; only the compression divider's position is.
+    assert {row[1] for row in rows[1:]} == {"reasoning", "token"}
