@@ -1087,7 +1087,17 @@ def _kanban_sse_poll(held, board, cursor):
             return None, cursor, []
     if held is None:
         try:
-            held = (kb.connect(board=board), resolved)
+            # Connect on `resolved`, never on the raw `board`. Passing
+            # board=None would make kb.connect re-resolve the pointer
+            # independently, so a switch landing between the read above
+            # and this call could open board C while we record B — and
+            # the next pass's equality check would see B == B and keep
+            # the stream on C forever, emitting C's events against B's
+            # cursor. Decision, handle and stored identity share one
+            # resolved value. `resolved is None` only when `board` is
+            # too (pointer unreadable), which degrades to the old
+            # connect(board=None).
+            held = (kb.connect(board=resolved), resolved)
         except Exception:
             return None, cursor, []
     try:

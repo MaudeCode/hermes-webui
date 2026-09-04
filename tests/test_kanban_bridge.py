@@ -1218,7 +1218,10 @@ def test_sse_stream_connects_once_for_the_whole_stream(monkeypatch):
     handler.wfile.close()
     done.wait(timeout=2.0)
     assert done.is_set(), "SSE handler did not exit after writer close"
-    assert connect_calls == [None], (
+    # ["default"], not [None]: the pass connects on the slug it resolved
+    # rather than letting kb.connect resolve the active pointer a second
+    # time. One entry is the point — one connect for the whole stream.
+    assert connect_calls == ["default"], (
         f"stream must connect once for its lifetime; saw {len(connect_calls)} "
         f"kb.connect calls: {connect_calls}"
     )
@@ -1297,6 +1300,47 @@ def test_sse_unpinned_stream_follows_an_active_board_switch(monkeypatch):
         "an unpinned stream must reopen exactly once against the newly "
         f"active board; saw {connect_calls}"
     )
+
+
+def test_sse_connects_on_the_board_it_resolved_not_a_second_resolution(monkeypatch):
+    """HWEB-31 follow-up: the pass must connect on the slug it resolved.
+
+    Passing board=None to kb.connect would let it resolve the active
+    pointer a second time, independently of the read that decided which
+    board this pass is for. A switch landing between the two would open
+    board C while the handle records B, and the next pass's equality
+    check (B == B) would keep the stream on C indefinitely — wrong
+    board's events, advanced against the wrong cursor.
+    """
+    bridge = _load_bridge(monkeypatch)
+    kb = bridge._kb()
+    bridge._create_board_payload({"slug": "experiments", "name": "Exp"})
+    kb.set_current_board("experiments")
+
+    original_connect = kb.connect
+    seen = []
+
+    def spying_connect(*args, **kwargs):
+        seen.append(kwargs.get("board"))
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr(kb, "connect", spying_connect)
+
+    # Unpinned pass: board=None on the wire, but the pointer resolves to
+    # "experiments", and that is what connect must receive.
+    held, _cursor, _events = bridge._kanban_sse_poll(None, None, 0)
+    assert seen == ["experiments"], (
+        f"unpinned pass must connect on the resolved slug; connect saw {seen}"
+    )
+    assert held is not None and held[1] == "experiments", (
+        f"stored identity must match the handle's board; held={held!r}"
+    )
+
+    # Pinned pass is unaffected: resolved is the pinned slug itself.
+    seen.clear()
+    held, _cursor, _events = bridge._kanban_sse_poll(None, "experiments", 0)
+    assert seen == ["experiments"]
+    assert held is not None and held[1] == "experiments"
 
 
 def test_handle_kanban_patch_routes_boards_slug_before_board_query_param(monkeypatch):
