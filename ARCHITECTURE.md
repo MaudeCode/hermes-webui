@@ -843,11 +843,32 @@ background thread and in this order:
 
 While the gate is closed, every `/api/` request waits on it for up to
 `STARTUP_WAIT_SECONDS` (10s) and then returns **503 with `Retry-After: 5`** and a
-body naming the phase — clients should retry rather than treat it as fatal.
-`/health`, the UI shell, static assets, `/api/health/restart` and `/api/csp-report`
-never wait. The gate defaults to *open*, and only `start_deferred_startup()` closes
-it, so a process that serves requests without running `main()` has nothing to wait
-for.
+body carrying `condition: "startup_recovery"` plus the phase. `api()` in
+`static/workspace.js` retries that specific condition for up to
+`API_STARTUP_RETRY_BUDGET_MS` (120s), so one-shot bootstrap fetches wait for an
+authoritative answer instead of committing fallback settings. The worker-overflow
+503 is real backpressure and is deliberately *not* retried there.
+
+Never gated: `/health`, the UI shell, static assets, `/api/health/restart`,
+`/api/csp-report`, and every path in `api.auth.PUBLIC_PATHS` — the auth surface is
+public precisely because it authenticates a caller rather than reading session
+state, so gating it would lock users out for the whole recovery window
+(`static/login.js` posts with a bare `fetch()` and never sees the retry).
+
+Two bounds keep the gate from becoming its own outage:
+
+- At most `STARTUP_WAIT_SLOT_COUNT` (8) requests block at once. Each waiter holds
+  one of `HTTPWorkerBudgetMixin`'s request-worker slots (`max_request_workers // 2`
+  = 64), acquired non-blocking, so an uncapped wait would let reconnecting tabs
+  exhaust the budget and get the exempt routes overflow-rejected at accept time.
+  Excess waiters get the same 503 immediately.
+- The gate defaults to *open* and only `start_deferred_startup()` closes it, so a
+  process serving requests without `main()` has nothing to wait for.
+
+`AGENT_DEPS_READY` is a second, later dimension covering step 2. `_get_ai_agent()`
+waits on it for up to `AGENT_DEPS_WAIT_SECONDS` (30s) before giving up, and the
+"AIAgent not available" diagnostic reports an in-flight install rather than
+sending the user to troubleshoot a `sys.path` problem they do not have.
 
 ---
 

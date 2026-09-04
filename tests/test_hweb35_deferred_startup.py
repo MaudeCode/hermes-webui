@@ -289,3 +289,58 @@ def test_deep_health_defers_until_recovery_settles(boot_server):
     boot.release_recovery.set()
     assert startup.STARTUP_READY.wait(timeout=15), "readiness never set after recovery"
     assert boot.get("/health?deep=1", timeout=15)[0] in (200, 503)
+
+
+def test_public_auth_endpoints_are_not_gated(boot_server):
+    """A long recovery must not lock users out of an authenticated deployment.
+
+    static/login.js posts with a bare fetch() and never sees api()'s startup
+    retry, so gating the public auth surface would break login outright.
+    """
+    from urllib.parse import urlparse
+
+    from api import startup
+    from api.auth import PUBLIC_PATHS
+
+    boot = boot_server()
+    assert boot.recovery_started.wait(timeout=15), "deferred startup never reached recovery"
+
+    for path in ("/api/auth/login", "/api/auth/status", "/api/auth/passkey/options",
+                 "/api/auth/oidc/start", "/api/health/restart", "/api/csp-report"):
+        assert path in PUBLIC_PATHS or path in startup.STARTUP_IMMEDIATE_PATHS, (
+            f"{path} is neither public nor explicitly immediate"
+        )
+        started = time.monotonic()
+        assert startup.await_startup_ready(None, urlparse(path)) is True, f"{path} was gated"
+        assert time.monotonic() - started < 1, f"{path} waited on the readiness bound"
+
+    # A genuinely session-dependent route still waits.
+    assert startup.await_startup_ready is not None
+    assert not startup.STARTUP_READY.is_set()
+
+
+def test_agent_deps_ready_is_a_separate_readiness_dimension(boot_server):
+    """Recovery readiness must not imply the pip repair has finished."""
+    from api import startup
+
+    boot = boot_server()
+    assert boot.recovery_started.wait(timeout=15), "deferred startup never reached recovery"
+    assert not startup.AGENT_DEPS_READY.is_set(), "dependency repair marked done before it ran"
+
+    boot.release_recovery.set()
+    assert startup.STARTUP_READY.wait(timeout=15), "readiness never set after recovery"
+    assert startup.AGENT_DEPS_READY.wait(timeout=15), "dependency readiness never released"
+
+
+def test_agent_unavailable_message_reflects_in_flight_dependency_repair(monkeypatch):
+    """The "check sys.path" diagnostic is wrong while pip is still running."""
+    from api import startup, streaming
+
+    monkeypatch.setattr(startup, "AGENT_DEPS_READY", threading.Event())
+    detail = streaming._aiagent_import_error_detail()
+    assert "still being installed" in detail
+    assert "sys.path" not in detail, "sent the user to troubleshoot a problem they do not have"
+
+    startup.AGENT_DEPS_READY.set()
+    settled = streaming._aiagent_import_error_detail()
+    assert "sys.path" in settled, "the real diagnostic must return once repair has settled"
