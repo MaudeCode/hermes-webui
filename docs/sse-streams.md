@@ -42,8 +42,11 @@ GET /api/sessions/events?gateway=1
   as `?probe=1` below. Because the session-events half stays healthy when the
   gateway half cannot attach, an unusable gateway never surfaces as a transport
   error; this frame is what tells a client to start its `fallback_poll_ms`
-  polling instead. A `gateway_status` with `ok: false` can also arrive
-  mid-stream when the watcher stops, and downgrades only the gateway half.
+  polling instead.
+- When the gateway watcher is replaced (a profile switch restarts it), the
+  server ends the response rather than downgrading the gateway half in place, so
+  the client's automatic reconnect resubscribes both halves against the live
+  watcher registry.
 - Without `?gateway=1` the endpoint behaves exactly as before, so existing
   subscribers are unaffected.
 

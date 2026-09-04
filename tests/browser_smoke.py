@@ -66,6 +66,121 @@ def _is_benign(text):
     return any(p.lower() in t for p in BENIGN)
 
 
+# HWEB-33: a tab must not hold more than two concurrent EventSource connections,
+# because the browser allows six per origin and everything above ~4 starves the
+# ordinary api() fetches. Wraps window.EventSource before any page script runs so
+# every construction is recorded and live sockets can be counted for real.
+_SSE_PROBE = """
+(() => {
+  const Native = window.EventSource;
+  if (!Native) return;
+  const all = [];
+  window.__sseProbe = all;
+  const Wrapped = function (url, init) {
+    const es = new Native(url, init);
+    all.push({ url: String(url), es: es });
+    return es;
+  };
+  Wrapped.prototype = Native.prototype;
+  Wrapped.CONNECTING = 0;
+  Wrapped.OPEN = 1;
+  Wrapped.CLOSED = 2;
+  window.EventSource = Wrapped;
+})();
+"""
+
+# readyState 2 is CLOSED; CONNECTING still owns a socket for the pending retry,
+# so anything that is not CLOSED counts against the budget.
+_OPEN_STREAMS = "() => (window.__sseProbe || []).filter(e => e.es.readyState !== 2).map(e => e.url)"
+_ALL_STREAMS = "() => (window.__sseProbe || []).map(e => e.url)"
+
+
+def _check_eventsource_budget(browser, base):
+    """Assert the two-stream ceiling and the sidebar merge in a real browser.
+
+    Returns a list of failure strings (empty when the budget holds).
+    """
+    failures = []
+    ctx = browser.new_context(base_url=base)
+    page = ctx.new_page()
+    page.add_init_script(_SSE_PROBE)
+    page.goto("/", wait_until="domcontentloaded")
+    try:
+        page.wait_for_selector("#msg, .app, body", timeout=10000)
+    except Exception:
+        pass
+    # The sidebar stream self-gates on document.hasFocus(); make sure this page
+    # is the focused one so a headless-only blur cannot fake a passing budget.
+    page.bring_to_front()
+    try:
+        page.wait_for_function(
+            "() => (window.__sseProbe || []).some(e => e.url.indexOf('api/sessions/events') !== -1)",
+            timeout=10000,
+        )
+    except Exception:
+        failures.append("  [sse-budget] sidebar stream never opened — probe saw no api/sessions/events")
+        ctx.close()
+        return failures
+
+    def snapshot(label):
+        open_urls = page.evaluate(_OPEN_STREAMS)
+        if len(open_urls) > 2:
+            failures.append(
+                f"  [sse-budget] {label}: {len(open_urls)} concurrent EventSources "
+                f"(budget is 2): {open_urls}"
+            )
+        return open_urls
+
+    def sidebar_open(urls):
+        return [u for u in urls if "api/sessions/events" in u]
+
+    # 1. Boot state: one merged sidebar stream, and no separate gateway socket.
+    booted = snapshot("chat panel")
+    if len(sidebar_open(booted)) != 1:
+        failures.append(f"  [sse-budget] expected exactly one open sidebar stream, got {booted}")
+    if not any("gateway=1" in u for u in sidebar_open(booted)):
+        failures.append(
+            f"  [sse-budget] sidebar stream did not request the merged gateway half: {booted}"
+        )
+    ever = page.evaluate(_ALL_STREAMS)
+    if any("api/sessions/gateway/stream" in u for u in ever):
+        failures.append(
+            f"  [sse-budget] a second EventSource was opened for the gateway feed: {ever}"
+        )
+
+    # 2. A main-view panel must release the sidebar socket for its own stream.
+    page.evaluate("() => switchPanel && switchPanel('kanban')")
+    try:
+        page.wait_for_function(
+            "() => !(window.__sseProbe || []).some("
+            "e => e.url.indexOf('api/sessions/events') !== -1 && e.es.readyState !== 2)",
+            timeout=5000,
+        )
+    except Exception:
+        failures.append(
+            "  [sse-budget] sidebar stream stayed open on the Kanban panel: "
+            f"{page.evaluate(_OPEN_STREAMS)}"
+        )
+    snapshot("kanban panel")
+
+    # 3. Returning to the session list brings it back.
+    page.evaluate("() => switchPanel && switchPanel('chat')")
+    try:
+        page.wait_for_function(
+            "() => (window.__sseProbe || []).some("
+            "e => e.url.indexOf('api/sessions/events') !== -1 && e.es.readyState !== 2)",
+            timeout=10000,
+        )
+    except Exception:
+        failures.append("  [sse-budget] sidebar stream did not reopen on returning to the chat panel")
+    snapshot("chat panel after return")
+
+    if not failures:
+        print("OK  EventSource budget — <=2 concurrent, sidebar merged and panel-gated")
+    ctx.close()
+    return failures
+
+
 def _wait_for_health(timeout=30):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -175,6 +290,7 @@ def main():
                 else:
                     print(f"OK  {path} — no console errors")
                 ctx.close()
+            failures.extend(_check_eventsource_budget(browser, BASE))
             browser.close()
 
         if failures:

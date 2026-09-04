@@ -220,18 +220,26 @@ def test_unusable_gateway_reports_status_instead_of_failing_the_stream(merged_ss
     assert any((data or {}).get("stream") == "sessions" for _name, data in frames)
 
 
-def test_watcher_shutdown_downgrades_only_the_gateway_half(merged_sse):
-    """The watcher's None sentinel drops the gateway half and says so."""
+def test_watcher_shutdown_ends_the_response_so_the_client_resubscribes(merged_sse):
+    """The watcher's None sentinel must end the response, not downgrade in place.
+
+    `restart_watcher_for_profile()` (another client's profile switch) stops the
+    old watcher and starts a REPLACEMENT this connection is not subscribed to.
+    Ending the response lets the browser's automatic EventSource reconnect pick
+    up the live registry, which is what the standalone gateway stream did before
+    the merge. Downgrading to the poll fallback instead would strand the tab at
+    30s updates until some unrelated focus or panel event reconnected it.
+    """
     frames, watcher = merged_sse(
         query="?gateway=1",
         gateway_events=[None],
         session_events=[{"type": "sessions_changed", "reason": "session_created"}],
+        stop_after=99,  # the handler must stop on its own, not on a disconnect
     )
-    statuses = [data for name, data in frames if name == "gateway_status"]
-    assert statuses[-1]["ok"] is False
-    assert statuses[-1]["watcher_running"] is False
+    # Nothing after the sentinel: no downgrade frame, no session frame.
+    assert not [d for name, d in frames if name == "gateway_status" and d.get("ok") is False]
+    assert not [d for _n, d in frames if (d or {}).get("stream") == "sessions"]
     assert watcher.unsubscribed, "the gateway queue must be released, not leaked"
-    assert any((data or {}).get("stream") == "sessions" for _name, data in frames)
 
 
 def test_merged_stream_releases_both_subscriptions_on_disconnect(monkeypatch):
@@ -320,30 +328,23 @@ def test_main_view_panel_closes_the_sidebar_stream():
     assert "_syncSidebarSseForPanel()" in PANELS_JS[start:start + 4000]
 
 
-def test_concurrent_stream_budget_for_turn_plus_kanban():
-    """Enumerate the four on-screen states and pin each at two streams or fewer.
+def test_concurrent_stream_budget_is_asserted_in_a_real_browser():
+    """The ceiling itself is measured in Chromium, not modelled here.
 
-    The streams are gated by source-level rules rather than runtime state, so
-    this models them from those rules:
-      - sidebar stream: closed while a main-view panel is active
-      - per-session stream: closed while a chat stream is live for the session
-      - chat stream: open during a turn
-      - Kanban stream: open only while the Kanban panel is active
+    `tests/browser_smoke.py` wraps `window.EventSource` before any page script
+    runs, counts sockets that are not CLOSED, and drives the real panel
+    transitions. A python-side model of the same rules could not fail when the
+    app opens a third socket, so the budget lives there; this only guards
+    against the scenario being dropped from the smoke gate.
     """
-    # Each rule above is asserted individually elsewhere in this file / suite;
-    # here we pin the arithmetic they produce so a future regression that
-    # re-opens one of them fails loudly.
-    def concurrent(*, main_view_panel, kanban_open, turn_active):
-        sidebar = 0 if main_view_panel else 1
-        chat = 1 if turn_active else 0
-        per_session = 0 if turn_active else 1
-        kanban = 1 if kanban_open else 0
-        return sidebar + chat + per_session + kanban
-
-    assert concurrent(main_view_panel=True, kanban_open=True, turn_active=True) == 2
-    assert concurrent(main_view_panel=True, kanban_open=True, turn_active=False) == 2
-    assert concurrent(main_view_panel=False, kanban_open=False, turn_active=True) == 2
-    assert concurrent(main_view_panel=False, kanban_open=False, turn_active=False) == 2
+    smoke = (ROOT / "tests" / "browser_smoke.py").read_text(encoding="utf-8")
+    assert "def _check_eventsource_budget(" in smoke
+    assert "failures.extend(_check_eventsource_budget(browser, BASE))" in smoke
+    # It must count live sockets, not merely observe that some were created.
+    assert "e.es.readyState !== 2" in smoke
+    assert "concurrent EventSources" in smoke
+    # And it must exercise the panel transition that frees the sidebar socket.
+    assert "switchPanel('kanban')" in smoke
 
 
 def test_per_session_stream_yields_to_the_live_chat_stream():

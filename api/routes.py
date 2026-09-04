@@ -20866,19 +20866,16 @@ def _handle_session_events_stream(handler, parsed):
                 except queue.Empty:
                     break
                 if event_data is None:
-                    # Watcher is stopping. Drop only the gateway half — closing
-                    # the whole connection would take the session-events feed
-                    # down with it — and tell the client to start polling.
-                    watcher.unsubscribe(gateway_q)
-                    gateway_q = None
-                    _sse(handler, 'gateway_status', dict(
-                        gateway_status,
-                        ok=False,
-                        watcher_running=False,
-                        error='watcher not started',
-                    ))
-                    last_write = time.monotonic()
-                    break
+                    # Watcher is stopping — usually because another client's
+                    # profile switch called restart_watcher_for_profile(), which
+                    # starts a REPLACEMENT watcher this connection is not
+                    # subscribed to. End the response so the browser's automatic
+                    # EventSource reconnect resubscribes both halves against the
+                    # live registry, exactly as the standalone gateway stream did
+                    # before the merge. Downgrading to polling instead would
+                    # strand this tab on the 30s fallback until an unrelated
+                    # focus/panel event happened to reconnect it.
+                    return True
                 _sse(handler, event_data.get('type', 'sessions_changed'), dict(event_data, stream='gateway'))
                 last_write = time.monotonic()
             try:
