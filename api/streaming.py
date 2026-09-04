@@ -9110,24 +9110,19 @@ def _try_acquire_worker_session_lock(
                 lock_stage=stage,
                 lock_wait_seconds=_CHAT_LOCK_WAIT_SECONDS,
             )
-        try:
-            yield acquired
-        finally:
-            if acquired:
-                from api import config as _run_config
-
-                with _run_config.ACTIVE_RUNS_LOCK:
-                    entry = (_run_config.ACTIVE_RUNS or {}).get(stream_id)
-                    if (
-                        entry is not None
-                        and entry.get("phase") == "waiting_for_session_lock"
-                        and entry.get("lock_stage") == stage
-                    ):
-                        entry.update(
-                            phase="running",
-                            lock_stage=None,
-                            lock_wait_started_at=None,
-                        )
+        else:
+            update_active_run(
+                stream_id,
+                preserve_cancelling=True,
+                phase=(
+                    "finalizing"
+                    if timeout_phase == "finalization_blocked"
+                    else "running"
+                ),
+                lock_stage=None,
+                lock_wait_started_at=None,
+            )
+        yield acquired
 
 
 class _WorkerWritebackTimeout(Exception):

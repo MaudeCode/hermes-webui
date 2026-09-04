@@ -399,7 +399,7 @@ def test_health_only_admission_waiter_never_blocks_worker_start():
     assert config.LAST_RUN_FINISHED_AT == previous_finished_at
 
 
-def test_worker_lock_release_does_not_overwrite_cancelling_phase():
+def test_worker_lock_acquisition_clears_wait_and_preserves_cancelling_phase():
     import threading
     from api import config, streaming
 
@@ -411,6 +411,11 @@ def test_worker_lock_release_does_not_overwrite_cancelling_phase():
             "cancel-transition", threading.Lock(), "prestream_save"
         ) as acquired:
             assert acquired is True
+            with config.ACTIVE_RUNS_LOCK:
+                entry = config.ACTIVE_RUNS["cancel-transition"]
+                assert entry["phase"] == "running"
+                assert entry["lock_stage"] is None
+                assert entry["lock_wait_started_at"] is None
             config.update_active_run("cancel-transition", phase="cancelling")
         with config.ACTIVE_RUNS_LOCK:
             assert config.ACTIVE_RUNS["cancel-transition"]["phase"] == "cancelling"
