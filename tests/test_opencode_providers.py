@@ -7,6 +7,7 @@ import sys
 import types
 import pytest
 import api.config as config
+import api.profiles as profiles
 
 
 @pytest.fixture(autouse=True)
@@ -76,6 +77,7 @@ def _models_with_env_key(monkeypatch, env_var, expected_provider_display):
     config.cfg["model"] = {}
     config.cfg.pop("custom_providers", None)
     monkeypatch.setenv(env_var, "test-key")
+    monkeypatch.setitem(profiles._INITIAL_PROCESS_ENV, env_var, "test-key")
     try:
         result = config.get_available_models()
         providers = [g["provider"] for g in result["groups"]]
@@ -108,6 +110,9 @@ def test_shared_opencode_api_key_detects_zen_and_go(monkeypatch):
     monkeypatch.delenv("OPENCODE_ZEN_API_KEY", raising=False)
     monkeypatch.delenv("OPENCODE_GO_API_KEY", raising=False)
     monkeypatch.setenv("OPENCODE_API_KEY", "test-key")
+    monkeypatch.delitem(profiles._INITIAL_PROCESS_ENV, "OPENCODE_ZEN_API_KEY", raising=False)
+    monkeypatch.delitem(profiles._INITIAL_PROCESS_ENV, "OPENCODE_GO_API_KEY", raising=False)
+    monkeypatch.setitem(profiles._INITIAL_PROCESS_ENV, "OPENCODE_API_KEY", "test-key")
     try:
         result = config.get_available_models()
         providers = {g["provider"] for g in result["groups"]}

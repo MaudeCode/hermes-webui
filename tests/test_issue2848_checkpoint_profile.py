@@ -49,16 +49,13 @@ def test_checkpoint_save_uses_session_profile_env(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("held_lock_name", "shared_env_scope_held"),
-    [
-        ("_SKILL_HOME_MODULE_PATCH_LOCK", False),
-        ("_PROFILE_ENV_SCOPE_LOCK", True),
-    ],
+    "held_lock_name",
+    ["_SKILL_HOME_MODULE_PATCH_LOCK", "_PROFILE_ENV_SCOPE_LOCK"],
 )
 def test_checkpoint_save_completes_with_parent_scope_lock_held(
-    monkeypatch, tmp_path, held_lock_name, shared_env_scope_held
+    monkeypatch, tmp_path, held_lock_name
 ):
-    """Checkpoint children reuse stream scope without blocking on its locks."""
+    """Checkpoint children use context-local state without profile locks."""
 
     from api.models import Session
     from api.streaming import _save_streaming_checkpoint
@@ -78,8 +75,6 @@ def test_checkpoint_save_completes_with_parent_scope_lock_held(
             "HERMES_EXEC_ASK": "profile-config-value",
         },
     )
-    monkeypatch.setattr(profiles, "_resolve_hermes_home_override", lambda: None)
-
     patch_calls: list[dict] = []
 
     def fake_save(self, *args, **kwargs):
@@ -97,8 +92,8 @@ def test_checkpoint_save_completes_with_parent_scope_lock_held(
     completion = threading.Event()
 
     session = Session(session_id="issue2848-lock", profile="maiko")
-    monkeypatch.setenv("HERMES_HOME", str(profile_home))
-    monkeypatch.setenv("HERMES_EXEC_ASK", "1")
+    monkeypatch.setenv("HERMES_HOME", "process-home")
+    monkeypatch.setenv("HERMES_EXEC_ASK", "process-value")
 
     held_lock = getattr(profiles, held_lock_name)
     acquired_lock = held_lock.acquire(timeout=1)
@@ -107,10 +102,7 @@ def test_checkpoint_save_completes_with_parent_scope_lock_held(
     try:
         def _worker() -> None:
             try:
-                _save_streaming_checkpoint(
-                    session,
-                    _shared_env_scope_held=shared_env_scope_held,
-                )
+                _save_streaming_checkpoint(session)
                 completion.set()
             except Exception as exc:  # pragma: no cover - defensive
                 captured["error"] = exc
@@ -132,9 +124,7 @@ def test_checkpoint_save_completes_with_parent_scope_lock_held(
         captured.get("thread_env", {}).get("HERMES_CONFIG_PATH")
         == str(profile_home / "config.yaml")
     )
-    assert captured.get("env_hermes_home") == str(profile_home)
-    assert captured.get("env_exec_ask") == (
-        "1" if shared_env_scope_held else "profile-config-value"
-    )
+    assert captured.get("env_hermes_home") == "process-home"
+    assert captured.get("env_exec_ask") == "process-value"
     assert not patch_calls
     assert "error" not in captured

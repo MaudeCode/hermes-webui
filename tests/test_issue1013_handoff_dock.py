@@ -262,7 +262,7 @@ def test_state_db_only_handoff_uses_active_request_profile(monkeypatch, tmp_path
     )
 
     @contextmanager
-    def profile_scope(name, purpose="", logger_override=None):
+    def profile_scope(name, purpose="", logger_override=None, **_kwargs):
         calls["scopes"].append(name)
         yield
 

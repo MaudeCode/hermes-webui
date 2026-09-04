@@ -135,6 +135,11 @@ def test_streaming_sessiondb_uses_session_profile_state_db(tmp_path, monkeypatch
     monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _profile: profile_home)
     monkeypatch.setattr(profiles, "get_profile_runtime_env", lambda _home: {})
     monkeypatch.setattr(
+        streaming,
+        "_streaming_requires_process_env_fallback",
+        lambda **_kwargs: False,
+    )
+    monkeypatch.setattr(
         oauth,
         "resolve_runtime_provider_with_anthropic_env_lock",
         lambda _resolver, requested=None: {

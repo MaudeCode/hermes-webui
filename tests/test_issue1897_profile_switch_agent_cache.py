@@ -113,14 +113,16 @@ def test_same_session_profile_switch_rebuilds_agent_under_new_soul_home(tmp_path
             self.tool_progress_callback = kwargs.get("tool_progress_callback")
             self.reasoning_callback = kwargs.get("reasoning_callback")
             self.clarify_callback = kwargs.get("clarify_callback")
-            home = Path(os.environ["HERMES_HOME"])
+            home = Path(cfg._thread_local_env_value("HERMES_HOME"))
             self.constructed_home = str(home)
             self._cached_system_prompt = (home / "SOUL.md").read_text(encoding="utf-8")
             constructed_agents.append(self)
 
         def run_conversation(self, **kwargs):
             prompts_used_for_runs.append(self._cached_system_prompt)
-            homes_seen_during_runs.append(os.environ.get("HERMES_HOME"))
+            homes_seen_during_runs.append(
+                cfg._thread_local_env_value("HERMES_HOME")
+            )
             history = list(kwargs.get("conversation_history") or [])
             return {
                 "messages": history
@@ -161,6 +163,11 @@ def test_same_session_profile_switch_rebuilds_agent_under_new_soul_home(tmp_path
     monkeypatch.setattr(streaming, "_maybe_schedule_title_refresh", lambda *args, **kwargs: None)
     monkeypatch.setattr(profiles, "get_hermes_home_for_profile", home_for_profile)
     monkeypatch.setattr(profiles, "get_profile_runtime_env", lambda _home: {})
+    monkeypatch.setattr(
+        streaming,
+        "_streaming_requires_process_env_fallback",
+        lambda **_kwargs: False,
+    )
     monkeypatch.setattr(
         oauth,
         "resolve_runtime_provider_with_anthropic_env_lock",

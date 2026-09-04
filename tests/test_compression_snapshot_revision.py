@@ -791,6 +791,9 @@ def test_webui_run_passes_revision_from_original_snapshot_when_sqlite_changes_be
     session.save(touch_updated_at=False)
     monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _profile: profile_home)
     monkeypatch.setattr(profiles, "get_profile_runtime_env", lambda _home: {})
+    monkeypatch.setattr(
+        streaming, "_streaming_requires_process_env_fallback", lambda **_kwargs: False
+    )
 
     original_reconcile = streaming.reconciled_state_db_messages_for_session
     reconciliation_calls = 0
@@ -882,6 +885,9 @@ def test_webui_run_missing_explicit_profile_passes_no_foreign_revision(
     session.save(touch_updated_at=False)
     monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _profile: missing_home)
     monkeypatch.setattr(profiles, "get_profile_runtime_env", lambda _home: {})
+    monkeypatch.setattr(
+        streaming, "_streaming_requires_process_env_fallback", lambda **_kwargs: False
+    )
     captured = {}
 
     class FakeAgent:

@@ -482,12 +482,16 @@ def test_anthropic_worker_reports_link_errors(monkeypatch, tmp_path):
 
 def test_anthropic_link_clears_env_and_writes_secret_free_marker(monkeypatch, tmp_path):
     import api.oauth as oauth
+    import api.profiles as profiles
     from api.onboarding import _provider_oauth_authenticated
 
     env_path = tmp_path / ".env"
     env_path.write_text("ANTHROPIC_TOKEN=old-token\nANTHROPIC_API_KEY=old-key\nOTHER=value\n", encoding="utf-8")
     monkeypatch.setenv("ANTHROPIC_TOKEN", "old-token")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "old-key")
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setitem(profiles._INITIAL_PROCESS_ENV, "ANTHROPIC_TOKEN", "old-token")
+    monkeypatch.setitem(profiles._INITIAL_PROCESS_ENV, "ANTHROPIC_API_KEY", "old-key")
 
     oauth._link_anthropic_credentials(tmp_path)
 
@@ -497,6 +501,8 @@ def test_anthropic_link_clears_env_and_writes_secret_free_marker(monkeypatch, tm
     assert "OTHER=value" in env_text
     assert "ANTHROPIC_TOKEN" not in os.environ
     assert "ANTHROPIC_API_KEY" not in os.environ
+    assert "ANTHROPIC_TOKEN" not in profiles._INITIAL_PROCESS_ENV
+    assert "ANTHROPIC_API_KEY" not in profiles._INITIAL_PROCESS_ENV
     auth = json.loads((tmp_path / "auth.json").read_text(encoding="utf-8"))
     marker = auth["credential_pool"]["anthropic"][0]
     assert marker["auth_type"] == "oauth"

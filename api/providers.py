@@ -3742,6 +3742,13 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
     except Exception as exc:
         logger.exception("Failed to write env file for provider %s", provider_id)
         return {"ok": False, "error": f"Failed to save API key: {exc}"}
+    if not api_key:
+        try:
+            from api.profiles import retire_startup_env_keys_for_home
+
+            retire_startup_env_keys_for_home(_get_hermes_home(), (env_var,))
+        except Exception:
+            logger.debug("Failed to retire removed startup provider key", exc_info=True)
 
     # Invalidate the model cache so the dropdown refreshes on next request.
     # Using invalidate_models_cache() instead of reload_config() to avoid

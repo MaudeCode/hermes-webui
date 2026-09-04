@@ -159,6 +159,8 @@ class TerminalSession:
 
 _TERMINALS: dict[str, TerminalSession] = {}
 _LOCK = threading.RLock()
+_STARTING_TERMINALS: dict[str, "_StartReservation"] = {}
+_TERMINAL_SHUTTING_DOWN = False
 # Hard cap on concurrently live embedded terminals. Each holds a shell process,
 # a pty master fd, and a reader thread; a client that drops its output stream
 # without POSTing /api/terminal/close (tab close, crash, network drop) leaves
@@ -167,6 +169,7 @@ _LOCK = threading.RLock()
 # cap evicts the least-recently-active terminal to make room. Generous enough
 # that real interactive use never trips it.
 _MAX_TERMINALS = 32
+_TERMINAL_SHUTDOWN_WAIT_SECONDS = 12.0
 _spawn_queue: queue.Queue = queue.Queue()
 _spawn_supervisor_started = False
 _spawn_supervisor_lock = threading.Lock()
@@ -196,6 +199,18 @@ class _SpawnRequest:
     lock: threading.Lock = field(default_factory=threading.Lock)
     proc: subprocess.Popen | None = None
     error: BaseException | None = None
+    reservation_sid: str | None = None
+    reservation: object | None = None
+    spawn_fds: tuple[int, ...] = ()
+    enqueued: bool = False
+    rejected: bool = False
+
+
+@dataclass
+class _StartReservation:
+    done: threading.Event = field(default_factory=threading.Event)
+    spawn_done: threading.Event | None = None
+    cancelled: bool = False
 
 
 def _reap_abandoned_spawn(proc: subprocess.Popen) -> bool:
@@ -225,6 +240,41 @@ def _reap_abandoned_spawn(proc: subprocess.Popen) -> bool:
     if proc.poll() is None:
         print("terminal abandoned spawn cleanup failed", flush=True)
         return False
+    return True
+
+
+def _release_abandoned_spawn_reservation(request: _SpawnRequest) -> None:
+    reservation = request.reservation
+    if reservation is None or not (
+        request.timed_out.is_set() or request.rejected
+    ):
+        return
+    with _LOCK:
+        if _STARTING_TERMINALS.get(request.reservation_sid or "") is reservation:
+            _STARTING_TERMINALS.pop(request.reservation_sid or "", None)
+            reservation.done.set()
+
+
+def _close_spawn_request_fds(request: _SpawnRequest) -> None:
+    fds, request.spawn_fds = request.spawn_fds, ()
+    for fd in fds:
+        _safe_close_fd(fd)
+
+
+def _cancel_spawn_before_popen(request: _SpawnRequest) -> bool:
+    """Reject a queued spawn whose caller timed out or shutdown cancelled it."""
+    with request.lock:
+        reservation = request.reservation
+        if not (
+            request.timed_out.is_set()
+            or (reservation is not None and getattr(reservation, "cancelled", False))
+        ):
+            return False
+        request.error = RuntimeError("terminal start was cancelled")
+        request.rejected = True
+        request.done.set()
+    _close_spawn_request_fds(request)
+    _release_abandoned_spawn_reservation(request)
     return True
 
 
@@ -259,21 +309,27 @@ def _spawn_supervisor_loop() -> None:
         request = None
         try:
             request = _spawn_queue.get()
+            if _cancel_spawn_before_popen(request):
+                continue
             try:
                 proc = subprocess.Popen(**request.kwargs)
+                _close_spawn_request_fds(request)
                 with request.lock:
                     if request.timed_out.is_set():
                         _reap_abandoned_spawn(proc)
                     else:
                         request.proc = proc
                     request.done.set()
+                _release_abandoned_spawn_reservation(request)
             except BaseException as exc:
+                _close_spawn_request_fds(request)
                 with request.lock:
                     try:
                         request.error = exc
                     except BaseException:
                         pass
                     request.done.set()
+                _release_abandoned_spawn_reservation(request)
         except BaseException as exc:
             if request is not None:
                 try:
@@ -419,9 +475,9 @@ def _enforce_terminal_cap(*, exclude_sid: str | None = None) -> None:
         victim_term = None
         with _LOCK:
             # Reuse/restart of an existing sid replaces in place — no growth.
-            if exclude_sid in _TERMINALS:
+            if exclude_sid in _TERMINALS or exclude_sid in _STARTING_TERMINALS:
                 return
-            if len(_TERMINALS) < _MAX_TERMINALS:
+            if len(_TERMINALS) + len(_STARTING_TERMINALS) < _MAX_TERMINALS:
                 return
             candidates = [
                 (sid, term) for sid, term in _TERMINALS.items() if sid != exclude_sid
@@ -550,17 +606,38 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
     # than adds an entry.
     _enforce_terminal_cap(exclude_sid=sid)
 
-    with _LOCK:
-        current = _TERMINALS.get(sid)
-        if current and current.is_alive() and not restart and current.workspace == cwd:
-            _set_size(current, rows, cols)
-            return current
-        if current:
-            close_terminal(sid)
+    while True:
+        with _LOCK:
+            if _TERMINAL_SHUTTING_DOWN:
+                raise RuntimeError("terminal subsystem is shutting down")
+            current = _TERMINALS.get(sid)
+            if current and current.is_alive() and not restart and current.workspace == cwd:
+                _set_size(current, rows, cols)
+                return current
+            pending = _STARTING_TERMINALS.get(sid)
+            if pending is None:
+                if current is None and len(_TERMINALS) + len(_STARTING_TERMINALS) >= _MAX_TERMINALS:
+                    raise RuntimeError("terminal capacity is busy")
+                pending = _StartReservation()
+                _STARTING_TERMINALS[sid] = pending
+                replaced = _TERMINALS.pop(sid, None)
+                current = None
+                break
+        if not pending.done.wait(timeout=5.0):
+            raise TimeoutError("terminal start already in progress")
+
+    master_fd = -1
+    slave_fd = -1
+    proc = None
+    term = None
+    request = None
+    spawn_slave_fd = -1
+    try:
+        if replaced is not None:
+            _teardown_terminal(replaced)
 
         master_fd, slave_fd = os.openpty()
         # Build a safe env: allowlist common shell vars, strip API keys and secrets.
-        # The PTY shell is an interactive UI surface — do not leak server credentials.
         _SAFE_ENV_KEYS = {
             "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL",
             "LC_CTYPE", "LC_MESSAGES", "LANGUAGE", "TZ", "TMPDIR", "TEMP",
@@ -578,45 +655,43 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
             }
         )
         shell = _shell_path()
-        # Keep the shell in its own process group for explicit cleanup via
-        # close_terminal()/close_all_terminals(); do not use PDEATHSIG here.
+        spawn_slave_fd = os.dup(slave_fd)
         request = _SpawnRequest(
             {
                 "args": _shell_argv(shell),
                 "cwd": cwd,
                 "env": env,
-                "stdin": slave_fd,
-                "stdout": slave_fd,
-                "stderr": slave_fd,
+                "stdin": spawn_slave_fd,
+                "stdout": spawn_slave_fd,
+                "stderr": spawn_slave_fd,
                 "close_fds": True,
-                # Required so cleanup can signal the whole interactive shell tree.
                 "start_new_session": True,
-            }
+            },
+            reservation_sid=sid,
+            reservation=pending,
+            spawn_fds=(spawn_slave_fd,),
         )
+        spawn_slave_fd = -1
+        with _LOCK:
+            if _STARTING_TERMINALS.get(sid) is pending:
+                pending.spawn_done = request.done
         _ensure_spawn_supervisor()
         _ensure_terminal_reaper()
         _spawn_queue.put(request)
-        try:
-            if not request.done.wait(timeout=5.0):
-                timed_out = False
-                with request.lock:
-                    if not request.done.is_set():
-                        request.timed_out.set()
-                        timed_out = True
-                if timed_out:
+        request.enqueued = True
+        if not request.done.wait(timeout=5.0):
+            with request.lock:
+                if not request.done.is_set():
+                    request.timed_out.set()
                     raise TimeoutError("terminal spawn timeout - supervisor unresponsive")
-            if request.error:
-                raise request.error
-            proc = request.proc
-            if proc is None:
-                raise RuntimeError("terminal spawn failed without process")
-        except BaseException:
-            _safe_close_fd(master_fd)
-            _safe_close_fd(slave_fd)
-            raise
+        if request.error:
+            raise request.error
+        proc = request.proc
+        if proc is None:
+            raise RuntimeError("terminal spawn failed without process")
         os.close(slave_fd)
+        slave_fd = -1
         _set_nonblocking(master_fd)
-
         term = TerminalSession(
             session_id=sid,
             workspace=cwd,
@@ -627,9 +702,44 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
         )
         _set_size(term, rows, cols)
         term.reader = threading.Thread(target=_reader_loop, args=(term,), daemon=True)
-        term.reader.start()
-        _TERMINALS[sid] = term
+        with _LOCK:
+            if _STARTING_TERMINALS.get(sid) is not pending or pending.cancelled:
+                raise RuntimeError("terminal start was cancelled")
+            _TERMINALS[sid] = term
+            term.reader.start()
+            _STARTING_TERMINALS.pop(sid, None)
+            pending.done.set()
         return term
+    except BaseException as exc:
+        if request is not None and not request.enqueued:
+            _close_spawn_request_fds(request)
+            with request.lock:
+                request.error = exc
+                request.done.set()
+        with _LOCK:
+            if term is not None and _TERMINALS.get(sid) is term:
+                _TERMINALS.pop(sid, None)
+        if term is not None:
+            _teardown_terminal(term)
+            master_fd = -1
+        elif proc is not None:
+            _reap_abandoned_spawn(proc)
+        if master_fd >= 0:
+            _safe_close_fd(master_fd)
+        if slave_fd >= 0:
+            _safe_close_fd(slave_fd)
+        if spawn_slave_fd >= 0:
+            _safe_close_fd(spawn_slave_fd)
+        with _LOCK:
+            if _STARTING_TERMINALS.get(sid) is pending:
+                if (
+                    request is None
+                    or not request.timed_out.is_set()
+                    or request.done.is_set()
+                ):
+                    _STARTING_TERMINALS.pop(sid, None)
+                    pending.done.set()
+        raise
 
 
 def get_terminal(session_id: str) -> TerminalSession | None:
@@ -718,9 +828,12 @@ def close_terminal(session_id: str, *, expected: TerminalSession | None = None) 
     with _LOCK:
         if expected is not None and _TERMINALS.get(sid) is not expected:
             return False
+        pending = _STARTING_TERMINALS.get(sid)
+        if pending is not None:
+            pending.cancelled = True
         term = _TERMINALS.pop(sid, None)
     if not term:
-        return False
+        return pending is not None
     _teardown_terminal(term)
     return True
 
@@ -764,10 +877,24 @@ def _teardown_terminal(term: TerminalSession) -> None:
 
 def close_all_terminals() -> None:
     """Best-effort reap of embedded shells during graceful WebUI shutdown."""
+    global _TERMINAL_SHUTTING_DOWN
     with _LOCK:
+        _TERMINAL_SHUTTING_DOWN = True
         session_ids = list(_TERMINALS)
+        pending = list(_STARTING_TERMINALS.values())
+        for reservation in pending:
+            reservation.cancelled = True
     for session_id in session_ids:
         close_terminal(session_id)
+    deadline = time.monotonic() + _TERMINAL_SHUTDOWN_WAIT_SECONDS
+    for reservation in pending:
+        reservation.done.wait(max(0.0, deadline - time.monotonic()))
+        spawn_done = reservation.spawn_done
+        if spawn_done is not None:
+            # Once the supervisor has admitted Popen, only it can safely close
+            # the transferred PTY descriptor and reap a late child. Do not let
+            # interpreter teardown cut that ownership handoff short.
+            spawn_done.wait()
 
 
 atexit.register(close_all_terminals)

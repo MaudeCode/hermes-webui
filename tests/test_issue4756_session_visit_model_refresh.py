@@ -463,7 +463,7 @@ def test_plain_follower_static_fallback_blocks_foreign_process_credentials(
 
     def hold_alpha_process_env():
         with profiles.profile_env_for_background_worker(
-            "alpha", "test holder", scope_skill_modules=False
+            "alpha", "test holder"
         ):
             holder_ready.set()
             release_holder.wait(2)

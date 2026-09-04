@@ -6,6 +6,7 @@ import builtins
 
 import api.config as config
 import api.onboarding as onboarding
+import api.profiles as profiles
 import api.providers as providers
 
 
@@ -43,6 +44,7 @@ def _run_available_models_with_cfg(monkeypatch, tmp_path, cfg):
 def test_xiaomi_api_key_env_var_detects_model_group(monkeypatch, tmp_path):
     _force_env_fallback(monkeypatch)
     monkeypatch.setenv("XIAOMI_API_KEY", "test-xiaomi-key")
+    monkeypatch.setitem(profiles._INITIAL_PROCESS_ENV, "XIAOMI_API_KEY", "test-xiaomi-key")
 
     result = _run_available_models_with_cfg(monkeypatch, tmp_path, {"model": {}})
     groups = {group["provider_id"]: group for group in result["groups"]}

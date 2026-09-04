@@ -20,6 +20,9 @@ These use fakes for the shell/pty so they run without spawning real processes;
 the real-shell path is covered by test_terminal_linux_lifecycle.
 """
 import os
+import threading
+import time
+import types
 
 import pytest
 
@@ -69,9 +72,14 @@ def _make_registered_term(monkeypatch, sid, *, alive=True, last_activity=0.0, re
 def _clean_terminals(monkeypatch):
     # Never kill real process groups in these unit tests.
     monkeypatch.setattr(terminal.os, "killpg", lambda *a, **k: None)
+    monkeypatch.setattr(terminal, "_TERMINAL_SHUTTING_DOWN", False)
     yield
     with terminal._LOCK:
         sids = list(terminal._TERMINALS)
+        pending = list(terminal._STARTING_TERMINALS.values())
+        terminal._STARTING_TERMINALS.clear()
+    for reservation in pending:
+        reservation.done.set()
     for sid in sids:
         try:
             terminal.close_terminal(sid)
@@ -157,6 +165,328 @@ def test_cap_reuse_of_existing_sid_evicts_nothing(monkeypatch):
 
     with terminal._LOCK:
         assert {"keep-a", "keep-b"} <= set(terminal._TERMINALS)
+
+
+def test_reused_terminal_resize_is_atomic_with_registry_close(monkeypatch, tmp_path):
+    current = _make_registered_term(monkeypatch, "reuse-atomic", alive=True)
+    current.workspace = str(terminal.Path(current.workspace).resolve())
+    close_started = threading.Event()
+    close_finished = threading.Event()
+    closer = None
+
+    def resize(_term, _rows, _cols):
+        nonlocal closer
+        closer = threading.Thread(
+            target=lambda: (
+                close_started.set(),
+                terminal.close_terminal("reuse-atomic", expected=current),
+                close_finished.set(),
+            )
+        )
+        closer.start()
+        assert close_started.wait(1)
+        assert close_finished.wait(0.1) is False
+
+    monkeypatch.setattr(terminal, "_set_size", resize)
+
+    assert terminal.start_terminal("reuse-atomic", terminal.Path(current.workspace)) is current
+    closer.join(1)
+    assert close_finished.is_set()
+
+
+def test_blocked_spawn_does_not_delay_unrelated_close(monkeypatch, tmp_path):
+    other = _make_registered_term(monkeypatch, "other", alive=False)
+    request_ready = threading.Event()
+    captured = {}
+    errors = []
+
+    def put(request):
+        captured["request"] = request
+        request_ready.set()
+
+    monkeypatch.setattr(terminal, "_spawn_queue", types.SimpleNamespace(put=put))
+    monkeypatch.setattr(terminal, "_ensure_spawn_supervisor", lambda: None)
+    monkeypatch.setattr(terminal, "_ensure_terminal_reaper", lambda: None)
+
+    def start_and_capture():
+        try:
+            terminal.start_terminal("blocked", tmp_path)
+        except Exception as exc:
+            errors.append(exc)
+
+    starter = threading.Thread(target=start_and_capture)
+    starter.start()
+    assert request_ready.wait(1)
+
+    closed = threading.Event()
+    closer = threading.Thread(
+        target=lambda: (terminal.close_terminal("other", expected=other), closed.set())
+    )
+    closer.start()
+    unrelated_close_progressed = closed.wait(0.2)
+
+    captured["request"].error = RuntimeError("synthetic spawn failure")
+    captured["request"].done.set()
+    starter.join(1)
+    closer.join(1)
+
+    assert unrelated_close_progressed is True
+    assert errors and str(errors[0]) == "synthetic spawn failure"
+    assert "blocked" not in terminal._STARTING_TERMINALS
+
+
+def test_pty_setup_failure_releases_start_reservation(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        terminal.os,
+        "openpty",
+        lambda: (_ for _ in ()).throw(OSError("fd exhaustion")),
+    )
+
+    with pytest.raises(OSError, match="fd exhaustion"):
+        terminal.start_terminal("pty-failure", tmp_path)
+
+    assert "pty-failure" not in terminal._STARTING_TERMINALS
+
+
+def test_pre_enqueue_failure_signals_spawn_event(monkeypatch, tmp_path):
+    captured = {}
+    original_request = terminal._SpawnRequest
+
+    def capture_request(*args, **kwargs):
+        request = original_request(*args, **kwargs)
+        captured["request"] = request
+        return request
+
+    monkeypatch.setattr(terminal, "_SpawnRequest", capture_request)
+    monkeypatch.setattr(terminal, "_ensure_spawn_supervisor", lambda: None)
+    monkeypatch.setattr(
+        terminal,
+        "_ensure_terminal_reaper",
+        lambda: (_ for _ in ()).throw(RuntimeError("thread unavailable")),
+    )
+
+    with pytest.raises(RuntimeError, match="thread unavailable"):
+        terminal.start_terminal("pre-enqueue-failure", tmp_path)
+
+    assert captured["request"].done.is_set()
+    assert "pre-enqueue-failure" not in terminal._STARTING_TERMINALS
+
+
+def test_request_construction_failure_closes_untransferred_slave_fd(
+    monkeypatch, tmp_path
+):
+    closed = []
+    monkeypatch.setattr(terminal.os, "openpty", lambda: (100, 101))
+    monkeypatch.setattr(terminal.os, "dup", lambda _fd: 102)
+    monkeypatch.setattr(terminal, "_safe_close_fd", lambda fd: closed.append(fd))
+    monkeypatch.setattr(
+        terminal,
+        "_SpawnRequest",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(MemoryError("allocation")),
+    )
+
+    with pytest.raises(MemoryError, match="allocation"):
+        terminal.start_terminal("request-allocation-failure", tmp_path)
+
+    assert set(closed) == {100, 101, 102}
+
+
+def test_cancelled_start_keeps_capacity_until_owner_cleans_up(monkeypatch, tmp_path):
+    monkeypatch.setattr(terminal, "_MAX_TERMINALS", 1)
+    request_ready = threading.Event()
+    captured = {}
+    errors = []
+
+    def put(request):
+        captured["request"] = request
+        request_ready.set()
+
+    monkeypatch.setattr(terminal, "_spawn_queue", types.SimpleNamespace(put=put))
+    monkeypatch.setattr(terminal, "_ensure_spawn_supervisor", lambda: None)
+    monkeypatch.setattr(terminal, "_ensure_terminal_reaper", lambda: None)
+
+    def start_blocked():
+        try:
+            terminal.start_terminal("blocked-cap", tmp_path)
+        except Exception as exc:
+            errors.append(exc)
+
+    owner = threading.Thread(target=start_blocked)
+    owner.start()
+    assert request_ready.wait(1)
+    assert terminal.close_terminal("blocked-cap") is True
+
+    with pytest.raises(RuntimeError, match="capacity is busy"):
+        terminal.start_terminal("second", tmp_path)
+
+    captured["request"].error = RuntimeError("synthetic spawn failure")
+    captured["request"].done.set()
+    owner.join(1)
+
+    assert errors
+    assert "blocked-cap" not in terminal._STARTING_TERMINALS
+
+
+def test_duplicate_pending_start_does_not_evict_live_terminal(monkeypatch):
+    monkeypatch.setattr(terminal, "_MAX_TERMINALS", 2)
+    live = _make_registered_term(monkeypatch, "live", alive=True)
+    with terminal._LOCK:
+        terminal._STARTING_TERMINALS["pending"] = terminal._StartReservation()
+
+    terminal._enforce_terminal_cap(exclude_sid="pending")
+
+    assert terminal._TERMINALS["live"] is live
+
+
+def test_reader_start_failure_rolls_back_published_terminal(monkeypatch, tmp_path):
+    class BrokenThread:
+        def start(self):
+            raise RuntimeError("thread exhaustion")
+
+    def put(request):
+        request.proc = _FakeProc(alive=False)
+        request.done.set()
+
+    monkeypatch.setattr(terminal, "_spawn_queue", types.SimpleNamespace(put=put))
+    monkeypatch.setattr(terminal, "_ensure_spawn_supervisor", lambda: None)
+    monkeypatch.setattr(terminal, "_ensure_terminal_reaper", lambda: None)
+    monkeypatch.setattr(terminal, "_set_nonblocking", lambda _fd: None)
+    monkeypatch.setattr(terminal, "_set_size", lambda *_args: None)
+    monkeypatch.setattr(terminal.threading, "Thread", lambda *_args, **_kwargs: BrokenThread())
+
+    with pytest.raises(RuntimeError, match="thread exhaustion"):
+        terminal.start_terminal("reader-failure", tmp_path)
+
+    assert "reader-failure" not in terminal._TERMINALS
+    assert "reader-failure" not in terminal._STARTING_TERMINALS
+
+
+def test_close_all_waits_for_pending_start_cleanup(monkeypatch, tmp_path):
+    request_ready = threading.Event()
+    captured = {}
+    errors = []
+
+    def put(request):
+        captured["request"] = request
+        request_ready.set()
+
+    monkeypatch.setattr(terminal, "_spawn_queue", types.SimpleNamespace(put=put))
+    monkeypatch.setattr(terminal, "_ensure_spawn_supervisor", lambda: None)
+    monkeypatch.setattr(terminal, "_ensure_terminal_reaper", lambda: None)
+
+    def start_and_capture():
+        try:
+            terminal.start_terminal("shutdown-pending", tmp_path)
+        except Exception as exc:
+            errors.append(str(exc))
+
+    owner = threading.Thread(target=start_and_capture)
+    owner.start()
+    assert request_ready.wait(1)
+    waiter = threading.Thread(target=start_and_capture)
+    waiter.start()
+    time.sleep(0.05)
+    closed = threading.Event()
+    shutdown = threading.Thread(
+        target=lambda: (terminal.close_all_terminals(), closed.set())
+    )
+    shutdown.start()
+    assert closed.wait(0.1) is False
+
+    captured["request"].error = RuntimeError("shutdown")
+    captured["request"].done.set()
+    owner.join(1)
+    waiter.join(1)
+    shutdown.join(1)
+
+    assert closed.is_set()
+    assert waiter.is_alive() is False
+    assert "terminal subsystem is shutting down" in errors
+    assert "shutdown-pending" not in terminal._STARTING_TERMINALS
+
+
+def test_shutdown_wait_covers_full_pending_start_cleanup_path():
+    # Replacement teardown (2.5s) + spawn wait (5s) + cancellation teardown
+    # (2.5s), with room for scheduling overhead.
+    assert terminal._TERMINAL_SHUTDOWN_WAIT_SECONDS >= 11.0
+
+
+def test_shutdown_waits_for_supervisor_owned_late_spawn_cleanup(monkeypatch):
+    reservation = terminal._StartReservation()
+    reservation.done.set()
+    reservation.spawn_done = threading.Event()
+    with terminal._LOCK:
+        terminal._STARTING_TERMINALS["late-spawn"] = reservation
+    finished = threading.Event()
+    shutdown = threading.Thread(
+        target=lambda: (terminal.close_all_terminals(), finished.set())
+    )
+    shutdown.start()
+    assert finished.wait(0.1) is False
+
+    reservation.spawn_done.set()
+    shutdown.join(1)
+
+    assert finished.is_set()
+
+
+def test_spawn_timeout_retains_capacity_until_supervisor_cleanup(monkeypatch, tmp_path):
+    captured = {}
+
+    class NeverDone:
+        def wait(self, timeout=None):
+            return False
+
+        def is_set(self):
+            return False
+
+    def put(request):
+        request.done = NeverDone()
+        captured["request"] = request
+
+    monkeypatch.setattr(terminal, "_spawn_queue", types.SimpleNamespace(put=put))
+    monkeypatch.setattr(terminal, "_ensure_spawn_supervisor", lambda: None)
+    monkeypatch.setattr(terminal, "_ensure_terminal_reaper", lambda: None)
+
+    with pytest.raises(TimeoutError, match="terminal spawn timeout"):
+        terminal.start_terminal("late-timeout", tmp_path)
+
+    assert "late-timeout" in terminal._STARTING_TERMINALS
+    request = captured["request"]
+    request.done = threading.Event()
+    request.done.set()
+    terminal._release_abandoned_spawn_reservation(request)
+    terminal._close_spawn_request_fds(request)
+    assert "late-timeout" not in terminal._STARTING_TERMINALS
+
+
+def test_shutdown_cancelled_queued_spawns_skip_process_creation():
+    requests = []
+    for index in range(3):
+        sid = f"queued-{index}"
+        reservation = terminal._StartReservation(cancelled=True)
+        read_fd, spawn_fd = os.pipe()
+        request = terminal._SpawnRequest(
+            {},
+            reservation_sid=sid,
+            reservation=reservation,
+            spawn_fds=(spawn_fd,),
+        )
+        with terminal._LOCK:
+            terminal._STARTING_TERMINALS[sid] = reservation
+        requests.append((sid, reservation, request, read_fd, spawn_fd))
+
+    try:
+        for sid, reservation, request, _read_fd, spawn_fd in requests:
+            assert terminal._cancel_spawn_before_popen(request) is True
+            assert request.done.is_set()
+            assert reservation.done.is_set()
+            assert sid not in terminal._STARTING_TERMINALS
+            with pytest.raises(OSError):
+                os.fstat(spawn_fd)
+    finally:
+        for _sid, _reservation, _request, read_fd, _spawn_fd in requests:
+            os.close(read_fd)
 
 
 # ── F1: writes/resizes are serialized against close (no fd-reuse injection) ───

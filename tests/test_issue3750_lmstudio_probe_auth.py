@@ -175,6 +175,18 @@ display:
     }
 
 
+def test_reasoning_probe_uses_context_local_profile_key(monkeypatch):
+    monkeypatch.setattr(config, "cfg", {"model": {}, "providers": {}})
+    monkeypatch.setenv("LM_API_KEY", "root-token")
+    config._set_thread_env(LM_API_KEY="profile-token")
+    config._thread_ctx.block_process_env_fallback = True
+    try:
+        assert config._get_lmstudio_reasoning_probe_api_key() == "profile-token"
+    finally:
+        config._thread_ctx.block_process_env_fallback = False
+        config._clear_thread_env()
+
+
 def test_reasoning_probe_honors_active_model_api_key(
     tmp_path,
     monkeypatch,

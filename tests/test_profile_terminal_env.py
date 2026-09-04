@@ -53,9 +53,9 @@ def test_streaming_applies_profile_runtime_env_to_agent_run():
     assert "get_profile_runtime_env" in src
     assert "_profile_runtime_env" in src
     assert "_safe_profile_runtime_env" in src
-    assert "old_profile_env" in src
     assert "filter_runtime_env_for_gateway_parity" in src
-    assert "os.environ.update(_safe_profile_runtime_env)" in src
+    assert "_set_thread_env(**_thread_env)" in src
+    assert "os.environ.update(_safe_profile_runtime_env)" not in src
     assert "os.environ.update(_profile_runtime_env)" not in src
 
 
@@ -88,7 +88,8 @@ def test_profile_background_worker_uses_gateway_parity_runtime_env_filter():
 
     assert "filter_runtime_env_for_gateway_parity" in src
     assert "safe_runtime_env" in src
-    assert "os.environ.update(safe_runtime_env)" in src
+    assert "thread_env.update(safe_runtime_env)" in src
+    assert "os.environ.update(safe_runtime_env)" not in src
     assert "os.environ.update(runtime_env)" not in src
 
 
@@ -96,7 +97,7 @@ def test_streaming_thread_env_allows_profile_terminal_cwd_override():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
 
     assert "def _build_agent_thread_env" in src
-    assert "_thread_env = _build_agent_thread_env(" in src
+    assert "_thread_env.update(_build_agent_thread_env(" in src
     assert "_set_thread_env(**_thread_env)" in src
     assert "_set_thread_env(\n            **_profile_runtime_env,\n            TERMINAL_CWD" not in src
 

@@ -84,6 +84,18 @@ def test_streaming_process_env_fallback_requires_safe_terminal_context(
     ) is True
 
 
+def test_streaming_accepts_terminal_config_with_context_local_policy():
+    assert streaming._streaming_requires_process_env_fallback(
+        home_override_installed=True,
+        skill_modules_dynamic=True,
+        profile_is_named=True,
+        secret_scope_installed=True,
+        terminal_context_installed=True,
+        terminal_process_env_required=True,
+        terminal_scope_installed=True,
+    ) is False
+
+
 def _make_state_db(home, prefix):
     home.mkdir(parents=True)
     db = home / "state.db"
@@ -551,7 +563,7 @@ def test_native_bootstrap_routes_stay_responsive_while_profile_env_is_busy(
         "profile_env_for_active_request_readonly",
     ],
 )
-def test_default_environment_scope_waits_for_named_profile_scope(
+def test_default_environment_scope_does_not_wait_for_named_profile_scope(
     monkeypatch, tmp_path, default_scope_name
 ):
     member_home = tmp_path / "profiles" / "member"
@@ -572,7 +584,7 @@ def test_default_environment_scope_waits_for_named_profile_scope(
 
     def named_worker():
         with profiles.profile_env_for_background_worker(
-            "member", "named holder", scope_skill_modules=False
+            "member", "named holder"
         ):
             named_entered.set()
             assert release_named.wait(2)
@@ -580,9 +592,7 @@ def test_default_environment_scope_waits_for_named_profile_scope(
     def default_worker():
         default_scope = getattr(profiles, default_scope_name)
         if default_scope_name == "profile_env_for_background_worker":
-            context = default_scope(
-                "default", "default waiter", scope_skill_modules=False
-            )
+            context = default_scope("default", "default waiter")
         else:
             context = default_scope("default waiter")
         with context:
@@ -593,13 +603,259 @@ def test_default_environment_scope_waits_for_named_profile_scope(
     named.start()
     assert named_entered.wait(2)
     default.start()
-    assert default_entered.wait(0.1) is False
+    default_progressed_while_named_scope_active = default_entered.wait(0.2)
     release_named.set()
-    assert default_entered.wait(2)
     named.join(2)
     default.join(2)
+    assert default_progressed_while_named_scope_active is True
     assert named.is_alive() is False
     assert default.is_alive() is False
+
+
+def test_default_title_scope_does_not_block_default_chat_scope():
+    title_entered = threading.Event()
+    release_title = threading.Event()
+    chat_entered = threading.Event()
+
+    def title_worker():
+        with profiles.profile_env_for_background_worker(
+            "default", "background title"
+        ):
+            title_entered.set()
+            assert release_title.wait(2)
+
+    def chat_worker():
+        with profiles.profile_env_for_background_worker(
+            "default", "chat admission"
+        ):
+            chat_entered.set()
+
+    title = threading.Thread(target=title_worker)
+    chat = threading.Thread(target=chat_worker)
+    title.start()
+    assert title_entered.wait(2)
+    chat.start()
+    chat_progressed_while_title_blocked = chat_entered.wait(0.2)
+    release_title.set()
+    title.join(2)
+    chat.join(2)
+
+    assert chat_progressed_while_title_blocked is True
+    assert title.is_alive() is False
+    assert chat.is_alive() is False
+
+
+def test_default_worker_pins_root_home_while_cron_mutates_process_env(
+    monkeypatch, tmp_path
+):
+    import api.config as config
+
+    root_home = tmp_path / "root"
+    cron_home = tmp_path / "profiles" / "cron"
+    root_home.mkdir()
+    cron_home.mkdir(parents=True)
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", root_home)
+    monkeypatch.setitem(profiles._INITIAL_PROCESS_ENV, "OPENAI_API_KEY", "root-startup-key")
+    monkeypatch.setenv("HERMES_HOME", str(cron_home))
+    monkeypatch.setenv("OPENAI_API_KEY", "named-live-key")
+
+    with profiles.profile_env_for_background_worker("default", "background title"):
+        assert config._thread_local_env_value("HERMES_HOME") == str(root_home)
+        assert config._thread_local_env_value("OPENAI_API_KEY") == "root-startup-key"
+
+    assert os.environ["HERMES_HOME"] == str(cron_home)
+
+
+def test_named_profile_secret_overlay_blanks_startup_root_credentials(
+    monkeypatch, tmp_path
+):
+    profile_home = tmp_path / "profiles" / "member"
+    profile_home.mkdir(parents=True)
+    monkeypatch.setattr(
+        profiles, "_profile_secret_env_names", lambda _home: {"OPENAI_API_KEY"}
+    )
+    monkeypatch.setitem(
+        profiles._INITIAL_PROCESS_ENV, "OPENAI_API_KEY", "root-startup-key"
+    )
+
+    assert profiles._profile_secret_thread_env("member", profile_home)[
+        "OPENAI_API_KEY"
+    ] == ""
+
+
+def test_isolated_profile_owns_its_startup_credentials(monkeypatch, tmp_path):
+    profile_home = tmp_path / "profiles" / "member"
+    profile_home.mkdir(parents=True)
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME", str(profile_home))
+    monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: True)
+    monkeypatch.setattr(
+        profiles, "_profile_secret_env_names", lambda _home: {"OPENAI_API_KEY"}
+    )
+    monkeypatch.setitem(
+        profiles._INITIAL_PROCESS_ENV, "OPENAI_API_KEY", "deployment-key"
+    )
+
+    assert profiles._profile_secret_thread_env("member", profile_home)[
+        "OPENAI_API_KEY"
+    ] == "deployment-key"
+
+
+def test_effective_model_override_uses_profile_thread_env(monkeypatch):
+    import api.config as config
+
+    monkeypatch.setenv("HERMES_MODEL", "root-model")
+    config._set_thread_env(HERMES_MODEL="profile-model")
+    try:
+        assert config.get_effective_default_model({"model": {}}) == "profile-model"
+    finally:
+        config._clear_thread_env()
+
+
+def test_root_profile_projects_startup_model_override(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        profiles, "_profile_secret_env_names", lambda _home: set()
+    )
+    monkeypatch.setitem(
+        profiles._INITIAL_PROCESS_ENV, "HERMES_MODEL", "deployment-model"
+    )
+
+    assert profiles._profile_secret_thread_env("default", tmp_path)[
+        "HERMES_MODEL"
+    ] == "deployment-model"
+
+
+def test_root_profile_projects_filtered_startup_config_environment(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(profiles, "_profile_secret_env_names", lambda _home: set())
+    monkeypatch.setitem(
+        profiles._INITIAL_PROCESS_ENV, "CUSTOM_BASE_URL", "https://root.example"
+    )
+    monkeypatch.setitem(profiles._INITIAL_PROCESS_ENV, "HOME", "/private/root")
+
+    env = profiles._profile_secret_thread_env("default", tmp_path)
+
+    assert env["CUSTOM_BASE_URL"] == "https://root.example"
+    assert "HOME" not in env
+
+
+def test_context_length_credentials_use_profile_thread_env(monkeypatch):
+    import api.config as config
+    import api.routes as routes
+
+    monkeypatch.setenv("PROFILE_CONTEXT_KEY", "root-key")
+    config._set_thread_env(PROFILE_CONTEXT_KEY="profile-key")
+    try:
+        entry = {"name": "Scoped", "key_env": "PROFILE_CONTEXT_KEY"}
+        assert routes._custom_provider_api_key_for_context(
+            entry, "custom:scoped"
+        ) == "profile-key"
+        assert routes._context_length_config_api_key_for_provider(
+            "custom:scoped",
+            {"providers": {"custom:scoped": entry}},
+        ) == "profile-key"
+    finally:
+        config._clear_thread_env()
+
+
+def test_ordinary_named_profile_removal_keeps_root_startup_key(
+    monkeypatch, tmp_path
+):
+    root_home = tmp_path / "root"
+    named_home = root_home / "profiles" / "member"
+    named_home.mkdir(parents=True)
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", root_home)
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME", str(named_home))
+    monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
+    monkeypatch.setitem(
+        profiles._INITIAL_PROCESS_ENV, "OPENAI_API_KEY", "root-deployment-key"
+    )
+
+    profiles.retire_startup_env_keys_for_home(named_home, ("OPENAI_API_KEY",))
+
+    assert profiles._INITIAL_PROCESS_ENV["OPENAI_API_KEY"] == "root-deployment-key"
+
+
+def test_root_stream_scope_cannot_fall_through_to_live_named_prefill(
+    monkeypatch, tmp_path
+):
+    import api.config as config
+
+    monkeypatch.delenv("HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT", raising=False)
+    monkeypatch.delitem(
+        profiles._INITIAL_PROCESS_ENV,
+        "HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT",
+        raising=False,
+    )
+    env = profiles._profile_secret_thread_env("default", tmp_path)
+    monkeypatch.setenv(
+        "HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT", "named-profile-script"
+    )
+    config._set_thread_env(**env)
+    config._thread_ctx.block_process_env_fallback = True
+    try:
+        assert config._thread_local_env_value(
+            "HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT"
+        ) == ""
+    finally:
+        config._thread_ctx.block_process_env_fallback = False
+        config._clear_thread_env()
+
+
+def test_codex_model_cache_uses_profile_thread_home(monkeypatch, tmp_path):
+    import api.config as config
+
+    root_home = tmp_path / "root-codex"
+    profile_home = tmp_path / "profile-codex"
+    root_home.mkdir()
+    profile_home.mkdir()
+    (root_home / "models_cache.json").write_text(
+        '{"models":[{"slug":"root-model"}]}', encoding="utf-8"
+    )
+    (profile_home / "models_cache.json").write_text(
+        '{"models":[{"slug":"profile-model"}]}', encoding="utf-8"
+    )
+    monkeypatch.setenv("CODEX_HOME", str(root_home))
+    config._set_thread_env(CODEX_HOME=str(profile_home))
+    try:
+        assert config._read_visible_codex_cache_model_ids() == ["profile-model"]
+        fingerprint = config._models_cache_source_fingerprint()
+    finally:
+        config._clear_thread_env()
+
+    assert fingerprint["catalog"]["codex_models_cache"]["path"] == str(
+        profile_home / "models_cache.json"
+    )
+
+
+def test_default_readonly_request_pins_root_home(monkeypatch, tmp_path):
+    import api.config as config
+
+    root_home = tmp_path / "root"
+    cron_home = tmp_path / "profiles" / "cron"
+    root_home.mkdir()
+    cron_home.mkdir(parents=True)
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", root_home)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    monkeypatch.setenv("HERMES_HOME", str(cron_home))
+
+    with profiles.profile_env_for_active_request_readonly("providers"):
+        assert config._thread_local_env_value("HERMES_HOME") == str(root_home)
+
+
+def test_default_detached_worker_pins_root_home(monkeypatch, tmp_path):
+    import api.config as config
+
+    root_home = tmp_path / "root"
+    cron_home = tmp_path / "profiles" / "cron"
+    root_home.mkdir()
+    cron_home.mkdir(parents=True)
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", root_home)
+    monkeypatch.setenv("HERMES_HOME", str(cron_home))
+
+    with profiles.profile_scope_for_detached_worker("", "models rebuild"):
+        assert profiles.get_active_profile_name() == "default"
+        assert config._thread_local_env_value("HERMES_HOME") == str(root_home)
 
 
 def test_explicit_profile_cli_caches_do_not_cross_under_concurrency(monkeypatch, tmp_path):
