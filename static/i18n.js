@@ -2,6 +2,13 @@
 // To add a new language: add an entry to LOCALES below with all keys translated.
 // The language code must match a valid BCP 47 tag (used for speech recognition).
 // Keys missing in a non-English locale fall back to English automatically.
+//
+// This file is authored whole but never served whole: api/i18n_assets.py slices
+// it into an English core (every other locale reduced to a `_stub` carrying
+// _lang/_label/_speech) plus one `?lang=<code>` bundle per client (HWEB-37).
+// The split is textual, so keep each locale as a single two-space-indented
+// `  <code>: {` block — tests/test_hweb37_shell_cache_and_locale_split.py pins
+// that shape and verifies every locale round-trips through core + bundle.
 
 const LOCALES = {
   en: {
@@ -26419,6 +26426,53 @@ function _i18nToolSummaryJoinCs(parts) {
 // Active locale — defaults to English; overridden by loadLocale() at boot.
 let _locale = LOCALES.en;
 
+// HWEB-37: the server serves this file split — the `en` block plus a metadata
+// stub (`_stub: true`) for every other locale, with the real strings delivered
+// as a separate `?lang=<code>` bundle. Publishing LOCALES on `window` is what
+// lets those bundles merge themselves in; the stubs keep resolveLocale() and
+// the settings language picker working against the full locale list.
+// Guarded on `window` so this file still runs under the bare node vm harnesses
+// several tests use (e.g. tests/test_language_precedence.py).
+if (typeof window !== 'undefined') window.LOCALES = LOCALES;
+
+// In-flight/settled bundle loads, keyed by locale code, so a rapid sequence of
+// language switches cannot queue duplicate script tags for the same locale.
+const _localeBundleLoads = {};
+
+/**
+ * Fetch the strings for a locale the page was not served with.
+ * The bundle merges itself into LOCALES and re-applies the active locale, so
+ * callers that already follow setLocale() with applyLocaleToDOM() need no
+ * change. Resolves (never rejects) once the bundle has loaded or failed —
+ * on failure the UI simply stays on the English fallback.
+ * @param {string} code
+ * @returns {Promise<void>}
+ */
+function _loadLocaleBundle(code) {
+  if (_localeBundleLoads[code]) return _localeBundleLoads[code];
+  // index.html emits a deferred <script> for the persisted locale ahead of the
+  // main bundles, so first paint is already localized. That tag has not run yet
+  // when the core's own loadLocale() lands here, so skip it once instead of
+  // fetching the same bundle twice — it merges itself in and re-applies on
+  // execution. Clearing the marker means a preload that never arrives (offline,
+  // 404) still gets a real fetch from the next setLocale().
+  if (window.__HERMES_I18N_PRELOAD__ === code) {
+    delete window.__HERMES_I18N_PRELOAD__;
+    return Promise.resolve();
+  }
+  const version = window.__HERMES_WEBUI_BUNDLE_VERSION__ || '';
+  const el = document.createElement('script');
+  el.src = 'static/i18n.js?v=' + encodeURIComponent(version) +
+           '&lang=' + encodeURIComponent(code);
+  const done = new Promise((resolve) => {
+    el.onload = () => resolve();
+    el.onerror = () => { delete _localeBundleLoads[code]; resolve(); };
+  });
+  _localeBundleLoads[code] = done;
+  (document.head || document.documentElement).appendChild(el);
+  return done;
+}
+
 /**
  * Resolve an incoming locale tag to a known LOCALES key.
  * Supports exact keys, case-insensitive matches, and a few common aliases
@@ -26488,13 +26542,20 @@ function t(key, ...args) {
 /**
  * Switch locale by language code (e.g. 'en', 'zh').
  * Persists to localStorage and updates the <html lang> attribute.
+ *
+ * When the page was not served with this locale's strings (HWEB-37), the bundle
+ * is fetched and applied asynchronously; text stays on the English fallback in
+ * the meantime. Await the returned promise when you need the strings to be live
+ * before reading the DOM.
  * @param {string} lang
+ * @returns {Promise<void>}
  */
 function setLocale(lang) {
   const resolved = resolveLocale(lang) || 'en';
   _locale = LOCALES[resolved];
   try { localStorage.setItem('hermes-lang', resolved); } catch (_) {}
   document.documentElement.lang = _locale._speech || resolved;
+  return _locale._stub ? _loadLocaleBundle(resolved) : Promise.resolve();
 }
 
 /**

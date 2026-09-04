@@ -19157,15 +19157,31 @@ def _serve_static(handler, parsed):
     st = static_file.stat()
     sig = (st.st_size, st.st_mtime_ns)
     cache_key = str(static_file)
+    # i18n.js is authored as one file holding every locale but served split:
+    # the English core, or one on-demand locale bundle (HWEB-37). The variant is
+    # part of the cache key and the ETag so the two never alias each other.
+    variant = None
+    if static_file.name == "i18n.js" and static_file.parent == static_root:
+        from api import i18n_assets
+
+        variant = i18n_assets.resolve_variant(
+            static_file, parse_qs(parsed.query).get("lang", [""])[0]
+        )
+        cache_key = f"{cache_key}#{variant}"
     raw = gz = etag = None
     with _STATIC_CACHE_LOCK:
         cached = _STATIC_CACHE.get(cache_key)
         if cached and cached[0] == sig:
             _, raw, gz, etag = cached
     if raw is None:
-        raw = static_file.read_bytes()
-        # Weak ETag: equality semantics, derived from filesystem identity.
-        etag = f'W/"{sig[0]:x}-{sig[1]:x}"'
+        raw = (
+            i18n_assets.render(static_file, variant, sig)
+            if variant is not None
+            else static_file.read_bytes()
+        )
+        # Weak ETag: equality semantics, derived from filesystem identity
+        # (plus the served variant, for the split i18n.js).
+        etag = f'W/"{sig[0]:x}-{sig[1]:x}{("-" + variant) if variant else ""}"'
         gz = (gzip.compress(raw, compresslevel=6)
               if ct in _COMPRESSIBLE_MIME and len(raw) > 1024
               else None)

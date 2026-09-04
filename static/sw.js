@@ -55,6 +55,10 @@ function deleteOldShellCaches() {
 // Install: prune old shell caches first, then pre-cache the app shell. Doing
 // this before caches.open(CACHE_NAME) avoids a temporary double-cache window on
 // quota-sensitive browsers during frequent version bumps.
+//
+// addAll() runs concurrently with the page's own <script> tags for the same
+// URLs. It uses the default request cache mode, so those are HTTP-cache hits
+// rather than a second full transfer of the shell (HWEB-37).
 self.addEventListener('install', (event) => {
   event.waitUntil(
     deleteOldShellCaches().then(() =>
@@ -118,9 +122,12 @@ self.addEventListener('fetch', (event) => {
   // Page navigations must be network-first. A stale cached './' response can
   // otherwise hide the server's 302-to-login after auth expiry, or ignore a
   // freshly set login cookie until the user manually refreshes.
+  // The request is NOT re-wrapped to opt out of the HTTP cache: the server
+  // already sends the app shell as no-store (api/helpers.py t()), so the browser
+  // cache can never answer this navigation from a stale copy anyway.
   if (event.request.mode === 'navigate') {
     event.respondWith(
-      fetch(new Request(event.request, { cache: 'no-store' })).then((response) => {
+      fetch(event.request).then((response) => {
         if (
           event.request.method === 'GET' &&
           response.status === 200 &&
@@ -153,11 +160,16 @@ self.addEventListener('fetch', (event) => {
   const shellPath = './' + relPath.replace(/^\/+/, '') + url.search;
   if (!SHELL_ASSETS.includes(shellPath)) return;
 
-  // Shell assets: network-first with cache fallback. This keeps offline support
-  // but avoids executing stale JS/CSS after a local hotfix when WEBUI_VERSION
-  // has not changed yet (e.g. before a guarded restart updates the ?v token).
+  // Shell assets: network-first with cache fallback, but WITHOUT re-wrapping
+  // the request to opt out of the HTTP cache. The `?v=__WEBUI_VERSION__` suffix
+  // is the cache buster: the server serves fingerprinted URLs as
+  // `Cache-Control: public, max-age=31536000, immutable`, so a plain fetch()
+  // here is answered from the browser HTTP cache with no network round-trip on
+  // repeat visits, and any redeploy changes the URL. Forcing no-store made the
+  // versioned URLs worthless — every load re-transferred the whole ~4.4 MB shell
+  // (HWEB-37). CacheStorage stays as the offline fallback.
   event.respondWith(
-    fetch(new Request(event.request, { cache: 'no-store' })).then((response) => {
+    fetch(event.request).then((response) => {
       if (
         event.request.method === 'GET' &&
         response.status === 200
