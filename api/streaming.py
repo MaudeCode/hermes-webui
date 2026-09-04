@@ -9132,47 +9132,80 @@ def _emit_worker_writeback_timeout(session_id: str, put) -> None:
     put("apperror", response)
 
 
+_DEFERRED_PAUSE_CLEAR_LOCK = threading.Lock()
+_DEFERRED_PAUSE_CLEAR_THREADS: dict[str, tuple[dict, threading.Thread]] = {}
+
+
 def _schedule_deferred_process_wakeup_pause_clear(
     session_id: str, expected_pause: dict
 ) -> threading.Thread | None:
     if not expected_pause:
         return None
+    expected_pause = dict(expected_pause)
 
     def _clear_if_unchanged():
-        lock = _get_session_agent_lock(session_id)
-        with _try_acquire_chat_lock(lock, _CHAT_LOCK_WAIT_SECONDS) as acquired:
-            if not acquired:
-                logger.warning(
-                    "Deferred process-wakeup pause clear timed out for session %s",
-                    session_id,
-                )
-                return
-            try:
-                current = get_session(session_id)
-                if getattr(current, "active_stream_id", None):
-                    return
-                if dict(getattr(current, "process_wakeup_pause", {}) or {}) != expected_pause:
-                    return
-                if clear_process_wakeup_pause(current, reason="run_completed"):
-                    try:
-                        current.save(touch_updated_at=False)
-                    except Exception:
-                        current.process_wakeup_pause = dict(expected_pause)
-                        raise
-            except Exception:
-                logger.warning(
-                    "Deferred process-wakeup pause clear failed for session %s",
-                    session_id,
-                    exc_info=True,
-                )
+        try:
+            lock = _get_session_agent_lock(session_id)
+            while True:
+                with _try_acquire_chat_lock(
+                    lock, _CHAT_LOCK_WAIT_SECONDS
+                ) as acquired:
+                    if acquired:
+                        try:
+                            current = get_session(session_id)
+                        except KeyError:
+                            return
+                        current_pause = dict(
+                            getattr(current, "process_wakeup_pause", {}) or {}
+                        )
+                        if current_pause != expected_pause:
+                            return
+                        if not getattr(current, "active_stream_id", None):
+                            if clear_process_wakeup_pause(
+                                current, reason="run_completed"
+                            ):
+                                try:
+                                    current.save(touch_updated_at=False)
+                                except Exception:
+                                    current.process_wakeup_pause = dict(expected_pause)
+                                    logger.warning(
+                                        "Deferred process-wakeup pause save failed for "
+                                        "session %s; retrying",
+                                        session_id,
+                                        exc_info=True,
+                                    )
+                                else:
+                                    return
+                time.sleep(0.25)
+        except Exception:
+            logger.warning(
+                "Deferred process-wakeup pause clear failed for session %s",
+                session_id,
+                exc_info=True,
+            )
+        finally:
+            current_thread = threading.current_thread()
+            with _DEFERRED_PAUSE_CLEAR_LOCK:
+                entry = _DEFERRED_PAUSE_CLEAR_THREADS.get(session_id)
+                if entry is not None and entry[1] is current_thread:
+                    _DEFERRED_PAUSE_CLEAR_THREADS.pop(session_id, None)
 
-    thread = threading.Thread(
-        target=_clear_if_unchanged,
-        daemon=True,
-        name=f"pause-clear-{session_id[:8]}",
-    )
-    thread.start()
-    return thread
+    with _DEFERRED_PAUSE_CLEAR_LOCK:
+        existing = _DEFERRED_PAUSE_CLEAR_THREADS.get(session_id)
+        if (
+            existing is not None
+            and existing[0] == expected_pause
+            and existing[1].is_alive()
+        ):
+            return existing[1]
+        thread = threading.Thread(
+            target=_clear_if_unchanged,
+            daemon=True,
+            name=f"pause-clear-{session_id[:8]}",
+        )
+        _DEFERRED_PAUSE_CLEAR_THREADS[session_id] = (expected_pause, thread)
+        thread.start()
+        return thread
 
 
 def _publish_agent_instance(stream_id, agent) -> bool:

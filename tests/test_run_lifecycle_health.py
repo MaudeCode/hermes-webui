@@ -377,15 +377,19 @@ def test_deferred_pause_clear_requires_unchanged_idle_session(monkeypatch):
         process_wakeup_pause=dict(pause),
         save=lambda **_kwargs: saved.append(True),
     )
+    lock = threading.Lock()
+    lock.acquire()
     monkeypatch.setattr(streaming, "get_session", lambda _sid: session)
-    monkeypatch.setattr(
-        streaming, "_get_session_agent_lock", lambda _sid: threading.Lock()
-    )
+    monkeypatch.setattr(streaming, "_get_session_agent_lock", lambda _sid: lock)
+    monkeypatch.setattr(streaming, "_CHAT_LOCK_WAIT_SECONDS", 0.02)
 
     thread = streaming._schedule_deferred_process_wakeup_pause_clear(
         "deferred-pause", pause
     )
     assert thread is not None
+    time.sleep(0.05)
+    assert thread.is_alive() is True
+    lock.release()
     thread.join(timeout=1)
 
     assert thread.is_alive() is False
