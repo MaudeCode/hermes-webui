@@ -1843,7 +1843,7 @@ async function _switchProfileForSessionLoad(profile){
     if(typeof refreshProfileTransitionReasoningChip==='function'){
       refreshProfileTransitionReasoningChip(data.default_model,data.default_model_provider);
     }
-    if(typeof startGatewaySSE==='function') startGatewaySSE();
+    if(typeof reconnectSidebarSSE==='function') reconnectSidebarSSE();
     if(typeof syncTopbar==='function') syncTopbar();
     if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);
     if(typeof renderSessionList==='function') await renderSessionList();
@@ -6019,9 +6019,11 @@ async function renderSessionList(opts={}){
 }
 
 // ── Gateway session SSE (real-time sync for agent sessions) ──
-let _gatewaySSE = null;
+// HWEB-33: the gateway feed no longer owns a socket. It rides the single
+// sidebar stream (`api/sessions/events?gateway=1`); this flag records whether
+// the stream that is currently open asked for the gateway half.
+let _sessionEventsGatewayAttached = false;
 let _gatewayPollTimer = null;
-let _gatewayProbeInFlight = false;
 let _gatewaySSEWarningShown = false;
 const _gatewayFallbackPollMs = 30000;
 const _streamingPollMs = 30000;
@@ -6401,8 +6403,28 @@ function _sidebarSseBackgrounded(){
   if(typeof document === 'undefined') return false;
   if(document.hidden) return true;
   if(typeof document.hasFocus === 'function' && !document.hasFocus()) return true;
+  // HWEB-33: a main-view panel (Kanban, Settings, Logs, ...) replaces BOTH the
+  // sidebar session list and the chat transcript, so nothing on screen consumes
+  // sidebar events. Free the socket for the panel's own stream — the reconnect
+  // path refreshes the list on the way back (_sessionEventsNeedsRefreshOnOpen).
+  if(typeof window !== 'undefined'
+    && typeof window._mainViewPanelActive === 'function'
+    && window._mainViewPanelActive()) return true;
   return false;
 }
+
+// Open or close the single sidebar stream to match the panel that is now on
+// screen. Called by switchPanel(); _sidebarSseBackgrounded() holds the actual
+// rule so hidden/blurred tabs keep winning over a panel that wants the stream.
+function _syncSidebarSseForPanel(){
+  if(_sidebarSseBackgrounded()){
+    _closeSessionEventsSSE();
+    stopGatewayPollFallback();
+    return;
+  }
+  ensureSessionEventsSSE();
+}
+if(typeof window!=='undefined') window._syncSidebarSseForPanel = _syncSidebarSseForPanel;
 
 let _sidebarSseBlurCloseTimer = 0;
 // Debounce the blur-close so a transient blur (native dialog, quick alt-tab and
@@ -6427,15 +6449,12 @@ function _installSidebarSseFocusHook(){
   window.addEventListener('focus', () => {
     if(_sidebarSseBlurCloseTimer){ clearTimeout(_sidebarSseBlurCloseTimer); _sidebarSseBlurCloseTimer = 0; }
     // Reopen and catch up on anything missed while blurred. ensureSessionEventsSSE()
-    // is idempotent (`if(_sessionEventsSSE) return`), but startGatewaySSE() is NOT — it
-    // begins with an unconditional stopGatewaySSE(). So only reopen the gateway when it
-    // was actually closed; otherwise a transient blur shorter than the debounce (where
-    // the blur-close timer was cleared and the stream was never torn down) would
+    // is idempotent (`if(_sessionEventsSSE) return`) and, since HWEB-33, it opens the
+    // gateway half on the same connection — so a transient blur shorter than the
+    // debounce (blur-close timer cleared, stream never torn down) can no longer
     // drop+reconnect the live gateway on every window switch, cancelling its poll
-    // fallback and resetting probe/warning state — the exact thrash the debounce exists
-    // to prevent, in the multi-window scenario this fix targets (#4151).
+    // fallback and resetting probe/warning state (#4151).
     ensureSessionEventsSSE();
-    if(!_gatewaySSE) startGatewaySSE();
     void _refreshSessionListAfterSidebarResume('focus');
   });
 }
@@ -6444,6 +6463,7 @@ function _closeSessionEventsSSE(){
   if(_sessionEventsSSE){
     try{if(_sessionEventsSSE.readyState!==2)_sessionEventsSSE.close();}catch(_){ }
     _sessionEventsSSE = null;
+    _sessionEventsGatewayAttached = false;
     _sessionEventsNeedsRefreshOnOpen = true;
   }
 }
@@ -6464,31 +6484,56 @@ function ensureSessionEventsSSE(){
   if(typeof EventSource==='undefined') return;
   if(_sidebarSseBackgrounded()) return;
   if(_sessionEventsSSE) return;
+  // HWEB-33: ask for the gateway half on this same connection when agent
+  // sessions are on, instead of opening a second EventSource for it.
+  const wantGateway = !!(typeof window!=='undefined' && window._showCliSessions);
   try{
     // Same-origin relative URL preserves subpath mounts and normal WebUI cookies.
-    _sessionEventsSSE = new EventSource('api/sessions/events');
+    _sessionEventsSSE = new EventSource('api/sessions/events' + (wantGateway ? '?gateway=1' : ''));
+    _sessionEventsGatewayAttached = wantGateway;
     _sessionEventsSSE.onopen = () => {
       _sessionEventsReconnectAttempt = 0;
       if(!_sessionEventsNeedsRefreshOnOpen) return;
       _sessionEventsNeedsRefreshOnOpen = false;
       void _refreshSessionListAfterSidebarResume('reconnect');
     };
+    // The server reports whether the gateway half actually attached. It cannot
+    // surface as an SSE error (the session-events half is still healthy), so
+    // this frame is what starts/stops the 30s poll fallback.
+    _sessionEventsSSE.addEventListener('gateway_status', (ev) => {
+      let status = null;
+      try { status = typeof ev?.data === 'string' ? JSON.parse(ev.data) : null; } catch(_){ status = null; }
+      _applyGatewayStatus(status);
+    });
     _sessionEventsSSE.addEventListener('sessions_changed', (ev) => {
+      let payload = null;
+      let parsed = false;
+      try {
+        payload = typeof ev?.data === 'string' ? JSON.parse(ev.data) : {};
+        parsed = true;
+      } catch (_err) {
+        payload = null;
+      }
+      // Gateway frames carry the watcher's session snapshot and are routed to
+      // the handler that owned /api/sessions/gateway/stream before the merge.
+      if (parsed && payload && payload.stream === 'gateway') {
+        _handleGatewaySessionsChanged(payload);
+        return;
+      }
       const activeProfile = S.activeProfile || 'default';
       let eventTargetsActiveSession = false;
       let refreshActiveSession = true;
-      try {
-        const payload = typeof ev?.data === 'string' ? JSON.parse(ev.data) : {};
+      if (parsed) {
         const eventProfile = payload && typeof payload.profile === 'string' ? payload.profile : '';
         if (!_sessionEventProfilesMatch(eventProfile, activeProfile)) {
           return;
         }
-        if(typeof payload.reason==='string'&&payload.reason.startsWith('project_')){
+        if(payload && typeof payload.reason==='string'&&payload.reason.startsWith('project_')){
           _invalidateSessionProjectsCache();
         }
         eventTargetsActiveSession = _sessionEventTargetsActiveSession(payload);
         refreshActiveSession = _sessionEventMustRefreshActiveSession(payload, true);
-      } catch (_err) {
+      } else {
         // Non-JSON payload (or transient malformed event). Keep legacy behavior:
         // refresh once event was seen.
         refreshActiveSession = _sessionEventMustRefreshActiveSession(null, false);
@@ -6496,6 +6541,9 @@ function ensureSessionEventsSSE(){
       _scheduleSessionEventsRefresh(eventTargetsActiveSession?'event-active-session':'event', {force:true, refreshActive:refreshActiveSession});
     });
     _sessionEventsSSE.onerror = () => {
+      // HWEB-33: one socket now carries both halves, so this is also the
+      // gateway feed's error path — keep reporting it under its own label.
+      if(typeof recordClientSSEError==='function') recordClientSSEError(_sessionEventsGatewayAttached?'gateway-sessions':'session-events',{ready_state:_sessionEventsSSE?_sessionEventsSSE.readyState:null,reason:'sidebar EventSource.onerror'});
       _sessionEventsNeedsRefreshOnOpen = true;
       _closeSessionEventsSSE();
       if(_sessionEventsReconnectTimer) return;
@@ -6572,135 +6620,122 @@ function _isDuplicateGatewaySessionSnapshot(sessions){
   return _gatewaySessionSnapshotKey(incoming)===_gatewaySessionSnapshotKey(currentGatewaySessions);
 }
 
-async function probeGatewaySSEStatus(){
-  if(_gatewayProbeInFlight || !window._showCliSessions) return;
-  _gatewayProbeInFlight = true;
-  try{
-    const resp = await fetch(new URL('api/sessions/gateway/stream?probe=1', document.baseURI || location.href).href, { credentials:'same-origin' });
-    const data = await resp.json().catch(() => ({}));
-    if(resp.ok && data.watcher_running){
-      stopGatewayPollFallback();
-      _gatewaySSEWarningShown = false;
-      if(!_gatewaySSE && typeof EventSource!=='undefined' && !(document&&document.hidden)) startGatewaySSE();
-      return;
-    }
-    if(resp.status === 503 || data.watcher_running === false){
-      startGatewayPollFallback(data.fallback_poll_ms || _gatewayFallbackPollMs);
-      renderSessionList({deferWhileInteracting:true});
-      if(!_gatewaySSEWarningShown && typeof showToast === 'function'){
-        showToast('Gateway sync unavailable — falling back to periodic refresh.', 5000);
-        _gatewaySSEWarningShown = true;
-      }
-    }
-  }catch(e){
-    // Network error during probe — server may be unreachable.
-    // Start fallback polling as a safe default; it will self-cancel
-    // when the SSE connection recovers and sessions_changed fires.
-    startGatewayPollFallback(_gatewayFallbackPollMs);
-    renderSessionList({deferWhileInteracting:true});
-  }finally{
-    _gatewayProbeInFlight = false;
+// HWEB-33: the gateway feed rides `api/sessions/events?gateway=1` instead of
+// holding its own EventSource. This is the frame handler that the
+// /api/sessions/gateway/stream listener used to own — unchanged apart from
+// receiving an already-parsed payload.
+function _handleGatewaySessionsChanged(data){
+  if(!data || !data.sessions) return;
+  stopGatewayPollFallback();
+  _gatewaySSEWarningShown = false;
+  if(!_isDuplicateGatewaySessionSnapshot(data.sessions)){
+    renderSessionList({deferWhileInteracting:true}); // re-fetch and re-render
   }
-}
-
-function startGatewaySSE(){
-  stopGatewaySSE();
-  if(!window._showCliSessions) return;
-  // Visibility hook (install once) — mirror ensureSessionEventsSSE() pattern
-  if(typeof document !== 'undefined' && !document._hermesGatewaySSEVisibilityHook){
-    document.addEventListener('visibilitychange', () => {
-      if(document.hidden){
-        stopGatewaySSE();
-      }else{
-        void startGatewaySSE();
-      }
-    });
-    document._hermesGatewaySSEVisibilityHook = true;
-  }
-  _installSidebarSseFocusHook();
-  // Don't open when tab is hidden OR the window has lost focus (PWA blur) —
-  // saves connection pool slots (#4151).
-  if(_sidebarSseBackgrounded()) return;
-  try{
-    _gatewaySSE = new EventSource('api/sessions/gateway/stream');
-    _gatewaySSE.addEventListener('sessions_changed', (ev) => {
-      try{
-        const data = JSON.parse(ev.data);
-        if(data.sessions){
-          stopGatewayPollFallback();
-          _gatewaySSEWarningShown = false;
-          if(!_isDuplicateGatewaySessionSnapshot(data.sessions)){
-            renderSessionList({deferWhileInteracting:true}); // re-fetch and re-render
-          }
-          // If the active session received new gateway messages, refresh the conversation view.
-          // S.busy check prevents stomping on an in-progress WebUI response.
-          // _isExternalSession covers CLI-originated and messaging-source sessions
-          // that need a server-side import before WebUI can read them.
-          if(S.session && !S.busy && _isExternalSession(S.session)){
-            const changedIds = new Set((data.sessions||[]).map(s=>s.session_id));
-            if(changedIds.has(S.session.session_id)){
-              // Capture active session ID before async fetch — race guard.
-              // If the user switches sessions while the fetch is in-flight, discard the result.
-              const activeSid = S.session.session_id;
-              api('/api/session/import_cli',{method:'POST',body:JSON.stringify(_externalImportPayload(S.session))})
-                .then(res=>{
-                  if(!S.session || S.session.session_id !== activeSid) return;
-                  if(res && res.session && Array.isArray(res.session.messages)){
-                    const prev = S.messages.length;
-                    const next = res.session.messages.filter(m => m && m.role);
-                    if (next.length < prev) return;
-                    if (prev > 0 && !_isCliImportRefreshPrefixMatch(S.messages, next)) return;
-                    // Carry forward ephemeral turn fields (_turnUsage/
-                    // _turnDuration/_turnTps/_gatewayRouting/_statusCard/
-                    // _anchor_stream_id) so
-                    // gateway-driven CLI refreshes do not drop the badge.
-                    let _nextToAssign = next;
-                    if (typeof window._carryForwardEphemeralTurnFields === 'function') {
-                      _nextToAssign = window._carryForwardEphemeralTurnFields(S.messages || [], next);
-                    }
-                    S.messages = _nextToAssign;
-                    if(S.session && S.session.session_id === activeSid){
-                      S.session.message_count = next.length;
-                      const newest = next.length ? next[next.length - 1] : null;
-                      const newestTs = Number((newest && (newest.timestamp || newest._ts)) || 0);
-                      if(newestTs){
-                        S.session.last_message_at = newestTs;
-                        S.session.updated_at = newestTs;
-                      }
-                    }
-                    if(S.messages.length !== prev){
-                      renderMessages({preserveScroll:true});
-                      if(typeof highlightCode==='function') highlightCode();
-                    }
-                  }
-                })
-                .catch(()=>{ /* ignore — next poll will retry */ });
+  // If the active session received new gateway messages, refresh the conversation view.
+  // S.busy check prevents stomping on an in-progress WebUI response.
+  // _isExternalSession covers CLI-originated and messaging-source sessions
+  // that need a server-side import before WebUI can read them.
+  if(S.session && !S.busy && _isExternalSession(S.session)){
+    const changedIds = new Set((data.sessions||[]).map(s=>s.session_id));
+    if(changedIds.has(S.session.session_id)){
+      // Capture active session ID before async fetch — race guard.
+      // If the user switches sessions while the fetch is in-flight, discard the result.
+      const activeSid = S.session.session_id;
+      api('/api/session/import_cli',{method:'POST',body:JSON.stringify(_externalImportPayload(S.session))})
+        .then(res=>{
+          if(!S.session || S.session.session_id !== activeSid) return;
+          if(res && res.session && Array.isArray(res.session.messages)){
+            const prev = S.messages.length;
+            const next = res.session.messages.filter(m => m && m.role);
+            if (next.length < prev) return;
+            if (prev > 0 && !_isCliImportRefreshPrefixMatch(S.messages, next)) return;
+            // Carry forward ephemeral turn fields (_turnUsage/
+            // _turnDuration/_turnTps/_gatewayRouting/_statusCard/
+            // _anchor_stream_id) so
+            // gateway-driven CLI refreshes do not drop the badge.
+            let _nextToAssign = next;
+            if (typeof window._carryForwardEphemeralTurnFields === 'function') {
+              _nextToAssign = window._carryForwardEphemeralTurnFields(S.messages || [], next);
+            }
+            S.messages = _nextToAssign;
+            if(S.session && S.session.session_id === activeSid){
+              S.session.message_count = next.length;
+              const newest = next.length ? next[next.length - 1] : null;
+              const newestTs = Number((newest && (newest.timestamp || newest._ts)) || 0);
+              if(newestTs){
+                S.session.last_message_at = newestTs;
+                S.session.updated_at = newestTs;
+              }
+            }
+            if(S.messages.length !== prev){
+              renderMessages({preserveScroll:true});
+              if(typeof highlightCode==='function') highlightCode();
             }
           }
-        }
-      }catch(e){ /* ignore parse errors */ }
-    });
-    _gatewaySSE.onerror = () => {
-      if(typeof recordClientSSEError==='function') recordClientSSEError('gateway-sessions',{ready_state:_gatewaySSE?_gatewaySSE.readyState:null,reason:'gateway EventSource.onerror'});
-      if(_gatewaySSE){
-        try{if(_gatewaySSE.readyState!==2)_gatewaySSE.close();}catch(_){ }
-        _gatewaySSE = null;
-      }
-      void probeGatewaySSEStatus();
-    };
-  }catch(e){
-    void probeGatewaySSEStatus();
+        })
+        .catch(()=>{ /* ignore — next poll will retry */ });
+    }
   }
 }
 
-function stopGatewaySSE(){
-  if(_gatewaySSE){
-    try{if(_gatewaySSE.readyState!==2)_gatewaySSE.close();}catch(_){ }
-    _gatewaySSE = null;
+// Route the server's gateway-attachment verdict to the poll fallback. On the
+// merged stream an unusable gateway cannot surface as an SSE error (the
+// session-events half is still healthy), so this frame — not onerror — is what
+// starts the 30s fallback.
+function _applyGatewayStatus(status){
+  if(status && status.ok){
+    stopGatewayPollFallback();
+    _gatewaySSEWarningShown = false;
+    return;
   }
+  // `enabled: false` means the server has agent sessions turned off — there is
+  // nothing to sync, so polling for it would be pure noise. The old probe's 404
+  // branch was a no-op for the same reason; only a started-but-unhealthy
+  // watcher warrants the fallback.
+  if(status && status.enabled === false){
+    stopGatewayPollFallback();
+    return;
+  }
+  startGatewayPollFallback((status && status.fallback_poll_ms) || _gatewayFallbackPollMs);
+  renderSessionList({deferWhileInteracting:true});
+  if(!_gatewaySSEWarningShown && typeof showToast === 'function'){
+    showToast('Gateway sync unavailable — falling back to periodic refresh.', 5000);
+    _gatewaySSEWarningShown = true;
+  }
+}
+
+// Public verbs kept for their callers in boot.js / ui.js / panels.js. They now
+// toggle the gateway half of the single sidebar connection, which means
+// reopening it so the `?gateway=1` subscription matches the current setting.
+function startGatewaySSE(){
+  if(!window._showCliSessions) return;
+  _installSidebarSseFocusHook();
+  if(_sidebarSseBackgrounded()) return;
+  if(_sessionEventsSSE && _sessionEventsGatewayAttached) return;
+  _closeSessionEventsSSE();
+  ensureSessionEventsSSE();
+}
+
+// Drop and reopen the sidebar stream even when its subscription already looks
+// right. Two callers need that: a profile switch (the watcher registry is
+// profile-keyed, #3629, so the open stream is still bound to the previous
+// profile's watcher) and the bfcache / offline-recovery paths (the socket is
+// dead but not yet nulled, so nothing would reopen it).
+function reconnectSidebarSSE(){
+  _closeSessionEventsSSE();
+  if(_sidebarSseBackgrounded()) return;
+  ensureSessionEventsSSE();
+}
+if(typeof window!=='undefined') window.reconnectSidebarSSE = reconnectSidebarSSE;
+
+function stopGatewaySSE(){
   stopGatewayPollFallback();
-  _gatewayProbeInFlight = false;
   _gatewaySSEWarningShown = false;
+  if(!_sessionEventsSSE || !_sessionEventsGatewayAttached) return;
+  _closeSessionEventsSSE();
+  // Only reopen when the sidebar still wants a stream at all; the blur and
+  // visibility paths call this right after closing it on purpose.
+  if(!_sidebarSseBackgrounded()) ensureSessionEventsSSE();
 }
 
 let _searchDebounceTimer = null;

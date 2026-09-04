@@ -102,9 +102,11 @@ def _load_older_messages_body() -> str:
 
 
 def _start_gateway_sse_body() -> str:
+    # HWEB-33 moved this branch out of startGatewaySSE(): the gateway feed now
+    # rides the merged sidebar stream, and its frame handler owns the import.
     return _function_body(
-        "function startGatewaySSE(){",
-        "function stopGatewaySSE",
+        "function _handleGatewaySessionsChanged(data){",
+        "function _applyGatewayStatus",
     )
 
 
@@ -134,16 +136,16 @@ def test_start_gateway_sse_import_cli_carries_forward():
     cf_idx = body.find("_carryForwardEphemeralTurnFields(S.messages || [], next)")
     assign_idx = body.find("S.messages = _nextToAssign;")
     assert cf_idx != -1, (
-        "#3306: startGatewaySSE import_cli branch must carry forward "
+        "#3306: the gateway import_cli branch must carry forward "
         "ephemeral turn fields before assigning S.messages"
     )
     assert assign_idx != -1, (
         "expected `S.messages = _nextToAssign;` after carry-forward in "
-        "startGatewaySSE import_cli branch"
+        "the gateway import_cli branch"
     )
     assert cf_idx < assign_idx, (
         "#3306: carry-forward call must precede the S.messages assignment "
-        "in the startGatewaySSE import_cli branch"
+        "in the gateway import_cli branch"
     )
 
 

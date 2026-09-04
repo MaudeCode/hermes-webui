@@ -8,7 +8,7 @@ This left the rail, topbar, workspace panel, and resize handles in the stale
 bfcache DOM state, producing a broken layout.
 
 Fix: extend the pageshow handler to also call syncTopbar, syncWorkspacePanelState,
-_initResizePanels, and startGatewaySSE — all guarded so missing helpers degrade.
+_initResizePanels, and reconnectSidebarSSE — all guarded so missing helpers degrade.
 """
 
 from pathlib import Path
@@ -58,10 +58,14 @@ class TestBfcacheLayoutRestore:
 
 
     def test_pageshow_calls_start_gateway_sse(self):
-        """pageshow handler must call startGatewaySSE() to reconnect the dead SSE connection."""
+        """pageshow handler must reconnect the dead sidebar SSE connection.
+
+        HWEB-33 merged the gateway feed onto the sidebar stream, so the single
+        reconnectSidebarSSE() verb replaces the old startGatewaySSE() call.
+        """
         src = _boot_js()
         handler_body = _pageshow_handler(src)
-        assert "startGatewaySSE" in handler_body, (
+        assert "reconnectSidebarSSE" in handler_body, (
             "pageshow handler must restart gateway SSE (bfcache-persisted connections are dead)"
         )
 
@@ -96,7 +100,7 @@ class TestBfcacheLayoutRestore:
         src = _boot_js()
         handler_body = _pageshow_handler(src)
         # Each of the new calls must be guarded
-        for fn in ("syncTopbar", "syncWorkspacePanelState", "startGatewaySSE",
+        for fn in ("syncTopbar", "syncWorkspacePanelState", "reconnectSidebarSSE",
                    "closeModelDropdown", "closeReasoningDropdown", "closeWsDropdown", "closeProfileDropdown"):
             assert f"typeof {fn} === 'function'" in handler_body, (
                 f"{fn}() call in pageshow handler must be guarded with typeof === 'function'"

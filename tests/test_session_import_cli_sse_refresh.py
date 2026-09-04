@@ -8,8 +8,10 @@ SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 
 def test_sse_import_cli_guard_skips_shorter_transcript_overwrite():
     """The SSE import refresh path should refuse stale/shorter transcripts."""
-    start = SESSIONS_JS.index("function startGatewaySSE")
-    stop = SESSIONS_JS.index("function stopGatewaySSE", start)
+    # HWEB-33: the gateway feed rides the merged sidebar stream; its frame
+    # handler (and this import path) moved into _handleGatewaySessionsChanged.
+    start = SESSIONS_JS.index("function _handleGatewaySessionsChanged")
+    stop = SESSIONS_JS.index("function _applyGatewayStatus", start)
     sse_block = SESSIONS_JS[start:stop]
 
     assert "const prev = S.messages.length;" in sse_block

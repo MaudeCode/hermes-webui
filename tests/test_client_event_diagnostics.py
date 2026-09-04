@@ -137,10 +137,13 @@ def test_workspace_js_defines_sanitized_client_sse_error_reporter():
 
 
 def test_sessions_js_reports_gateway_sse_errors_with_browser_context():
-    gateway_block_start = SESSIONS_JS.index("_gatewaySSE.onerror = () =>")
-    gateway_block = SESSIONS_JS[gateway_block_start:gateway_block_start + 400]
-    assert "recordClientSSEError('gateway-sessions'" in gateway_block
-    assert "probeGatewaySSEStatus" in gateway_block
+    # HWEB-33: one sidebar socket carries both the session-events and gateway
+    # feeds, so its onerror is the gateway feed's error path too — and it still
+    # reports under the 'gateway-sessions' label when the gateway half is on.
+    gateway_block_start = SESSIONS_JS.index("_sessionEventsSSE.onerror = () =>")
+    gateway_block = SESSIONS_JS[gateway_block_start:gateway_block_start + 600]
+    assert "recordClientSSEError(_sessionEventsGatewayAttached?'gateway-sessions':'session-events'" in gateway_block
+    assert "ready_state:" in gateway_block
 
 
 def test_messages_js_reports_chat_sse_errors_with_stream_identity():

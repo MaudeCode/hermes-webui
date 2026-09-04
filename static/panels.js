@@ -47,6 +47,17 @@ const APP_TITLEBAR_KEYS = {
 const MAIN_VIEW_PANELS = ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'];
 const MAIN_VIEW_SIDEBAR_PANEL_FALLBACKS = { plugin: 'settings' };
 
+// HWEB-33: true while a main-view panel owns the screen. Such a panel replaces
+// BOTH the sidebar session list and the chat transcript, so the sidebar event
+// stream has no visible consumer and _sidebarSseBackgrounded() closes it —
+// which is what keeps "active turn + Kanban open" down to two live
+// EventSources. Sidebar-only panels (Todos) keep the transcript on screen and
+// are deliberately excluded.
+function _mainViewPanelActive(){
+  return MAIN_VIEW_PANELS.includes(_currentPanel);
+}
+if(typeof window!=='undefined') window._mainViewPanelActive = _mainViewPanelActive;
+
 /**
  * Update the top app titlebar to reflect the current page or selected conversation.
  * On the chat panel, a selected session's title takes precedence over the page name.
@@ -421,6 +432,9 @@ async function switchPanel(name, opts = {}) {
     if (typeof _kanbanStopPolling === 'function') _kanbanStopPolling();
   }
   _currentPanel = nextPanel;
+  // HWEB-33: entering a main-view panel frees the sidebar stream's socket for
+  // that panel's own stream; leaving one reopens it and refreshes the list.
+  if (typeof _syncSidebarSseForPanel === 'function') _syncSidebarSseForPanel();
   // Mobile drawer visibility: a rail/tab click on a phone should surface the
   // panel synchronously, NOT after the panel's async data load. If the re-open
   // stayed at the bottom of this function, a form opened from inside the drawer
@@ -7208,10 +7222,10 @@ async function switchToProfile(name) {
     // Reconnect the gateway SSE to the NEW profile's watcher. The backend watcher
     // registry is now profile-keyed (#3629), but this tab's existing EventSource is
     // still subscribed to the PREVIOUS profile's watcher — and the probe-based
-    // reattach is gated on `!_gatewaySSE`, which can't fire while the old stream is
-    // open. startGatewaySSE() closes the old ES (stopGatewaySSE) and reconnects with
-    // the new profile cookie; it self-gates on window._showCliSessions internally.
-    if (typeof startGatewaySSE === 'function') startGatewaySSE();
+    // reattach would otherwise be skipped while that stream is still open, so
+    // reconnect it unconditionally — it comes back up with the new profile
+    // cookie and the gateway half the current setting calls for.
+    if (typeof reconnectSidebarSSE === 'function') reconnectSidebarSSE();
 
     // Update composer placeholder and title bar while the core profile-switch
     // state is still close to the profile API response.
