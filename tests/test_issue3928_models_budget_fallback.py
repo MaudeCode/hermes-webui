@@ -251,10 +251,10 @@ def test_worker_scope_entry_failure_releases_catalog_waiters(
     monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.05, raising=False)
     monkeypatch.setattr(profiles, "profile_scope_for_detached_worker", fail_closed_scope)
 
-    with pytest.raises(RuntimeError, match="profile scope unavailable"):
-        cfg.get_available_models()
+    result = cfg.get_available_models()
 
     assert cfg._cache_build_in_progress is False
+    assert "groups" in result
 
 
 def test_budget_exceeded_uses_shape_only_stale_cache_before_static_fallback(

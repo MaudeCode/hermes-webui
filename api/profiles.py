@@ -1130,7 +1130,12 @@ def _profile_secret_env_names(profile_home_path: Path) -> set[str]:
 
 def _profile_secret_thread_env(profile: str, profile_home_path: Path) -> dict[str, str]:
     """Return a complete, profile-safe credential overlay for agent readers."""
-    source = _INITIAL_PROCESS_ENV if _is_root_profile(profile or "default") else {}
+    owns_startup_env = _is_root_profile(profile or "default") or (
+        _is_isolated_profile_mode()
+        and (profile or "") == _isolated_profile_name()
+        and Path(profile_home_path).expanduser() == Path(_INITIAL_HERMES_HOME).expanduser()
+    )
+    source = _INITIAL_PROCESS_ENV if owns_startup_env else {}
     return {
         name: source.get(name, "")
         for name in _profile_secret_env_names(profile_home_path)

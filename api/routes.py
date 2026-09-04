@@ -26084,12 +26084,10 @@ def _selected_profile_snapshot_updates(
     try:
         from api.profiles import profile_env_for_background_worker
         from cron.jobs import _compute_provider_model_snapshots
-    except Exception:
-        logger.warning(
-            "Selected-profile cron snapshot repair unavailable; saving ambient snapshots",
-            exc_info=True,
-        )
-        return {}
+    except Exception as exc:
+        raise RuntimeError(
+            "Selected-profile cron snapshot support is unavailable"
+        ) from exc
 
     try:
         with _CRON_CREATE_SNAPSHOT_LOCK:
@@ -26104,13 +26102,10 @@ def _selected_profile_snapshot_updates(
                     base_url=None,
                     no_agent=False,
                 )
-    except Exception:
-        logger.warning(
-            "Selected-profile cron snapshot repair failed for %s; saving ambient snapshots",
-            selected_profile,
-            exc_info=True,
-        )
-        return {}
+    except Exception as exc:
+        raise RuntimeError(
+            f"Cannot safely resolve cron snapshots for profile {selected_profile!r}"
+        ) from exc
 
     updates = {}
     if provider is None:
@@ -26132,15 +26127,6 @@ def _handle_cron_create(handler, body):
         toast_notifications = body.get("toast_notifications") is not False
         requested_model = body.get("model") or None
         requested_provider = body.get("provider") or None
-        job = create_job(
-            prompt=body["prompt"],
-            schedule=body["schedule"],
-            name=body.get("name") or None,
-            deliver=body.get("deliver") or "local",
-            skills=body.get("skills") or [],
-            model=requested_model,
-            provider=requested_provider,
-        )
         post_create_updates = {}
         if profile is not None:
             post_create_updates["profile"] = profile
@@ -26153,6 +26139,15 @@ def _handle_cron_create(handler, body):
             )
         if not toast_notifications:
             post_create_updates["toast_notifications"] = False
+        job = create_job(
+            prompt=body["prompt"],
+            schedule=body["schedule"],
+            name=body.get("name") or None,
+            deliver=body.get("deliver") or "local",
+            skills=body.get("skills") or [],
+            model=requested_model,
+            provider=requested_provider,
+        )
         if post_create_updates:
             job = update_job(job["id"], post_create_updates) or job
         return j(handler, {"ok": True, "job": _cron_job_for_api(job)})

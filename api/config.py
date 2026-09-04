@@ -5904,10 +5904,15 @@ def _profile_safe_static_models_catalog() -> dict:
     """Build a static catalog without reading another profile's process env."""
     from api.profiles import profile_env_for_active_request_readonly
 
-    with profile_env_for_active_request_readonly(
-        "models static fallback", isolate_root=True
-    ):
-        return _static_models_catalog_without_live_probes(get_config_snapshot())
+    try:
+        with profile_env_for_active_request_readonly(
+            "models static fallback", isolate_root=True
+        ):
+            return _static_models_catalog_without_live_probes(get_config_snapshot())
+    except RuntimeError:
+        # An older Agent cannot safely expose credential-derived availability.
+        # Keep the endpoint usable with config-only model metadata.
+        return _minimal_static_models_catalog(get_config_snapshot())
 
 # Cache for credential pool results -- calling load_pool() per-provider per-server
 # session is expensive (~10s for zai due to endpoint probing).  The credential pool
@@ -8663,7 +8668,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             # synchronously, exactly like the legacy path.
             if "error" in box:
                 _clear_build_in_progress()
-                raise box["error"]
+                return copy.deepcopy(_profile_safe_static_models_catalog())
             if _claim_publish():
                 _publish_models_result(box["result"])
             return copy.deepcopy(box["result"])

@@ -671,6 +671,23 @@ def test_named_profile_secret_overlay_blanks_startup_root_credentials(
     }
 
 
+def test_isolated_profile_owns_its_startup_credentials(monkeypatch, tmp_path):
+    profile_home = tmp_path / "profiles" / "member"
+    profile_home.mkdir(parents=True)
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME", str(profile_home))
+    monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: True)
+    monkeypatch.setattr(
+        profiles, "_profile_secret_env_names", lambda _home: {"OPENAI_API_KEY"}
+    )
+    monkeypatch.setitem(
+        profiles._INITIAL_PROCESS_ENV, "OPENAI_API_KEY", "deployment-key"
+    )
+
+    assert profiles._profile_secret_thread_env("member", profile_home) == {
+        "OPENAI_API_KEY": "deployment-key"
+    }
+
+
 def test_effective_model_override_uses_profile_thread_env(monkeypatch):
     import api.config as config
 
