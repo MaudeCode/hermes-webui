@@ -248,3 +248,20 @@ def test_post_execution_writeback_timeout_is_not_retryable():
     assert response["_status"] == 503
     assert response["retryable"] is False
     assert response["outcome_unknown"] is True
+
+
+def test_health_only_admission_waiter_never_blocks_worker_start():
+    from api import config, routes
+
+    config.register_active_run(
+        "admission-observation",
+        session_id="shared-session",
+        phase="waiting_for_session_lock",
+        health_only=True,
+        attachable=False,
+        profile=None,
+    )
+    try:
+        assert routes._active_run_stream_for_session("shared-session") is None
+    finally:
+        config.unregister_active_run("admission-observation")

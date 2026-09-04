@@ -24368,6 +24368,8 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
             ]
         matching_rows = []
         for run_key, raw in run_rows:
+            if raw.get("health_only"):
+                continue
             stream_id = str(raw.get("stream_id") or run_key or "").strip()
             run_sid = str(raw.get("session_id") or "").strip()
             if not run_sid or not stream_id:
@@ -24381,6 +24383,8 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
             for run_stream_id, stream_id in matching_rows:
                 raw = (_live_config.ACTIVE_RUNS or {}).get(run_stream_id)
                 if not raw:
+                    continue
+                if raw.get("health_only"):
                     continue
                 if str(raw.get("stream_id") or run_stream_id or "").strip() != stream_id:
                     continue
