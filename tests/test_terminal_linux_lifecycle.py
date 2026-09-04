@@ -237,7 +237,9 @@ def test_terminal_spawn_timeout_abandons_late_process(monkeypatch, tmp_path):
     def force_timeout(request):
         request.done = TimedOutEvent()
         captured["request"] = request
-        return real_put(request)
+        result = real_put(request)
+        assert entered.wait(timeout=1.0)
+        return result
 
     monkeypatch.setattr(terminal.subprocess, "Popen", slow_popen)
     monkeypatch.setattr(terminal._spawn_queue, "put", force_timeout)

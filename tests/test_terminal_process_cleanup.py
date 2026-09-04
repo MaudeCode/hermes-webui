@@ -142,6 +142,7 @@ def test_close_terminal_waits_again_after_sigkill(monkeypatch):
 
 
 def test_close_all_terminals_closes_snapshot(monkeypatch):
+    monkeypatch.setattr(terminal, "_TERMINAL_SHUTTING_DOWN", False)
     terminal._TERMINALS.clear()
     terminal._TERMINALS.update({"a": object(), "b": object()})
     closed = []
