@@ -9062,6 +9062,7 @@ def _try_acquire_worker_session_lock(
     started_at = time.time()
     update_active_run(
         stream_id,
+        preserve_cancelling=True,
         phase="waiting_for_session_lock",
         lock_stage=stage,
         lock_wait_started_at=started_at,
@@ -9071,6 +9072,7 @@ def _try_acquire_worker_session_lock(
             note_chat_admission_timeout()
             update_active_run(
                 stream_id,
+                preserve_cancelling=True,
                 phase=timeout_phase,
                 lock_stage=stage,
                 lock_wait_seconds=_CHAT_LOCK_WAIT_SECONDS,
@@ -9128,6 +9130,49 @@ def _emit_worker_writeback_timeout(session_id: str, put) -> None:
     response["session_id"] = session_id
     response["old_session_id"] = session_id
     put("apperror", response)
+
+
+def _schedule_deferred_process_wakeup_pause_clear(
+    session_id: str, expected_pause: dict
+) -> threading.Thread | None:
+    if not expected_pause:
+        return None
+
+    def _clear_if_unchanged():
+        lock = _get_session_agent_lock(session_id)
+        with _try_acquire_chat_lock(lock, _CHAT_LOCK_WAIT_SECONDS) as acquired:
+            if not acquired:
+                logger.warning(
+                    "Deferred process-wakeup pause clear timed out for session %s",
+                    session_id,
+                )
+                return
+            try:
+                current = get_session(session_id)
+                if getattr(current, "active_stream_id", None):
+                    return
+                if dict(getattr(current, "process_wakeup_pause", {}) or {}) != expected_pause:
+                    return
+                if clear_process_wakeup_pause(current, reason="run_completed"):
+                    try:
+                        current.save(touch_updated_at=False)
+                    except Exception:
+                        current.process_wakeup_pause = dict(expected_pause)
+                        raise
+            except Exception:
+                logger.warning(
+                    "Deferred process-wakeup pause clear failed for session %s",
+                    session_id,
+                    exc_info=True,
+                )
+
+    thread = threading.Thread(
+        target=_clear_if_unchanged,
+        daemon=True,
+        name=f"pause-clear-{session_id[:8]}",
+    )
+    thread.start()
+    return thread
 
 
 def _publish_agent_instance(stream_id, agent) -> bool:
@@ -12850,12 +12895,19 @@ def _run_agent_streaming(
                         return True
                 return False
 
+            _pause_for_deferred_clear = dict(
+                getattr(s, "process_wakeup_pause", {}) or {}
+            )
             with _terminal_writeback_lock("success_finalize") as acquired:
                 if not acquired:
                     logger.warning(
                         "Skipped post-commit process-wakeup pause finalization because "
                         "session %s remained busy",
                         getattr(s, "session_id", session_id),
+                    )
+                    _schedule_deferred_process_wakeup_pause_clear(
+                        getattr(s, "session_id", session_id),
+                        _pause_for_deferred_clear,
                     )
                 elif _finalize_process_wakeup_pause():
                     return

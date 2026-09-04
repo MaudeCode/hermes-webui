@@ -24706,7 +24706,11 @@ def _start_chat_stream_for_session(
         unregister_active_run(stream_id)
         clear_session_writeback_owner_if_owned(s.session_id, stream_id)
         try:
-            with _get_session_agent_lock(s.session_id):
+            with _bounded_chat_admission_lock(
+                s.session_id, _get_session_agent_lock(s.session_id)
+            ) as rollback_acquired:
+                if not rollback_acquired:
+                    raise TimeoutError("worker-start rollback session lock timed out")
                 failed_session = get_session(s.session_id)
                 if getattr(failed_session, "active_stream_id", None) == stream_id:
                     from api.streaming import _materialize_pending_user_turn_before_error

@@ -9634,13 +9634,21 @@ def register_active_run(stream_id: str, **metadata) -> None:
         logger.debug("Failed to publish active-run start", exc_info=True)
 
 
-def update_active_run(stream_id: str, **metadata) -> None:
+def update_active_run(
+    stream_id: str, *, preserve_cancelling: bool = False, **metadata
+) -> None:
     """Update active-run metadata without creating a new run implicitly."""
     if not stream_id:
         return
     with ACTIVE_RUNS_LOCK:
         entry = ACTIVE_RUNS.get(stream_id)
         if entry is not None:
+            if preserve_cancelling and (
+                str(entry.get("phase") or "").strip() == "cancelling"
+                or entry.get("cancelled_at")
+                or entry.get("cancellation_blocked")
+            ):
+                return
             entry.update(metadata)
             health_only = bool(entry.get("health_only"))
             session_id = entry.get("session_id")

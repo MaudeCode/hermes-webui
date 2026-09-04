@@ -345,6 +345,54 @@ def test_worker_lock_release_does_not_overwrite_cancelling_phase():
         config.unregister_active_run("cancel-transition")
 
 
+def test_worker_lock_entry_does_not_overwrite_cancelling_phase():
+    import threading
+    from api import config, streaming
+
+    config.register_active_run(
+        "cancel-entry", session_id="session", health_only=True, profile=None
+    )
+    config.update_active_run(
+        "cancel-entry", phase="cancelling", cancelled_at=time.time()
+    )
+    try:
+        with streaming._try_acquire_worker_session_lock(
+            "cancel-entry", threading.Lock(), "post_run_cancel"
+        ) as acquired:
+            assert acquired is True
+            with config.ACTIVE_RUNS_LOCK:
+                assert config.ACTIVE_RUNS["cancel-entry"]["phase"] == "cancelling"
+    finally:
+        config.unregister_active_run("cancel-entry")
+
+
+def test_deferred_pause_clear_requires_unchanged_idle_session(monkeypatch):
+    import threading
+    from api import streaming
+
+    pause = {"paused": True, "classification": "credential_pool_empty"}
+    saved = []
+    session = SimpleNamespace(
+        active_stream_id=None,
+        process_wakeup_pause=dict(pause),
+        save=lambda **_kwargs: saved.append(True),
+    )
+    monkeypatch.setattr(streaming, "get_session", lambda _sid: session)
+    monkeypatch.setattr(
+        streaming, "_get_session_agent_lock", lambda _sid: threading.Lock()
+    )
+
+    thread = streaming._schedule_deferred_process_wakeup_pause_clear(
+        "deferred-pause", pause
+    )
+    assert thread is not None
+    thread.join(timeout=1)
+
+    assert thread.is_alive() is False
+    assert session.process_wakeup_pause == {}
+    assert saved == [True]
+
+
 def test_health_only_waiter_does_not_skip_agent_eviction(monkeypatch):
     from api import config, session_lifecycle
 
