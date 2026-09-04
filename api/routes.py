@@ -11191,6 +11191,7 @@ from api.streaming import (
     _strip_compact_echo_suffix,
     _try_acquire_chat_lock,
     _CHAT_LOCK_WAIT_SECONDS,
+    _DEFERRED_SESSION_RETRY_DELAYS,
 )
 from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
 from api.run_journal import (
@@ -24065,7 +24066,9 @@ def _schedule_deferred_compression_recovery_restore(
     def _restore_when_available():
         try:
             lock = _get_session_agent_lock(session_id)
-            while True:
+            for retry_delay in _DEFERRED_SESSION_RETRY_DELAYS:
+                if retry_delay:
+                    time.sleep(retry_delay)
                 with _try_acquire_chat_lock(lock, _CHAT_LOCK_WAIT_SECONDS) as acquired:
                     if acquired:
                         try:
@@ -24112,7 +24115,10 @@ def _schedule_deferred_compression_recovery_restore(
                             )
                         else:
                             return
-                time.sleep(0.25)
+            logger.warning(
+                "Deferred compression recovery restore exhausted retries for session %s",
+                session_id,
+            )
         except Exception:
             logger.warning(
                 "Deferred compression recovery restore failed for session %s",

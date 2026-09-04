@@ -283,6 +283,23 @@ def test_deferred_recovery_restore_retries_after_lock_timeout(monkeypatch, tmp_p
     assert saved["compression_recovery"]["terminal_state"] == "compression_exhausted"
 
 
+def test_deferred_recovery_restore_stops_after_bounded_lock_retries(monkeypatch):
+    lock = threading.Lock()
+    lock.acquire()
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: lock)
+    monkeypatch.setattr(routes, "_CHAT_LOCK_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(routes, "_DEFERRED_SESSION_RETRY_DELAYS", (0.0, 0.0))
+
+    thread = routes._schedule_deferred_compression_recovery_restore(
+        "bounded-recovery", {"terminal_state": "compression_exhausted"}
+    )
+    thread.join(timeout=1)
+
+    assert thread.is_alive() is False
+    assert "bounded-recovery" not in routes._DEFERRED_RECOVERY_RESTORE_THREADS
+    lock.release()
+
+
 def test_recovery_start_creates_focused_linked_session(monkeypatch, tmp_path):
     session_dir = _isolate_sessions(monkeypatch, tmp_path)
     sid = "recoverysrc1"

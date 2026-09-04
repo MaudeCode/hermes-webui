@@ -29,6 +29,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 _CHAT_LOCK_WAIT_SECONDS = 2.0
+_DEFERRED_SESSION_RETRY_DELAYS = (0.0, 0.25, 0.5, 1.0, 2.0, 4.0)
 
 from api.config import (
     _HERMES_FOUND,
@@ -9174,7 +9175,9 @@ def _schedule_deferred_process_wakeup_pause_clear(
     def _clear_if_unchanged():
         try:
             lock = _get_session_agent_lock(session_id)
-            while True:
+            for retry_delay in _DEFERRED_SESSION_RETRY_DELAYS:
+                if retry_delay:
+                    time.sleep(retry_delay)
                 with _try_acquire_chat_lock(
                     lock, _CHAT_LOCK_WAIT_SECONDS
                 ) as acquired:
@@ -9204,7 +9207,10 @@ def _schedule_deferred_process_wakeup_pause_clear(
                                     )
                                 else:
                                     return
-                time.sleep(0.25)
+            logger.warning(
+                "Deferred process-wakeup pause clear exhausted retries for session %s",
+                session_id,
+            )
         except Exception:
             logger.warning(
                 "Deferred process-wakeup pause clear failed for session %s",

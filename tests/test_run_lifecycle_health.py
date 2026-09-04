@@ -475,6 +475,27 @@ def test_deferred_pause_clear_requires_unchanged_idle_session(monkeypatch):
     assert saved == [True]
 
 
+def test_deferred_pause_clear_stops_after_bounded_lock_retries(monkeypatch):
+    import threading
+    from api import streaming
+
+    lock = threading.Lock()
+    lock.acquire()
+    monkeypatch.setattr(streaming, "_get_session_agent_lock", lambda _sid: lock)
+    monkeypatch.setattr(streaming, "_CHAT_LOCK_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(streaming, "_DEFERRED_SESSION_RETRY_DELAYS", (0.0, 0.0))
+
+    thread = streaming._schedule_deferred_process_wakeup_pause_clear(
+        "bounded-pause", {"paused": True}
+    )
+    assert thread is not None
+    thread.join(timeout=1)
+
+    assert thread.is_alive() is False
+    assert "bounded-pause" not in streaming._DEFERRED_PAUSE_CLEAR_THREADS
+    lock.release()
+
+
 def test_health_only_waiter_does_not_skip_agent_eviction(monkeypatch):
     from api import config, session_lifecycle
 
