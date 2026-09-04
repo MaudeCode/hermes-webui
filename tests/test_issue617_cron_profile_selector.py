@@ -94,8 +94,6 @@ def test_cron_create_api_persists_profile_and_returns_it(monkeypatch):
             "schedule": "every 60m",
             "deliver": "local",
             "profile": "research",
-            "provider": "openai-codex",
-            "model": "gpt-5.4",
         },
     )
 
