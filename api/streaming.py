@@ -9703,7 +9703,7 @@ def _run_agent_streaming(
                 if event == 'cancel' or _error_type in {'cancelled', 'canceled'}
                 else ('interrupted-by-crash' if _error_type == 'interrupted' else 'errored')
             )
-            if _error_type != "chat_writeback_timeout":
+            if _error_type not in {"chat_writeback_timeout", "chat_admission_timeout"}:
                 _persist_terminal_steering_scene(terminal_state=_terminal_state)
         event_id = None
         if run_journal is not None:
