@@ -344,3 +344,52 @@ def test_agent_unavailable_message_reflects_in_flight_dependency_repair(monkeypa
     startup.AGENT_DEPS_READY.set()
     settled = streaming._aiagent_import_error_detail()
     assert "sys.path" in settled, "the real diagnostic must return once repair has settled"
+
+
+def test_plugin_registry_is_published_atomically(tmp_path, monkeypatch):
+    """Discovery runs behind the bind, so readers must never see it half-done.
+
+    load_plugins() used to insert into PLUGIN_MANIFESTS one entry at a time.
+    Before HWEB-35 that finished before the socket bound; now an in-flight
+    /api/plugins request or the plugin-page router can iterate it concurrently,
+    where a partial list is wrong and a resize mid-iteration raises RuntimeError.
+    """
+    from api import plugins
+
+    for i in range(25):
+        d = tmp_path / f"plug{i}" / "dashboard"
+        d.mkdir(parents=True)
+        (d / "manifest.json").write_text(
+            json.dumps({"name": f"plug{i}", "label": f"P{i}", "tab": {"path": f"/plug{i}"}})
+        )
+    monkeypatch.setenv("HERMES_WEBUI_PLUGINS_DIR", str(tmp_path))
+    monkeypatch.setattr(plugins, "PLUGIN_MANIFESTS", {})
+    monkeypatch.setattr(plugins, "_PLUGIN_STATIC_ROOTS", {})
+
+    observed = []
+    stop = threading.Event()
+
+    def reader():
+        while not stop.is_set():
+            try:
+                # Same access shape as api/routes.py's plugin-page router.
+                observed.append(len([n for n, _m in plugins.PLUGIN_MANIFESTS.items()]))
+            except RuntimeError as exc:  # pragma: no cover - the bug being pinned
+                observed.append(exc)
+                return
+
+    t = threading.Thread(target=reader, daemon=True)
+    t.start()
+    try:
+        plugins.load_plugins()
+    finally:
+        stop.set()
+        t.join(timeout=10)
+
+    assert len(plugins.PLUGIN_MANIFESTS) == 25, "discovery did not publish every plugin"
+    assert not any(isinstance(o, RuntimeError) for o in observed), (
+        "registry mutated while a reader iterated it"
+    )
+    # Every observation is either the empty pre-publish state or the full set —
+    # never a partially-filled registry.
+    assert set(observed) <= {0, 25}, f"reader saw a partial registry: {sorted(set(observed))}"

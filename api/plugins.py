@@ -42,11 +42,23 @@ def _get_plugin_base() -> Path:
 
 
 def load_plugins() -> None:
-    """Scan plugin directories and load manifest.json for each dashboard plugin."""
+    """Scan plugin directories and load manifest.json for each dashboard plugin.
+
+    Discovery now runs behind the socket bind (HWEB-35), so API requests can be
+    in flight while it works. The registries are therefore built off to the side
+    and published in one dict.update() each — a single C-level call, so a
+    concurrent reader can never observe a half-filled registry, and iterating
+    /api/plugins or the plugin-page router can't raise "dictionary changed size
+    during iteration". The module-level dict objects are reused rather than
+    rebound because callers and tests hold direct references to them.
+    """
     plugin_base = _get_plugin_base()
     if not plugin_base.is_dir():
         logger.debug("No plugins directory at %s", plugin_base)
         return
+
+    discovered: dict[str, dict] = {}
+    discovered_roots: dict[str, Path] = {}
 
     for entry in sorted(plugin_base.iterdir()):
         if not entry.is_dir():
@@ -81,20 +93,30 @@ def load_plugins() -> None:
             logger.warning("Skipping plugin %s with invalid tab.path %r (must match %s)", name, tab_path, _VALID_PLUGIN_TAB_PATH.pattern)
             continue
 
-        if name in PLUGIN_MANIFESTS:
+        # Conflict checks consider both what is already published and what this
+        # scan has staged, so a duplicate within one pass is still rejected.
+        if name in PLUGIN_MANIFESTS or name in discovered:
             logger.warning("Duplicate plugin name skipped: %s (already loaded)", name)
             continue
-        if tab_path in (m.get("tab", {}).get("path") for m in PLUGIN_MANIFESTS.values()):
+        if tab_path in (
+            m.get("tab", {}).get("path")
+            for m in (*PLUGIN_MANIFESTS.values(), *discovered.values())
+        ):
             logger.warning("Plugin %s tab.path %r conflicts with another plugin; skipped", name, tab_path)
             continue
 
-        PLUGIN_MANIFESTS[name] = manifest
+        discovered[name] = manifest
         logger.info("Loaded dashboard plugin: %s (label=%s)", name, manifest.get("label", ""))
 
         # Pre-compute static root for fast serving (points to dashboard/)
         dashboard_dir = entry / "dashboard"
         if dashboard_dir.is_dir():
-            _PLUGIN_STATIC_ROOTS[name] = dashboard_dir.resolve()
+            discovered_roots[name] = dashboard_dir.resolve()
+
+    # Publish atomically: static roots first, so a plugin is never routable
+    # before the directory it serves from is resolvable.
+    _PLUGIN_STATIC_ROOTS.update(discovered_roots)
+    PLUGIN_MANIFESTS.update(discovered)
 
 
 def serve_plugin_static(plugin_name: str, rel_path: str) -> tuple[bytes, str] | None:
