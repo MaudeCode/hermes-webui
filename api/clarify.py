@@ -7,9 +7,11 @@ clarification string instead of an approval decision.
 from __future__ import annotations
 
 import queue
+import itertools
 import threading
 import time
 import uuid
+import weakref
 from typing import Optional
 
 from api.session_events import publish_session_list_changed
@@ -25,7 +27,28 @@ _gateway_notify_cbs: dict[str, object] = {}
 _clarify_sse_subscribers: dict[str, list[queue.Queue]] = {}
 _clarify_sse_sequence: dict[str, int] = {}
 _clarify_sse_dispatched: dict[str, int] = {}
-_clarify_sse_dispatch_lock = threading.RLock()
+_clarify_sse_sequence_source = itertools.count(1)
+_clarify_sse_dispatch_locks = weakref.WeakValueDictionary()
+_clarify_sse_dispatch_locks_lock = threading.Lock()
+
+
+def _clarify_sse_dispatch_lock(session_id: str):
+    with _clarify_sse_dispatch_locks_lock:
+        lock = _clarify_sse_dispatch_locks.get(session_id)
+        if lock is None:
+            lock = threading.RLock()
+            _clarify_sse_dispatch_locks[session_id] = lock
+        return lock
+
+
+def _cleanup_clarify_sse_sequence_locked(session_id: str) -> None:
+    if (
+        _gateway_notify_cbs.get(session_id) is None
+        and not _gateway_queues.get(session_id)
+        and not _clarify_sse_subscribers.get(session_id)
+    ):
+        _clarify_sse_sequence.pop(session_id, None)
+        _clarify_sse_dispatched.pop(session_id, None)
 
 
 class _ClarifyEntry:
@@ -42,8 +65,9 @@ class _ClarifyEntry:
 
 def register_gateway_notify(session_key: str, cb) -> None:
     """Register a per-session callback for sending clarify requests to the UI."""
-    with _lock:
-        _gateway_notify_cbs[session_key] = cb
+    with _clarify_sse_dispatch_lock(session_key):
+        with _lock:
+            _gateway_notify_cbs[session_key] = cb
 
 
 def _clear_queue_locked(session_key: str) -> list[_ClarifyEntry]:
@@ -54,12 +78,14 @@ def _clear_queue_locked(session_key: str) -> list[_ClarifyEntry]:
 
 def unregister_gateway_notify(session_key: str) -> None:
     """Unregister the per-session callback and unblock any waiting clarify prompt."""
-    with _clarify_sse_dispatch_lock:
+    with _clarify_sse_dispatch_lock(session_key):
         with _lock:
             _gateway_notify_cbs.pop(session_key, None)
             entries = _clear_queue_locked(session_key)
             notification = _clarify_sse_snapshot_locked(session_key, None, 0)
         _dispatch_clarify_sse(notification)
+        with _lock:
+            _cleanup_clarify_sse_sequence_locked(session_key)
     if entries:
         publish_session_list_changed("attention_cleared")
     for entry in entries:
@@ -105,14 +131,14 @@ def _with_timeout_metadata(data: dict) -> dict:
 
 def _clarify_sse_snapshot_locked(session_id: str, head: dict | None, total: int):
     payload = {"pending": dict(head) if head else None, "pending_count": total}
-    sequence = _clarify_sse_sequence.get(session_id, 0) + 1
+    sequence = next(_clarify_sse_sequence_source)
     _clarify_sse_sequence[session_id] = sequence
     return session_id, sequence, tuple(_clarify_sse_subscribers.get(session_id, ())), payload
 
 
 def _dispatch_clarify_sse(notification, callback=None, callback_payload=None) -> bool:
     session_id, sequence, subscribers, payload = notification
-    with _clarify_sse_dispatch_lock:
+    with _clarify_sse_dispatch_lock(session_id):
         with _lock:
             if sequence != _clarify_sse_sequence.get(session_id):
                 return False
@@ -129,6 +155,8 @@ def _dispatch_clarify_sse(notification, callback=None, callback_payload=None) ->
                 callback(dict(callback_payload or {}))
             except Exception:
                 pass
+        with _lock:
+            _cleanup_clarify_sse_sequence_locked(session_id)
         return True
 
 
@@ -158,6 +186,7 @@ def sse_unsubscribe(session_id: str, q: queue.Queue) -> None:
                 pass
             if not subs:
                 _clarify_sse_subscribers.pop(session_id, None)
+            _cleanup_clarify_sse_sequence_locked(session_id)
 
 
 def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:

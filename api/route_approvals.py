@@ -4,8 +4,10 @@ State-extraction prelude to the routes.py split tracked in #1907.
 Extracts approval state, not handlers, by design.
 """
 import queue
+import itertools
 import threading
 import uuid
+import weakref
 from contextlib import contextmanager
 
 from api.session_events import publish_session_list_changed
@@ -47,7 +49,9 @@ except ImportError:
 _approval_sse_subscribers: dict[str, list[queue.Queue]] = {}
 _approval_sse_sequence: dict[str, int] = {}
 _approval_sse_dispatched: dict[str, int] = {}
-_approval_sse_dispatch_lock = threading.Lock()
+_approval_sse_sequence_source = itertools.count(1)
+_approval_sse_dispatch_locks = weakref.WeakValueDictionary()
+_approval_sse_dispatch_locks_lock = threading.Lock()
 _GATEWAY_MIRROR_FLAG = "_gateway_mirror"
 _GATEWAY_MIRROR_TOKEN = "_gateway_mirror_token"
 _GATEWAY_MIRROR_RETAINED = "_gateway_mirror_retained"
@@ -58,6 +62,25 @@ _yolo_transition_lock = threading.Lock()
 _yolo_transitions: dict[str, dict] = {}
 _gateway_yolo_handoff_guard = threading.Lock()
 _gateway_yolo_handoffs: dict[str, dict] = {}
+
+
+def _approval_sse_dispatch_lock(session_id: str):
+    with _approval_sse_dispatch_locks_lock:
+        lock = _approval_sse_dispatch_locks.get(session_id)
+        if lock is None:
+            lock = threading.RLock()
+            _approval_sse_dispatch_locks[session_id] = lock
+        return lock
+
+
+def _cleanup_approval_sse_sequence_locked(session_id: str) -> None:
+    if (
+        not _approval_sse_subscribers.get(session_id)
+        and not _pending.get(session_id)
+        and not _gateway_queues.get(session_id)
+    ):
+        _approval_sse_sequence.pop(session_id, None)
+        _approval_sse_dispatched.pop(session_id, None)
 
 
 @contextmanager
@@ -161,6 +184,7 @@ def _approval_sse_unsubscribe(session_id: str, q: queue.Queue) -> None:
             subs.remove(q)
             if not subs:
                 _approval_sse_subscribers.pop(session_id, None)
+            _cleanup_approval_sse_sequence_locked(session_id)
 
 
 def _approval_sse_notify_locked(session_id: str, head: dict | None, total: int):
@@ -178,14 +202,14 @@ def _approval_sse_notify_locked(session_id: str, head: dict | None, total: int):
     hide its approval card.
     """
     payload = {"pending": dict(head) if head else None, "pending_count": total}
-    sequence = _approval_sse_sequence.get(session_id, 0) + 1
+    sequence = next(_approval_sse_sequence_source)
     _approval_sse_sequence[session_id] = sequence
     return session_id, sequence, tuple(_approval_sse_subscribers.get(session_id, ())), payload
 
 
 def _dispatch_approval_sse(notification) -> None:
     session_id, sequence, subs, payload = notification
-    with _approval_sse_dispatch_lock:
+    with _approval_sse_dispatch_lock(session_id):
         with _lock:
             if sequence != _approval_sse_sequence.get(session_id):
                 return
@@ -197,6 +221,8 @@ def _dispatch_approval_sse(notification) -> None:
                 q.put_nowait(payload)
             except queue.Full:
                 pass  # drop if subscriber is slow (bounded queue prevents memory leak)
+        with _lock:
+            _cleanup_approval_sse_sequence_locked(session_id)
 
 
 def _approval_sse_notify(session_id: str, head: dict | None, total: int) -> None:

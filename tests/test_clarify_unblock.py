@@ -147,10 +147,13 @@ class TestClarifyUnblocking:
         first_waiting = threading.Event()
         release_first = threading.Event()
         callbacks = []
+        calls = 0
         original_dispatch = clarify._dispatch_clarify_sse
 
         def delayed_dispatch(notification, callback=None, callback_payload=None):
-            if notification[1] == 1:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
                 first_waiting.set()
                 assert release_first.wait(2)
             return original_dispatch(notification, callback, callback_payload)
@@ -204,6 +207,40 @@ class TestClarifyUnblocking:
 
         assert submitter.is_alive() is False
         assert callbacks == []
+        assert sid not in clarify._clarify_sse_sequence
+        assert sid not in clarify._clarify_sse_dispatched
+
+    def test_slow_callback_does_not_block_another_session(self):
+        first_started = threading.Event()
+        release_first = threading.Event()
+        second_finished = threading.Event()
+        sid_a = f"unit-slow-a-{uuid.uuid4().hex[:8]}"
+        sid_b = f"unit-slow-b-{uuid.uuid4().hex[:8]}"
+
+        def slow_callback(_data):
+            first_started.set()
+            assert release_first.wait(2)
+
+        register_gateway_notify(sid_a, slow_callback)
+        register_gateway_notify(sid_b, lambda _data: second_finished.set())
+        first = threading.Thread(
+            target=lambda: submit_pending(sid_a, {"question": "A", "choices_offered": []})
+        )
+        first.start()
+        assert first_started.wait(1)
+        second = threading.Thread(
+            target=lambda: submit_pending(sid_b, {"question": "B", "choices_offered": []})
+        )
+        second.start()
+        assert second_finished.wait(0.2)
+        release_first.set()
+        first.join(1)
+        second.join(1)
+        unregister_gateway_notify(sid_a)
+        unregister_gateway_notify(sid_b)
+
+        assert first.is_alive() is False
+        assert second.is_alive() is False
 
 
 class TestClarifyModuleExports:

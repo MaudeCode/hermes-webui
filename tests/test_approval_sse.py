@@ -275,6 +275,17 @@ class TestSSESubscribeUnsubscribe:
         finally:
             approvals._approval_sse_unsubscribe(sid, q)
 
+    def test_empty_unowned_snapshot_releases_sequence_state(self):
+        from api import route_approvals as approvals
+
+        sid = f"sse-sequence-cleanup-{uuid.uuid4().hex[:8]}"
+        with approvals._lock:
+            notification = approvals._approval_sse_notify_locked(sid, None, 0)
+        approvals._dispatch_approval_sse(notification)
+
+        assert sid not in approvals._approval_sse_sequence
+        assert sid not in approvals._approval_sse_dispatched
+
     def test_unsubscribe_removes_queue(self):
         """After unsubscribe, the queue must not be in the subscribers list."""
         from api import routes as r
