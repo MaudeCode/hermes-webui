@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import contextlib
 import json
 import time
 
@@ -235,6 +236,24 @@ def test_budget_exceeded_foreground_uses_richer_static_catalog_and_refreshes_out
 
     assert rebuild_calls["count"] == 1
     assert cfg._available_models_cache == live_result
+    assert cfg._cache_build_in_progress is False
+
+
+def test_worker_scope_entry_failure_releases_catalog_waiters(
+    monkeypatch,
+    isolate_models_catalog_state,
+):
+    @contextlib.contextmanager
+    def fail_closed_scope(*_args, **_kwargs):
+        raise RuntimeError("profile scope unavailable")
+        yield
+
+    monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.05, raising=False)
+    monkeypatch.setattr(profiles, "profile_scope_for_detached_worker", fail_closed_scope)
+
+    with pytest.raises(RuntimeError, match="profile scope unavailable"):
+        cfg.get_available_models()
+
     assert cfg._cache_build_in_progress is False
 
 

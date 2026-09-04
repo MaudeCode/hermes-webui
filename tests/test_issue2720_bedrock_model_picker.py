@@ -5,6 +5,7 @@ from __future__ import annotations
 import builtins
 
 import api.config as config
+import api.profiles as profiles
 
 
 def _force_env_fallback(monkeypatch):
@@ -77,6 +78,8 @@ def test_bedrock_aws_credentials_detected_in_env_fallback(monkeypatch, tmp_path)
     _force_env_fallback(monkeypatch)
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+    monkeypatch.setitem(profiles._INITIAL_PROCESS_ENV, "AWS_ACCESS_KEY_ID", "test-access-key")
+    monkeypatch.setitem(profiles._INITIAL_PROCESS_ENV, "AWS_SECRET_ACCESS_KEY", "test-secret-key")
 
     result = _run_available_models_with_cfg(monkeypatch, tmp_path, {"model": {}})
     groups = {group["provider_id"]: group for group in result["groups"]}
@@ -94,6 +97,8 @@ def test_bedrock_missing_secret_key_not_detected(monkeypatch, tmp_path):
     _force_env_fallback(monkeypatch)
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE")
     monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
+    monkeypatch.setitem(profiles._INITIAL_PROCESS_ENV, "AWS_ACCESS_KEY_ID", "test-access-key")
+    monkeypatch.delitem(profiles._INITIAL_PROCESS_ENV, "AWS_SECRET_ACCESS_KEY", raising=False)
 
     result = _run_available_models_with_cfg(monkeypatch, tmp_path, {"model": {}})
     groups = {group["provider_id"]: group for group in result["groups"]}

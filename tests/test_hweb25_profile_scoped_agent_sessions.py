@@ -671,6 +671,17 @@ def test_named_profile_secret_overlay_blanks_startup_root_credentials(
     }
 
 
+def test_effective_model_override_uses_profile_thread_env(monkeypatch):
+    import api.config as config
+
+    monkeypatch.setenv("HERMES_MODEL", "root-model")
+    config._set_thread_env(HERMES_MODEL="profile-model")
+    try:
+        assert config.get_effective_default_model({"model": {}}) == "profile-model"
+    finally:
+        config._clear_thread_env()
+
+
 def test_default_readonly_request_pins_root_home(monkeypatch, tmp_path):
     import api.config as config
 

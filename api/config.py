@@ -3419,8 +3419,13 @@ def get_effective_default_model(config_data: dict | None = None) -> str:
         if cfg_default:
             default_model = cfg_default
 
-    env_model = (
-        os.getenv("HERMES_MODEL") or os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL")
+    env_model = next(
+        (
+            value
+            for name in ("HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL")
+            if (value := _thread_local_env_value(name))
+        ),
+        "",
     )
     if env_model:
         default_model = env_model.strip()
@@ -8618,24 +8623,33 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 if _prof_scope_worker is not None
                 else _nullcontext()
             )
-            with _worker_scope:
-                try:
-                    box["result"] = _invoke_models_rebuild(_build_available_models_uncached)
-                except Exception as exc:  # noqa: BLE001 — propagated to caller
-                    box["error"] = exc
-                finally:
-                    build_done.set()
-                    # Only publish out-of-band if the foreground already gave up
-                    # (over budget). Within budget the foreground publishes
-                    # synchronously, so the worker must NOT touch the cache.
-                    # NOTE: the publish (and its disk write + fingerprint) runs
-                    # INSIDE this profile scope so the over-budget path writes
-                    # the correct profile's cache file.
-                    if budget_exceeded.is_set() and _claim_publish():
-                        if "result" in box:
-                            _publish_models_result(box["result"])
-                        else:
-                            _clear_build_in_progress()
+            try:
+                with _worker_scope:
+                    try:
+                        box["result"] = _invoke_models_rebuild(_build_available_models_uncached)
+                    except Exception as exc:  # noqa: BLE001 — propagated to caller
+                        box["error"] = exc
+                    finally:
+                        build_done.set()
+                        # Only publish out-of-band if the foreground already gave up
+                        # (over budget). Within budget the foreground publishes
+                        # synchronously, so the worker must NOT touch the cache.
+                        # NOTE: the publish (and its disk write + fingerprint) runs
+                        # INSIDE this profile scope so the over-budget path writes
+                        # the correct profile's cache file.
+                        if budget_exceeded.is_set() and _claim_publish():
+                            if "result" in box:
+                                _publish_models_result(box["result"])
+                            else:
+                                _clear_build_in_progress()
+            except Exception as exc:
+                # Context entry can fail closed when this Agent version cannot
+                # isolate the selected profile. Wake foreground waiters instead
+                # of leaving the catalog build flag stuck forever.
+                box["error"] = exc
+                build_done.set()
+                if budget_exceeded.is_set() and _claim_publish():
+                    _clear_build_in_progress()
 
         _worker = threading.Thread(
             target=_rebuild_worker,
@@ -8659,10 +8673,13 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # wait() returning False and here: if so, still publish synchronously
         # so this caller honours the cache contract.
         budget_exceeded.set()
-        if build_done.is_set() and "error" not in box and "result" in box:
+        if build_done.is_set():
+            if "error" not in box and "result" in box:
+                if _claim_publish():
+                    _publish_models_result(box["result"])
+                return copy.deepcopy(box["result"])
             if _claim_publish():
-                _publish_models_result(box["result"])
-            return copy.deepcopy(box["result"])
+                _clear_build_in_progress()
 
         # Genuinely slow/hung probe: serve the best fallback now; the worker
         # keeps going and refreshes the cache for the next caller.
