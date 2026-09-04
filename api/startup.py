@@ -177,22 +177,35 @@ def auto_install_agent_deps() -> bool:
 def _startup_exempt(path: str) -> bool:
     """Return True for /api/ paths that must answer while recovery runs.
 
-    The auth surface is reused from api.auth.PUBLIC_PATHS rather than
-    hand-listed: those endpoints are public precisely because they authenticate
-    a caller instead of reading session state, so none of them depend on
-    recovery. Gating them would lock users out of an authenticated deployment
-    for the whole recovery window — static/login.js posts with a bare fetch()
-    and never sees api()'s startup retry.
+    The public surface is reused from api.auth.is_public_path() rather than
+    hand-listed: those paths are public precisely because they authenticate a
+    caller or serve a standalone snapshot instead of reading session state, so
+    none of them depend on recovery. Gating them would lock users out of an
+    authenticated deployment for the whole recovery window, and would break
+    public share links — static/login.js and static/share.js both use a bare
+    fetch() and never see api()'s startup retry.
+
+    Note this deliberately uses the predicate, not PUBLIC_PATHS: share reads and
+    static assets are prefix rules, so an exact-match copy would miss them.
     """
     if path in STARTUP_IMMEDIATE_PATHS:
         return True
-    from api.auth import PUBLIC_PATHS
-    return path in PUBLIC_PATHS
+    from api.auth import is_public_path
+    return is_public_path(path)
 
 
 def _send_still_starting(handler) -> None:
     """Answer a gated request with a retryable startup 503."""
     from api.helpers import j
+
+    # The gate runs before the route reads the body, so a rejected POST/PUT/
+    # PATCH/DELETE leaves its JSON or upload bytes unread. On an HTTP/1.1
+    # keep-alive connection BaseHTTPRequestHandler would parse those bytes as
+    # the next request line — blocking until the 30s handler timeout or
+    # answering a spurious 400/501, and holding a request-worker slot the whole
+    # time, which is exactly the budget STARTUP_WAIT_SLOTS protects. Close
+    # instead, matching REQUEST_WORKER_OVERFLOW_RESPONSE's Connection: close.
+    handler.close_connection = True
     j(
         handler,
         {

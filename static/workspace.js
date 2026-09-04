@@ -1,9 +1,3 @@
-// How long api() keeps retrying a startup-readiness 503 before giving up and
-// letting the caller's error path run. Session recovery on a large session
-// directory is the case this covers; a slow-but-correct boot beats a fast boot
-// that silently commits fallback settings for the rest of the page's life.
-const API_STARTUP_RETRY_BUDGET_MS=120000;
-
 async function api(path,opts={}){
   // Strip leading slash so URL resolves relative to location.href (supports subpath mounts)
   const rel = path.startsWith('/') ? path.slice(1) : path;
@@ -20,7 +14,10 @@ async function api(path,opts={}){
   // Startup-readiness 503s get their own wall-clock budget instead of the attempt
   // cap: session recovery can run for minutes, and each gated attempt already
   // blocks server-side for up to the readiness bound, so three attempts would give
-  // up after ~31s and let bootstrap callers commit fallback state. (HWEB-35)
+  // up after ~31s and let bootstrap callers commit fallback state. Declared inside
+  // api() so the function stays self-contained — tests/test_api_timeout.py extracts
+  // this function's source and evals it standalone under node. (HWEB-35)
+  const API_STARTUP_RETRY_BUDGET_MS=120000;
   const startupRetryDeadline=Date.now()+API_STARTUP_RETRY_BUDGET_MS;
   let lastErr;
   for(let attempt=0;attempt<maxAttempts;attempt++){

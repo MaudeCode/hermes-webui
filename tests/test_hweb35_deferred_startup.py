@@ -393,3 +393,72 @@ def test_plugin_registry_is_published_atomically(tmp_path, monkeypatch):
     # Every observation is either the empty pre-publish state or the full set —
     # never a partially-filled registry.
     assert set(observed) <= {0, 25}, f"reader saw a partial registry: {sorted(set(observed))}"
+
+
+def test_public_share_reads_are_not_gated():
+    """Public share links must survive a long recovery.
+
+    api/shares.py serves a standalone snapshot with no recovered-session
+    dependency, and static/share.js fetches it with a bare, non-retrying
+    fetch() — so gating it renders a permanent "Share unavailable".
+    """
+    from urllib.parse import urlparse
+
+    from api import startup
+
+    startup.STARTUP_READY.clear()
+    try:
+        for path in ("/api/share/abc123", "/api/share/tok-en_09"):
+            assert startup.await_startup_ready(None, urlparse(path)) is True, f"{path} gated"
+        # Mutating share routes are not public and stay gated.
+        for path in ("/api/share/create", "/api/share/revoke"):
+            assert startup._startup_exempt(path) is False, f"{path} must stay gated"
+    finally:
+        startup.STARTUP_READY.set()
+
+
+def test_startup_exempt_tracks_the_auth_predicate():
+    """The exemption reuses api.auth.is_public_path so the rules cannot drift."""
+    from api import startup
+    from api.auth import is_public_path
+
+    for path in ("/api/share/tok", "/api/auth/login", "/api/auth/status",
+                 "/api/share/create", "/api/sessions", "/api/settings"):
+        assert startup._startup_exempt(path) == (
+            is_public_path(path) or path in startup.STARTUP_IMMEDIATE_PATHS
+        ), f"{path} diverged from the auth predicate"
+
+
+def test_gated_write_closes_the_connection(boot_server):
+    """A rejected write leaves its body unread, so the connection must not be reused.
+
+    Otherwise BaseHTTPRequestHandler parses the unread JSON as the next request
+    line — blocking to the 30s handler timeout or answering a spurious 400/501
+    while holding the request-worker slot STARTUP_WAIT_SLOTS exists to protect.
+    """
+    boot = boot_server()
+    assert boot.recovery_started.wait(timeout=15), "deferred startup never reached recovery"
+
+    body = json.dumps({"title": "x" * 200}).encode()
+    with boot.connect(timeout=20) as sock:
+        sock.sendall(
+            b"POST /api/sessions HTTP/1.1\r\nHost: localhost\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
+        )
+        sock.settimeout(20)
+        chunks = []
+        while True:
+            try:
+                data = sock.recv(4096)
+            except socket.timeout:  # pragma: no cover - the bug being pinned
+                raise AssertionError("server held the connection open on a gated write")
+            if not data:
+                break
+            chunks.append(data)
+
+    raw = b"".join(chunks)
+    assert b"503" in raw.split(b"\r\n", 1)[0], f"expected a 503 status line, got {raw[:80]!r}"
+    assert b"startup_recovery" in raw
+    # Exactly one response: the unread body was not parsed as a second request.
+    assert raw.count(b"HTTP/1.1 ") == 1, f"server answered the unread body too: {raw[:400]!r}"
