@@ -385,8 +385,27 @@ def test_spawn_timeout_retains_capacity_until_supervisor_cleanup(monkeypatch, tm
     request = captured["request"]
     request.done = threading.Event()
     request.done.set()
-    terminal._release_timed_out_spawn_reservation(request)
+    terminal._release_abandoned_spawn_reservation(request)
     assert "late-timeout" not in terminal._STARTING_TERMINALS
+
+
+def test_shutdown_cancelled_queued_spawns_skip_process_creation():
+    requests = []
+    for index in range(3):
+        sid = f"queued-{index}"
+        reservation = terminal._StartReservation(cancelled=True)
+        request = terminal._SpawnRequest(
+            {}, reservation_sid=sid, reservation=reservation
+        )
+        with terminal._LOCK:
+            terminal._STARTING_TERMINALS[sid] = reservation
+        requests.append((sid, reservation, request))
+
+    for sid, reservation, request in requests:
+        assert terminal._cancel_spawn_before_popen(request) is True
+        assert request.done.is_set()
+        assert reservation.done.is_set()
+        assert sid not in terminal._STARTING_TERMINALS
 
 
 # ── F1: writes/resizes are serialized against close (no fd-reuse injection) ───

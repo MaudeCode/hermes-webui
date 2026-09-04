@@ -240,13 +240,31 @@ def _reap_abandoned_spawn(proc: subprocess.Popen) -> bool:
     return True
 
 
-def _release_timed_out_spawn_reservation(request: _SpawnRequest) -> None:
-    if not request.timed_out.is_set() or request.reservation is None:
+def _release_abandoned_spawn_reservation(request: _SpawnRequest) -> None:
+    reservation = request.reservation
+    if reservation is None or not (
+        request.timed_out.is_set() or getattr(reservation, "cancelled", False)
+    ):
         return
     with _LOCK:
-        if _STARTING_TERMINALS.get(request.reservation_sid or "") is request.reservation:
+        if _STARTING_TERMINALS.get(request.reservation_sid or "") is reservation:
             _STARTING_TERMINALS.pop(request.reservation_sid or "", None)
-            request.reservation.done.set()
+            reservation.done.set()
+
+
+def _cancel_spawn_before_popen(request: _SpawnRequest) -> bool:
+    """Reject a queued spawn whose caller timed out or shutdown cancelled it."""
+    with request.lock:
+        reservation = request.reservation
+        if not (
+            request.timed_out.is_set()
+            or (reservation is not None and getattr(reservation, "cancelled", False))
+        ):
+            return False
+        request.error = RuntimeError("terminal start was cancelled")
+        request.done.set()
+    _release_abandoned_spawn_reservation(request)
+    return True
 
 
 def _reap_terminal_descendants(
@@ -280,6 +298,8 @@ def _spawn_supervisor_loop() -> None:
         request = None
         try:
             request = _spawn_queue.get()
+            if _cancel_spawn_before_popen(request):
+                continue
             try:
                 proc = subprocess.Popen(**request.kwargs)
                 with request.lock:
@@ -288,7 +308,7 @@ def _spawn_supervisor_loop() -> None:
                     else:
                         request.proc = proc
                     request.done.set()
-                _release_timed_out_spawn_reservation(request)
+                _release_abandoned_spawn_reservation(request)
             except BaseException as exc:
                 with request.lock:
                     try:
@@ -296,7 +316,7 @@ def _spawn_supervisor_loop() -> None:
                     except BaseException:
                         pass
                     request.done.set()
-                _release_timed_out_spawn_reservation(request)
+                _release_abandoned_spawn_reservation(request)
         except BaseException as exc:
             if request is not None:
                 try:
