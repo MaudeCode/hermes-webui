@@ -287,3 +287,29 @@ def test_worker_lock_release_does_not_overwrite_cancelling_phase():
             assert config.ACTIVE_RUNS["cancel-transition"]["phase"] == "cancelling"
     finally:
         config.unregister_active_run("cancel-transition")
+
+
+def test_health_only_waiter_does_not_skip_agent_eviction(monkeypatch):
+    from api import config, session_lifecycle
+
+    closed = []
+    agent = SimpleNamespace(
+        _session_db=SimpleNamespace(close=lambda: closed.append(True))
+    )
+    with config.SESSION_AGENT_CACHE_LOCK:
+        config.SESSION_AGENT_CACHE["evict-session"] = (agent, "sig")
+    config.register_active_run(
+        "evict-observation",
+        session_id="evict-session",
+        health_only=True,
+        profile=None,
+    )
+    monkeypatch.setattr(session_lifecycle, "has_uncommitted_work", lambda _sid: False)
+    monkeypatch.setattr(session_lifecycle, "unregister_agent", lambda _sid: None)
+    monkeypatch.setattr(session_lifecycle, "discard_session", lambda _sid: None)
+    try:
+        config._evict_session_agent("evict-session")
+    finally:
+        config.unregister_active_run("evict-observation")
+
+    assert closed == [True]

@@ -9729,7 +9729,10 @@ def _evict_session_agent(session_id: str) -> None:
     try:
         with ACTIVE_RUNS_LOCK:
             for _entry in (ACTIVE_RUNS or {}).values():
-                if (_entry or {}).get("session_id") == session_id:
+                if (
+                    (_entry or {}).get("session_id") == session_id
+                    and not (_entry or {}).get("health_only")
+                ):
                     _run_active = True
                     break
     except Exception:

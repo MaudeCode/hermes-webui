@@ -19252,6 +19252,19 @@ def _read_json_request_body(handler, *, max_bytes: int = 4096) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+def _file_ops_session_or_error(handler, session_id: str):
+    """Resolve one file-operation session and normalize lookup failures."""
+    try:
+        return get_session_for_file_ops(session_id)
+    except WorkspaceBindingBusy:
+        response = _chat_admission_timeout_response()
+        status = response.pop("_status")
+        j(handler, response, status=status)
+    except KeyError:
+        bad(handler, "Session not found", 404)
+    return None
+
+
 def _handle_escape_authorize(handler, parsed, body: dict | None = None):
     if handler.command != "POST":
         return bad(handler, "method not allowed", 405)
@@ -19274,10 +19287,9 @@ def _handle_escape_authorize(handler, parsed, body: dict | None = None):
         return bad(handler, "session_id is required")
     if not rel:
         return bad(handler, "path is required")
-    try:
-        s = get_session_for_file_ops(sid)
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, sid)
+    if s is None:
+        return True
     try:
         payload = authorize_escape_target(Path(s.workspace), sid, rel)
     except ValueError as exc:
@@ -19293,10 +19305,9 @@ def _handle_escape_list_dir(handler, parsed):
         return bad(handler, "session_id is required")
     if not token:
         return bad(handler, "token is required")
-    try:
-        s = get_session_for_file_ops(sid)
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, sid)
+    if s is None:
+        return True
     rel_path = qs.get("path", ["."])[0]
     try:
         payload = list_authorized_escape_dir(Path(s.workspace), sid, token, rel_path)
@@ -19318,10 +19329,9 @@ def _handle_escape_file_read(handler, parsed):
         return bad(handler, "session_id is required")
     if not token:
         return bad(handler, "token is required")
-    try:
-        s = get_session_for_file_ops(sid)
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, sid)
+    if s is None:
+        return True
     rel = qs.get("path", [""])[0]
     try:
         return j(handler, read_authorized_escape_file_content(Path(s.workspace), sid, token, rel))
@@ -19345,10 +19355,9 @@ def _handle_escape_file_raw(handler, parsed):
         return bad(handler, "session_id is required")
     if not token:
         return bad(handler, "token is required")
-    try:
-        s = get_session_for_file_ops(sid)
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, sid)
+    if s is None:
+        return True
     rel = qs.get("path", [""])[0]
     force_download = qs.get("download", [""])[0] == "1"
     try:
@@ -22119,10 +22128,9 @@ def _handle_folder_download(handler, parsed):
     sid = qs.get("session_id", [""])[0]
     if not sid:
         return bad(handler, "session_id is required")
-    try:
-        s = get_session_for_file_ops(sid)
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, sid)
+    if s is None:
+        return True
 
     rel = qs.get("path", [""])[0]
     try:
@@ -22205,10 +22213,9 @@ def _handle_file_raw(handler, parsed):
     sid = qs.get("session_id", [""])[0]
     if not sid:
         return bad(handler, "session_id is required")
-    try:
-        s = get_session_for_file_ops(sid)
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, sid)
+    if s is None:
+        return True
     rel = qs.get("path", [""])[0]
     force_download = qs.get("download", [""])[0] == "1"
     resolved = _file_raw_target(s, sid, rel)
@@ -22245,10 +22252,9 @@ def _handle_file_read(handler, parsed):
     sid = qs.get("session_id", [""])[0]
     if not sid:
         return bad(handler, "session_id is required")
-    try:
-        s = get_session_for_file_ops(sid)
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, sid)
+    if s is None:
+        return True
     rel = qs.get("path", [""])[0]
     if not rel:
         return bad(handler, "path is required")
@@ -26958,10 +26964,9 @@ def _handle_file_delete(handler, body):
         require(body, "session_id", "path")
     except ValueError as e:
         return bad(handler, str(e))
-    try:
-        s = get_session_for_file_ops(body["session_id"])
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, body["session_id"])
+    if s is None:
+        return True
     try:
         ws_root = Path(s.workspace)
         target = safe_resolve(ws_root, body["path"])
@@ -26990,10 +26995,9 @@ def _handle_file_save(handler, body):
         require(body, "session_id", "path")
     except ValueError as e:
         return bad(handler, str(e))
-    try:
-        s = get_session_for_file_ops(body["session_id"])
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, body["session_id"])
+    if s is None:
+        return True
     try:
         ws_root = Path(s.workspace)
         target = safe_resolve(ws_root, body["path"])
@@ -27021,10 +27025,9 @@ def _handle_office_file_save(handler, body):
         require(body, "session_id", "path")
     except ValueError as e:
         return bad(handler, str(e))
-    try:
-        s = get_session_for_file_ops(body["session_id"])
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, body["session_id"])
+    if s is None:
+        return True
     try:
         ws_root = Path(s.workspace)
         target = safe_resolve(ws_root, body["path"])
@@ -27056,10 +27059,9 @@ def _handle_file_create(handler, body):
         require(body, "session_id", "path")
     except ValueError as e:
         return bad(handler, str(e))
-    try:
-        s = get_session_for_file_ops(body["session_id"])
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, body["session_id"])
+    if s is None:
+        return True
     try:
         ws_root = Path(s.workspace)
         target = safe_resolve(ws_root, body["path"])
@@ -27083,10 +27085,9 @@ def _handle_file_rename(handler, body):
         require(body, "session_id", "path", "new_name")
     except ValueError as e:
         return bad(handler, str(e))
-    try:
-        s = get_session_for_file_ops(body["session_id"])
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, body["session_id"])
+    if s is None:
+        return True
     try:
         ws_root = Path(s.workspace)
         ws_root_resolved = ws_root.resolve()
@@ -27118,10 +27119,9 @@ def _handle_file_move(handler, body):
         require(body, "session_id", "path", "dest_dir")
     except ValueError as e:
         return bad(handler, str(e))
-    try:
-        s = get_session_for_file_ops(body["session_id"])
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, body["session_id"])
+    if s is None:
+        return True
     try:
         ws_root = Path(s.workspace)
         # safe_resolve() returns paths under the RESOLVED root, so compute
@@ -27216,10 +27216,9 @@ def _handle_create_dir(handler, body):
         require(body, "session_id", "path")
     except ValueError as e:
         return bad(handler, str(e))
-    try:
-        s = get_session_for_file_ops(body["session_id"])
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, body["session_id"])
+    if s is None:
+        return True
     try:
         ws_root = Path(s.workspace)
         target = safe_resolve(ws_root, body["path"])
@@ -27238,10 +27237,9 @@ def _handle_file_reveal(handler, body):
         require(body, "session_id", "path")
     except ValueError as e:
         return bad(handler, str(e))
-    try:
-        s = get_session_for_file_ops(body["session_id"])
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, body["session_id"])
+    if s is None:
+        return True
     try:
         target = safe_resolve(Path(s.workspace), body["path"])
         if not target.exists():
@@ -27299,10 +27297,9 @@ def _handle_file_path(handler, body):
         require(body, "session_id", "path")
     except ValueError as e:
         return bad(handler, str(e))
-    try:
-        s = get_session_for_file_ops(body["session_id"])
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, body["session_id"])
+    if s is None:
+        return True
     try:
         target = safe_resolve(Path(s.workspace), body["path"])
         return j(handler, {"ok": True, "path": str(target)})
@@ -27329,10 +27326,9 @@ def _handle_file_open_vscode(handler, body):
         require(body, "session_id", "path")
     except ValueError as e:
         return bad(handler, str(e))
-    try:
-        s = get_session_for_file_ops(body["session_id"])
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, body["session_id"])
+    if s is None:
+        return True
     try:
         target = safe_resolve(Path(s.workspace), body["path"])
         if not target.exists():

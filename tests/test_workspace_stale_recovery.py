@@ -89,6 +89,27 @@ def test_workspace_recovery_lock_wait_is_bounded(monkeypatch, tmp_path):
         api_config.LAST_CHAT_ADMISSION_TIMEOUT_AT = None
 
 
+def test_file_operation_busy_uses_chat_admission_timeout_response(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        routes,
+        "get_session_for_file_ops",
+        lambda _sid: (_ for _ in ()).throw(routes.WorkspaceBindingBusy()),
+    )
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda _handler, payload, status=200: captured.update(
+            payload=payload, status=status
+        ),
+    )
+
+    assert routes._file_ops_session_or_error(SimpleNamespace(), "busy-session") is None
+    assert captured["status"] == 409
+    assert captured["payload"]["code"] == "chat_admission_timeout"
+    assert captured["payload"]["retryable"] is True
+
+
 def test_chat_recovery_persistence_failure_fails_closed(monkeypatch, tmp_path):
     fallback = tmp_path / "fallback"
     fallback.mkdir()
