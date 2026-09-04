@@ -1,7 +1,6 @@
 """Session-list cache helpers extracted from api.routes."""
 
 import os
-import copy
 import re
 import threading
 import time
@@ -226,23 +225,36 @@ def _session_list_cache_key(
     )
 
 
-def _session_list_cache_get(
+def _session_list_cache_lookup(
     key: tuple,
     allow_stale: bool = False,
-) -> tuple[dict | None, bool]:
+) -> tuple[dict | None, bool, str | None]:
+    """Return ``(payload, is_fresh, stale_reason)`` from one source-stamp read.
+
+    The caller used to ask for the payload and then call
+    ``_session_list_cache_stale_reason`` for the reason, which recomputed the
+    identical stamp (a SQLite connect, two queries and five ``stat()`` calls)
+    a second time per request. Folding the reason into the lookup computes it
+    once and also removes the window where the entry changed between the two
+    reads.
+
+    The payload is returned by reference, not deep-copied: cached session-list
+    payloads are read-only for every caller (the response layer copies each row
+    it reshapes), and the deepcopy was an O(N-sessions) cost on every cache hit.
+    """
     now = time.monotonic()
     current_stamp = _session_list_cache_resolved_source_stamp(key)
     with _SESSIONS_CACHE_LOCK:
         entry = _SESSIONS_CACHE.get(key)
         if not entry:
-            return None, False
+            return None, False, None
         ts, stamp, payload = entry
         if stamp != current_stamp:
             if allow_stale:
                 _SESSIONS_CACHE.move_to_end(key)
-                return copy.deepcopy(payload), False
+                return payload, False, "source"
             _SESSIONS_CACHE.pop(key, None)
-            return None, False
+            return None, False, "source"
         # #4808: widen the freshness window while a turn is streaming so the fixed
         # streaming poll cadence doesn't force a full rebuild on every poll.
         ttl = _SESSIONS_CACHE_TTL_SECONDS
@@ -251,12 +263,20 @@ def _session_list_cache_get(
         fresh = (now - ts) < ttl
         if fresh:
             _SESSIONS_CACHE.move_to_end(key)
-            return copy.deepcopy(payload), True
+            return payload, True, None
         if allow_stale:
             _SESSIONS_CACHE.move_to_end(key)
-            return copy.deepcopy(payload), False
+            return payload, False, "age"
         _SESSIONS_CACHE.pop(key, None)
-        return None, False
+        return None, False, "age"
+
+
+def _session_list_cache_get(
+    key: tuple,
+    allow_stale: bool = False,
+) -> tuple[dict | None, bool]:
+    payload, fresh, _reason = _session_list_cache_lookup(key, allow_stale=allow_stale)
+    return payload, fresh
 
 
 def _session_list_cache_stale_reason(key: tuple) -> str | None:
@@ -283,7 +303,7 @@ def _session_list_cache_set(key: tuple, payload: dict) -> None:
         return
     stamp = _session_list_cache_resolved_source_stamp(key)
     with _SESSIONS_CACHE_LOCK:
-        _SESSIONS_CACHE[key] = (time.monotonic(), stamp, copy.deepcopy(payload))
+        _SESSIONS_CACHE[key] = (time.monotonic(), stamp, payload)
         _SESSIONS_CACHE.move_to_end(key)
         while len(_SESSIONS_CACHE) > _SESSIONS_CACHE_MAX_ENTRIES:
             _SESSIONS_CACHE.popitem(last=False)

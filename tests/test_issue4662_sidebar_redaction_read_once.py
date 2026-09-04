@@ -29,7 +29,9 @@ def test_sessions_route_threads_its_authoritative_settings_into_serializer():
     route_end = source.index('if parsed.path == "/api/projects":', route_start)
     route = source[route_start:route_end]
 
-    assert "_session_list_payload_to_response(payload, settings=settings)" in route
+    # The route now goes through the serialized-response cache, which threads the
+    # same authoritative settings snapshot into _session_list_payload_to_response.
+    assert "_session_list_response_body(key, payload, settings=settings)" in route
 
 
 def test_sidebar_payload_reads_redaction_setting_once(monkeypatch):
