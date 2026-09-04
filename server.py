@@ -111,7 +111,7 @@ from api.helpers import (
     _build_csp_report_only_policy,
     _CLIENT_DISCONNECT_ERRORS,
 )
-from api.http_server import bind_without_reverse_dns
+from api.http_server import HTTPWorkerBudgetMixin, REQUEST_WORKER_OVERFLOW_RESPONSE, bind_without_reverse_dns
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers
 from api.startup import auto_install_agent_deps, fix_credential_permissions
@@ -119,18 +119,13 @@ from api.updates import WEBUI_VERSION
 from api.crash_visibility import install_crash_visibility
 
 
-class QuietHTTPServer(ThreadingHTTPServer):
+class QuietHTTPServer(HTTPWorkerBudgetMixin, ThreadingHTTPServer):
     """Custom HTTP server that silently handles common network errors."""
     daemon_threads = True
     request_queue_size = 64
     max_request_workers = 128
     max_overflow_reject_workers = 16
-    _OVERFLOW_RESPONSE = (
-        b"HTTP/1.1 503 Service Unavailable\r\n"
-        b"Connection: close\r\n"
-        b"Content-Length: 0\r\n"
-        b"\r\n"
-    )
+    _OVERFLOW_RESPONSE = REQUEST_WORKER_OVERFLOW_RESPONSE
 
     def __init__(self, *args, **kwargs):
         server_address = args[0] if args else kwargs.get('server_address', None)
@@ -138,7 +133,7 @@ class QuietHTTPServer(ThreadingHTTPServer):
             self.address_family = socket.AF_INET6
         self.ssl_context: object | None = None
         super().__init__(*args, **kwargs)
-        self._request_worker_slots = threading.BoundedSemaphore(self.max_request_workers)
+        self._init_worker_budgets()
         self._overflow_reject_slots = threading.BoundedSemaphore(self.max_overflow_reject_workers)
         self.accept_loop_requests_total = 0
         self.accept_loop_last_request_at = 0.0
@@ -258,23 +253,6 @@ class QuietHTTPServer(ThreadingHTTPServer):
         finally:
             self._close_request_quietly(request)
             self._overflow_reject_slots.release()
-
-    def process_request(self, request, client_address):
-        if not self._request_worker_slots.acquire(blocking=False):
-            self._reject_overflow_request(request)
-            return
-        try:
-            return super().process_request(request, client_address)
-        except Exception:
-            self._request_worker_slots.release()
-            self._close_request_quietly(request)
-            raise
-
-    def process_request_thread(self, request, client_address):
-        try:
-            return super().process_request_thread(request, client_address)
-        finally:
-            self._request_worker_slots.release()
 
     def handle_error(self, request, client_address):
         """Suppress logging for common client disconnect errors."""

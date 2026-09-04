@@ -174,7 +174,7 @@ class TestQuietHTTPServer(unittest.TestCase):
         """QuietHTTPServer must extend ThreadingHTTPServer."""
         self.assertRegex(
             SERVER_PY,
-            r"class QuietHTTPServer\(ThreadingHTTPServer\)",
+            r"class QuietHTTPServer\(HTTPWorkerBudgetMixin, ThreadingHTTPServer\)",
             "QuietHTTPServer must extend ThreadingHTTPServer",
         )
 

@@ -35,7 +35,8 @@ def _emits_connection_close(body: str) -> bool:
 
 def test_session_events_stream_does_not_emit_connection_close():
     body = _handler_body("_handle_session_events_stream")
-    assert "text/event-stream" in body, "sanity: this is the SSE handler"
+    assert "start_sse_response(handler)" in body, "sanity: this is the SSE handler"
+    assert "connection_close=True" not in body
     assert not _emits_connection_close(body), (
         "_handle_session_events_stream must not emit `Connection: close` — it triggers "
         "browser EventSource reconnect storms on this long-lived stream (#3103)"
@@ -44,7 +45,8 @@ def test_session_events_stream_does_not_emit_connection_close():
 
 def test_gateway_sse_stream_does_not_emit_connection_close():
     body = _handler_body("_handle_gateway_sse_stream")
-    assert "text/event-stream" in body, "sanity: this is the SSE handler"
+    assert "start_sse_response(handler)" in body, "sanity: this is the SSE handler"
+    assert "connection_close=True" not in body
     assert not _emits_connection_close(body), (
         "_handle_gateway_sse_stream must not emit `Connection: close` — it triggers "
         "browser EventSource reconnect storms on this long-lived stream (#3103)"

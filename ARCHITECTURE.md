@@ -183,6 +183,12 @@ environment lock.
 Python stdlib ThreadingHTTPServer (from http.server). Each HTTP request runs in its own
 thread. The Handler class subclasses BaseHTTPRequestHandler with two methods:
 
+`QuietHTTPServer` caps handler threads at 128 and reserves half for ordinary
+requests. SSE handlers transfer into the other half through
+`start_sse_response()`, with at most eight streams per authenticated username
+or client address. This keeps long-lived streams from consuming the request
+workers needed by health, cancellation, and other short API calls.
+
     do_GET    Routes: /, /health, /api/session, /api/sessions, /api/list,
                       /api/chat/stream, /api/file, /api/approval/pending,
                       /api/session/worktree/status
