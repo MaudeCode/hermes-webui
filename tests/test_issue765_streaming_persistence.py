@@ -334,14 +334,16 @@ class TestIssue765FollowupHardening:
         stop_idx = src.find("if _checkpoint_stop is not None:\n                _checkpoint_stop.set()")
         join_idx = src.find("if _ckpt_thread is not None:\n                _ckpt_thread.join(timeout=15)")
         lock_idx = src.find(
-            "with _agent_lock:\n"
+            "with _bounded_worker_writeback_lock(\n"
+            "                stream_id, _agent_lock, \"result_writeback\"\n"
+            "            ):\n"
             "                if not ephemeral and not _stream_writeback_is_current(s, stream_id):"
         )
         save_idx = src.find("_result_messages = _settle_result_messages(")
 
         assert stop_idx != -1, "Success path must stop the checkpoint thread"
         assert join_idx != -1, "Success path must join the checkpoint thread"
-        assert lock_idx != -1, "Success path must serialize mutation with _agent_lock"
+        assert lock_idx != -1, "Success path must use the bounded writeback lock"
         assert save_idx != -1, "Success path settlement block not found"
         assert stop_idx < join_idx < lock_idx <= save_idx, (
             "Checkpoint stop/join must happen before the success-path settlement block"
@@ -357,16 +359,20 @@ class TestIssue765FollowupHardening:
             encoding="utf-8"
         )
         outer_lock_idx = src.find(
-            "with _agent_lock:\n"
+            "with _bounded_worker_writeback_lock(\n"
+            "                stream_id, _agent_lock, \"result_writeback\"\n"
+            "            ):\n"
             "                if not ephemeral and not _stream_writeback_is_current(s, stream_id):"
         )
         silent_failure_idx = src.find(
             "if _terminal_failure or (not _assistant_added and not _token_sent):"
         )
-        inner_lock_idx = src.find("with _agent_lock:", outer_lock_idx + 1)
+        inner_lock_idx = src.find(
+            "with _bounded_worker_writeback_lock(", outer_lock_idx + 1
+        )
         compression_idx = src.find("# ── Handle context compression side effects ──")
 
-        assert outer_lock_idx != -1, "Outer success-path _agent_lock block not found"
+        assert outer_lock_idx != -1, "Outer bounded success-path lock not found"
         assert silent_failure_idx != -1, "Silent-failure branch not found"
         assert compression_idx != -1, "Compression marker not found"
         assert not (
