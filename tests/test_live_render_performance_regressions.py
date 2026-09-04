@@ -472,6 +472,8 @@ MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 _MESSAGES_SRC_JS = f"const src=require('fs').readFileSync({json.dumps(str(ROOT / 'static' / 'messages.js'))},'utf8');"
 
 
+
+
 @pytest.mark.skipif(NODE is None, reason="node is required for DOM-executed live-render tests")
 def test_compact_echo_suffix_strip_is_linear_on_a_long_interim_message():
     """A 30k-char interim message with a reasoning echo must not scan quadratically."""
@@ -496,17 +498,17 @@ function naive(value, suffix){{
   }}
   return {{text:raw,removed:false}};
 }}
-const echo='the model restated this visible sentence';
+const shortEcho='the model restated this visible sentence';
 const cases=[
-  ['', echo],
-  ['nothing to strip here', echo],
-  ['prefix text\\n\\n'+echo, echo],
-  ['prefix text\\n\\n'+echo.replace(/ /g,'\\n'), echo],
-  ['prefix '+echo+' trailing', echo],
-  [echo, echo],
-  ['x'.repeat(5000)+'  '+echo+'  ', echo],
-  ['x'.repeat(30000), echo],
-  ['x'.repeat(30000)+'\\n'+echo, echo],
+  ['', shortEcho],
+  ['nothing to strip here', shortEcho],
+  ['prefix text\\n\\n'+shortEcho, shortEcho],
+  ['prefix text\\n\\n'+shortEcho.replace(/ /g,'\\n'), shortEcho],
+  ['prefix '+shortEcho+' trailing', shortEcho],
+  [shortEcho, shortEcho],
+  ['x'.repeat(5000)+'  '+shortEcho+'  ', shortEcho],
+  ['x'.repeat(30000), shortEcho],
+  ['x'.repeat(30000)+'\\n'+shortEcho, shortEcho],
 ];
 const mismatches=[];
 for(const [value,suffix] of cases){{
@@ -514,20 +516,36 @@ for(const [value,suffix] of cases){{
   const b=naive(value,suffix);
   if(a.removed!==b.removed||a.text!==b.text) mismatches.push({{value:value.slice(0,40),a,b}});
 }}
-// 30k characters of interim message, an echo tail, and the four calls one
-// interim_assistant event makes.
-const long='word '.repeat(6000)+'\\n\\n'+echo;
+// `windowSize` is max(suffix.length*3, 4096), so only a long visible echo
+// forces the 30k tail the quadratic scan choked on. A short echo pins the
+// window at the 4096 floor and would let the old implementation pass.
+const echo='visible echoed sentence '.repeat(500);
+const windowSize=Math.max(echo.length*3,4096);
+const filler='word '.repeat(8000);
+const long=filler+'\\n\\n'+echo;
 const started=Date.now();
-let removed=true;
-for(let i=0;i<4;i+=1) removed=removed&&_stripCompactEchoSuffix(long,echo).removed;
+let result=null;
+// Four calls: what one interim_assistant event with a reasoning_echo makes.
+for(let i=0;i<4;i+=1) result=_stripCompactEchoSuffix(long,echo);
 const elapsedMs=Date.now()-started;
-process.stdout.write(JSON.stringify({{mismatches,removed,elapsedMs,longLength:long.length}}));
+process.stdout.write(JSON.stringify({{
+  mismatches,
+  windowSize,
+  tailLength:Math.min(long.length,windowSize),
+  removed:result.removed,
+  textOk:result.text===filler.trimEnd(),
+  elapsedMs,
+}}));
 """
     result = _run_node(script)
     assert result["mismatches"] == []
+    # The window must actually reach 30k, or this is not a regression gate.
+    assert result["windowSize"] >= 30000, result
+    assert result["tailLength"] >= 30000, result
     assert result["removed"] is True
-    assert result["longLength"] > 30000
-    # The quadratic scan needed multiple seconds for one call at this size.
+    assert result["textOk"] is True
+    # The quadratic scan needs ~450M character copies per call at this window
+    # size and takes seconds; it cannot pass this bound.
     assert result["elapsedMs"] < 250, result
 
 
@@ -582,15 +600,92 @@ process.stdout.write(JSON.stringify({{
     assert result["nextSegment"] == "second segment prose"
 
 
-def test_live_anchor_scene_sweeps_are_keyed_on_a_group_generation():
-    """The per-frame cleanup sweeps must be skippable while the turn is unchanged."""
-    body = _function_body_ui("renderLiveAnchorActivityScene")
-    assert "const sweepGeneration=sweepCache?blocks.childElementCount:null;" in body
-    assert "if(!sweepCache||sweepCache.get(group)!==sweepGeneration){" in body
-    sweep_idx = body.index("if(!sweepCache||sweepCache.get(group)!==sweepGeneration){")
-    for selector in (
-        "blocks.querySelectorAll('[data-anchor-scene-owner=\"1\"],[data-anchor-scene-row=\"1\"]')",
-        "blocks.querySelectorAll('.live-worklog[data-live-worklog-shell=\"1\"]",
-        "blocks.querySelectorAll('[data-live-assistant=\"1\"]')",
-    ):
-        assert body.index(selector) > sweep_idx, selector
+@pytest.mark.skipif(NODE is None, reason="node is required for DOM-executed live-render tests")
+def test_live_anchor_scene_skips_cleanup_sweeps_until_the_turn_changes():
+    """Unchanged frames skip the whole-turn sweeps; a new child re-runs them."""
+    script = f"""
+const fs=require('fs');
+const src=fs.readFileSync({json.dumps(str(ROOT / 'static' / 'ui.js'))},'utf8');
+{_EXTRACT_FUNC_JS}
+let sweeps=0;
+const removals=[];
+const hidden=[];
+const makeRow=(name,attrs)=>({{
+  name,
+  attributes:attrs||{{}},
+  classList:{{add(){{}}}},
+  getAttribute(k){{return this.attributes[k]||null;}},
+  setAttribute(k,v){{this.attributes[k]=String(v);}},
+  remove(){{removals.push(this.name);}},
+  set hidden(v){{hidden.push(this.name);}},
+}});
+const group={{
+  contains:()=>false,
+  getAttribute:name=>name==='data-activity-disclosure-key'?'live:stream-1':'',
+}};
+let foreignRows=[makeRow('foreign-scene-row')];
+let liveSegments=[makeRow('segment-1')];
+const blocks={{
+  _children:[{{}},{{}}],
+  get childElementCount(){{return this._children.length;}},
+  querySelectorAll(selector){{
+    sweeps++;
+    if(selector.includes('[data-anchor-scene-owner="1"]')) return foreignRows.slice();
+    if(selector.includes('.live-worklog')) return [];
+    if(selector.includes('[data-live-assistant="1"]')) return liveSegments.slice();
+    return [];
+  }},
+}};
+const turn={{dataset:{{sessionId:'sid-1'}},setAttribute(){{}}}};
+global.window={{}};
+global.S={{session:{{session_id:'sid-1'}},activeStreamId:'stream-1'}};
+global.chatActivityMode=()=> 'compact_worklog';
+global.isSimplifiedToolCalling=()=>true;
+global.$=id=>id==='liveAssistantTurn'?turn:id==='emptyState'?{{style:{{}}}}:null;
+global._anchorSceneRowsForRendering=scene=>scene.activity_rows;
+global._liveAnchorRowWindow=rows=>({{rows,hiddenCount:0,total:rows.length}});
+global._buildLiveAnchorWindowEdges=()=>({{beforeNode:null,afterNode:null}});
+global._assistantTurnBlocks=()=>blocks;
+global._captureWorklogDetailDisclosureState=()=>null;
+global._captureMessageScrollSnapshot=()=>({{pinned:true}});
+global._prepareLiveAnchorScrollRebuildGuard=()=>({{readerAwayFromBottom:false,release:null}});
+global._anchorSceneWorklogGroup=()=>group;
+global._renderAnchorSceneRowsIntoWorklog=()=>true;
+global._restoreWorklogDetailDisclosureState=()=>{{}};
+global._startActivityElapsedTimer=()=>{{}};
+global._dedupeLiveProcessedWorklogAnchors=()=>group;
+global._readActivityDisclosureState=()=>null;
+global._applyLiveActivityDisclosureIntent=()=>{{}};
+global._moveLiveRunStatusToTurnEnd=()=>{{}};
+global._restoreLiveAnchorScrollSnapshotAfterRebuild=()=>{{}};
+global._liveAnchorSceneSweepGenerations=new WeakMap();
+eval(extractFunc('renderLiveAnchorActivityScene'));
+const scene={{activity_rows:[{{row_id:'x',role:'thinking',text:'work'}}]}};
+const render=()=>renderLiveAnchorActivityScene('stream-1',scene,{{sessionId:'sid-1'}});
+
+render();
+const first={{sweeps,removals:removals.slice(),hidden:hidden.slice()}};
+// Nothing about the turn changed: the sweeps must not run again.
+render();
+render();
+const cached={{sweeps}};
+// A new live assistant segment lands as a new direct child of `blocks`, which
+// bumps the generation and must re-run every sweep on the new nodes.
+foreignRows=[makeRow('foreign-scene-row-2')];
+liveSegments=[makeRow('segment-1'),makeRow('segment-2')];
+blocks._children.push({{}});
+render();
+const afterChange={{sweeps,removals:removals.slice(),hidden:hidden.slice()}};
+process.stdout.write(JSON.stringify({{first,cached,afterChange}}));
+"""
+    result = _run_node(script)
+    # Frame 1 runs all three sweeps and cleans up.
+    assert result["first"]["sweeps"] == 3, result
+    assert result["first"]["removals"] == ["foreign-scene-row"], result
+    assert result["first"]["hidden"] == ["segment-1"], result
+    # Frames 2 and 3 change nothing, so no sweep runs at all.
+    assert result["cached"]["sweeps"] == 3, result
+    # A new direct child invalidates the generation and the sweeps run again.
+    assert result["afterChange"]["sweeps"] == 6, result
+    assert result["afterChange"]["removals"] == ["foreign-scene-row", "foreign-scene-row-2"], result
+    assert result["afterChange"]["hidden"] == ["segment-1", "segment-1", "segment-2"], result
