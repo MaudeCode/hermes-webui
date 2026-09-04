@@ -97,7 +97,7 @@ def test_streaming_thread_env_allows_profile_terminal_cwd_override():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
 
     assert "def _build_agent_thread_env" in src
-    assert "_thread_env = _build_agent_thread_env(" in src
+    assert "_thread_env.update(_build_agent_thread_env(" in src
     assert "_set_thread_env(**_thread_env)" in src
     assert "_set_thread_env(\n            **_profile_runtime_env,\n            TERMINAL_CWD" not in src
 

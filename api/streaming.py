@@ -9676,6 +9676,7 @@ def _run_agent_streaming(
                 _skill_modules_support_profile_home,
                 _resolve_secret_scope_module,
                 _is_root_profile,
+                _profile_secret_thread_env,
             )
             _profile_home_path = get_hermes_home_for_profile(getattr(s, 'profile', None))
             _profile_home = str(_profile_home_path)
@@ -9689,6 +9690,7 @@ def _run_agent_streaming(
             _skill_modules_support_profile_home = None
             _resolve_secret_scope_module = None
             _is_root_profile = None
+            _profile_secret_thread_env = None
 
         # Profile-aware provider/model enrichment: when the session belongs
         # to a profile that specifies model.provider and model.default, use
@@ -9732,12 +9734,18 @@ def _run_agent_streaming(
             except Exception:
                 _resolved_profile_name = None
         
-        _thread_env = _build_agent_thread_env(
+        _streaming_profile = str(getattr(s, "profile", None) or "").strip()
+        _thread_env = (
+            _profile_secret_thread_env(_streaming_profile, _profile_home_path)
+            if _profile_secret_thread_env is not None
+            else {}
+        )
+        _thread_env.update(_build_agent_thread_env(
             _profile_runtime_env,
             str(s.workspace),
             session_id,
             _profile_home,
-        )
+        ))
         _streaming_hermes_home_override_ctx = _set_streaming_hermes_home_override(_profile_home)
         _set_thread_env(**_thread_env)
         try:
@@ -9762,7 +9770,6 @@ def _run_agent_streaming(
         _streaming_previous_block_process_env_fallback = bool(
             getattr(_thread_ctx, "block_process_env_fallback", False)
         )
-        _streaming_profile = str(getattr(s, "profile", None) or "").strip()
         _streaming_profile_is_named = bool(
             _streaming_profile
             and _is_root_profile is not None

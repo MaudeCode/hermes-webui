@@ -42,6 +42,7 @@ _CLONE_CONFIG_FILES = ['config.yaml', '.env', 'SOUL.md']
 _INITIAL_HERMES_HOME = os.getenv('HERMES_HOME', '').strip()
 _INITIAL_HERMES_CONFIG_PATH = os.getenv('HERMES_CONFIG_PATH', '').strip()
 _INITIAL_ISOLATED_PROFILE_OPT_IN = os.getenv('HERMES_WEBUI_ISOLATED_PROFILE', '').strip().lower()
+_INITIAL_PROCESS_ENV = dict(os.environ)
 _ISOLATED_SYMLINK_WARNING_EMITTED = False
 _ISOLATED_PROFILE_SHAPE_WITHOUT_OPT_IN_WARNING_EMITTED = False
 _ISOLATED_PROFILE_TRUTHY_VALUES = frozenset({'1', 'true', 'yes', 'on'})
@@ -1127,6 +1128,15 @@ def _profile_secret_env_names(profile_home_path: Path) -> set[str]:
     return names
 
 
+def _profile_secret_thread_env(profile: str, profile_home_path: Path) -> dict[str, str]:
+    """Return a complete, profile-safe credential overlay for agent readers."""
+    source = _INITIAL_PROCESS_ENV if _is_root_profile(profile or "default") else {}
+    return {
+        name: source.get(name, "")
+        for name in _profile_secret_env_names(profile_home_path)
+    }
+
+
 _secret_scope_available = None
 
 
@@ -1217,7 +1227,7 @@ def profile_env_for_background_worker(
         profile_home_path = Path(get_hermes_home_for_profile(profile))
         runtime_env = get_profile_runtime_env(profile_home_path)
         safe_runtime_env = filter_runtime_env_for_gateway_parity(runtime_env)
-        secret_env_names = _profile_secret_env_names(profile_home_path)
+        thread_env = _profile_secret_thread_env(profile, profile_home_path)
     except Exception as exc:
         log.debug(
             "Failed to resolve profile env for %s profile %s",
@@ -1230,13 +1240,6 @@ def profile_env_for_background_worker(
             "profile environment resolution failed."
         ) from exc
 
-    if _is_root_profile(profile):
-        thread_env = {
-            name: os.environ.get(name, "")
-            for name in secret_env_names
-        }
-    else:
-        thread_env = {name: "" for name in secret_env_names}
     thread_env.update(safe_runtime_env)
     thread_env["HERMES_HOME"] = str(profile_home_path)
     previous_thread_env = getattr(_thread_ctx, "env", {}).copy()
