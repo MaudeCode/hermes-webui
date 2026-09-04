@@ -114,7 +114,7 @@ from api.helpers import (
 from api.http_server import HTTPWorkerBudgetMixin, REQUEST_WORKER_OVERFLOW_RESPONSE, bind_without_reverse_dns
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers
-from api.startup import auto_install_agent_deps, fix_credential_permissions
+from api.startup import await_startup_ready, fix_credential_permissions, start_deferred_startup
 from api.updates import WEBUI_VERSION
 from api.crash_visibility import install_crash_visibility
 
@@ -357,6 +357,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             parsed = urlparse(self.path)
             if not check_auth(self, parsed): return
+            if not await_startup_ready(self, parsed): return
             result = handle_get(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
@@ -385,6 +386,7 @@ class Handler(BaseHTTPRequestHandler):
                 parsed.path == "/api/csp-report" and self.command == "POST"
             )
             if not _is_csp_report_post and not check_auth(self, parsed): return
+            if not await_startup_ready(self, parsed): return
             result = route_func(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
@@ -523,7 +525,7 @@ def _abort_if_already_serving(host: str, port: int) -> None:
 
 
 def main() -> None:
-    from api.config import print_startup_config, verify_hermes_imports, _HERMES_FOUND
+    from api.config import print_startup_config
 
     _ignore_sigpipe()
 
@@ -547,23 +549,9 @@ def main() -> None:
 
     fix_credential_permissions()
 
-    try:
-        from api.models import _active_state_db_path
-        from api.session_recovery import recover_all_sessions_on_startup
-        result = recover_all_sessions_on_startup(
-            SESSION_DIR,
-            rebuild_index=True,
-            state_db_path=_active_state_db_path(),
-        )
-        if result.get("restored"):
-            print(f"[recovery] Restored {result['restored']}/{result['scanned']} sessions from .bak (see #1558).", flush=True)
-    except Exception as exc:
-        # Recovery is best-effort; never block server startup.
-        print(f"[recovery] startup recovery failed: {exc}", flush=True)
-
     within_container = False
     try:
-        with open('/.within_container', 'r') as f:
+        with open('/.within_container', 'r'):
             within_container = True
     except FileNotFoundError:
         pass
@@ -575,77 +563,24 @@ def main() -> None:
     from api.auth import get_oidc_startup_warning, is_auth_enabled
     if HOST not in ('127.0.0.1', '::1', 'localhost') and not is_auth_enabled():
         print(f'[!!] WARNING: Binding to {HOST} with NO PASSWORD SET.', flush=True)
-        print(f'     Anyone on the network can access your filesystem and agent.', flush=True)
-        print(f'     Set a password via Settings or HERMES_WEBUI_PASSWORD env var.', flush=True)
-        print(f'     To suppress: bind to 127.0.0.1 or set a password.', flush=True)
+        print('     Anyone on the network can access your filesystem and agent.', flush=True)
+        print('     Set a password via Settings or HERMES_WEBUI_PASSWORD env var.', flush=True)
+        print('     To suppress: bind to 127.0.0.1 or set a password.', flush=True)
         if within_container:
-            print(f'     Note: You are running within a container, must bind to 0.0.0.0 (IPv4) or :: (IPv6) to publish the port.', flush=True)
+            print('     Note: You are running within a container, must bind to 0.0.0.0 (IPv4) or :: (IPv6) to publish the port.', flush=True)
     elif not is_auth_enabled():
-        print(f'  [tip] No password set. Any process on this machine can read sessions', flush=True)
-        print(f'        and memory via the local API. Set HERMES_WEBUI_PASSWORD to', flush=True)
-        print(f'        enable authentication.', flush=True)
+        print('  [tip] No password set. Any process on this machine can read sessions', flush=True)
+        print('        and memory via the local API. Set HERMES_WEBUI_PASSWORD to', flush=True)
+        print('        enable authentication.', flush=True)
 
     oidc_startup_warning = get_oidc_startup_warning()
     if oidc_startup_warning:
         print(f'[!!] WARNING: {oidc_startup_warning}', flush=True)
 
-    ok, missing, errors = verify_hermes_imports()
-    if not ok and _HERMES_FOUND:
-        print(f'[!!] Warning: Hermes agent found but missing modules: {missing}', flush=True)
-        for mod, err in errors.items():
-            print(f'     {mod}: {err}', flush=True)
-        print('     Attempting to install missing dependencies from agent requirements.txt...', flush=True)
-        auto_install_agent_deps()
-        ok, missing, errors = verify_hermes_imports()
-        if not ok:
-            print(f'[!!] Still missing after install attempt: {missing}', flush=True)
-            for mod, err in errors.items():
-                print(f'     {mod}: {err}', flush=True)
-            print('     Agent features may not work correctly.', flush=True)
-        else:
-            print('[ok] Agent dependencies installed successfully.', flush=True)
-
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
     DEFAULT_WORKSPACE.mkdir(parents=True, exist_ok=True)
 
-    try:
-        from api.gateway_watcher import start_watcher
-
-        def _start_watcher_safe():
-            try:
-                start_watcher()
-            except Exception as e:
-                print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
-
-        t = threading.Thread(target=_start_watcher_safe, daemon=True)
-        t.start()
-        t.join(timeout=5)
-        if t.is_alive():
-            print('[tip] Gateway watcher still initializing (non-blocking)', flush=True)
-    except Exception as e:
-        print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
-
-    try:
-        from api.background_process import start_drain_thread
-        if start_drain_thread():
-            print('[ok] bg_task_complete drain thread started', flush=True)
-    except Exception as e:
-        print(f'[!!] WARNING: bg_task_complete drain failed to start: {e}', flush=True)
-
-    try:
-        from api.background_process import start_session_channel_reaper
-        if start_session_channel_reaper():
-            print('[ok] SessionChannel reaper thread started', flush=True)
-    except Exception as e:
-        print(f'[!!] WARNING: SessionChannel reaper failed to start: {e}', flush=True)
-    try:
-        from api.plugins import load_plugins
-        load_plugins()
-        from api.talaria_relay import start_talaria_relay_publisher
-        start_talaria_relay_publisher()
-    except Exception as e:
-        print(f'[!!] WARNING: Plugin loading failed: {e}', flush=True)
     _abort_if_already_serving(HOST, PORT)
     httpd = QuietHTTPServer((HOST, PORT), Handler)
 
@@ -668,6 +603,10 @@ def main() -> None:
         print(f'  Remote access: ssh -N -L {PORT}:127.0.0.1:{PORT} <user>@<your-server>', flush=True)
     print(f'  Then open:     {scheme}://localhost:{PORT}', flush=True)
     print('', flush=True)
+
+    # The socket is bound; recovery, dependency repair and watcher startup run
+    # behind it now (HWEB-35).
+    start_deferred_startup()
 
     # ctl.sh stops the WebUI with SIGTERM. Python's default SIGTERM handler
     # terminates the process WITHOUT unwinding the try/finally around

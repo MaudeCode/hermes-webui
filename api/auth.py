@@ -1145,22 +1145,33 @@ def _safe_login_inner_next(query: str | None) -> str:
     return path
 
 
+def is_public_path(path: str) -> bool:
+    """Return True if *path* is reachable without an authenticated session.
+
+    The exact-match set alone is not the whole rule — share reads and static
+    assets are prefixes. Kept as one predicate so callers can't drift from it:
+    api.startup.await_startup_ready() also needs to know that these paths carry
+    no session dependency, and a second hand-maintained copy would go stale.
+    """
+    return (
+        path in PUBLIC_PATHS
+        or path.startswith('/share/')
+        or (
+            path.startswith('/api/share/')
+            and path not in {'/api/share/create', '/api/share/revoke'}
+        )
+        or path.startswith('/static/')
+        or path.startswith('/session/static/')
+    )
+
+
 def check_auth(handler, parsed) -> bool:
     """Check if request is authorized. Returns True if OK.
     If not authorized, sends 401 (API) or 302 redirect (page) and returns False."""
     if not is_auth_enabled():
         return True
     # Public paths don't require auth
-    if (
-        parsed.path in PUBLIC_PATHS
-        or parsed.path.startswith('/share/')
-        or (
-            parsed.path.startswith('/api/share/')
-            and parsed.path not in {'/api/share/create', '/api/share/revoke'}
-        )
-        or parsed.path.startswith('/static/')
-        or parsed.path.startswith('/session/static/')
-    ):
+    if is_public_path(parsed.path):
         return True
     cookie_val = parse_cookie(handler)
     has_session = bool(cookie_val and verify_session(cookie_val))

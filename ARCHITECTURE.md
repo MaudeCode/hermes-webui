@@ -64,7 +64,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       profiles.py          Profile state management, hermes_cli wrapper
       onboarding.py        First-run onboarding status, real provider config writes, OAuth linking, readiness detection
       routes.py            All GET + POST route handlers (if/elif dispatch, no decorators)
-      startup.py           Startup helpers: auto_install_agent_deps()
+      startup.py           Startup helpers: auto_install_agent_deps(), deferred startup behind the bind
       state_sync.py        /insights sync — message_count to the agent's state.db
       streaming.py         SSE engine, run_agent, cancel, compression, HERMES_HOME save/restore
       updates.py           Self-update check and release notes
@@ -823,6 +823,52 @@ Return value:
       'completed': True/False,    Whether the conversation completed normally
       ...other fields
     }
+
+---
+
+## 7b. Startup Order and the Readiness Gate
+
+`server.py main()` binds the listening socket before any scan-shaped work runs, so
+a restart answers `/health` promptly instead of hiding behind a full session scan
+(worst case previously: a pip install with a 120s timeout). After the bind it calls
+`api.startup.start_deferred_startup()`, which arms a readiness gate and runs, on a
+background thread and in this order:
+
+1. `recover_all_sessions_on_startup()` — then releases the readiness gate, on
+   success *or* failure, so later stages can never hold a request.
+2. `verify_hermes_imports()`, and `auto_install_agent_deps()` only if an agent
+   import actually failed.
+3. Gateway watcher, `bg_task_complete` drain thread, SessionChannel reaper,
+   plugins, and the Talaria relay publisher.
+
+While the gate is closed, every `/api/` request waits on it for up to
+`STARTUP_WAIT_SECONDS` (10s) and then returns **503 with `Retry-After: 5`** and a
+body carrying `condition: "startup_recovery"` plus the phase. `api()` in
+`static/workspace.js` retries that specific condition for up to
+`API_STARTUP_RETRY_BUDGET_MS` (120s), so one-shot bootstrap fetches wait for an
+authoritative answer instead of committing fallback settings. The worker-overflow
+503 is real backpressure and is deliberately *not* retried there.
+
+Never gated: `/health`, the UI shell, static assets, `/api/health/restart`,
+`/api/csp-report`, and every path in `api.auth.PUBLIC_PATHS` — the auth surface is
+public precisely because it authenticates a caller rather than reading session
+state, so gating it would lock users out for the whole recovery window
+(`static/login.js` posts with a bare `fetch()` and never sees the retry).
+
+Two bounds keep the gate from becoming its own outage:
+
+- At most `STARTUP_WAIT_SLOT_COUNT` (8) requests block at once. Each waiter holds
+  one of `HTTPWorkerBudgetMixin`'s request-worker slots (`max_request_workers // 2`
+  = 64), acquired non-blocking, so an uncapped wait would let reconnecting tabs
+  exhaust the budget and get the exempt routes overflow-rejected at accept time.
+  Excess waiters get the same 503 immediately.
+- The gate defaults to *open* and only `start_deferred_startup()` closes it, so a
+  process serving requests without `main()` has nothing to wait for.
+
+`AGENT_DEPS_READY` is a second, later dimension covering step 2. `_get_ai_agent()`
+waits on it for up to `AGENT_DEPS_WAIT_SECONDS` (30s) before giving up, and the
+"AIAgent not available" diagnostic reports an in-flight install rather than
+sending the user to troubleshoot a `sys.path` problem they do not have.
 
 ---
 

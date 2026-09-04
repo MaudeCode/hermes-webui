@@ -11,6 +11,14 @@ async function api(path,opts={}){
   const retryDelayMs=Object.prototype.hasOwnProperty.call(opts,'retryDelayMs')?Math.max(0,Number(opts.retryDelayMs)||0):350;
   // Retry up to 2 times on network errors (e.g. stale keep-alive after long idle).
   // Callers may opt into retrying timeouts / transient server statuses for idempotent GETs.
+  // Startup-readiness 503s get their own wall-clock budget instead of the attempt
+  // cap: session recovery can run for minutes, and each gated attempt already
+  // blocks server-side for up to the readiness bound, so three attempts would give
+  // up after ~31s and let bootstrap callers commit fallback state. Declared inside
+  // api() so the function stays self-contained — tests/test_api_timeout.py extracts
+  // this function's source and evals it standalone under node. (HWEB-35)
+  const API_STARTUP_RETRY_BUDGET_MS=120000;
+  const startupRetryDeadline=Date.now()+API_STARTUP_RETRY_BUDGET_MS;
   let lastErr;
   for(let attempt=0;attempt<maxAttempts;attempt++){
     let controller=null;
@@ -110,7 +118,28 @@ async function api(path,opts={}){
       // Only retry on network errors (TypeError from fetch), not on HTTP errors
       // that were already thrown above. Re-throw 401 redirects immediately.
       if(e.message&&/401/.test(e.message)) throw e;
-      if(attempt<2&&attempt<maxAttempts-1 && (e instanceof TypeError || retryStatuses.includes(Number(e.status)))){
+      // A startup-readiness 503 means the socket is bound but session recovery
+      // is still running, so the value is not yet authoritative — it will be
+      // shortly. Retry for EVERY caller, not per call site: one-shot bootstrap
+      // fetches (/api/settings, /api/profile/active) otherwise fall into their
+      // catch paths and commit fallback preferences and a 'default' profile for
+      // the rest of the boot. Distinct from the worker-overflow 503, which is
+      // real backpressure and must not be retried here. (HWEB-35)
+      let _condition=null;
+      try{_condition=JSON.parse(e&&e.body||'{}').condition;}catch(_){}
+      const isStartupRecovery503 = e && Number(e.status)===503 && _condition==='startup_recovery';
+      // Keep retrying a startup 503 until readiness actually opens, not just for
+      // the ordinary attempt budget — otherwise the bootstrap catch paths still
+      // install fallback settings, only ~31s later instead of immediately. The
+      // deadline bounds it, and the attempt counter is rewound so these waits
+      // don't consume the network-error retries. Callers that explicitly opted
+      // out of retries (retries:0) keep their single shot.
+      if(isStartupRecovery503 && maxAttempts>1 && Date.now()<startupRetryDeadline){
+        await new Promise(resolve=>setTimeout(resolve,retryDelayMs||350));
+        attempt--;
+        continue;
+      }
+      if(attempt<2&&attempt<maxAttempts-1 && (e instanceof TypeError || isStartupRecovery503 || retryStatuses.includes(Number(e.status)))){
         if(retryDelayMs) await new Promise(resolve=>setTimeout(resolve,retryDelayMs*Math.pow(2,attempt)));
         continue;
       }

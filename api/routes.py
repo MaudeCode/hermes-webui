@@ -13444,6 +13444,18 @@ def _handle_health(handler, parsed):
             "finalization_timeout_age_seconds", 0.0
         )
     if deep:
+        # Plain /health stays immediate during startup, but the deep probes call
+        # all_sessions(), which starts its own session-index rebuild when the
+        # index is missing — exactly the case startup recovery is repairing. Two
+        # concurrent atomic replaces mean the later one wins, so a probe could
+        # publish a pre-recovery index and report that partial state as healthy.
+        # Defer the deep checks until recovery has settled. (HWEB-35)
+        from api.startup import STARTUP_PHASE, STARTUP_READY
+
+        if not STARTUP_READY.is_set():
+            payload["status"] = "starting"
+            payload["phase"] = STARTUP_PHASE
+            return j(handler, payload, status=503, extra_headers={"Retry-After": "5"})
         if stream_check.get("status") != "ok":
             payload["checks"] = {"streams_lock": stream_check}
             return j(handler, payload, status=503)

@@ -843,6 +843,18 @@ def _get_ai_agent():
     ensure_agent_runtime_current()
     if AIAgent is None:
         AIAgent = get_ai_agent_class()
+    if AIAgent is None:
+        # Startup no longer blocks the bind on dependency repair (HWEB-35), so a
+        # chat can begin while auto_install_agent_deps() is still mutating the
+        # environment. Reporting "check sys.path" then is simply wrong — the
+        # import may succeed once pip lands. Wait for the repair to settle and
+        # retry once before letting the caller raise.
+        from api.startup import AGENT_DEPS_READY, AGENT_DEPS_WAIT_SECONDS
+
+        if not AGENT_DEPS_READY.is_set():
+            AGENT_DEPS_READY.wait(timeout=AGENT_DEPS_WAIT_SECONDS)
+            ensure_agent_runtime_current()
+            AIAgent = get_ai_agent_class()
     return AIAgent
 
 
@@ -2620,6 +2632,19 @@ def _aiagent_import_error_detail() -> str:
     """
     import os as _os
     import sys as _sys
+
+    from api.startup import AGENT_DEPS_READY
+
+    if not AGENT_DEPS_READY.is_set():
+        # Startup dependency repair is still running, so this is a transient
+        # state, not a misconfiguration — say so instead of sending the user to
+        # troubleshoot a sys.path problem they do not have. (HWEB-35)
+        return (
+            "Agent dependencies are still being installed by startup repair.\n"
+            "\n"
+            "  This is temporary. Wait for the install to finish and send the\n"
+            "  message again; the server log shows its progress."
+        )
 
     lines = ["AIAgent not available -- check that hermes-agent is on sys.path"]
     lines.append("")
