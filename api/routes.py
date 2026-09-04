@@ -13076,7 +13076,7 @@ def _run_lifecycle_health() -> dict:
                 wait_age = 0.0
             if wait_started_at:
                 item["lock_wait_age_seconds"] = round(wait_age, 1)
-            degraded = phase in {"admission_blocked", "cancellation_blocked"} or (
+            degraded = bool(item.get("cancellation_blocked")) or phase == "admission_blocked" or (
                 phase in {"waiting_for_session_lock", "cancelling"} and wait_age >= 2.0
             )
             if degraded:

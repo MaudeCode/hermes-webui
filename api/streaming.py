@@ -9595,6 +9595,7 @@ def _run_agent_streaming(
     _checkpoint_stop = None
     _ckpt_thread = None
     _agent_lock = None
+    _admission_lock_timed_out = False
     try:
         # Register this stream with the global streaming meter and start the 1 Hz
         # metering ticker. Kept INSIDE the outer try so the outer `finally`'s
@@ -9667,6 +9668,7 @@ def _run_agent_streaming(
         )
         with _try_acquire_chat_lock(_agent_lock, _CHAT_LOCK_WAIT_SECONDS) as acquired:
             if not acquired:
+                _admission_lock_timed_out = True
                 update_active_run(
                     stream_id,
                     phase="admission_blocked",
@@ -13522,6 +13524,7 @@ def _run_agent_streaming(
         if _ckpt_thread is not None:
             _ckpt_thread.join(timeout=15)
         if (s is not None
+                and not _admission_lock_timed_out
                 and getattr(s, 'active_stream_id', None) == stream_id
                 and getattr(s, 'pending_user_message', None)):
             update_active_run(stream_id, phase="finalizing")
@@ -14265,17 +14268,11 @@ def cancel_stream(stream_id: str) -> bool:
             if not acquired:
                 update_active_run(
                     stream_id,
-                    phase="cancellation_blocked",
+                    phase="cancelling",
+                    cancellation_blocked=True,
                     lock_wait_started_at=cancel_lock_wait_started_at,
                     lock_wait_seconds=_CHAT_LOCK_WAIT_SECONDS,
                 )
-                if q:
-                    try:
-                        q.put_nowait(('cancel', _cancel_event_payload(
-                            'Cancellation is still unwinding; Agent health is degraded.'
-                        )))
-                    except Exception:
-                        logger.debug("Failed to publish bounded cancellation state")
                 return True
             try:
                 _cs = get_session(_cancel_session_id)
