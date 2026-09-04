@@ -48,6 +48,20 @@ function extractFunc(name){
 """
 
 
+def _function_body_ui(name: str) -> str:
+    start = UI_JS.index(f"function {name}(")
+    depth = 0
+    brace = UI_JS.index("{", UI_JS.index(")", start))
+    for i in range(brace, len(UI_JS)):
+        if UI_JS[i] == "{":
+            depth += 1
+        elif UI_JS[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return UI_JS[start:i + 1]
+    raise AssertionError(f"{name} body did not close")
+
+
 @pytest.mark.skipif(NODE is None, reason="node is required for DOM-executed live-render tests")
 def test_compact_worklog_reconcile_preserves_unchanged_rows_without_clearing_list():
     """A new live event must not tear down every earlier Compact Worklog row."""
@@ -452,3 +466,131 @@ def test_returning_session_boot_does_not_animate_transient_empty_logo():
     assert 'html[data-session-boot="1"] .empty-state{display:none}' in css
     assert "function showConversationEmptyState()" in ui
     assert "delete document.documentElement.dataset.sessionBoot" in ui
+
+
+MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+_MESSAGES_SRC_JS = f"const src=require('fs').readFileSync({json.dumps(str(ROOT / 'static' / 'messages.js'))},'utf8');"
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for DOM-executed live-render tests")
+def test_compact_echo_suffix_strip_is_linear_on_a_long_interim_message():
+    """A 30k-char interim message with a reasoning echo must not scan quadratically."""
+    script = f"""
+{_MESSAGES_SRC_JS}
+{_EXTRACT_FUNC_JS}
+eval(extractFunc('_compactVisibleEchoText'));
+eval(extractFunc('_stripCompactEchoSuffix'));
+const _ECHO_WHITESPACE_RE=/\\s/;
+// The pre-HWEB-36 implementation, kept here as the behavioural oracle.
+function naive(value, suffix){{
+  const raw=String(value||'');
+  const candidate=_compactVisibleEchoText(suffix);
+  if(!raw||!candidate) return {{text:raw,removed:false}};
+  const windowSize=Math.max(String(suffix||'').length*3,4096);
+  const offset=Math.max(0,raw.length-windowSize);
+  const tail=raw.slice(offset);
+  for(let idx=0;idx<=tail.length;idx+=1){{
+    if(_compactVisibleEchoText(tail.slice(idx))===candidate){{
+      return {{text:raw.slice(0,offset+idx).trimEnd(),removed:true}};
+    }}
+  }}
+  return {{text:raw,removed:false}};
+}}
+const echo='the model restated this visible sentence';
+const cases=[
+  ['', echo],
+  ['nothing to strip here', echo],
+  ['prefix text\\n\\n'+echo, echo],
+  ['prefix text\\n\\n'+echo.replace(/ /g,'\\n'), echo],
+  ['prefix '+echo+' trailing', echo],
+  [echo, echo],
+  ['x'.repeat(5000)+'  '+echo+'  ', echo],
+  ['x'.repeat(30000), echo],
+  ['x'.repeat(30000)+'\\n'+echo, echo],
+];
+const mismatches=[];
+for(const [value,suffix] of cases){{
+  const a=_stripCompactEchoSuffix(value,suffix);
+  const b=naive(value,suffix);
+  if(a.removed!==b.removed||a.text!==b.text) mismatches.push({{value:value.slice(0,40),a,b}});
+}}
+// 30k characters of interim message, an echo tail, and the four calls one
+// interim_assistant event makes.
+const long='word '.repeat(6000)+'\\n\\n'+echo;
+const started=Date.now();
+let removed=true;
+for(let i=0;i<4;i+=1) removed=removed&&_stripCompactEchoSuffix(long,echo).removed;
+const elapsedMs=Date.now()-started;
+process.stdout.write(JSON.stringify({{mismatches,removed,elapsedMs,longLength:long.length}}));
+"""
+    result = _run_node(script)
+    assert result["mismatches"] == []
+    assert result["removed"] is True
+    assert result["longLength"] > 30000
+    # The quadratic scan needed multiple seconds for one call at this size.
+    assert result["elapsedMs"] < 250, result
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for DOM-executed live-render tests")
+def test_post_tool_segments_use_the_incremental_xml_tool_call_stripper():
+    """Segments after the first must not re-scan their whole text every frame."""
+    assert "_stripXmlToolCalls(assistantText.slice(segmentStart))" not in MESSAGES_JS, (
+        "live render paths must go through _stripXmlToolCallsForSegment()"
+    )
+    script = f"""
+{_MESSAGES_SRC_JS}
+{_EXTRACT_FUNC_JS}
+eval(extractFunc('_createIncrementalXmlToolCallStripper'));
+eval(extractFunc('_stripXmlToolCallsForSegment'));
+global._segmentXmlStripper=null;
+global._segmentXmlStripperStart=-1;
+let batchCalls=0;
+global._stripXmlToolCalls=s=>{{batchCalls++;return String(s).replace(/<function_calls>[\\s\\S]*?<\\/function_calls>/g,'').trim();}};
+global.segmentStart=100;
+global.assistantText='p'.repeat(100)+'answer';
+const frames=[];
+for(let i=0;i<200;i+=1){{
+  assistantText+=' token'+i;
+  frames.push(_stripXmlToolCallsForSegment());
+}}
+const cleanCalls=batchCalls;
+const cleanTail=frames[frames.length-1];
+// A tool-call marker arriving mid-segment still has to be stripped.
+assistantText+='<function_calls>{{"name":"read"}}</function_calls>';
+const stripped=_stripXmlToolCallsForSegment();
+const markerCalls=batchCalls-cleanCalls;
+// A new segment gets a fresh stripper, so the previous segment's latched
+// marker state cannot force batch scans on it.
+segmentStart=assistantText.length;
+assistantText+='second segment prose';
+const nextSegment=_stripXmlToolCallsForSegment();
+process.stdout.write(JSON.stringify({{
+  cleanCalls,
+  markerCalls,
+  nextSegmentCalls:batchCalls-cleanCalls-markerCalls,
+  cleanTailOk:cleanTail.endsWith('token199'),
+  strippedOk:stripped.indexOf('function_calls')===-1&&stripped.startsWith('answer'),
+  nextSegment,
+}}));
+"""
+    result = _run_node(script)
+    assert result["cleanCalls"] == 0, result
+    assert result["markerCalls"] == 1, result
+    assert result["nextSegmentCalls"] == 0, result
+    assert result["cleanTailOk"] is True
+    assert result["strippedOk"] is True
+    assert result["nextSegment"] == "second segment prose"
+
+
+def test_live_anchor_scene_sweeps_are_keyed_on_a_group_generation():
+    """The per-frame cleanup sweeps must be skippable while the turn is unchanged."""
+    body = _function_body_ui("renderLiveAnchorActivityScene")
+    assert "const sweepGeneration=sweepCache?blocks.childElementCount:null;" in body
+    assert "if(!sweepCache||sweepCache.get(group)!==sweepGeneration){" in body
+    sweep_idx = body.index("if(!sweepCache||sweepCache.get(group)!==sweepGeneration){")
+    for selector in (
+        "blocks.querySelectorAll('[data-anchor-scene-owner=\"1\"],[data-anchor-scene-row=\"1\"]')",
+        "blocks.querySelectorAll('.live-worklog[data-live-worklog-shell=\"1\"]",
+        "blocks.querySelectorAll('[data-live-assistant=\"1\"]')",
+    ):
+        assert body.index(selector) > sweep_idx, selector
