@@ -83,3 +83,15 @@ def test_health_degrades_for_blocked_admission_without_exposing_session():
     assert health["runs"][0]["lock_wait_age_seconds"] >= 2
     assert "session_id" not in health["runs"][0]
     assert "workspace" not in health["runs"][0]
+
+
+def test_admission_timeout_marks_only_its_owned_turn_stale():
+    from api.streaming import _mark_chat_admission_timeout_stale
+
+    owned = type("Session", (), {"active_stream_id": "owned", "pending_started_at": 123.0})()
+    replaced = type("Session", (), {"active_stream_id": "newer", "pending_started_at": 456.0})()
+
+    assert _mark_chat_admission_timeout_stale(owned, "owned") is True
+    assert owned.pending_started_at is None
+    assert _mark_chat_admission_timeout_stale(replaced, "old") is False
+    assert replaced.pending_started_at == 456.0

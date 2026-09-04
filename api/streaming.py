@@ -9024,6 +9024,14 @@ def _try_acquire_chat_lock(lock, timeout: float = _CHAT_LOCK_WAIT_SECONDS):
             lock.release()
 
 
+def _mark_chat_admission_timeout_stale(session, stream_id: str) -> bool:
+    """Make this unstarted turn immediately eligible for owned stale cleanup."""
+    if getattr(session, "active_stream_id", None) != stream_id:
+        return False
+    session.pending_started_at = None
+    return True
+
+
 def _run_agent_streaming(
     session_id,
     msg_text,
@@ -9669,6 +9677,7 @@ def _run_agent_streaming(
         with _try_acquire_chat_lock(_agent_lock, _CHAT_LOCK_WAIT_SECONDS) as acquired:
             if not acquired:
                 _admission_lock_timed_out = True
+                _mark_chat_admission_timeout_stale(s, stream_id)
                 update_active_run(
                     stream_id,
                     phase="admission_blocked",
@@ -9677,6 +9686,8 @@ def _run_agent_streaming(
                 put('apperror', {
                     'type': 'chat_admission_timeout',
                     'message': 'Chat could not start because this session is busy. Try Stop or retry shortly.',
+                    'session_id': getattr(s, 'session_id', session_id),
+                    'old_session_id': session_id,
                 })
                 return
             _last_persisted_model = getattr(s, "model", None)
