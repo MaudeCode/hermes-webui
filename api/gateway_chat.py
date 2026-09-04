@@ -846,7 +846,6 @@ def _run_gateway_runs_api_streaming(
     with urllib.request.urlopen(req_events, timeout=_gateway_read_timeout_secs()) as resp:
         for raw_line in _iter_sse_lines_cancellable(resp, cancel_event):
             if cancel_event.is_set():
-                put_gateway_event("cancel", {"message": "Cancelled by user"})
                 return None, usage
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line:
@@ -960,7 +959,6 @@ def _run_gateway_runs_api_streaming(
                 flush_deferred_reasoning()
                 from api.route_approvals import retire_gateway_pending_mirror
                 retire_gateway_pending_mirror(session_id, run_id=run_id)
-                put_gateway_event("cancel", {"message": "Cancelled by gateway"})
                 return None, usage
             reasoning_delta = _gateway_sse_reasoning_delta(payload)
             has_titles = _gateway_has_reasoning_titles(payload)
@@ -1492,6 +1490,12 @@ def _run_gateway_chat_streaming(
                 terminal_writeback_committed = _settle_gateway_terminal_cancel(
                     session_id, stream_id
                 )
+                if terminal_writeback_committed:
+                    put_gateway_event("cancel", {"message": "Cancelled"})
+                else:
+                    put_gateway_event(
+                        "apperror", _gateway_writeback_timeout_payload(session_id)
+                    )
                 return
             if final_text:
                 final_chunks = [final_text]

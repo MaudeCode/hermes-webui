@@ -8508,7 +8508,7 @@ def _last_resort_sync_from_core(session, stream_id, agent_lock):
         )
         with _lock_ctx as acquired:
             if not acquired:
-                note_chat_admission_timeout()
+                note_chat_finalization_timeout()
                 logger.warning(
                     "Final recovery skipped because session %s remained busy",
                     getattr(session, "session_id", "?"),

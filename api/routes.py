@@ -24041,6 +24041,102 @@ def _bounded_chat_admission_lock(
             unregister_active_run(admission_id)
 
 
+_DEFERRED_RECOVERY_RESTORE_LOCK = threading.Lock()
+_DEFERRED_RECOVERY_RESTORE_THREADS: dict[
+    str, tuple[dict, threading.Thread]
+] = {}
+
+
+def _schedule_deferred_compression_recovery_restore(
+    session_id: str, expected_recovery: dict
+) -> threading.Thread:
+    expected_recovery = copy.deepcopy(expected_recovery)
+
+    def _restore_when_available():
+        try:
+            lock = _get_session_agent_lock(session_id)
+            while True:
+                with _try_acquire_chat_lock(lock, _CHAT_LOCK_WAIT_SECONDS) as acquired:
+                    if acquired:
+                        try:
+                            current = get_session(session_id)
+                        except KeyError:
+                            return
+                        current_recovery = compression_recovery_payload_for_session(
+                            current
+                        )
+                        if (
+                            current_recovery is not None
+                            and current_recovery != expected_recovery
+                        ):
+                            return
+                        active_stream_id = getattr(
+                            current, "active_stream_id", None
+                        )
+                        if active_stream_id and _active_stream_blocks_chat_start(
+                            current, active_stream_id
+                        ):
+                            return
+                        previous_recovery = copy.deepcopy(
+                            getattr(current, "compression_recovery", {})
+                        )
+                        previous_action = getattr(
+                            current, "recommended_recovery_action", None
+                        )
+                        current.compression_recovery = copy.deepcopy(
+                            expected_recovery
+                        )
+                        current.recommended_recovery_action = expected_recovery.get(
+                            "recommended_action"
+                        )
+                        try:
+                            current.save()
+                        except Exception:
+                            current.compression_recovery = previous_recovery
+                            current.recommended_recovery_action = previous_action
+                            logger.warning(
+                                "Deferred compression recovery restore save failed for "
+                                "session %s; retrying",
+                                session_id,
+                                exc_info=True,
+                            )
+                        else:
+                            return
+                time.sleep(0.25)
+        except Exception:
+            logger.warning(
+                "Deferred compression recovery restore failed for session %s",
+                session_id,
+                exc_info=True,
+            )
+        finally:
+            current_thread = threading.current_thread()
+            with _DEFERRED_RECOVERY_RESTORE_LOCK:
+                entry = _DEFERRED_RECOVERY_RESTORE_THREADS.get(session_id)
+                if entry is not None and entry[1] is current_thread:
+                    _DEFERRED_RECOVERY_RESTORE_THREADS.pop(session_id, None)
+
+    with _DEFERRED_RECOVERY_RESTORE_LOCK:
+        existing = _DEFERRED_RECOVERY_RESTORE_THREADS.get(session_id)
+        if (
+            existing is not None
+            and existing[0] == expected_recovery
+            and existing[1].is_alive()
+        ):
+            return existing[1]
+        thread = threading.Thread(
+            target=_restore_when_available,
+            daemon=True,
+            name=f"recovery-restore-{session_id[:8]}",
+        )
+        _DEFERRED_RECOVERY_RESTORE_THREADS[session_id] = (
+            expected_recovery,
+            thread,
+        )
+        thread.start()
+        return thread
+
+
 def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
     """Return whether an active_stream_id still owns this session's next turn.
 
@@ -25948,6 +26044,10 @@ def _handle_chat_start(handler, body, diag=None):
                     finalization=True,
                 ) as acquired:
                     if not acquired:
+                        _restore(s)
+                        _schedule_deferred_compression_recovery_restore(
+                            s.session_id, recovery_cleared_for_start
+                        )
                         return TimeoutError(
                             "compression recovery restore session lock timed out"
                         )
@@ -25982,7 +26082,12 @@ def _handle_chat_start(handler, body, diag=None):
             )
         except Exception as exc:
             if not getattr(exc, "_regeneration_accepted", False):
-                _restore_cleared_recovery(persist=True)
+                restore_err = _restore_cleared_recovery(persist=True)
+                if restore_err is not None:
+                    raise RuntimeError(
+                        "chat start failed and compression recovery restoration "
+                        f"is pending: {_sanitize_error(restore_err)}"
+                    ) from exc
             raise
         # Map adapter-selection NotImplementedError (501) onto the legacy
         # bad-request response shape that this route exposed historically

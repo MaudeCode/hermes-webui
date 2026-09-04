@@ -262,6 +262,27 @@ def test_checkpoint_lock_wait_is_bounded_and_stop_aware(monkeypatch):
     assert time.monotonic() - started < 0.2
 
 
+def test_last_resort_recovery_timeout_records_finalization(monkeypatch, tmp_path):
+    import threading
+    from api import config, models, streaming
+
+    lock = threading.Lock()
+    lock.acquire()
+    session = SimpleNamespace(session_id="final-recovery", profile="default")
+    config.LAST_CHAT_ADMISSION_TIMEOUT_AT = None
+    config.LAST_CHAT_FINALIZATION_TIMEOUT_AT = None
+    monkeypatch.setattr(streaming, "_CHAT_LOCK_WAIT_SECONDS", 0.02)
+    monkeypatch.setattr(models, "_get_profile_home", lambda _profile: tmp_path)
+    try:
+        streaming._last_resort_sync_from_core(session, "final-recovery-stream", lock)
+    finally:
+        lock.release()
+
+    assert config.LAST_CHAT_ADMISSION_TIMEOUT_AT is None
+    assert config.LAST_CHAT_FINALIZATION_TIMEOUT_AT is not None
+    config.LAST_CHAT_FINALIZATION_TIMEOUT_AT = None
+
+
 def test_post_execution_writeback_timeout_is_not_retryable():
     from api.routes import _chat_writeback_timeout_response
 
