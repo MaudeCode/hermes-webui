@@ -1155,7 +1155,7 @@ def retire_startup_env_keys_for_home(profile_home_path: Path, names) -> None:
     """Retire explicitly cleared credentials from their startup-owner baseline."""
     home = Path(profile_home_path).expanduser()
     startup_homes = {Path(_DEFAULT_HERMES_HOME).expanduser()}
-    if _INITIAL_HERMES_HOME:
+    if _INITIAL_HERMES_HOME and _is_isolated_profile_mode():
         startup_homes.add(Path(_INITIAL_HERMES_HOME).expanduser())
     if home in startup_homes:
         for name in names:

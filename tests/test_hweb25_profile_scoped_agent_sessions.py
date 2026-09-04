@@ -758,6 +758,24 @@ def test_context_length_credentials_use_profile_thread_env(monkeypatch):
         config._clear_thread_env()
 
 
+def test_ordinary_named_profile_removal_keeps_root_startup_key(
+    monkeypatch, tmp_path
+):
+    root_home = tmp_path / "root"
+    named_home = root_home / "profiles" / "member"
+    named_home.mkdir(parents=True)
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", root_home)
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME", str(named_home))
+    monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
+    monkeypatch.setitem(
+        profiles._INITIAL_PROCESS_ENV, "OPENAI_API_KEY", "root-deployment-key"
+    )
+
+    profiles.retire_startup_env_keys_for_home(named_home, ("OPENAI_API_KEY",))
+
+    assert profiles._INITIAL_PROCESS_ENV["OPENAI_API_KEY"] == "root-deployment-key"
+
+
 def test_default_readonly_request_pins_root_home(monkeypatch, tmp_path):
     import api.config as config
 
