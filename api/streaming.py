@@ -9589,13 +9589,13 @@ def _run_agent_streaming(
     _PROFILE_ENV_SCOPE_LOCK = None
     _acquired_streaming_profile_env_scope_lock = False
     _streaming_uses_process_env_fallback = False
+    _admission_lock_timed_out = False
     # Initialised here (before any code that may raise) so the outer `finally`
     # block can safely check `if _checkpoint_stop is not None` even when an
     # exception fires before the checkpoint thread is created (Issue #765).
     _checkpoint_stop = None
     _ckpt_thread = None
     _agent_lock = None
-    _admission_lock_timed_out = False
     try:
         # Register this stream with the global streaming meter and start the 1 Hz
         # metering ticker. Kept INSIDE the outer try so the outer `finally`'s
