@@ -278,6 +278,7 @@ def test_worker_writeback_lock_timeout_emits_terminal_error(monkeypatch):
     lock = threading.Lock()
     lock.acquire()
     events = []
+    config.LAST_CHAT_ADMISSION_TIMEOUT_AT = None
     config.register_active_run("writeback-timeout", session_id="private")
     monkeypatch.setattr(streaming, "_CHAT_LOCK_WAIT_SECONDS", 0.02)
     try:
@@ -291,6 +292,7 @@ def test_worker_writeback_lock_timeout_emits_terminal_error(monkeypatch):
         )
         with config.ACTIVE_RUNS_LOCK:
             assert config.ACTIVE_RUNS["writeback-timeout"]["phase"] == "finalization_blocked"
+        assert config.LAST_CHAT_ADMISSION_TIMEOUT_AT is None
     finally:
         lock.release()
         config.unregister_active_run("writeback-timeout")

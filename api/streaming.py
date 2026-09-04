@@ -9075,7 +9075,8 @@ def _try_acquire_worker_session_lock(
     )
     with _try_acquire_chat_lock(lock, _CHAT_LOCK_WAIT_SECONDS) as acquired:
         if not acquired:
-            note_chat_admission_timeout()
+            if timeout_phase == "admission_blocked":
+                note_chat_admission_timeout()
             update_active_run(
                 stream_id,
                 preserve_cancelling=True,
