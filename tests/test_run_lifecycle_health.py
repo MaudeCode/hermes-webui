@@ -253,6 +253,7 @@ def test_post_execution_writeback_timeout_is_not_retryable():
 def test_health_only_admission_waiter_never_blocks_worker_start():
     from api import config, routes
 
+    previous_finished_at = config.LAST_RUN_FINISHED_AT
     config.register_active_run(
         "admission-observation",
         session_id="shared-session",
@@ -265,6 +266,7 @@ def test_health_only_admission_waiter_never_blocks_worker_start():
         assert routes._active_run_stream_for_session("shared-session") is None
     finally:
         config.unregister_active_run("admission-observation")
+    assert config.LAST_RUN_FINISHED_AT == previous_finished_at
 
 
 def test_worker_lock_release_does_not_overwrite_cancelling_phase():

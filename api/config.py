@@ -9680,7 +9680,8 @@ def unregister_active_run(stream_id: str) -> None:
     global LAST_RUN_FINISHED_AT
     with ACTIVE_RUNS_LOCK:
         entry = ACTIVE_RUNS.pop(stream_id, None)
-        LAST_RUN_FINISHED_AT = time.time()
+        if not (isinstance(entry, dict) and entry.get("health_only")):
+            LAST_RUN_FINISHED_AT = time.time()
     publish_active_run_finished(stream_id, entry)
 
 # Agent cache: reuse AIAgent across messages in the same WebUI session so that
