@@ -273,12 +273,13 @@ def test_post_execution_writeback_timeout_is_not_retryable():
 
 def test_worker_writeback_lock_timeout_emits_terminal_error(monkeypatch):
     import threading
-    from api import config, streaming
+    from api import config, routes, streaming
 
     lock = threading.Lock()
     lock.acquire()
     events = []
     config.LAST_CHAT_ADMISSION_TIMEOUT_AT = None
+    config.LAST_CHAT_FINALIZATION_TIMEOUT_AT = None
     config.register_active_run("writeback-timeout", session_id="private")
     monkeypatch.setattr(streaming, "_CHAT_LOCK_WAIT_SECONDS", 0.02)
     try:
@@ -298,6 +299,11 @@ def test_worker_writeback_lock_timeout_emits_terminal_error(monkeypatch):
         config.unregister_active_run("writeback-timeout")
         config.LAST_CHAT_ADMISSION_TIMEOUT_AT = None
 
+    assert config.LAST_CHAT_FINALIZATION_TIMEOUT_AT is not None
+    health = routes._run_lifecycle_health()
+    assert health["status"] == "degraded"
+    assert health["recent_finalization_timeout"] is True
+    config.LAST_CHAT_FINALIZATION_TIMEOUT_AT = None
     assert events[0][0] == "apperror"
     assert events[0][1]["type"] == "chat_writeback_timeout"
     assert events[0][1]["retryable"] is False
@@ -323,6 +329,7 @@ def test_gateway_error_writeback_timeout_is_terminal(monkeypatch):
         lock.release()
         config.unregister_active_run("gateway-timeout")
         config.LAST_CHAT_ADMISSION_TIMEOUT_AT = None
+        config.LAST_CHAT_FINALIZATION_TIMEOUT_AT = None
 
     assert payload["type"] == "chat_writeback_timeout"
     assert payload["retryable"] is False

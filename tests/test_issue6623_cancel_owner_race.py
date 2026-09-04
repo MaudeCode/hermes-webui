@@ -162,7 +162,7 @@ def test_early_cancel_lock_timeout_still_emits_terminal_event(tmp_path, monkeypa
     assert config.LAST_CHAT_ADMISSION_TIMEOUT_AT is not None
 
 
-def test_mature_cancel_lock_timeout_does_not_emit_false_terminal_cancel(
+def test_mature_cancel_lock_timeout_emits_unknown_terminal_error(
     tmp_path, monkeypatch
 ):
     sid = "sess_mature_cancel_timeout"
@@ -181,13 +181,19 @@ def test_mature_cancel_lock_timeout_does_not_emit_false_terminal_cancel(
     blocked_lock.acquire()
     monkeypatch.setattr(streaming, "_CHAT_LOCK_WAIT_SECONDS", 0.02)
     monkeypatch.setattr(streaming, "_get_session_agent_lock", lambda _sid: blocked_lock)
+    config.LAST_CHAT_FINALIZATION_TIMEOUT_AT = None
     try:
         assert streaming.cancel_stream(stream_id) is True
     finally:
         blocked_lock.release()
 
-    assert event_queue.empty()
+    event, payload = event_queue.get(timeout=1)
+    assert event == "apperror"
+    assert payload["type"] == "cancel_writeback_timeout"
+    assert payload["outcome_unknown"] is True
     assert session.pending_started_at is not None
+    assert config.LAST_CHAT_FINALIZATION_TIMEOUT_AT is not None
+    config.LAST_CHAT_FINALIZATION_TIMEOUT_AT = None
 
 
 def test_issue6623_newer_stream_stale_writeback_still_rejected(tmp_path, monkeypatch):

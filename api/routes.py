@@ -13077,6 +13077,16 @@ def _run_lifecycle_health() -> dict:
         admission_timeout_age is not None
         and admission_timeout_age < _live_config.CHAT_ADMISSION_HEALTH_WINDOW_SECONDS
     )
+    finalization_timeout_age = (
+        max(0.0, now - float(_live_config.LAST_CHAT_FINALIZATION_TIMEOUT_AT))
+        if _live_config.LAST_CHAT_FINALIZATION_TIMEOUT_AT
+        else None
+    )
+    recent_finalization_timeout = bool(
+        finalization_timeout_age is not None
+        and finalization_timeout_age
+        < _live_config.CHAT_ADMISSION_HEALTH_WINDOW_SECONDS
+    )
     degraded_runs = 0
     with _live_config.ACTIVE_RUNS_LOCK:
         runs = []
@@ -13099,7 +13109,10 @@ def _run_lifecycle_health() -> dict:
                 wait_age = 0.0
             if wait_started_at:
                 item["lock_wait_age_seconds"] = round(wait_age, 1)
-            degraded = bool(item.get("cancellation_blocked")) or phase == "admission_blocked" or (
+            degraded = bool(item.get("cancellation_blocked")) or phase in {
+                "admission_blocked",
+                "finalization_blocked",
+            } or (
                 phase in {"waiting_for_session_lock", "cancelling"} and wait_age >= 2.0
             )
             if degraded:
@@ -13112,12 +13125,19 @@ def _run_lifecycle_health() -> dict:
         "active_runs": len(runs),
         "runs": runs,
         "last_run_finished_at": last_finished,
-        "status": "degraded" if degraded_runs or recent_admission_timeout else "ok",
+        "status": "degraded"
+        if degraded_runs or recent_admission_timeout or recent_finalization_timeout
+        else "ok",
         "degraded_runs": degraded_runs,
     }
     if recent_admission_timeout:
         payload["recent_admission_timeout"] = True
         payload["admission_timeout_age_seconds"] = round(admission_timeout_age, 1)
+    if recent_finalization_timeout:
+        payload["recent_finalization_timeout"] = True
+        payload["finalization_timeout_age_seconds"] = round(
+            finalization_timeout_age, 1
+        )
     if runs:
         payload["oldest_run_age_seconds"] = runs[0].get("age_seconds", 0.0)
     elif last_finished:
@@ -13231,6 +13251,11 @@ def _handle_health(handler, parsed):
         payload["recent_admission_timeout"] = True
         payload["admission_timeout_age_seconds"] = run_check.get(
             "admission_timeout_age_seconds", 0.0
+        )
+    if run_check.get("recent_finalization_timeout"):
+        payload["recent_finalization_timeout"] = True
+        payload["finalization_timeout_age_seconds"] = run_check.get(
+            "finalization_timeout_age_seconds", 0.0
         )
     if deep:
         if stream_check.get("status") != "ok":

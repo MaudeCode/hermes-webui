@@ -42,7 +42,7 @@ from api.config import (
     _get_session_agent_lock, _alias_session_agent_lock,
     _set_thread_env, _clear_thread_env, _thread_ctx, _thread_local_env_value,
     register_active_run, update_active_run, publish_active_run_finished,
-    note_chat_admission_timeout,
+    note_chat_admission_timeout, note_chat_finalization_timeout,
     unregister_stream_owner,
     stream_owner_session_id,
     session_writeback_owner,
@@ -9063,7 +9063,12 @@ def _try_acquire_checkpoint_session_lock(lock, stop_event):
 
 @contextlib.contextmanager
 def _try_acquire_worker_session_lock(
-    stream_id: str, lock, stage: str, *, timeout_phase: str = "admission_blocked"
+    stream_id: str,
+    lock,
+    stage: str,
+    *,
+    timeout_phase: str = "admission_blocked",
+    record_finalization_timeout: bool = True,
 ):
     started_at = time.time()
     update_active_run(
@@ -9077,6 +9082,8 @@ def _try_acquire_worker_session_lock(
         if not acquired:
             if timeout_phase == "admission_blocked":
                 note_chat_admission_timeout()
+            elif record_finalization_timeout:
+                note_chat_finalization_timeout()
             update_active_run(
                 stream_id,
                 preserve_cancelling=True,
@@ -9618,7 +9625,9 @@ def _run_agent_streaming(
     _success_writeback_committed = False
     s = None
 
-    def _terminal_writeback_lock(stage: str):
+    def _terminal_writeback_lock(
+        stage: str, *, record_finalization_timeout: bool = True
+    ):
         if _agent_lock is None:
             return contextlib.nullcontext(True)
         return _try_acquire_worker_session_lock(
@@ -9626,6 +9635,7 @@ def _run_agent_streaming(
             _agent_lock,
             stage,
             timeout_phase="finalization_blocked",
+            record_finalization_timeout=record_finalization_timeout,
         )
 
     def _persist_terminal_steering_scene(*, terminal_state, turn_duration=None):
@@ -12944,7 +12954,9 @@ def _run_agent_streaming(
             _pause_for_deferred_clear = dict(
                 getattr(s, "process_wakeup_pause", {}) or {}
             )
-            with _terminal_writeback_lock("success_finalize") as acquired:
+            with _terminal_writeback_lock(
+                "success_finalize", record_finalization_timeout=False
+            ) as acquired:
                 if not acquired:
                     logger.warning(
                         "Skipped post-commit process-wakeup pause finalization because "
@@ -14468,7 +14480,10 @@ def cancel_stream(stream_id: str) -> bool:
             _CHAT_LOCK_WAIT_SECONDS,
         ) as acquired:
             if not acquired:
-                note_chat_admission_timeout()
+                if active_run_entry:
+                    note_chat_finalization_timeout()
+                else:
+                    note_chat_admission_timeout()
                 update_active_run(
                     stream_id,
                     phase="cancelling",
@@ -14476,7 +14491,29 @@ def cancel_stream(stream_id: str) -> bool:
                     lock_wait_started_at=cancel_lock_wait_started_at,
                     lock_wait_seconds=_CHAT_LOCK_WAIT_SECONDS,
                 )
-                if not active_run_entry:
+                if active_run_entry:
+                    if q is None:
+                        return False
+                    try:
+                        q.put_nowait((
+                            "apperror",
+                            {
+                                "type": "cancel_writeback_timeout",
+                                "message": (
+                                    "Cancellation was requested, but its persisted "
+                                    "outcome is unknown. Refresh before retrying."
+                                ),
+                                "session_id": _cancel_session_id,
+                                "retryable": False,
+                                "outcome_unknown": True,
+                            },
+                        ))
+                    except Exception:
+                        logger.debug(
+                            "Failed to emit blocked mature cancel for %s", stream_id
+                        )
+                        return False
+                else:
                     try:
                         stale_session = get_session(_cancel_session_id)
                         _mark_chat_admission_timeout_stale(stale_session, stream_id)

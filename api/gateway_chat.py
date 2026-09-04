@@ -2043,6 +2043,7 @@ def _run_gateway_chat_streaming(
                     _get_session_agent_lock(session_id),
                     "gateway_teardown",
                     timeout_phase="finalization_blocked",
+                    record_finalization_timeout=False,
                 ) as acquired:
                     if acquired:
                         _clear_gateway_pending_state(get_session(session_id), stream_id)
