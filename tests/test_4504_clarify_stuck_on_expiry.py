@@ -116,10 +116,8 @@ class TestClarifyClearPendingSourceMarkers:
 
     def test_clear_pending_calls_notify(self):
         src = _read(_CLARIFY)
-        # The fix adds _clarify_sse_notify(session_key, None, 0) inside
-        # clear_pending's _lock block.
-        assert "_clarify_sse_notify(session_key, None, 0)" in src, (
-            "clear_pending must invoke _clarify_sse_notify with None head so "
+        assert "_clarify_sse_snapshot_locked(session_key, None, 0)" in src, (
+            "clear_pending must snapshot a None head so "
             "the silent-timeout path notifies SSE subscribers (#4504)."
         )
 

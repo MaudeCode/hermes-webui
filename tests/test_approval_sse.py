@@ -431,6 +431,7 @@ class TestSSENotifyFromSubmitPending:
 
     def test_gateway_mirror_reconcile_tags_live_head_and_purges_stale_copy(self):
         """Gateway mirrors must track the live head and disappear when the queue does."""
+        from api import route_approvals
         from api import routes as r
 
         sid = f"sse-gateway-mirror-{uuid.uuid4().hex[:8]}"
@@ -461,7 +462,8 @@ class TestSSENotifyFromSubmitPending:
                 assert r._pending[sid][0]["_gateway_mirror"] is True
                 r._gateway_queues.pop(sid, None)
                 head, total, changed = r.reconcile_gateway_pending_mirror_locked(sid)
-                r._approval_sse_notify_locked(sid, head, total)
+                notification = r._approval_sse_notify_locked(sid, head, total)
+            route_approvals._dispatch_approval_sse(notification)
             assert changed is True
 
             cleared = q.get(timeout=1)

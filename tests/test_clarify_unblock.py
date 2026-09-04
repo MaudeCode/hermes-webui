@@ -1,6 +1,7 @@
 """Tests for clarify prompt unblocking and HTTP endpoints."""
 
 import json
+import threading
 import uuid
 import urllib.request
 import urllib.error
@@ -114,6 +115,28 @@ class TestClarifyUnblocking:
         )
 
         clear_pending(sid)
+
+    def test_duplicate_callback_can_reenter_clarify_state(self):
+        sid = f"unit-reentrant-{uuid.uuid4().hex[:8]}"
+        data = {"question": "Same question", "choices_offered": ["one"]}
+        callback_finished = threading.Event()
+
+        def callback(_data):
+            assert submit_pending is not None
+            with _lock:
+                assert sid in _gateway_queues
+            callback_finished.set()
+
+        register_gateway_notify(sid, callback)
+        submit_pending(sid, data)
+        callback_finished.clear()
+        worker = threading.Thread(target=lambda: submit_pending(sid, data))
+        worker.start()
+        assert callback_finished.wait(1)
+        worker.join(1)
+        clear_pending(sid)
+
+        assert worker.is_alive() is False
 
 
 class TestClarifyModuleExports:

@@ -45,6 +45,9 @@ except ImportError:
 
 # ── Approval SSE subscribers (long-connection push) ──────────────────────────
 _approval_sse_subscribers: dict[str, list[queue.Queue]] = {}
+_approval_sse_sequence: dict[str, int] = {}
+_approval_sse_dispatched: dict[str, int] = {}
+_approval_sse_dispatch_lock = threading.Lock()
 _GATEWAY_MIRROR_FLAG = "_gateway_mirror"
 _GATEWAY_MIRROR_TOKEN = "_gateway_mirror_token"
 _GATEWAY_MIRROR_RETAINED = "_gateway_mirror_retained"
@@ -160,11 +163,8 @@ def _approval_sse_unsubscribe(session_id: str, q: queue.Queue) -> None:
                 _approval_sse_subscribers.pop(session_id, None)
 
 
-def _approval_sse_notify_locked(session_id: str, head: dict | None, total: int) -> None:
-    """Push an approval event to all SSE subscribers for a session.
-
-    CALLER MUST HOLD `_lock`. Snapshots the subscriber list under the held
-    lock and then calls `q.put_nowait()` on each (which is itself thread-safe).
+def _approval_sse_notify_locked(session_id: str, head: dict | None, total: int):
+    """Snapshot an approval event and its subscribers while `_lock` is held.
 
     `head` is the approval entry currently at the head of the queue (the one
     the UI should display) — NOT the just-appended entry. With multiple
@@ -178,25 +178,29 @@ def _approval_sse_notify_locked(session_id: str, head: dict | None, total: int) 
     hide its approval card.
     """
     payload = {"pending": dict(head) if head else None, "pending_count": total}
-    subs = _approval_sse_subscribers.get(session_id, ())
-    for q in subs:
-        try:
-            q.put_nowait(payload)
-        except queue.Full:
-            pass  # drop if subscriber is slow (bounded queue prevents memory leak)
+    sequence = _approval_sse_sequence.get(session_id, 0) + 1
+    _approval_sse_sequence[session_id] = sequence
+    return session_id, sequence, tuple(_approval_sse_subscribers.get(session_id, ())), payload
+
+
+def _dispatch_approval_sse(notification) -> None:
+    session_id, sequence, subs, payload = notification
+    with _approval_sse_dispatch_lock:
+        if sequence <= _approval_sse_dispatched.get(session_id, 0):
+            return
+        _approval_sse_dispatched[session_id] = sequence
+        for q in subs:
+            try:
+                q.put_nowait(payload)
+            except queue.Full:
+                pass  # drop if subscriber is slow (bounded queue prevents memory leak)
 
 
 def _approval_sse_notify(session_id: str, head: dict | None, total: int) -> None:
-    """Convenience wrapper that takes `_lock` itself.
-
-    Use only from contexts that don't already hold `_lock`. Production call
-    sites (submit_pending, _handle_approval_respond) MUST hold the lock and
-    call `_approval_sse_notify_locked` directly to avoid a notify-ordering
-    race where a later append's notify can fire before an earlier append's
-    notify (resulting in stale `pending_count`).
-    """
+    """Push an approval event without holding the state lock."""
     with _lock:
-        _approval_sse_notify_locked(session_id, head, total)
+        notification = _approval_sse_notify_locked(session_id, head, total)
+    _dispatch_approval_sse(notification)
 
 
 def _gateway_mirror_entry_token(entry) -> str | None:
@@ -496,6 +500,8 @@ def retire_gateway_pending_mirror(
 ) -> bool:
     """Retire one approval, or every mirror for a terminal run."""
     retired_waiters = []
+    early = False
+    changed = False
     with _lock:
         reconcile_gateway_pending_mirror_locked(session_key)
         queue = _pending.get(session_key)
@@ -537,23 +543,27 @@ def retire_gateway_pending_mirror(
                     retained_gateway_queue.append(entry)
         if not retired and not gateway_queue_changed:
             head, total, changed = reconcile_gateway_pending_mirror_locked(session_key)
-            _approval_sse_notify_locked(session_key, head, total)
-            if changed:
-                publish_session_list_changed("attention_resolved")
-            return changed
-        for match in retired:
-            entries.remove(match)
-        if normalized_run_id and not approval_id:
-            if retained_gateway_queue:
-                _gateway_queues[session_key] = retained_gateway_queue
-            else:
-                _gateway_queues.pop(session_key, None)
-        if entries:
-            _pending[session_key] = entries
+            notification = _approval_sse_notify_locked(session_key, head, total)
+            early = True
         else:
-            _pending.pop(session_key, None)
-        head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
-        _approval_sse_notify_locked(session_key, head, total)
+            for match in retired:
+                entries.remove(match)
+            if normalized_run_id and not approval_id:
+                if retained_gateway_queue:
+                    _gateway_queues[session_key] = retained_gateway_queue
+                else:
+                    _gateway_queues.pop(session_key, None)
+            if entries:
+                _pending[session_key] = entries
+            else:
+                _pending.pop(session_key, None)
+            head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
+            notification = _approval_sse_notify_locked(session_key, head, total)
+    _dispatch_approval_sse(notification)
+    if early:
+        if changed:
+            publish_session_list_changed("attention_resolved")
+        return changed
     for waiter in retired_waiters:
         waiter.result = "deny"
         waiter.reason = "Gateway run ended before this approval was resolved."
@@ -773,7 +783,8 @@ def submit_gateway_pending_mirror(session_key: str, approval: dict) -> tuple[dic
                     mirror_entry[_GATEWAY_MIRROR_TOKEN] = mirror_token
                 _normalize_pending_queue_locked(session_key).append(mirror_entry)
         head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
-        _approval_sse_notify_locked(session_key, head, total)
+        notification = _approval_sse_notify_locked(session_key, head, total)
+    _dispatch_approval_sse(notification)
     publish_session_list_changed("attention_pending")
     return (dict(head) if head else None), total
 
@@ -796,7 +807,8 @@ def resolve_gateway_pending_local(
         else:
             _gateway_queues.pop(session_key, None)
         head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
-        _approval_sse_notify_locked(session_key, head, total)
+        notification = _approval_sse_notify_locked(session_key, head, total)
+    _dispatch_approval_sse(notification)
     if target is None:
         return 0, head, total
     target.result = choice
@@ -848,7 +860,7 @@ def resolve_gateway_pending_local_no_run_mirror(
             else:
                 _pending.pop(session_key, None)
             head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
-            _approval_sse_notify_locked(session_key, head, total)
+            notification = _approval_sse_notify_locked(session_key, head, total)
             expired = True
         else:
             expired = False
@@ -864,7 +876,8 @@ def resolve_gateway_pending_local_no_run_mirror(
             else:
                 _pending.pop(session_key, None)
             head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
-            _approval_sse_notify_locked(session_key, head, total)
+            notification = _approval_sse_notify_locked(session_key, head, total)
+    _dispatch_approval_sse(notification)
     if expired:
         publish_session_list_changed("attention_resolved")
         return True, 0, head, total
@@ -915,8 +928,9 @@ def resolve_gateway_pending_local_all(
             _pending.pop(session_key, None)
 
         head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
-        _approval_sse_notify_locked(session_key, head, total)
+        notification = _approval_sse_notify_locked(session_key, head, total)
 
+    _dispatch_approval_sse(notification)
     for entry in targets:
         entry.result = choice
         if reason:
@@ -967,10 +981,8 @@ def submit_pending(session_key: str, approval: dict) -> None:
         queue_list.append(entry)
         total = len(queue_list)
         head = queue_list[0]  # /api/approval/pending always returns head
-        # Push to SSE subscribers from inside _lock so two parallel
-        # submit_pending calls can't deliver out-of-order (T2's later
-        # notify arriving before T1's earlier notify with a stale count).
-        _approval_sse_notify_locked(session_key, head, total)
+        notification = _approval_sse_notify_locked(session_key, head, total)
+    _dispatch_approval_sse(notification)
     publish_session_list_changed("attention_pending")
     # NOTE: We do NOT call _submit_pending_raw here — that function overwrites
     # _pending[session_key] with a single dict, which would undo the list we just
