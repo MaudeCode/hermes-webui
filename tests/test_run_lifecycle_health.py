@@ -265,3 +265,22 @@ def test_health_only_admission_waiter_never_blocks_worker_start():
         assert routes._active_run_stream_for_session("shared-session") is None
     finally:
         config.unregister_active_run("admission-observation")
+
+
+def test_worker_lock_release_does_not_overwrite_cancelling_phase():
+    import threading
+    from api import config, streaming
+
+    config.register_active_run(
+        "cancel-transition", session_id="session", health_only=True, profile=None
+    )
+    try:
+        with streaming._try_acquire_worker_session_lock(
+            "cancel-transition", threading.Lock(), "prestream_save"
+        ) as acquired:
+            assert acquired is True
+            config.update_active_run("cancel-transition", phase="cancelling")
+        with config.ACTIVE_RUNS_LOCK:
+            assert config.ACTIVE_RUNS["cancel-transition"]["phase"] == "cancelling"
+    finally:
+        config.unregister_active_run("cancel-transition")

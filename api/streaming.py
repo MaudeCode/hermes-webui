@@ -9055,12 +9055,20 @@ def _try_acquire_worker_session_lock(stream_id: str, lock, stage: str):
             yield acquired
         finally:
             if acquired:
-                update_active_run(
-                    stream_id,
-                    phase="running",
-                    lock_stage=None,
-                    lock_wait_started_at=None,
-                )
+                from api import config as _run_config
+
+                with _run_config.ACTIVE_RUNS_LOCK:
+                    entry = (_run_config.ACTIVE_RUNS or {}).get(stream_id)
+                    if (
+                        entry is not None
+                        and entry.get("phase") == "waiting_for_session_lock"
+                        and entry.get("lock_stage") == stage
+                    ):
+                        entry.update(
+                            phase="running",
+                            lock_stage=None,
+                            lock_wait_started_at=None,
+                        )
 
 
 def _emit_worker_admission_timeout(session, session_id: str, stream_id: str, put) -> None:
@@ -11404,6 +11412,25 @@ def _run_agent_streaming(
                     _emit_worker_admission_timeout(s, session_id, stream_id, put)
                     return
                 s.save(touch_updated_at=True, skip_index=False)
+
+            if cancel_event.is_set():
+                with _try_acquire_worker_session_lock(
+                    stream_id, _agent_lock, "post_save_cancel"
+                ) as acquired:
+                    if not acquired:
+                        _admission_lock_timed_out = True
+                        _emit_worker_admission_timeout(
+                            s, session_id, stream_id, put
+                        )
+                        return
+                    _finalize_cancelled_turn(
+                        s,
+                        ephemeral=ephemeral,
+                        message='Task cancelled before start.',
+                        stream_id=stream_id,
+                    )
+                put('cancel', _turn_cancel_payload('Cancelled before start'))
+                return
 
             _ckpt_thread = threading.Thread(
                 target=_periodic_checkpoint, daemon=True,
