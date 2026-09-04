@@ -31,7 +31,7 @@ import http.client
 import socket as _socket
 from collections import defaultdict, deque, OrderedDict
 from pathlib import Path
-from contextlib import ExitStack, closing, nullcontext
+from contextlib import ExitStack, closing, contextmanager, nullcontext
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
@@ -2942,6 +2942,10 @@ from api.config import (
     MAX_UPLOAD_BYTES,
     ACTIVE_RUNS,
     ACTIVE_RUNS_LOCK,
+    register_active_run,
+    update_active_run,
+    note_chat_admission_timeout,
+    note_chat_finalization_timeout,
     register_stream_owner,
     register_session_writeback_owner,
     clear_session_writeback_owner_if_owned,
@@ -3042,7 +3046,7 @@ def _cancelled_run_is_stale(run_entry) -> bool:
         return False
 
 
-def _clear_stale_stream_state(session) -> bool:
+def _clear_stale_stream_state(session, *, lock_held: bool = False) -> bool:
     """Clear persisted streaming flags when the in-memory stream no longer exists.
 
     A server restart or worker crash can leave active_stream_id/pending_* in the
@@ -3169,7 +3173,12 @@ def _clear_stale_stream_state(session) -> bool:
     # active_stream_id under it. A concurrent chat_start may have already
     # registered a new stream after our STREAMS_LOCK check above; in that
     # case we must NOT clobber its session.active_stream_id.
-    with _get_session_agent_lock(session.session_id):
+    lock_context = (
+        nullcontext()
+        if lock_held
+        else _get_session_agent_lock(session.session_id)
+    )
+    with lock_context:
         try:
             authoritative_session = get_session(session.session_id)
         except KeyError:
@@ -10905,6 +10914,7 @@ from api.models import (
     find_compression_recovery_session,
     get_session_for_file_ops,
     persist_recovered_workspace_binding,
+    WorkspaceBindingBusy,
     WorkspaceBindingPersistenceError,
     new_session,
     all_sessions,
@@ -11179,6 +11189,9 @@ from api.streaming import (
     generate_session_title_for_session,
     _compact_for_echo_compare,
     _strip_compact_echo_suffix,
+    _try_acquire_chat_lock,
+    _CHAT_LOCK_WAIT_SECONDS,
+    _DEFERRED_SESSION_RETRY_DELAYS,
 )
 from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
 from api.run_journal import (
@@ -13057,6 +13070,26 @@ def _run_lifecycle_health() -> dict:
     from api import config as _live_config
 
     now = time.time()
+    admission_timeout_age = (
+        max(0.0, now - float(_live_config.LAST_CHAT_ADMISSION_TIMEOUT_AT))
+        if _live_config.LAST_CHAT_ADMISSION_TIMEOUT_AT
+        else None
+    )
+    recent_admission_timeout = bool(
+        admission_timeout_age is not None
+        and admission_timeout_age < _live_config.CHAT_ADMISSION_HEALTH_WINDOW_SECONDS
+    )
+    finalization_timeout_age = (
+        max(0.0, now - float(_live_config.LAST_CHAT_FINALIZATION_TIMEOUT_AT))
+        if _live_config.LAST_CHAT_FINALIZATION_TIMEOUT_AT
+        else None
+    )
+    recent_finalization_timeout = bool(
+        finalization_timeout_age is not None
+        and finalization_timeout_age
+        < _live_config.CHAT_ADMISSION_HEALTH_WINDOW_SECONDS
+    )
+    degraded_runs = 0
     with _live_config.ACTIVE_RUNS_LOCK:
         runs = []
         for _stream_id, raw in (_live_config.ACTIVE_RUNS or {}).items():
@@ -13070,6 +13103,23 @@ def _run_lifecycle_health() -> dict:
             except Exception:
                 age = 0.0
             item["age_seconds"] = round(age, 1)
+            phase = str(item.get("phase") or "")
+            wait_started_at = item.get("lock_wait_started_at") or item.get("cancelled_at")
+            try:
+                wait_age = max(0.0, now - float(wait_started_at)) if wait_started_at else 0.0
+            except Exception:
+                wait_age = 0.0
+            if wait_started_at:
+                item["lock_wait_age_seconds"] = round(wait_age, 1)
+            degraded = bool(item.get("cancellation_blocked")) or phase in {
+                "admission_blocked",
+                "finalization_blocked",
+            } or (
+                phase in {"waiting_for_session_lock", "cancelling"} and wait_age >= 2.0
+            )
+            if degraded:
+                item["degraded"] = True
+                degraded_runs += 1
             runs.append(item)
         last_finished = _live_config.LAST_RUN_FINISHED_AT
     runs.sort(key=lambda item: float(item.get("started_at") or 0.0))
@@ -13077,7 +13127,19 @@ def _run_lifecycle_health() -> dict:
         "active_runs": len(runs),
         "runs": runs,
         "last_run_finished_at": last_finished,
+        "status": "degraded"
+        if degraded_runs or recent_admission_timeout or recent_finalization_timeout
+        else "ok",
+        "degraded_runs": degraded_runs,
     }
+    if recent_admission_timeout:
+        payload["recent_admission_timeout"] = True
+        payload["admission_timeout_age_seconds"] = round(admission_timeout_age, 1)
+    if recent_finalization_timeout:
+        payload["recent_finalization_timeout"] = True
+        payload["finalization_timeout_age_seconds"] = round(
+            finalization_timeout_age, 1
+        )
     if runs:
         payload["oldest_run_age_seconds"] = runs[0].get("age_seconds", 0.0)
     elif last_finished:
@@ -13171,7 +13233,9 @@ def _handle_health(handler, parsed):
     stream_check = _streams_lock_health()
     run_check = _run_lifecycle_health()
     payload = {
-        "status": "ok" if stream_check.get("status") == "ok" else "degraded",
+        "status": "ok" if (
+            stream_check.get("status") == "ok" and run_check.get("status") == "ok"
+        ) else "degraded",
         "sessions": len(SESSIONS),
         "active_streams": int(stream_check.get("active_streams") or 0),
         "active_runs": int(run_check.get("active_runs") or 0),
@@ -13185,11 +13249,22 @@ def _handle_health(handler, parsed):
         payload["oldest_run_age_seconds"] = run_check["oldest_run_age_seconds"]
     if "idle_seconds_since_last_run" in run_check:
         payload["idle_seconds_since_last_run"] = run_check["idle_seconds_since_last_run"]
+    if run_check.get("recent_admission_timeout"):
+        payload["recent_admission_timeout"] = True
+        payload["admission_timeout_age_seconds"] = run_check.get(
+            "admission_timeout_age_seconds", 0.0
+        )
+    if run_check.get("recent_finalization_timeout"):
+        payload["recent_finalization_timeout"] = True
+        payload["finalization_timeout_age_seconds"] = run_check.get(
+            "finalization_timeout_age_seconds", 0.0
+        )
     if deep:
         if stream_check.get("status") != "ok":
             payload["checks"] = {"streams_lock": stream_check}
             return j(handler, payload, status=503)
         checks, healthy = _deep_health_checks(stream_check=stream_check)
+        healthy = healthy and run_check.get("status") == "ok"
         payload["checks"] = checks
         if not healthy:
             payload["status"] = "degraded"
@@ -19186,6 +19261,10 @@ def _handle_list_dir(handler, parsed):
                 "workspace_recovered": recovered,
             },
         )
+    except WorkspaceBindingBusy:
+        response = _file_operation_busy_response()
+        status = response.pop("_status")
+        return j(handler, response, status=status)
     except WorkspaceBindingPersistenceError as e:
         return bad(handler, _sanitize_error(e), 500)
     except (FileNotFoundError, ValueError) as e:
@@ -19203,6 +19282,19 @@ def _read_json_request_body(handler, *, max_bytes: int = 4096) -> dict:
     except Exception as exc:
         raise ValueError("invalid JSON body") from exc
     return payload if isinstance(payload, dict) else {}
+
+
+def _file_ops_session_or_error(handler, session_id: str):
+    """Resolve one file-operation session and normalize lookup failures."""
+    try:
+        return get_session_for_file_ops(session_id)
+    except WorkspaceBindingBusy:
+        response = _file_operation_busy_response()
+        status = response.pop("_status")
+        j(handler, response, status=status)
+    except KeyError:
+        bad(handler, "Session not found", 404)
+    return None
 
 
 def _handle_escape_authorize(handler, parsed, body: dict | None = None):
@@ -19227,10 +19319,9 @@ def _handle_escape_authorize(handler, parsed, body: dict | None = None):
         return bad(handler, "session_id is required")
     if not rel:
         return bad(handler, "path is required")
-    try:
-        s = get_session_for_file_ops(sid)
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, sid)
+    if s is None:
+        return True
     try:
         payload = authorize_escape_target(Path(s.workspace), sid, rel)
     except ValueError as exc:
@@ -19246,10 +19337,9 @@ def _handle_escape_list_dir(handler, parsed):
         return bad(handler, "session_id is required")
     if not token:
         return bad(handler, "token is required")
-    try:
-        s = get_session_for_file_ops(sid)
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, sid)
+    if s is None:
+        return True
     rel_path = qs.get("path", ["."])[0]
     try:
         payload = list_authorized_escape_dir(Path(s.workspace), sid, token, rel_path)
@@ -19271,10 +19361,9 @@ def _handle_escape_file_read(handler, parsed):
         return bad(handler, "session_id is required")
     if not token:
         return bad(handler, "token is required")
-    try:
-        s = get_session_for_file_ops(sid)
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, sid)
+    if s is None:
+        return True
     rel = qs.get("path", [""])[0]
     try:
         return j(handler, read_authorized_escape_file_content(Path(s.workspace), sid, token, rel))
@@ -19298,10 +19387,9 @@ def _handle_escape_file_raw(handler, parsed):
         return bad(handler, "session_id is required")
     if not token:
         return bad(handler, "token is required")
-    try:
-        s = get_session_for_file_ops(sid)
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, sid)
+    if s is None:
+        return True
     rel = qs.get("path", [""])[0]
     force_download = qs.get("download", [""])[0] == "1"
     try:
@@ -22072,10 +22160,9 @@ def _handle_folder_download(handler, parsed):
     sid = qs.get("session_id", [""])[0]
     if not sid:
         return bad(handler, "session_id is required")
-    try:
-        s = get_session_for_file_ops(sid)
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, sid)
+    if s is None:
+        return True
 
     rel = qs.get("path", [""])[0]
     try:
@@ -22158,10 +22245,9 @@ def _handle_file_raw(handler, parsed):
     sid = qs.get("session_id", [""])[0]
     if not sid:
         return bad(handler, "session_id is required")
-    try:
-        s = get_session_for_file_ops(sid)
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, sid)
+    if s is None:
+        return True
     rel = qs.get("path", [""])[0]
     force_download = qs.get("download", [""])[0] == "1"
     resolved = _file_raw_target(s, sid, rel)
@@ -22198,10 +22284,9 @@ def _handle_file_read(handler, parsed):
     sid = qs.get("session_id", [""])[0]
     if not sid:
         return bad(handler, "session_id is required")
-    try:
-        s = get_session_for_file_ops(sid)
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, sid)
+    if s is None:
+        return True
     rel = qs.get("path", [""])[0]
     if not rel:
         return bad(handler, "path is required")
@@ -23894,6 +23979,180 @@ def _is_hidden_empty_session(s) -> bool:
     )
 
 
+def _chat_admission_timeout_response() -> dict:
+    return {
+        "error": "session is busy",
+        "code": "chat_admission_timeout",
+        "message": "Chat could not start because this session is busy. Try again shortly.",
+        "retryable": True,
+        "_status": 409,
+    }
+
+
+def _file_operation_busy_response() -> dict:
+    return {
+        "error": "session is busy",
+        "code": "file_operation_busy",
+        "message": "The session is busy. Retry this file operation shortly.",
+        "retryable": True,
+        "_status": 409,
+    }
+
+
+def _chat_writeback_timeout_response() -> dict:
+    return {
+        "error": "response persistence is uncertain",
+        "code": "chat_writeback_timeout",
+        "message": (
+            "The response finished but could not be persisted because this session "
+            "remained busy. Do not retry automatically; refresh the session first."
+        ),
+        "retryable": False,
+        "outcome_unknown": True,
+        "_status": 503,
+    }
+
+
+@contextmanager
+def _bounded_chat_admission_lock(
+    session_id: str, lock, timeout=None, *, finalization: bool = False
+):
+    """Expose and bound route-layer waiting for the session write lock."""
+    wait_seconds = _CHAT_LOCK_WAIT_SECONDS if timeout is None else timeout
+    admission_id = f"admission-{uuid.uuid4().hex}"
+    started_at = time.time()
+    register_active_run(
+        admission_id,
+        session_id=session_id,
+        started_at=started_at,
+        phase="waiting_for_session_lock",
+        lock_wait_started_at=started_at,
+        attachable=False,
+        health_only=True,
+        profile=None,
+    )
+    registered = True
+    try:
+        with _try_acquire_chat_lock(lock, wait_seconds) as acquired:
+            if not acquired:
+                update_active_run(
+                    admission_id,
+                    phase=("finalization_blocked" if finalization else "admission_blocked"),
+                )
+                if finalization:
+                    note_chat_finalization_timeout()
+                else:
+                    note_chat_admission_timeout()
+            else:
+                unregister_active_run(admission_id)
+                registered = False
+            yield acquired
+    finally:
+        if registered:
+            unregister_active_run(admission_id)
+
+
+_DEFERRED_RECOVERY_RESTORE_LOCK = threading.Lock()
+_DEFERRED_RECOVERY_RESTORE_THREADS: dict[
+    str, tuple[dict, threading.Thread]
+] = {}
+
+
+def _schedule_deferred_compression_recovery_restore(
+    session_id: str, expected_recovery: dict
+) -> threading.Thread:
+    expected_recovery = copy.deepcopy(expected_recovery)
+
+    def _restore_when_available():
+        try:
+            lock = _get_session_agent_lock(session_id)
+            for retry_delay in _DEFERRED_SESSION_RETRY_DELAYS:
+                if retry_delay:
+                    time.sleep(retry_delay)
+                with _try_acquire_chat_lock(lock, _CHAT_LOCK_WAIT_SECONDS) as acquired:
+                    if acquired:
+                        try:
+                            current = get_session(session_id)
+                        except KeyError:
+                            return
+                        current_recovery = compression_recovery_payload_for_session(
+                            current
+                        )
+                        if (
+                            current_recovery is not None
+                            and current_recovery != expected_recovery
+                        ):
+                            return
+                        active_stream_id = getattr(
+                            current, "active_stream_id", None
+                        )
+                        if active_stream_id and _active_stream_blocks_chat_start(
+                            current, active_stream_id
+                        ):
+                            return
+                        previous_recovery = copy.deepcopy(
+                            getattr(current, "compression_recovery", {})
+                        )
+                        previous_action = getattr(
+                            current, "recommended_recovery_action", None
+                        )
+                        current.compression_recovery = copy.deepcopy(
+                            expected_recovery
+                        )
+                        current.recommended_recovery_action = expected_recovery.get(
+                            "recommended_action"
+                        )
+                        try:
+                            current.save()
+                        except Exception:
+                            current.compression_recovery = previous_recovery
+                            current.recommended_recovery_action = previous_action
+                            logger.warning(
+                                "Deferred compression recovery restore save failed for "
+                                "session %s; retrying",
+                                session_id,
+                                exc_info=True,
+                            )
+                        else:
+                            return
+            logger.warning(
+                "Deferred compression recovery restore exhausted retries for session %s",
+                session_id,
+            )
+        except Exception:
+            logger.warning(
+                "Deferred compression recovery restore failed for session %s",
+                session_id,
+                exc_info=True,
+            )
+        finally:
+            current_thread = threading.current_thread()
+            with _DEFERRED_RECOVERY_RESTORE_LOCK:
+                entry = _DEFERRED_RECOVERY_RESTORE_THREADS.get(session_id)
+                if entry is not None and entry[1] is current_thread:
+                    _DEFERRED_RECOVERY_RESTORE_THREADS.pop(session_id, None)
+
+    with _DEFERRED_RECOVERY_RESTORE_LOCK:
+        existing = _DEFERRED_RECOVERY_RESTORE_THREADS.get(session_id)
+        if (
+            existing is not None
+            and existing[0] == expected_recovery
+            and existing[1].is_alive()
+        ):
+            return existing[1]
+        thread = threading.Thread(
+            target=_restore_when_available,
+            daemon=True,
+            name=f"recovery-restore-{session_id[:8]}",
+        )
+        _DEFERRED_RECOVERY_RESTORE_THREADS[session_id] = (
+            expected_recovery,
+            thread,
+        )
+        thread.start()
+        return thread
+
+
 def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
     """Return whether an active_stream_id still owns this session's next turn.
 
@@ -24270,6 +24529,8 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
             ]
         matching_rows = []
         for run_key, raw in run_rows:
+            if raw.get("health_only"):
+                continue
             stream_id = str(raw.get("stream_id") or run_key or "").strip()
             run_sid = str(raw.get("session_id") or "").strip()
             if not run_sid or not stream_id:
@@ -24283,6 +24544,8 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
             for run_stream_id, stream_id in matching_rows:
                 raw = (_live_config.ACTIVE_RUNS or {}).get(run_stream_id)
                 if not raw:
+                    continue
+                if raw.get("health_only"):
                     continue
                 if str(raw.get("stream_id") or run_stream_id or "").strip() != stream_id:
                     continue
@@ -24380,7 +24643,9 @@ def _start_chat_stream_for_session(
     process_wakeup_lineage_seen: set[str] = set()
     diag.stage("session_lock_wait") if diag else None
     while True:
-        with session_lock:
+        with _bounded_chat_admission_lock(s.session_id, session_lock) as acquired:
+            if not acquired:
+                return _chat_admission_timeout_response()
             # Re-resolve under the same lock used by delete/draft/recovery.
             # A caller may hold a stale Session object captured before delete;
             # saving through that handle would recreate the sidecar/index and
@@ -24456,7 +24721,16 @@ def _start_chat_stream_for_session(
                         "active_stream_id": locked_stream_id,
                         "_status": 409,
                     }
-                needs_stale_cleanup = True
+                diag.stage("stale_stream_cleanup") if diag else None
+                cleared = _clear_stale_stream_state(s, lock_held=True)
+                if not cleared and getattr(s, "active_stream_id", None):
+                    diag.stage("response_write") if diag else None
+                    return {
+                        "error": "session already has an active stream",
+                        "active_stream_id": getattr(s, "active_stream_id", None),
+                        "_status": 409,
+                    }
+                continue
             else:
                 blocking_run_stream_id = _active_run_stream_for_session(s.session_id)
                 if blocking_run_stream_id:
@@ -24466,7 +24740,6 @@ def _start_chat_stream_for_session(
                         "active_stream_id": blocking_run_stream_id,
                         "_status": 409,
                     }
-                needs_stale_cleanup = False
                 if regeneration is not None:
                     return _start_regeneration_stream_locked(
                         s,
@@ -24505,16 +24778,6 @@ def _start_chat_stream_for_session(
                 if s.session_id in PENDING_BG_TASK_COMPLETIONS:
                     PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
                 break
-        if needs_stale_cleanup:
-            diag.stage("stale_stream_cleanup") if diag else None
-            cleared = _clear_stale_stream_state(s)
-            if not cleared and getattr(s, "active_stream_id", None):
-                diag.stage("response_write") if diag else None
-                return {
-                    "error": "session already has an active stream",
-                    "active_stream_id": getattr(s, "active_stream_id", None),
-                    "_status": 409,
-                }
     if was_hidden_empty_session:
         publish_session_list_changed(
             "session_new",
@@ -24589,7 +24852,11 @@ def _start_chat_stream_for_session(
         unregister_active_run(stream_id)
         clear_session_writeback_owner_if_owned(s.session_id, stream_id)
         try:
-            with _get_session_agent_lock(s.session_id):
+            with _bounded_chat_admission_lock(
+                s.session_id, _get_session_agent_lock(s.session_id)
+            ) as rollback_acquired:
+                if not rollback_acquired:
+                    raise TimeoutError("worker-start rollback session lock timed out")
                 failed_session = get_session(s.session_id)
                 if getattr(failed_session, "active_stream_id", None) == stream_id:
                     from api.streaming import _materialize_pending_user_turn_before_error
@@ -24947,6 +25214,9 @@ def start_session_turn(
 
     try:
         workspace = _resolve_chat_workspace_with_recovery(s, None)
+    except WorkspaceBindingBusy:
+        note_chat_admission_timeout()
+        return _chat_admission_timeout_response()
     except WorkspaceBindingPersistenceError as e:
         return {"error": str(e), "_status": 500}
     except ValueError as e:
@@ -24971,7 +25241,11 @@ def start_session_turn(
         prefer_cached_catalog=True,
     )
     _paused_wakeup_response = None
-    with _get_session_agent_lock(s.session_id):
+    with _bounded_chat_admission_lock(
+        s.session_id, _get_session_agent_lock(s.session_id)
+    ) as acquired:
+        if not acquired:
+            return _chat_admission_timeout_response()
         try:
             s = get_session(session_id)
         except KeyError:
@@ -25610,9 +25884,18 @@ def _handle_chat_start(handler, body, diag=None):
                 return j(handler, {"error": "regeneration_revision is required", "code": "stale_regeneration_revision"}, status=409)
             try:
                 from api.session_ops import plan_regeneration, RegenerationUnavailable
-                regeneration = plan_regeneration(
-                    s, expected_revision=body["regeneration_revision"]
-                )
+                with _bounded_chat_admission_lock(
+                    s.session_id, _get_session_agent_lock(s.session_id)
+                ) as acquired:
+                    if not acquired:
+                        response = _chat_admission_timeout_response()
+                        status = response.pop("_status")
+                        return j(handler, response, status=status)
+                    regeneration = plan_regeneration(
+                        s,
+                        expected_revision=body["regeneration_revision"],
+                        lock_held=True,
+                    )
             except RegenerationUnavailable as exc:
                 return j(handler, {"error": str(exc), "code": exc.code}, status=exc.status)
             msg = regeneration.turn.message_text
@@ -25646,6 +25929,11 @@ def _handle_chat_start(handler, body, diag=None):
                 workspace = _resolve_chat_workspace_for_regeneration(s, body.get("workspace"))
             else:
                 workspace = _resolve_chat_workspace_with_recovery(s, body.get("workspace"))
+        except WorkspaceBindingBusy:
+            note_chat_admission_timeout()
+            response = _chat_admission_timeout_response()
+            status = response.pop("_status")
+            return j(handler, response, status=status)
         except WorkspaceBindingPersistenceError as e:
             return bad(handler, str(e), 500)
         except ValueError as e:
@@ -25752,13 +26040,51 @@ def _handle_chat_start(handler, body, diag=None):
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config
         recovery_cleared_for_start = None
-        def _restore_cleared_recovery():
+        def _restore_cleared_recovery(*, persist: bool = False):
             if recovery_cleared_for_start is None:
                 return None
-            s.compression_recovery = recovery_cleared_for_start
-            s.recommended_recovery_action = recovery_cleared_for_start.get("recommended_action")
+
+            def _restore(target):
+                target.compression_recovery = copy.deepcopy(
+                    recovery_cleared_for_start
+                )
+                target.recommended_recovery_action = recovery_cleared_for_start.get(
+                    "recommended_action"
+                )
+
+            if not persist:
+                _restore(s)
+                return None
             try:
-                s.save()
+                with _bounded_chat_admission_lock(
+                    s.session_id,
+                    _get_session_agent_lock(s.session_id),
+                    finalization=True,
+                ) as acquired:
+                    if not acquired:
+                        _restore(s)
+                        _schedule_deferred_compression_recovery_restore(
+                            s.session_id, recovery_cleared_for_start
+                        )
+                        return TimeoutError(
+                            "compression recovery restore session lock timed out"
+                        )
+                    try:
+                        current = get_session(s.session_id)
+                    except KeyError:
+                        return RuntimeError("session was deleted before recovery restore")
+                    if getattr(current, "active_stream_id", None):
+                        return None
+                    current_recovery = compression_recovery_payload_for_session(current)
+                    if (
+                        current_recovery is not None
+                        and current_recovery != recovery_cleared_for_start
+                    ):
+                        return None
+                    _restore(current)
+                    current.save()
+                    if current is not s:
+                        _restore(s)
             except Exception as restore_err:
                 logger.exception("failed to restore compression recovery after chat start rejection for %s", getattr(s, "session_id", None))
                 return restore_err
@@ -25774,7 +26100,12 @@ def _handle_chat_start(handler, body, diag=None):
             )
         except Exception as exc:
             if not getattr(exc, "_regeneration_accepted", False):
-                _restore_cleared_recovery()
+                restore_err = _restore_cleared_recovery(persist=True)
+                if restore_err is not None:
+                    raise RuntimeError(
+                        "chat start failed and compression recovery restoration "
+                        f"is pending: {_sanitize_error(restore_err)}"
+                    ) from exc
             raise
         # Map adapter-selection NotImplementedError (501) onto the legacy
         # bad-request response shape that this route exposed historically
@@ -25786,7 +26117,9 @@ def _handle_chat_start(handler, body, diag=None):
             return j(handler, {"error": response["error"]}, status=501)
         status = int(response.pop("_status", 200) or 200)
         if status >= 400 and recovery_cleared_for_start is not None:
-            restore_err = _restore_cleared_recovery()
+            restore_err = _restore_cleared_recovery(
+                persist=response.get("code") != "chat_admission_timeout"
+            )
             if restore_err is not None:
                 return bad(handler, f"failed to restore compression recovery: {_sanitize_error(restore_err)}", 500)
         diag.stage("response_write") if diag else None
@@ -25873,7 +26206,14 @@ def _handle_chat_sync(handler, body):
         workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
     except ValueError as e:
         return bad(handler, str(e))
-    with _get_session_agent_lock(s.session_id):
+    with _bounded_chat_admission_lock(
+        s.session_id,
+        _get_session_agent_lock(s.session_id),
+    ) as acquired:
+        if not acquired:
+            response = _chat_admission_timeout_response()
+            response.pop("_status", None)
+            return j(handler, response, status=409)
         s.workspace = workspace
         _sync_requested_provider = (
             body.get("model_provider") if "model_provider" in body else getattr(s, "model_provider", None)
@@ -26057,7 +26397,15 @@ def _handle_chat_sync(handler, body):
                 task_id=s.session_id,
                 persist_user_message=msg,
             )
-    with _get_session_agent_lock(s.session_id):
+    with _bounded_chat_admission_lock(
+        s.session_id,
+        _get_session_agent_lock(s.session_id),
+        finalization=True,
+    ) as acquired:
+        if not acquired:
+            response = _chat_writeback_timeout_response()
+            status = response.pop("_status")
+            return j(handler, response, status=status)
         _result_messages = result.get("messages") or _previous_context_messages
         _next_context_messages = _restore_reasoning_metadata(
             _previous_context_messages,
@@ -26819,10 +27167,9 @@ def _handle_file_delete(handler, body):
         require(body, "session_id", "path")
     except ValueError as e:
         return bad(handler, str(e))
-    try:
-        s = get_session_for_file_ops(body["session_id"])
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, body["session_id"])
+    if s is None:
+        return True
     try:
         ws_root = Path(s.workspace)
         target = safe_resolve(ws_root, body["path"])
@@ -26851,10 +27198,9 @@ def _handle_file_save(handler, body):
         require(body, "session_id", "path")
     except ValueError as e:
         return bad(handler, str(e))
-    try:
-        s = get_session_for_file_ops(body["session_id"])
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, body["session_id"])
+    if s is None:
+        return True
     try:
         ws_root = Path(s.workspace)
         target = safe_resolve(ws_root, body["path"])
@@ -26882,10 +27228,9 @@ def _handle_office_file_save(handler, body):
         require(body, "session_id", "path")
     except ValueError as e:
         return bad(handler, str(e))
-    try:
-        s = get_session_for_file_ops(body["session_id"])
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, body["session_id"])
+    if s is None:
+        return True
     try:
         ws_root = Path(s.workspace)
         target = safe_resolve(ws_root, body["path"])
@@ -26917,10 +27262,9 @@ def _handle_file_create(handler, body):
         require(body, "session_id", "path")
     except ValueError as e:
         return bad(handler, str(e))
-    try:
-        s = get_session_for_file_ops(body["session_id"])
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, body["session_id"])
+    if s is None:
+        return True
     try:
         ws_root = Path(s.workspace)
         target = safe_resolve(ws_root, body["path"])
@@ -26944,10 +27288,9 @@ def _handle_file_rename(handler, body):
         require(body, "session_id", "path", "new_name")
     except ValueError as e:
         return bad(handler, str(e))
-    try:
-        s = get_session_for_file_ops(body["session_id"])
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, body["session_id"])
+    if s is None:
+        return True
     try:
         ws_root = Path(s.workspace)
         ws_root_resolved = ws_root.resolve()
@@ -26979,10 +27322,9 @@ def _handle_file_move(handler, body):
         require(body, "session_id", "path", "dest_dir")
     except ValueError as e:
         return bad(handler, str(e))
-    try:
-        s = get_session_for_file_ops(body["session_id"])
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, body["session_id"])
+    if s is None:
+        return True
     try:
         ws_root = Path(s.workspace)
         # safe_resolve() returns paths under the RESOLVED root, so compute
@@ -27077,10 +27419,9 @@ def _handle_create_dir(handler, body):
         require(body, "session_id", "path")
     except ValueError as e:
         return bad(handler, str(e))
-    try:
-        s = get_session_for_file_ops(body["session_id"])
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, body["session_id"])
+    if s is None:
+        return True
     try:
         ws_root = Path(s.workspace)
         target = safe_resolve(ws_root, body["path"])
@@ -27099,10 +27440,9 @@ def _handle_file_reveal(handler, body):
         require(body, "session_id", "path")
     except ValueError as e:
         return bad(handler, str(e))
-    try:
-        s = get_session_for_file_ops(body["session_id"])
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, body["session_id"])
+    if s is None:
+        return True
     try:
         target = safe_resolve(Path(s.workspace), body["path"])
         if not target.exists():
@@ -27160,10 +27500,9 @@ def _handle_file_path(handler, body):
         require(body, "session_id", "path")
     except ValueError as e:
         return bad(handler, str(e))
-    try:
-        s = get_session_for_file_ops(body["session_id"])
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, body["session_id"])
+    if s is None:
+        return True
     try:
         target = safe_resolve(Path(s.workspace), body["path"])
         return j(handler, {"ok": True, "path": str(target)})
@@ -27190,10 +27529,9 @@ def _handle_file_open_vscode(handler, body):
         require(body, "session_id", "path")
     except ValueError as e:
         return bad(handler, str(e))
-    try:
-        s = get_session_for_file_ops(body["session_id"])
-    except KeyError:
-        return bad(handler, "Session not found", 404)
+    s = _file_ops_session_or_error(handler, body["session_id"])
+    if s is None:
+        return True
     try:
         target = safe_resolve(Path(s.workspace), body["path"])
         if not target.exists():

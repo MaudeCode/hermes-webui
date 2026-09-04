@@ -1,5 +1,7 @@
 import io
 import json
+import threading
+import time
 from pathlib import Path
 
 from api import models, routes
@@ -188,6 +190,114 @@ def test_chat_start_restores_recovery_when_substantive_prompt_start_is_rejected(
     assert handler.status == 409
     assert saved["recommended_recovery_action"] == "start_focused_continuation"
     assert saved["compression_recovery"]["terminal_state"] == "compression_exhausted"
+
+
+def test_chat_start_timeout_restores_recovery_without_unlocked_save(monkeypatch, tmp_path):
+    session_dir = _isolate_sessions(monkeypatch, tmp_path)
+    sid = "recoverychat-timeout"
+    session = Session(
+        session_id=sid,
+        title="Recovery",
+        workspace=str(tmp_path),
+        model="gpt-4o",
+        messages=[{"role": "user", "content": "long task"}],
+    )
+    stamp_compression_exhausted_recovery(session, message="Context length exceeded.")
+    session.save()
+    models.SESSIONS[sid] = session
+    routes.SESSIONS[sid] = session
+    monkeypatch.setattr(
+        routes,
+        "_resolve_chat_workspace_with_recovery",
+        lambda *_args, **_kwargs: str(tmp_path),
+    )
+    monkeypatch.setattr(
+        routes, "_read_profile_model_config", lambda *_args, **_kwargs: (None, None, {})
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda requested_model, requested_provider, **_kwargs: (
+            requested_model or "gpt-4o",
+            requested_provider or "openai",
+            False,
+        ),
+    )
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _config: False)
+    save_calls = []
+    monkeypatch.setattr(session, "save", lambda **_kwargs: save_calls.append(True))
+    monkeypatch.setattr(
+        routes,
+        "_start_run",
+        lambda *_args, **_kwargs: {
+            "error": "session is busy",
+            "code": "chat_admission_timeout",
+            "_status": 409,
+        },
+    )
+
+    handler = _JSONHandler()
+    routes._handle_chat_start(
+        handler, {"session_id": sid, "message": "continue by checking the repo"}
+    )
+    saved = json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
+
+    assert handler.status == 409
+    assert save_calls == []
+    assert session.recommended_recovery_action == "start_focused_continuation"
+    assert saved["compression_recovery"]["terminal_state"] == "compression_exhausted"
+
+
+def test_deferred_recovery_restore_retries_after_lock_timeout(monkeypatch, tmp_path):
+    session_dir = _isolate_sessions(monkeypatch, tmp_path)
+    session = Session(
+        session_id="deferred-recovery",
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "long task"}],
+    )
+    recovery = stamp_compression_exhausted_recovery(
+        session, message="Context length exceeded."
+    )
+    clear_recovery = session.compression_recovery
+    session.compression_recovery = {}
+    session.recommended_recovery_action = None
+    session.save()
+    models.SESSIONS[session.session_id] = session
+    lock = threading.Lock()
+    lock.acquire()
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: lock)
+    monkeypatch.setattr(routes, "_CHAT_LOCK_WAIT_SECONDS", 0.02)
+
+    thread = routes._schedule_deferred_compression_recovery_restore(
+        session.session_id, recovery or clear_recovery
+    )
+    time.sleep(0.05)
+    assert thread.is_alive() is True
+    lock.release()
+    thread.join(timeout=1)
+
+    saved = json.loads(
+        (session_dir / f"{session.session_id}.json").read_text(encoding="utf-8")
+    )
+    assert thread.is_alive() is False
+    assert saved["compression_recovery"]["terminal_state"] == "compression_exhausted"
+
+
+def test_deferred_recovery_restore_stops_after_bounded_lock_retries(monkeypatch):
+    lock = threading.Lock()
+    lock.acquire()
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: lock)
+    monkeypatch.setattr(routes, "_CHAT_LOCK_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(routes, "_DEFERRED_SESSION_RETRY_DELAYS", (0.0, 0.0))
+
+    thread = routes._schedule_deferred_compression_recovery_restore(
+        "bounded-recovery", {"terminal_state": "compression_exhausted"}
+    )
+    thread.join(timeout=1)
+
+    assert thread.is_alive() is False
+    assert "bounded-recovery" not in routes._DEFERRED_RECOVERY_RESTORE_THREADS
+    lock.release()
 
 
 def test_recovery_start_creates_focused_linked_session(monkeypatch, tmp_path):

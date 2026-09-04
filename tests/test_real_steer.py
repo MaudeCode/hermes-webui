@@ -521,11 +521,15 @@ def test_terminal_steer_finalizes_before_scene_persistence():
     assert finalized < emitted < persisted
 
 
-def test_cancel_and_error_terminal_events_persist_steering_scene():
+def test_cancel_and_non_timeout_errors_persist_steering_scene():
     src = (Path(__file__).parent.parent / "api" / "streaming.py").read_text(encoding="utf-8")
     put = src[src.index("    def put(event, data):"):src.index("    # #5940:")]
 
     assert "if event in ('cancel', 'apperror', 'error'):" in put
+    assert (
+        'if _error_type not in {"chat_writeback_timeout", "chat_admission_timeout"}:'
+        in put
+    )
     assert "_persist_terminal_steering_scene(terminal_state=_terminal_state)" in put
     assert "'steer_consumed', 'pending_steer_leftover'" in put
 

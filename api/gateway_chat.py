@@ -846,7 +846,6 @@ def _run_gateway_runs_api_streaming(
     with urllib.request.urlopen(req_events, timeout=_gateway_read_timeout_secs()) as resp:
         for raw_line in _iter_sse_lines_cancellable(resp, cancel_event):
             if cancel_event.is_set():
-                put_gateway_event("cancel", {"message": "Cancelled by user"})
                 return None, usage
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line:
@@ -960,7 +959,6 @@ def _run_gateway_runs_api_streaming(
                 flush_deferred_reasoning()
                 from api.route_approvals import retire_gateway_pending_mirror
                 retire_gateway_pending_mirror(session_id, run_id=run_id)
-                put_gateway_event("cancel", {"message": "Cancelled by gateway"})
                 return None, usage
             reasoning_delta = _gateway_sse_reasoning_delta(payload)
             has_titles = _gateway_has_reasoning_titles(payload)
@@ -1035,9 +1033,17 @@ def _settle_gateway_terminal_error(
         _session_payload_with_terminal_window,
         _snapshot_and_append_partial_on_error,
         _terminal_turn_duration,
+        _try_acquire_worker_session_lock,
     )
 
-    with _get_session_agent_lock(session_id):
+    with _try_acquire_worker_session_lock(
+        stream_id,
+        _get_session_agent_lock(session_id),
+        "gateway_error_writeback",
+        timeout_phase="finalization_blocked",
+    ) as acquired:
+        if not acquired:
+            return _gateway_writeback_timeout_payload(session_id)
         session = get_session(session_id)
         if not _stream_writeback_is_current(session, stream_id):
             return None
@@ -1127,6 +1133,38 @@ def _settle_gateway_terminal_error(
         return error_payload
 
 
+def _gateway_writeback_timeout_payload(session_id: str) -> dict:
+    from api.routes import _chat_writeback_timeout_response
+
+    payload = _chat_writeback_timeout_response()
+    payload.pop("_status", None)
+    payload["type"] = payload["code"]
+    payload["session_id"] = session_id
+    payload["terminal_session_persisted"] = False
+    return payload
+
+
+def _settle_gateway_terminal_cancel(session_id: str, stream_id: str) -> bool:
+    from api.streaming import (
+        _finalize_cancelled_turn,
+        _try_acquire_worker_session_lock,
+    )
+
+    with _try_acquire_worker_session_lock(
+        stream_id,
+        _get_session_agent_lock(session_id),
+        "gateway_cancel_writeback",
+        timeout_phase="finalization_blocked",
+    ) as acquired:
+        if not acquired:
+            return False
+        return _finalize_cancelled_turn(
+            get_session(session_id),
+            ephemeral=False,
+            stream_id=stream_id,
+        )
+
+
 def _stream_writeback_is_current(session: Any, stream_id: str) -> bool:
     return bool(stream_id and getattr(session, "active_stream_id", None) == stream_id)
 
@@ -1214,6 +1252,7 @@ def _run_gateway_chat_streaming(
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
 
     success_writeback_committed = False
+    terminal_writeback_committed = False
     runs_api_pending_marked = True
     reasoning_titles: list[str] = []
     explicit_reasoning_titles: list[str] = []
@@ -1440,11 +1479,23 @@ def _run_gateway_chat_streaming(
                     str(exc),
                     regeneration=regeneration,
                 )
+                terminal_writeback_committed = bool(
+                    error_payload and error_payload.get("terminal_session_persisted")
+                )
                 if error_payload is None:
                     return
                 put_gateway_event("apperror", error_payload)
                 return
             if final_text is None:
+                terminal_writeback_committed = _settle_gateway_terminal_cancel(
+                    session_id, stream_id
+                )
+                if terminal_writeback_committed:
+                    put_gateway_event("cancel", {"message": "Cancelled"})
+                else:
+                    put_gateway_event(
+                        "apperror", _gateway_writeback_timeout_payload(session_id)
+                    )
                 return
             if final_text:
                 final_chunks = [final_text]
@@ -1527,7 +1578,18 @@ def _run_gateway_chat_streaming(
             with urllib.request.urlopen(req, timeout=_gateway_read_timeout_secs()) as resp:
                 for raw_line in _iter_sse_lines_cancellable(resp, cancel_event):
                     if cancel_event.is_set():
-                        put_gateway_event("cancel", {"message": "Cancelled by user"})
+                        terminal_writeback_committed = (
+                            _settle_gateway_terminal_cancel(session_id, stream_id)
+                        )
+                        if terminal_writeback_committed:
+                            put_gateway_event(
+                                "cancel", {"message": "Cancelled by user"}
+                            )
+                        else:
+                            put_gateway_event(
+                                "apperror",
+                                _gateway_writeback_timeout_payload(session_id),
+                            )
                         return
                     line = raw_line.decode("utf-8", errors="replace").strip()
                     if not line:
@@ -1644,6 +1706,9 @@ def _run_gateway_chat_streaming(
                 terminal_error,
                 regeneration=regeneration,
             )
+            terminal_writeback_committed = bool(
+                error_payload and error_payload.get("terminal_session_persisted")
+            )
             if error_payload is None:
                 return
             put_gateway_event("apperror", error_payload)
@@ -1665,10 +1730,25 @@ def _run_gateway_chat_streaming(
                 error_payload_override=empty_payload,
                 regeneration=regeneration,
             )
+            terminal_writeback_committed = bool(
+                error_payload and error_payload.get("terminal_session_persisted")
+            )
             if error_payload is not None:
                 put_gateway_event("apperror", error_payload)
             return
-        with _get_session_agent_lock(session_id):
+        from api.streaming import _try_acquire_worker_session_lock
+
+        with _try_acquire_worker_session_lock(
+            stream_id,
+            _get_session_agent_lock(session_id),
+            "gateway_success_writeback",
+            timeout_phase="finalization_blocked",
+        ) as acquired:
+            if not acquired:
+                put_gateway_event(
+                    "apperror", _gateway_writeback_timeout_payload(session_id)
+                )
+                return
             s = get_session(session_id)
             if not _stream_writeback_is_current(s, stream_id):
                 return
@@ -1676,7 +1756,17 @@ def _run_gateway_chat_streaming(
             # before success writeback. Treat it as cancellation so any
             # credential-exhausted process-wakeup pause stays in place.
             if cancel_event.is_set():
-                put_gateway_event("cancel", {"message": "Cancelled by user"})
+                from api.streaming import _finalize_cancelled_turn
+
+                terminal_writeback_committed = _finalize_cancelled_turn(
+                    s, ephemeral=False, stream_id=stream_id
+                )
+                if terminal_writeback_committed:
+                    put_gateway_event("cancel", {"message": "Cancelled by user"})
+                else:
+                    put_gateway_event(
+                        "apperror", _gateway_writeback_timeout_payload(session_id)
+                    )
                 return
             now = time.time()
             # Preserve subsecond ordering for gateway-backed turns. Using an
@@ -1837,6 +1927,7 @@ def _run_gateway_chat_streaming(
                 _restore_cancelled_success_writeback()
                 return
             success_writeback_committed = True
+            terminal_writeback_committed = True
         try:
             from api.goals import evaluate_goal_after_turn, has_active_goal
             from api.profiles import get_hermes_home_for_profile
@@ -1910,6 +2001,9 @@ def _run_gateway_chat_streaming(
             error_payload_override=http_payload,
             regeneration=regeneration,
         )
+        terminal_writeback_committed = bool(
+            error_payload and error_payload.get("terminal_session_persisted")
+        )
         if error_payload is not None:
             put_gateway_event("apperror", error_payload)
     except Exception as exc:
@@ -1946,6 +2040,9 @@ def _run_gateway_chat_streaming(
             error_payload = dict(gateway_payload)
             error_payload["session_id"] = session_id
             error_payload["terminal_session_persisted"] = bool(success_writeback_committed)
+        terminal_writeback_committed = bool(
+            error_payload.get("terminal_session_persisted")
+        )
         if error_payload is not None:
             put_gateway_event("apperror", error_payload)
     finally:
@@ -1962,10 +2059,24 @@ def _run_gateway_chat_streaming(
                 retire_gateway_pending_mirror(session_id, run_id=mapped_run_id)
             except Exception:
                 logger.debug("Failed to retire gateway pending mirrors during teardown", exc_info=True)
-        if s is not None:
+        if s is not None and terminal_writeback_committed:
             try:
-                with _get_session_agent_lock(session_id):
-                    _clear_gateway_pending_state(get_session(session_id), stream_id)
+                from api.streaming import _try_acquire_worker_session_lock
+
+                with _try_acquire_worker_session_lock(
+                    stream_id,
+                    _get_session_agent_lock(session_id),
+                    "gateway_teardown",
+                    timeout_phase="finalization_blocked",
+                    record_finalization_timeout=False,
+                ) as acquired:
+                    if acquired:
+                        _clear_gateway_pending_state(get_session(session_id), stream_id)
+                    else:
+                        logger.warning(
+                            "Gateway teardown skipped because session %s remained busy",
+                            session_id,
+                        )
             except Exception:
                 logger.debug("Failed to clear gateway stream state", exc_info=True)
             _cleanup_gateway_pending_mirror(session_id)

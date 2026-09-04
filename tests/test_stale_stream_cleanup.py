@@ -48,7 +48,7 @@ class _FakeSession:
 
 
 def test_stale_stream_cleanup_helper_exists():
-    assert "def _clear_stale_stream_state(session)" in ROUTES_SRC
+    assert "def _clear_stale_stream_state(session, *, lock_held: bool = False)" in ROUTES_SRC
     assert "stream_id in STREAMS" in ROUTES_SRC
     assert "session.active_stream_id = None" in ROUTES_SRC
     assert "session.pending_user_message = None" in ROUTES_SRC
@@ -69,6 +69,19 @@ def test_stale_stream_cleanup_does_not_refresh_sidebar_timestamp(monkeypatch):
     assert session.saved_touch_updated_at == [False]
 
 
+def test_lock_held_stale_cleanup_does_not_reacquire(monkeypatch):
+    config.STREAMS.clear()
+    session = _FakeSession()
+    monkeypatch.setattr(routes, "get_session", lambda sid: session)
+    monkeypatch.setattr(
+        routes,
+        "_get_session_agent_lock",
+        lambda _sid: (_ for _ in ()).throw(AssertionError("lock reacquired")),
+    )
+
+    assert routes._clear_stale_stream_state(session, lock_held=True) is True
+
+
 def test_session_load_clears_stale_stream_before_response():
     load_pos = ROUTES_SRC.index("s = get_session(sid, metadata_only=(not load_messages))")
     cleanup_pos = ROUTES_SRC.index("_clear_stale_stream_state(s)", load_pos)
@@ -77,8 +90,10 @@ def test_session_load_clears_stale_stream_before_response():
 
 
 def test_chat_start_clears_stale_pending_state_not_only_active_id():
-    stale_comment_pos = ROUTES_SRC.index("needs_stale_cleanup = True")
-    cleanup_pos = ROUTES_SRC.index("_clear_stale_stream_state(s)", stale_comment_pos)
+    stale_comment_pos = ROUTES_SRC.index("locked_stream_id = getattr(s, \"active_stream_id\", None)")
+    cleanup_pos = ROUTES_SRC.index(
+        "_clear_stale_stream_state(s, lock_held=True)", stale_comment_pos
+    )
     assert stale_comment_pos < cleanup_pos
 
 
@@ -117,15 +132,15 @@ def test_chat_start_rechecks_active_stream_under_session_lock(monkeypatch, tmp_p
     routes.PENDING_BG_TASK_COMPLETIONS.add(session.session_id)
 
     class MutatingSessionLock:
-        def __enter__(self):
+        def acquire(self, timeout=None):
             session.active_stream_id = existing_stream_id
             session.pending_user_message = "prompt already claimed by another start"
             session.pending_started_at = 123.0
             routes.STREAMS[existing_stream_id] = queue.Queue()
-            return self
+            return True
 
-        def __exit__(self, exc_type, exc, tb):
-            return False
+        def release(self):
+            pass
 
     class NoopThread:
         def __init__(self, *args, **kwargs):
@@ -246,16 +261,16 @@ def test_process_wakeup_retargets_snapshot_created_while_waiting_for_admission(
         def __init__(self, session_id):
             self.session_id = session_id
 
-        def __enter__(self):
+        def acquire(self, timeout=None):
             lock_entries.append(self.session_id)
             if self.session_id == parent.session_id:
                 # The caller captured a writable parent, then the active turn
                 # compressed it before this queued wakeup acquired admission.
                 parent.pre_compression_snapshot = True
-            return self
+            return True
 
-        def __exit__(self, exc_type, exc, tb):
-            return False
+        def release(self):
+            pass
 
     prepared = []
 

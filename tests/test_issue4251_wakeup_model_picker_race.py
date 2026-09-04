@@ -238,13 +238,21 @@ def test_dispatch_stamp_snapshots_provider_under_agent_lock(monkeypatch):
         def __init__(self):
             self._entered = 0
 
-        def __enter__(self):
+        def acquire(self, **_kwargs):
             self._entered += 1
             if self._entered == 1:
                 fake_session.model_provider = "openrouter"
+            return True
+
+        def release(self):
+            return None
+
+        def __enter__(self):
+            assert self.acquire()
             return self
 
         def __exit__(self, exc_type, exc, tb):
+            self.release()
             return False
 
     monkeypatch.setattr(streaming, "_get_session_agent_lock", lambda _session_id: PickerUpdateLock())

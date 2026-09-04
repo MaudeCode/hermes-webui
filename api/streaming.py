@@ -28,6 +28,9 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+_CHAT_LOCK_WAIT_SECONDS = 2.0
+_DEFERRED_SESSION_RETRY_DELAYS = (0.0, 0.25, 0.5, 1.0, 2.0, 4.0)
+
 from api.config import (
     _HERMES_FOUND,
     get_config,
@@ -40,6 +43,7 @@ from api.config import (
     _get_session_agent_lock, _alias_session_agent_lock,
     _set_thread_env, _clear_thread_env, _thread_ctx, _thread_local_env_value,
     register_active_run, update_active_run, publish_active_run_finished,
+    note_chat_admission_timeout, note_chat_finalization_timeout,
     unregister_stream_owner,
     stream_owner_session_id,
     session_writeback_owner,
@@ -2574,12 +2578,31 @@ def _finalize_cancelled_turn(
     if ephemeral:
         _cleanup_ephemeral_cancelled_turn(session)
         return True
+    if (
+        _session_has_cancel_marker(session)
+        and getattr(session, "active_stream_id", None) is None
+        and not getattr(session, "pending_user_message", None)
+    ):
+        return True
+    previous_state = {
+        "messages": copy.deepcopy(getattr(session, "messages", None)),
+        "active_stream_id": getattr(session, "active_stream_id", None),
+        "pending_user_message": getattr(session, "pending_user_message", None),
+        "pending_attachments": copy.deepcopy(
+            getattr(session, "pending_attachments", None)
+        ),
+        "pending_started_at": getattr(session, "pending_started_at", None),
+        "pending_user_source": getattr(session, "pending_user_source", None),
+    }
     if not _persist_cancelled_turn(session, message=message, stream_id=stream_id):
         return False
     try:
         session.save()
     except Exception:
         logger.debug("Failed to persist cancelled turn", exc_info=True)
+        for field, value in previous_state.items():
+            setattr(session, field, value)
+        return False
     return True
 
 def _aiagent_import_error_detail() -> str:
@@ -8485,8 +8508,19 @@ def _last_resort_sync_from_core(session, stream_id, agent_lock):
         profile_home = _get_profile_home(session.profile)
         core_path = profile_home / 'sessions' / f'session_{session.session_id}.json'
 
-        _lock_ctx = agent_lock if agent_lock is not None else contextlib.nullcontext()
-        with _lock_ctx:
+        _lock_ctx = (
+            _try_acquire_chat_lock(agent_lock, _CHAT_LOCK_WAIT_SECONDS)
+            if agent_lock is not None
+            else contextlib.nullcontext(True)
+        )
+        with _lock_ctx as acquired:
+            if not acquired:
+                note_chat_finalization_timeout()
+                logger.warning(
+                    "Final recovery skipped because session %s remained busy",
+                    getattr(session, "session_id", "?"),
+                )
+                return
             _apply_core_sync_or_error_marker(
                 session,
                 core_path,
@@ -9023,6 +9057,191 @@ def _refresh_cached_agent_primary_runtime_snapshot(agent) -> None:
             rt['is_anthropic_oauth'] = agent._is_anthropic_oauth
 
 
+@contextlib.contextmanager
+def _try_acquire_chat_lock(lock, timeout: float = _CHAT_LOCK_WAIT_SECONDS):
+    acquired = lock.acquire(timeout=timeout)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            lock.release()
+
+
+def _mark_chat_admission_timeout_stale(session, stream_id: str) -> bool:
+    """Make this unstarted turn immediately eligible for owned stale cleanup."""
+    if getattr(session, "active_stream_id", None) != stream_id:
+        return False
+    session.pending_started_at = None
+    return True
+
+
+@contextlib.contextmanager
+def _try_acquire_checkpoint_session_lock(lock, stop_event):
+    with _try_acquire_chat_lock(lock, _CHAT_LOCK_WAIT_SECONDS) as acquired:
+        yield acquired and not stop_event.is_set()
+
+
+@contextlib.contextmanager
+def _try_acquire_worker_session_lock(
+    stream_id: str,
+    lock,
+    stage: str,
+    *,
+    timeout_phase: str = "admission_blocked",
+    record_finalization_timeout: bool = True,
+):
+    started_at = time.time()
+    update_active_run(
+        stream_id,
+        preserve_cancelling=True,
+        phase="waiting_for_session_lock",
+        lock_stage=stage,
+        lock_wait_started_at=started_at,
+    )
+    with _try_acquire_chat_lock(lock, _CHAT_LOCK_WAIT_SECONDS) as acquired:
+        if not acquired:
+            if timeout_phase == "admission_blocked":
+                note_chat_admission_timeout()
+            elif record_finalization_timeout:
+                note_chat_finalization_timeout()
+            update_active_run(
+                stream_id,
+                preserve_cancelling=True,
+                phase=timeout_phase,
+                lock_stage=stage,
+                lock_wait_seconds=_CHAT_LOCK_WAIT_SECONDS,
+            )
+        else:
+            update_active_run(
+                stream_id,
+                preserve_cancelling=True,
+                phase=(
+                    "finalizing"
+                    if timeout_phase == "finalization_blocked"
+                    else "running"
+                ),
+                lock_stage=None,
+                lock_wait_started_at=None,
+            )
+        yield acquired
+
+
+class _WorkerWritebackTimeout(Exception):
+    """A completed worker could not reacquire its session persistence lock."""
+
+
+@contextlib.contextmanager
+def _bounded_worker_writeback_lock(stream_id: str, lock, stage: str):
+    with _try_acquire_worker_session_lock(
+        stream_id, lock, stage, timeout_phase="finalization_blocked"
+    ) as acquired:
+        if not acquired:
+            raise _WorkerWritebackTimeout(stage)
+        yield
+
+
+def _emit_worker_admission_timeout(session, session_id: str, stream_id: str, put) -> None:
+    _mark_chat_admission_timeout_stale(session, stream_id)
+    put('apperror', {
+        'type': 'chat_admission_timeout',
+        'message': 'Chat could not start because this session is busy. Try Stop or retry shortly.',
+        'session_id': getattr(session, 'session_id', session_id),
+        'old_session_id': session_id,
+    })
+
+
+def _emit_worker_writeback_timeout(session_id: str, put) -> None:
+    from api.routes import _chat_writeback_timeout_response
+
+    response = _chat_writeback_timeout_response()
+    response.pop("_status", None)
+    response["type"] = response["code"]
+    response["session_id"] = session_id
+    response["old_session_id"] = session_id
+    put("apperror", response)
+
+
+_DEFERRED_PAUSE_CLEAR_LOCK = threading.Lock()
+_DEFERRED_PAUSE_CLEAR_THREADS: dict[str, tuple[dict, threading.Thread]] = {}
+
+
+def _schedule_deferred_process_wakeup_pause_clear(
+    session_id: str, expected_pause: dict
+) -> threading.Thread | None:
+    if not expected_pause:
+        return None
+    expected_pause = dict(expected_pause)
+
+    def _clear_if_unchanged():
+        try:
+            lock = _get_session_agent_lock(session_id)
+            for retry_delay in _DEFERRED_SESSION_RETRY_DELAYS:
+                if retry_delay:
+                    time.sleep(retry_delay)
+                with _try_acquire_chat_lock(
+                    lock, _CHAT_LOCK_WAIT_SECONDS
+                ) as acquired:
+                    if acquired:
+                        try:
+                            current = get_session(session_id)
+                        except KeyError:
+                            return
+                        current_pause = dict(
+                            getattr(current, "process_wakeup_pause", {}) or {}
+                        )
+                        if current_pause != expected_pause:
+                            return
+                        if not getattr(current, "active_stream_id", None):
+                            if clear_process_wakeup_pause(
+                                current, reason="run_completed"
+                            ):
+                                try:
+                                    current.save(touch_updated_at=False)
+                                except Exception:
+                                    current.process_wakeup_pause = dict(expected_pause)
+                                    logger.warning(
+                                        "Deferred process-wakeup pause save failed for "
+                                        "session %s; retrying",
+                                        session_id,
+                                        exc_info=True,
+                                    )
+                                else:
+                                    return
+            logger.warning(
+                "Deferred process-wakeup pause clear exhausted retries for session %s",
+                session_id,
+            )
+        except Exception:
+            logger.warning(
+                "Deferred process-wakeup pause clear failed for session %s",
+                session_id,
+                exc_info=True,
+            )
+        finally:
+            current_thread = threading.current_thread()
+            with _DEFERRED_PAUSE_CLEAR_LOCK:
+                entry = _DEFERRED_PAUSE_CLEAR_THREADS.get(session_id)
+                if entry is not None and entry[1] is current_thread:
+                    _DEFERRED_PAUSE_CLEAR_THREADS.pop(session_id, None)
+
+    with _DEFERRED_PAUSE_CLEAR_LOCK:
+        existing = _DEFERRED_PAUSE_CLEAR_THREADS.get(session_id)
+        if (
+            existing is not None
+            and existing[0] == expected_pause
+            and existing[1].is_alive()
+        ):
+            return existing[1]
+        thread = threading.Thread(
+            target=_clear_if_unchanged,
+            daemon=True,
+            name=f"pause-clear-{session_id[:8]}",
+        )
+        _DEFERRED_PAUSE_CLEAR_THREADS[session_id] = (expected_pause, thread)
+        thread.start()
+        return thread
+
+
 def _publish_agent_instance(stream_id, agent) -> bool:
     """Publish one cancel target and return its captured cancel state."""
     with STREAMS_LOCK:
@@ -9117,6 +9336,8 @@ def _run_agent_streaming(
             _automatic_wakeup_limit_reason[0] or default_message
         )
     with STREAMS_LOCK:
+        if stream_id not in STREAMS:
+            cancel_event.set()
         CANCEL_FLAGS[stream_id] = cancel_event
         STREAM_PARTIAL_TEXT[stream_id] = []  # chunked partial text accumulator (#893)
         STREAM_REASONING_TEXT[stream_id] = []  # chunked reasoning accumulator (#1361 §A)
@@ -9426,6 +9647,19 @@ def _run_agent_streaming(
     _success_writeback_committed = False
     s = None
 
+    def _terminal_writeback_lock(
+        stage: str, *, record_finalization_timeout: bool = True
+    ):
+        if _agent_lock is None:
+            return contextlib.nullcontext(True)
+        return _try_acquire_worker_session_lock(
+            stream_id,
+            _agent_lock,
+            stage,
+            timeout_phase="finalization_blocked",
+            record_finalization_timeout=record_finalization_timeout,
+        )
+
     def _persist_terminal_steering_scene(*, terminal_state, turn_duration=None):
         if ephemeral or s is None:
             return
@@ -9472,7 +9706,8 @@ def _run_agent_streaming(
                 if event == 'cancel' or _error_type in {'cancelled', 'canceled'}
                 else ('interrupted-by-crash' if _error_type == 'interrupted' else 'errored')
             )
-            _persist_terminal_steering_scene(terminal_state=_terminal_state)
+            if _error_type not in {"chat_writeback_timeout", "chat_admission_timeout"}:
+                _persist_terminal_steering_scene(terminal_state=_terminal_state)
         event_id = None
         if run_journal is not None:
             try:
@@ -9586,6 +9821,7 @@ def _run_agent_streaming(
     _streaming_terminal_scope_installed = False
     _streaming_get_session_cwd = None
     _streaming_record_session_cwd = None
+    _admission_lock_timed_out = False
     # Initialised here (before any code that may raise) so the outer `finally`
     # block can safely check `if _checkpoint_stop is not None` even when an
     # exception fires before the checkpoint thread is created (Issue #765).
@@ -9656,7 +9892,13 @@ def _run_agent_streaming(
         # #4251: the route layer already persisted this turn's model under the
         # session lock before dispatch, so a mismatch here means a newer picker
         # write won the race and must not be clobbered by the worker thread.
-        with _agent_lock:
+        with _try_acquire_worker_session_lock(
+            stream_id, _agent_lock, "initial_model"
+        ) as acquired:
+            if not acquired:
+                _admission_lock_timed_out = True
+                _emit_worker_admission_timeout(s, session_id, stream_id, put)
+                return
             _last_persisted_model = getattr(s, "model", None)
             _last_persisted_provider = getattr(s, "model_provider", None)
             if _last_persisted_provider is not None:
@@ -9671,11 +9913,16 @@ def _run_agent_streaming(
                 _last_persisted_model = model
                 _last_persisted_provider = provider_context
                 _turn_owns_persisted_model = True
-
         # TD1: set thread-local env context so concurrent sessions don't clobber globals
         # Check for pre-flight cancel (user cancelled before agent even started)
         if cancel_event.is_set():
-            with _agent_lock:
+            with _try_acquire_worker_session_lock(
+                stream_id, _agent_lock, "preflight_cancel"
+            ) as acquired:
+                if not acquired:
+                    _admission_lock_timed_out = True
+                    _emit_worker_admission_timeout(s, session_id, stream_id, put)
+                    return
                 _finalize_cancelled_turn(
                     s,
                     ephemeral=ephemeral,
@@ -9725,7 +9972,13 @@ def _run_agent_streaming(
         # #4251: only apply the profile-repair persistence if this turn still
         # owns the session model/provider pair it last wrote.
         provider_context = str(provider_context).strip().lower() if provider_context else None
-        with _agent_lock:
+        with _try_acquire_worker_session_lock(
+            stream_id, _agent_lock, "profile_repair"
+        ) as acquired:
+            if not acquired:
+                _admission_lock_timed_out = True
+                _emit_worker_admission_timeout(s, session_id, stream_id, put)
+                return
             _current_provider = getattr(s, "model_provider", None)
             if _current_provider is not None:
                 _current_provider = str(_current_provider).strip().lower() or None
@@ -11077,7 +11330,13 @@ def _run_agent_streaming(
                     agent.interrupt("Cancelled before start")
                 except Exception:
                     logger.debug("Failed to interrupt agent before start")
-                with _agent_lock:
+                with _try_acquire_worker_session_lock(
+                    stream_id, _agent_lock, "prestart_cancel"
+                ) as acquired:
+                    if not acquired:
+                        _admission_lock_timed_out = True
+                        _emit_worker_admission_timeout(s, session_id, stream_id, put)
+                        return
                     _finalize_cancelled_turn(
                         s,
                         ephemeral=ephemeral,
@@ -11241,7 +11500,13 @@ def _run_agent_streaming(
                     try:
                         cur = _checkpoint_activity[0]
                         if cur > last_saved_activity:
-                            with _agent_lock:
+                            with _try_acquire_checkpoint_session_lock(
+                                _agent_lock, _checkpoint_stop
+                            ) as acquired:
+                                if not acquired:
+                                    if _checkpoint_stop.is_set():
+                                        return
+                                    continue
                                 fingerprint = _streaming_checkpoint_fingerprint(s)
                                 # A completed tool call is the trigger, but not
                                 # proof that anything the checkpoint persists
@@ -11271,8 +11536,33 @@ def _run_agent_streaming(
             _checkpoint_stop = threading.Event()
             # Persist the user message BEFORE streaming starts so it's durable even if
             # the server crashes before the first checkpoint fires (every 15s).
-            with _agent_lock:
+            with _try_acquire_worker_session_lock(
+                stream_id, _agent_lock, "prestream_save"
+            ) as acquired:
+                if not acquired:
+                    _admission_lock_timed_out = True
+                    _emit_worker_admission_timeout(s, session_id, stream_id, put)
+                    return
                 s.save(touch_updated_at=True, skip_index=False)
+
+            if cancel_event.is_set():
+                with _try_acquire_worker_session_lock(
+                    stream_id, _agent_lock, "post_save_cancel"
+                ) as acquired:
+                    if not acquired:
+                        _admission_lock_timed_out = True
+                        _emit_worker_admission_timeout(
+                            s, session_id, stream_id, put
+                        )
+                        return
+                    _finalize_cancelled_turn(
+                        s,
+                        ephemeral=ephemeral,
+                        message='Task cancelled before start.',
+                        stream_id=stream_id,
+                    )
+                put('cancel', _turn_cancel_payload('Cancelled before start'))
+                return
 
             _ckpt_thread = threading.Thread(
                 target=_periodic_checkpoint, daemon=True,
@@ -11371,11 +11661,12 @@ def _run_agent_streaming(
                     _checkpoint_stop.set()
                 if _ckpt_thread is not None:
                     _ckpt_thread.join(timeout=15)
-                if ephemeral:
-                    with _agent_lock:
+                with _bounded_worker_writeback_lock(
+                    stream_id, _agent_lock, "post_run_cancel"
+                ):
+                    if ephemeral:
                         _finalize_cancelled_turn(s, ephemeral=True, stream_id=stream_id)
-                else:
-                    with _agent_lock:
+                    else:
                         _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                         try:
                             append_turn_journal_event_for_stream(
@@ -11424,7 +11715,9 @@ def _run_agent_streaming(
             if _ckpt_thread is not None:
                 _ckpt_thread.join(timeout=15)
             if cancel_event.is_set():
-                with _agent_lock:
+                with _bounded_worker_writeback_lock(
+                    stream_id, _agent_lock, "post_checkpoint_cancel"
+                ):
                     _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                     try:
                         append_turn_journal_event_for_stream(
@@ -11442,7 +11735,9 @@ def _run_agent_streaming(
                 return
             _writeback_timings = []
             _writeback_started = time.perf_counter()
-            with _agent_lock:
+            with _bounded_worker_writeback_lock(
+                stream_id, _agent_lock, "result_writeback"
+            ):
                 if not ephemeral and not _stream_writeback_is_current(s, stream_id):
                     if _stream_writeback_can_supersede_recovery_marker(s, msg_text):
                         logger.info(
@@ -12500,6 +12795,7 @@ def _run_agent_streaming(
                     return
                 with _stream_writeback_stage(_writeback_timings, "session_save"):
                     s.save()
+                _success_writeback_committed = True
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                     try:
@@ -12602,8 +12898,8 @@ def _run_agent_streaming(
             # is still settling as a normal completion. The pause re-read, clear,
             # restore, and save must stay under the session lock so a concurrent
             # suppression cannot observe stale pause state or lose its update.
-            _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
-            with _lock_ctx:
+            def _finalize_process_wakeup_pause() -> bool:
+                nonlocal s
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                     try:
@@ -12619,7 +12915,7 @@ def _run_agent_streaming(
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                     put('cancel', _turn_cancel_payload())
-                    return
+                    return True
                 try:
                     _latest_pause_owner = get_session(getattr(s, 'session_id', session_id))
                     if _latest_pause_owner is not None:
@@ -12651,7 +12947,7 @@ def _run_agent_streaming(
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                         put('cancel', _turn_cancel_payload())
-                        return
+                        return True
                     with _stream_writeback_stage(_writeback_timings, "process_wakeup_pause_clear_save"):
                         s.save(touch_updated_at=False)
                     if cancel_event.is_set():
@@ -12674,8 +12970,27 @@ def _run_agent_streaming(
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                         put('cancel', _turn_cancel_payload())
-                        return
-                _success_writeback_committed = True
+                        return True
+                return False
+
+            _pause_for_deferred_clear = dict(
+                getattr(s, "process_wakeup_pause", {}) or {}
+            )
+            with _terminal_writeback_lock(
+                "success_finalize", record_finalization_timeout=False
+            ) as acquired:
+                if not acquired:
+                    logger.warning(
+                        "Skipped post-commit process-wakeup pause finalization because "
+                        "session %s remained busy",
+                        getattr(s, "session_id", session_id),
+                    )
+                    _schedule_deferred_process_wakeup_pause_clear(
+                        getattr(s, "session_id", session_id),
+                        _pause_for_deferred_clear,
+                    )
+                elif _finalize_process_wakeup_pause():
+                    return
             usage = {
                 'input_tokens': input_tokens,
                 'output_tokens': output_tokens,
@@ -13006,6 +13321,10 @@ def _run_agent_streaming(
                 except Exception:
                     logger.debug("Failed to unregister clarify callback")
     except Exception as e:
+        if isinstance(e, _WorkerWritebackTimeout):
+            _admission_lock_timed_out = True
+            _emit_worker_writeback_timeout(session_id, put)
+            return
         print('[webui] stream error:\n' + traceback.format_exc(), flush=True)
         err_str = str(e)
         # Sanitize HTML from provider error responses — some providers return
@@ -13025,8 +13344,11 @@ def _run_agent_streaming(
                     _checkpoint_stop.set()
                 if _ckpt_thread is not None:
                     _ckpt_thread.join(timeout=15)
-                _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
-                with _lock_ctx:
+                with _terminal_writeback_lock("exception_cancel") as acquired:
+                    if not acquired:
+                        _admission_lock_timed_out = True
+                        _emit_worker_writeback_timeout(session_id, put)
+                        return
                     _pause_recorded = False
                     if (
                         not ephemeral
@@ -13197,8 +13519,13 @@ def _run_agent_streaming(
                                     _checkpoint_stop.set()
                                 if _ckpt_thread is not None:
                                     _ckpt_thread.join(timeout=15)
-                                _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
-                                with _lock_ctx:
+                                with _terminal_writeback_lock(
+                                    "credential_self_heal_writeback"
+                                ) as acquired:
+                                    if not acquired:
+                                        _admission_lock_timed_out = True
+                                        _emit_worker_writeback_timeout(session_id, put)
+                                        return
                                     if not ephemeral and not _stream_writeback_is_current(s, stream_id):
                                         logger.info(
                                             "Skipping stale stream self-heal writeback for session %s stream %s; active_stream_id=%s",
@@ -13297,8 +13624,11 @@ def _run_agent_streaming(
             # Persist the error so it survives page reload.
             # _error=True ensures _sanitize_messages_for_api excludes it from subsequent
             # API calls so the LLM never sees its own error as prior context on the next turn.
-            _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
-            with _lock_ctx:
+            with _terminal_writeback_lock("exception_writeback") as acquired:
+                if not acquired:
+                    _admission_lock_timed_out = True
+                    _emit_worker_writeback_timeout(session_id, put)
+                    return
                 if not ephemeral and not _stream_writeback_is_current(s, stream_id):
                     if _turn_pending_source == 'process_wakeup':
                         # #6623 re-gate: merge the pause into the CURRENT
@@ -13435,6 +13765,7 @@ def _run_agent_streaming(
         if _ckpt_thread is not None:
             _ckpt_thread.join(timeout=15)
         if (s is not None
+                and not _admission_lock_timed_out
                 and getattr(s, 'active_stream_id', None) == stream_id
                 and getattr(s, 'pending_user_message', None)):
             update_active_run(stream_id, phase="finalizing")
@@ -14165,7 +14496,66 @@ def cancel_stream(stream_id: str) -> bool:
     # so the cancel-path mutation races neither the checkpoint thread nor
     # concurrent undo/retry calls.
     if _cancel_session_id:
-        with _get_session_agent_lock(_cancel_session_id):
+        cancel_lock_wait_started_at = time.time()
+        with _try_acquire_chat_lock(
+            _get_session_agent_lock(_cancel_session_id),
+            _CHAT_LOCK_WAIT_SECONDS,
+        ) as acquired:
+            if not acquired:
+                with streams_lock:
+                    late_flag = cancel_flags.get(stream_id)
+                    late_agent = agent_instances.get(stream_id)
+                if late_flag is not None:
+                    late_flag.set()
+                if late_agent is not None:
+                    try:
+                        late_agent.interrupt("Cancelled by user")
+                    except Exception:
+                        logger.debug(
+                            "Failed to interrupt late-published agent for %s",
+                            stream_id,
+                            exc_info=True,
+                        )
+                try:
+                    with _live_config.ACTIVE_RUNS_LOCK:
+                        late_active_run = bool(
+                            (_live_config.ACTIVE_RUNS or {}).get(stream_id)
+                        )
+                except Exception:
+                    late_active_run = False
+                if active_run_entry or late_active_run:
+                    note_chat_finalization_timeout()
+                else:
+                    note_chat_admission_timeout()
+                update_active_run(
+                    stream_id,
+                    phase="cancelling",
+                    cancellation_blocked=True,
+                    lock_wait_started_at=cancel_lock_wait_started_at,
+                    lock_wait_seconds=_CHAT_LOCK_WAIT_SECONDS,
+                )
+                if q is None:
+                    return False
+                try:
+                    q.put_nowait((
+                        "apperror",
+                        {
+                            "type": "cancel_writeback_timeout",
+                            "message": (
+                                "Cancellation was requested, but its persisted "
+                                "outcome is unknown. Refresh before retrying."
+                            ),
+                            "session_id": _cancel_session_id,
+                            "retryable": False,
+                            "outcome_unknown": True,
+                        },
+                    ))
+                except Exception:
+                    logger.debug(
+                        "Failed to emit blocked cancel for %s", stream_id
+                    )
+                    return False
+                return True
             try:
                 _cs = get_session(_cancel_session_id)
                 if not isinstance(getattr(_cs, 'messages', None), list):

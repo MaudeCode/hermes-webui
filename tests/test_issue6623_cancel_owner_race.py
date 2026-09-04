@@ -57,6 +57,7 @@ def _isolate_sessions(tmp_path, monkeypatch):
     config.STREAM_SESSION_OWNERS.clear()
     config.SESSION_WRITEBACK_OWNERS.clear()
     config.SESSION_AGENT_LOCKS.clear()
+    config.LAST_CHAT_ADMISSION_TIMEOUT_AT = None
     yield
     models.SESSIONS.clear()
     config.STREAMS.clear()
@@ -66,6 +67,7 @@ def _isolate_sessions(tmp_path, monkeypatch):
     config.STREAM_SESSION_OWNERS.clear()
     config.SESSION_WRITEBACK_OWNERS.clear()
     config.SESSION_AGENT_LOCKS.clear()
+    config.LAST_CHAT_ADMISSION_TIMEOUT_AT = None
 
 
 class _PoppingStreams(dict):
@@ -130,6 +132,85 @@ def test_issue6623_owner_must_be_captured_before_stream_pop(tmp_path, monkeypatc
     # No owner leak: the simulated worker teardown retired the registry entry,
     # and cancel captured the owner before that teardown could hide it.
     assert config.STREAM_SESSION_OWNERS.get(stream_id) is None
+
+
+def test_early_cancel_lock_timeout_signals_late_worker_and_reports_unknown(
+    tmp_path, monkeypatch
+):
+    sid = "sess_early_cancel_timeout"
+    stream_id = "stream_early_cancel_timeout"
+    session = Session(session_id=sid, messages=[])
+    session.active_stream_id = stream_id
+    session.pending_user_message = "hello"
+    session.pending_started_at = time.time()
+    models.SESSIONS[sid] = session
+    event_queue = queue.Queue()
+    config.STREAMS[stream_id] = event_queue
+    config.register_stream_owner(stream_id, sid)
+    config.CANCEL_FLAGS[stream_id] = threading.Event()
+    late_flag = threading.Event()
+
+    class LateWorkerLock:
+        def acquire(self, timeout=None):
+            config.CANCEL_FLAGS[stream_id] = late_flag
+            config.register_active_run(stream_id, session_id=sid, phase="starting")
+            return False
+
+        def release(self):
+            pytest.fail("an unacquired lock must not be released")
+
+    monkeypatch.setattr(streaming, "_CHAT_LOCK_WAIT_SECONDS", 0.02)
+    monkeypatch.setattr(
+        streaming, "_get_session_agent_lock", lambda _sid: LateWorkerLock()
+    )
+    try:
+        assert streaming.cancel_stream(stream_id) is True
+    finally:
+        config.unregister_active_run(stream_id)
+
+    event, payload = event_queue.get(timeout=1)
+    assert late_flag.is_set() is True
+    assert event == "apperror"
+    assert payload["type"] == "cancel_writeback_timeout"
+    assert payload["outcome_unknown"] is True
+    assert payload["session_id"] == sid
+    assert session.pending_started_at is not None
+    assert config.LAST_CHAT_FINALIZATION_TIMEOUT_AT is not None
+    config.LAST_CHAT_FINALIZATION_TIMEOUT_AT = None
+
+
+def test_mature_cancel_lock_timeout_emits_unknown_terminal_error(
+    tmp_path, monkeypatch
+):
+    sid = "sess_mature_cancel_timeout"
+    stream_id = "stream_mature_cancel_timeout"
+    session = Session(session_id=sid, messages=[])
+    session.active_stream_id = stream_id
+    session.pending_user_message = "hello"
+    session.pending_started_at = time.time()
+    models.SESSIONS[sid] = session
+    event_queue = queue.Queue()
+    config.STREAMS[stream_id] = event_queue
+    config.register_stream_owner(stream_id, sid)
+    config.CANCEL_FLAGS[stream_id] = threading.Event()
+    config.register_active_run(stream_id, session_id=sid, phase="running")
+    blocked_lock = threading.Lock()
+    blocked_lock.acquire()
+    monkeypatch.setattr(streaming, "_CHAT_LOCK_WAIT_SECONDS", 0.02)
+    monkeypatch.setattr(streaming, "_get_session_agent_lock", lambda _sid: blocked_lock)
+    config.LAST_CHAT_FINALIZATION_TIMEOUT_AT = None
+    try:
+        assert streaming.cancel_stream(stream_id) is True
+    finally:
+        blocked_lock.release()
+
+    event, payload = event_queue.get(timeout=1)
+    assert event == "apperror"
+    assert payload["type"] == "cancel_writeback_timeout"
+    assert payload["outcome_unknown"] is True
+    assert session.pending_started_at is not None
+    assert config.LAST_CHAT_FINALIZATION_TIMEOUT_AT is not None
+    config.LAST_CHAT_FINALIZATION_TIMEOUT_AT = None
 
 
 def test_issue6623_newer_stream_stale_writeback_still_rejected(tmp_path, monkeypatch):

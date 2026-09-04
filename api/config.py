@@ -9523,7 +9523,20 @@ SESSION_CHANNEL_SUBSCRIBER_GRACE_SECS: int = 60  # subscribers-empty grace
 ACTIVE_RUNS: dict = {}
 ACTIVE_RUNS_LOCK = threading.Lock()
 LAST_RUN_FINISHED_AT: float | None = None
+LAST_CHAT_ADMISSION_TIMEOUT_AT: float | None = None
+LAST_CHAT_FINALIZATION_TIMEOUT_AT: float | None = None
+CHAT_ADMISSION_HEALTH_WINDOW_SECONDS = 30.0
 SERVER_START_TIME = time.time()
+
+
+def note_chat_admission_timeout() -> None:
+    global LAST_CHAT_ADMISSION_TIMEOUT_AT
+    LAST_CHAT_ADMISSION_TIMEOUT_AT = time.time()
+
+
+def note_chat_finalization_timeout() -> None:
+    global LAST_CHAT_FINALIZATION_TIMEOUT_AT
+    LAST_CHAT_FINALIZATION_TIMEOUT_AT = time.time()
 
 
 def active_run_is_attachable(run_entry) -> bool:
@@ -9544,7 +9557,10 @@ def active_run_is_attachable(run_entry) -> bool:
     """
     return not (
         isinstance(run_entry, dict)
-        and str(run_entry.get("phase") or "").strip() == "cancelling"
+        and (
+            run_entry.get("attachable") is False
+            or str(run_entry.get("phase") or "").strip() == "cancelling"
+        )
     )
 
 
@@ -9585,7 +9601,8 @@ def register_active_run(stream_id: str, **metadata) -> None:
     entry.setdefault("stream_id", stream_id)
     entry.setdefault("started_at", now)
     entry.setdefault("phase", "running")
-    if "profile" not in entry and entry.get("session_id"):
+    health_only = bool(entry.get("health_only"))
+    if not health_only and "profile" not in entry and entry.get("session_id"):
         try:
             from api.models import get_session
 
@@ -9608,6 +9625,8 @@ def register_active_run(stream_id: str, **metadata) -> None:
         pass
     with ACTIVE_RUNS_LOCK:
         ACTIVE_RUNS[stream_id] = entry
+    if health_only:
+        return
     try:
         from api.talaria_relay import start_talaria_relay_publisher
         from api.session_events import publish_session_list_changed
@@ -9621,20 +9640,30 @@ def register_active_run(stream_id: str, **metadata) -> None:
         logger.debug("Failed to publish active-run start", exc_info=True)
 
 
-def update_active_run(stream_id: str, **metadata) -> None:
+def update_active_run(
+    stream_id: str, *, preserve_cancelling: bool = False, **metadata
+) -> None:
     """Update active-run metadata without creating a new run implicitly."""
     if not stream_id:
         return
     with ACTIVE_RUNS_LOCK:
         entry = ACTIVE_RUNS.get(stream_id)
         if entry is not None:
+            if preserve_cancelling and (
+                str(entry.get("phase") or "").strip() == "cancelling"
+                or entry.get("cancelled_at")
+                or entry.get("cancellation_blocked")
+            ):
+                return
             entry.update(metadata)
+            health_only = bool(entry.get("health_only"))
             session_id = entry.get("session_id")
             profile = entry.get("profile") if not entry.get("profile_unresolved") else None
         else:
+            health_only = False
             session_id = None
             profile = None
-    if session_id:
+    if session_id and not health_only:
         try:
             from api.session_events import publish_session_list_changed
             publish_session_list_changed("run_updated", profile=profile, session_id=session_id)
@@ -9645,6 +9674,8 @@ def update_active_run(stream_id: str, **metadata) -> None:
 def publish_active_run_finished(stream_id: str, entry) -> None:
     """Publish side effects after an active-run row is atomically retired."""
     unregister_stream_owner(stream_id)
+    if isinstance(entry, dict) and entry.get("health_only"):
+        return
     try:
         from api.session_events import publish_session_list_changed
         publish_session_list_changed(
@@ -9663,7 +9694,8 @@ def unregister_active_run(stream_id: str) -> None:
     global LAST_RUN_FINISHED_AT
     with ACTIVE_RUNS_LOCK:
         entry = ACTIVE_RUNS.pop(stream_id, None)
-        LAST_RUN_FINISHED_AT = time.time()
+        if not (isinstance(entry, dict) and entry.get("health_only")):
+            LAST_RUN_FINISHED_AT = time.time()
     publish_active_run_finished(stream_id, entry)
 
 # Agent cache: reuse AIAgent across messages in the same WebUI session so that
@@ -9711,7 +9743,10 @@ def _evict_session_agent(session_id: str) -> None:
     try:
         with ACTIVE_RUNS_LOCK:
             for _entry in (ACTIVE_RUNS or {}).values():
-                if (_entry or {}).get("session_id") == session_id:
+                if (
+                    (_entry or {}).get("session_id") == session_id
+                    and not (_entry or {}).get("health_only")
+                ):
                     _run_active = True
                     break
     except Exception:

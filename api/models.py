@@ -5750,6 +5750,10 @@ class WorkspaceBindingPersistenceError(ValueError):
     """A recovered workspace could not be durably bound to its WebUI session."""
 
 
+class WorkspaceBindingBusy(WorkspaceBindingPersistenceError):
+    """Workspace recovery could not acquire its session mutation lock in time."""
+
+
 _EXPECTED_WORKSPACE_UNSET = object()
 
 
@@ -5781,7 +5785,11 @@ def persist_recovered_workspace_binding(
     expected = str(expected_value or "")
     path = SESSION_DIR / f"{sid}.json"
     lock = _get_session_agent_lock(sid)
-    with lock:
+    if not lock.acquire(timeout=2.0):
+        raise WorkspaceBindingBusy(
+            "Failed to persist recovered workspace: session is busy"
+        )
+    try:
         if not path.exists():
             # Recovery only repairs an existing WebUI sidecar. Creating a new
             # sidecar here can resurrect a session that was deleted after the
@@ -5839,6 +5847,8 @@ def persist_recovered_workspace_binding(
                 exc_info=True,
             )
         return cached or session
+    finally:
+        lock.release()
 
 
 def get_session_for_file_ops(sid: str):

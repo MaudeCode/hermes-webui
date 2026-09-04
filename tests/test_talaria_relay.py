@@ -788,6 +788,44 @@ def test_terminal_state_survives_active_run_teardown(tmp_path, monkeypatch):
     assert restarted._next_revision() > states[0]["revision"]
 
 
+def test_health_only_waiter_is_not_published(tmp_path, monkeypatch):
+    key = Ed25519PrivateKey.generate()
+    key_path = tmp_path / "publisher.pem"
+    key_path.write_bytes(key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()))
+    from api import config, models
+
+    monkeypatch.setattr(
+        models,
+        "get_session",
+        lambda sid, metadata_only: type("S", (), {"title": sid, "profile": "default"})(),
+    )
+    publisher = TalariaRelayPublisher(
+        RelayConfig("https://relay.example", "publisher", "key", key_path)
+    )
+    with config.ACTIVE_RUNS_LOCK:
+        previous = dict(config.ACTIVE_RUNS)
+        config.ACTIVE_RUNS.clear()
+        config.ACTIVE_RUNS.update(
+            {
+                "real": {"stream_id": "real", "session_id": "session", "started_at": 1},
+                "admission": {
+                    "stream_id": "admission",
+                    "session_id": "waiting",
+                    "started_at": 2,
+                    "health_only": True,
+                },
+            }
+        )
+    try:
+        states = publisher.build_states("default")
+    finally:
+        with config.ACTIVE_RUNS_LOCK:
+            config.ACTIVE_RUNS.clear()
+            config.ACTIVE_RUNS.update(previous)
+
+    assert [state["sessionId"] for state in states] == ["session"]
+
+
 def test_publisher_isolates_permanent_failure_to_one_profile(tmp_path, caplog):
     key = Ed25519PrivateKey.generate()
     key_path = tmp_path / "publisher.pem"
