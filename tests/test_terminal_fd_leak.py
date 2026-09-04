@@ -21,6 +21,7 @@ the real-shell path is covered by test_terminal_linux_lifecycle.
 """
 import os
 import threading
+import time
 import types
 
 import pytest
@@ -71,6 +72,7 @@ def _make_registered_term(monkeypatch, sid, *, alive=True, last_activity=0.0, re
 def _clean_terminals(monkeypatch):
     # Never kill real process groups in these unit tests.
     monkeypatch.setattr(terminal.os, "killpg", lambda *a, **k: None)
+    monkeypatch.setattr(terminal, "_TERMINAL_SHUTTING_DOWN", False)
     yield
     with terminal._LOCK:
         sids = list(terminal._TERMINALS)
@@ -281,6 +283,7 @@ def test_reader_start_failure_rolls_back_published_terminal(monkeypatch, tmp_pat
 def test_close_all_waits_for_pending_start_cleanup(monkeypatch, tmp_path):
     request_ready = threading.Event()
     captured = {}
+    errors = []
 
     def put(request):
         captured["request"] = request
@@ -290,16 +293,18 @@ def test_close_all_waits_for_pending_start_cleanup(monkeypatch, tmp_path):
     monkeypatch.setattr(terminal, "_ensure_spawn_supervisor", lambda: None)
     monkeypatch.setattr(terminal, "_ensure_terminal_reaper", lambda: None)
 
-    owner = threading.Thread(
-        target=lambda: pytest.raises(
-            RuntimeError,
-            terminal.start_terminal,
-            "shutdown-pending",
-            tmp_path,
-        )
-    )
+    def start_and_capture():
+        try:
+            terminal.start_terminal("shutdown-pending", tmp_path)
+        except Exception as exc:
+            errors.append(str(exc))
+
+    owner = threading.Thread(target=start_and_capture)
     owner.start()
     assert request_ready.wait(1)
+    waiter = threading.Thread(target=start_and_capture)
+    waiter.start()
+    time.sleep(0.05)
     closed = threading.Event()
     shutdown = threading.Thread(
         target=lambda: (terminal.close_all_terminals(), closed.set())
@@ -310,9 +315,12 @@ def test_close_all_waits_for_pending_start_cleanup(monkeypatch, tmp_path):
     captured["request"].error = RuntimeError("shutdown")
     captured["request"].done.set()
     owner.join(1)
+    waiter.join(1)
     shutdown.join(1)
 
     assert closed.is_set()
+    assert waiter.is_alive() is False
+    assert "terminal subsystem is shutting down" in errors
     assert "shutdown-pending" not in terminal._STARTING_TERMINALS
 
 

@@ -160,6 +160,7 @@ class TerminalSession:
 _TERMINALS: dict[str, TerminalSession] = {}
 _LOCK = threading.RLock()
 _STARTING_TERMINALS: dict[str, "_StartReservation"] = {}
+_TERMINAL_SHUTTING_DOWN = False
 # Hard cap on concurrently live embedded terminals. Each holds a shell process,
 # a pty master fd, and a reader thread; a client that drops its output stream
 # without POSTing /api/terminal/close (tab close, crash, network drop) leaves
@@ -559,6 +560,8 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
 
     while True:
         with _LOCK:
+            if _TERMINAL_SHUTTING_DOWN:
+                raise RuntimeError("terminal subsystem is shutting down")
             current = _TERMINALS.get(sid)
             if current and current.is_alive() and not restart and current.workspace == cwd:
                 break
@@ -806,7 +809,9 @@ def _teardown_terminal(term: TerminalSession) -> None:
 
 def close_all_terminals() -> None:
     """Best-effort reap of embedded shells during graceful WebUI shutdown."""
+    global _TERMINAL_SHUTTING_DOWN
     with _LOCK:
+        _TERMINAL_SHUTTING_DOWN = True
         session_ids = list(_TERMINALS)
         pending = list(_STARTING_TERMINALS.values())
         for reservation in pending:
