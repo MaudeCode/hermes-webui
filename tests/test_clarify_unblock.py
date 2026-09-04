@@ -1,6 +1,7 @@
 """Tests for clarify prompt unblocking and HTTP endpoints."""
 
 import json
+import threading
 import uuid
 import urllib.request
 import urllib.error
@@ -114,6 +115,132 @@ class TestClarifyUnblocking:
         )
 
         clear_pending(sid)
+
+    def test_duplicate_callback_can_reenter_clarify_state(self):
+        sid = f"unit-reentrant-{uuid.uuid4().hex[:8]}"
+        data = {"question": "Same question", "choices_offered": ["one"]}
+        callback_finished = threading.Event()
+
+        def callback(_data):
+            assert submit_pending is not None
+            with _lock:
+                assert sid in _gateway_queues
+            callback_finished.set()
+
+        register_gateway_notify(sid, callback)
+        submit_pending(sid, data)
+        callback_finished.clear()
+        worker = threading.Thread(target=lambda: submit_pending(sid, data))
+        worker.start()
+        assert callback_finished.wait(1)
+        worker.join(1)
+        clear_pending(sid)
+
+        assert worker.is_alive() is False
+
+    def test_reversed_submit_dispatch_keeps_callback_on_authoritative_head(
+        self, monkeypatch
+    ):
+        from api import clarify
+
+        sid = f"unit-ordered-{uuid.uuid4().hex[:8]}"
+        first_waiting = threading.Event()
+        release_first = threading.Event()
+        callbacks = []
+        calls = 0
+        original_dispatch = clarify._dispatch_clarify_sse
+
+        def delayed_dispatch(notification, callback=None, callback_payload=None):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                first_waiting.set()
+                assert release_first.wait(2)
+            return original_dispatch(notification, callback, callback_payload)
+
+        monkeypatch.setattr(clarify, "_dispatch_clarify_sse", delayed_dispatch)
+        register_gateway_notify(sid, lambda data: callbacks.append(data["question"]))
+        first = threading.Thread(
+            target=lambda: submit_pending(sid, {"question": "A", "choices_offered": []})
+        )
+        first.start()
+        assert first_waiting.wait(1)
+        second = submit_pending(sid, {"question": "B", "choices_offered": []})
+        release_first.set()
+        first.join(1)
+
+        assert callbacks == ["A"]
+        assert resolve_clarify(sid, "done") == 1
+        assert callbacks == ["A", "B"]
+        assert second.event.is_set() is False
+        clear_pending(sid)
+        unregister_gateway_notify(sid)
+
+    def test_unregister_invalidates_deferred_submit_callback(self, monkeypatch):
+        from api import clarify
+
+        sid = f"unit-unregister-{uuid.uuid4().hex[:8]}"
+        dispatch_waiting = threading.Event()
+        release_dispatch = threading.Event()
+        callbacks = []
+        calls = 0
+        original_dispatch = clarify._dispatch_clarify_sse
+
+        def delayed_first_dispatch(notification, callback=None, callback_payload=None):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                dispatch_waiting.set()
+                assert release_dispatch.wait(2)
+            return original_dispatch(notification, callback, callback_payload)
+
+        monkeypatch.setattr(clarify, "_dispatch_clarify_sse", delayed_first_dispatch)
+        register_gateway_notify(sid, lambda data: callbacks.append(data))
+        submitter = threading.Thread(
+            target=lambda: submit_pending(sid, {"question": "late", "choices_offered": []})
+        )
+        submitter.start()
+        assert dispatch_waiting.wait(1)
+        unregister_gateway_notify(sid)
+        release_dispatch.set()
+        submitter.join(1)
+
+        assert submitter.is_alive() is False
+        assert callbacks == []
+        assert sid not in clarify._clarify_sse_sequence
+        assert sid not in clarify._clarify_sse_dispatched
+
+    def test_slow_callback_does_not_block_another_session(self):
+        first_started = threading.Event()
+        release_first = threading.Event()
+        second_finished = threading.Event()
+        sid_a = f"unit-slow-a-{uuid.uuid4().hex[:8]}"
+        sid_b = f"unit-slow-b-{uuid.uuid4().hex[:8]}"
+
+        def slow_callback(_data):
+            first_started.set()
+            assert release_first.wait(2)
+
+        register_gateway_notify(sid_a, slow_callback)
+        register_gateway_notify(sid_b, lambda _data: second_finished.set())
+        first = threading.Thread(
+            target=lambda: submit_pending(sid_a, {"question": "A", "choices_offered": []})
+        )
+        first.start()
+        assert first_started.wait(1)
+        second = threading.Thread(
+            target=lambda: submit_pending(sid_b, {"question": "B", "choices_offered": []})
+        )
+        second.start()
+        assert second_finished.wait(0.2)
+        release_first.set()
+        first.join(1)
+        second.join(1)
+        unregister_gateway_notify(sid_a)
+        unregister_gateway_notify(sid_b)
+
+        assert first.is_alive() is False
+        assert second.is_alive() is False
 
 
 class TestClarifyModuleExports:

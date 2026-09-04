@@ -407,6 +407,11 @@ All state lives in module-level variables in that file:
 Because server.py imports tools.approval at module load time and everything runs in the
 same process, this state IS shared between HTTP threads and agent daemon threads.
 
+Approval and clarification state locks protect queue mutation and subscriber
+snapshots only. SSE queue publication, session-list invalidation, registered
+callbacks, and waiter signaling happen after release. Per-session notification
+sequence numbers suppress a delayed stale snapshot without reordering queue state.
+
 Important: this only works because Python imports are cached (sys.modules). The same
 module object is used everywhere. If the approval module were ever imported in a subprocess
 or via importlib.reload(), this would break.

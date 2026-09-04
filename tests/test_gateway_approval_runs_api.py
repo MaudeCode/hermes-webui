@@ -1366,6 +1366,7 @@ def test_retire_gateway_pending_mirror_notifies_reconciled_successor_when_target
 
         def fake_notify(_sid, head, total):
             notifications.append((head["approval_id"] if head else None, total))
+            return _sid, 1, (), {"pending": head, "pending_count": total}
 
         with patch.object(approvals, "_approval_sse_notify_locked", side_effect=fake_notify):
             assert approvals.retire_gateway_pending_mirror(sid, approval_id="appr-a", run_id="run-a") is False
