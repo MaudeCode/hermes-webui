@@ -1578,7 +1578,18 @@ def _run_gateway_chat_streaming(
             with urllib.request.urlopen(req, timeout=_gateway_read_timeout_secs()) as resp:
                 for raw_line in _iter_sse_lines_cancellable(resp, cancel_event):
                     if cancel_event.is_set():
-                        put_gateway_event("cancel", {"message": "Cancelled by user"})
+                        terminal_writeback_committed = (
+                            _settle_gateway_terminal_cancel(session_id, stream_id)
+                        )
+                        if terminal_writeback_committed:
+                            put_gateway_event(
+                                "cancel", {"message": "Cancelled by user"}
+                            )
+                        else:
+                            put_gateway_event(
+                                "apperror",
+                                _gateway_writeback_timeout_payload(session_id),
+                            )
                         return
                     line = raw_line.decode("utf-8", errors="replace").strip()
                     if not line:
