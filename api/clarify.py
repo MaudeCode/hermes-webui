@@ -54,9 +54,12 @@ def _clear_queue_locked(session_key: str) -> list[_ClarifyEntry]:
 
 def unregister_gateway_notify(session_key: str) -> None:
     """Unregister the per-session callback and unblock any waiting clarify prompt."""
-    with _lock:
-        _gateway_notify_cbs.pop(session_key, None)
-        entries = _clear_queue_locked(session_key)
+    with _clarify_sse_dispatch_lock:
+        with _lock:
+            _gateway_notify_cbs.pop(session_key, None)
+            entries = _clear_queue_locked(session_key)
+            notification = _clarify_sse_snapshot_locked(session_key, None, 0)
+        _dispatch_clarify_sse(notification)
     if entries:
         publish_session_list_changed("attention_cleared")
     for entry in entries:

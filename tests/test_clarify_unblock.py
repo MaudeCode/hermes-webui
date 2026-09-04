@@ -173,6 +173,38 @@ class TestClarifyUnblocking:
         clear_pending(sid)
         unregister_gateway_notify(sid)
 
+    def test_unregister_invalidates_deferred_submit_callback(self, monkeypatch):
+        from api import clarify
+
+        sid = f"unit-unregister-{uuid.uuid4().hex[:8]}"
+        dispatch_waiting = threading.Event()
+        release_dispatch = threading.Event()
+        callbacks = []
+        calls = 0
+        original_dispatch = clarify._dispatch_clarify_sse
+
+        def delayed_first_dispatch(notification, callback=None, callback_payload=None):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                dispatch_waiting.set()
+                assert release_dispatch.wait(2)
+            return original_dispatch(notification, callback, callback_payload)
+
+        monkeypatch.setattr(clarify, "_dispatch_clarify_sse", delayed_first_dispatch)
+        register_gateway_notify(sid, lambda data: callbacks.append(data))
+        submitter = threading.Thread(
+            target=lambda: submit_pending(sid, {"question": "late", "choices_offered": []})
+        )
+        submitter.start()
+        assert dispatch_waiting.wait(1)
+        unregister_gateway_notify(sid)
+        release_dispatch.set()
+        submitter.join(1)
+
+        assert submitter.is_alive() is False
+        assert callbacks == []
+
 
 class TestClarifyModuleExports:
     def test_register_gateway_notify_exported(self):
