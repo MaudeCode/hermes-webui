@@ -99,6 +99,36 @@ class TestSessionPersistence(unittest.TestCase):
             "Invalidated session must not be reinstated after restart",
         )
 
+    def test_concurrent_idempotent_logout_joins_pending_persistence(self) -> None:
+        cookie = auth.create_session()
+        token = cookie.rsplit('.', 1)[0]
+        first_save_started = threading.Event()
+        release_first_save = threading.Event()
+        snapshots = []
+
+        def blocking_save(snapshot):
+            snapshots.append(dict(snapshot))
+            if len(snapshots) == 1:
+                first_save_started.set()
+                self.assertTrue(release_first_save.wait(timeout=1))
+
+        with mock.patch.object(auth, "_save_sessions", side_effect=blocking_save):
+            first = threading.Thread(target=auth.invalidate_session, args=(cookie,))
+            second = threading.Thread(target=auth.invalidate_session, args=(cookie,))
+            first.start()
+            self.assertTrue(first_save_started.wait(timeout=1))
+            second.start()
+            time.sleep(0.05)
+            self.assertTrue(second.is_alive())
+            release_first_save.set()
+            first.join(timeout=1)
+            second.join(timeout=1)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(len(snapshots), 2)
+        self.assertTrue(all(token not in snapshot for snapshot in snapshots))
+
     def test_expired_sessions_pruned_on_load(self) -> None:
         """Sessions that expire between restarts must not be loaded."""
         sessions_file = _TEST_STATE / '.sessions.json'

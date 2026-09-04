@@ -1084,13 +1084,11 @@ def invalidate_session(cookie_value) -> None:
     """Remove a session token."""
     if cookie_value and '.' in cookie_value:
         token = cookie_value.rsplit('.', 1)[0]
-        removed = False
         with _SESSIONS_LOCK:
-            if token in _sessions:
-                _sessions.pop(token, None)
-                removed = True
-        if removed:
-            _persist_sessions()
+            _sessions.pop(token, None)
+        # Always join the serialized persistence lane. A concurrent logout may
+        # have removed this token in memory but not committed that removal yet.
+        _persist_sessions()
 
 
 def parse_cookie(handler) -> str | None:
