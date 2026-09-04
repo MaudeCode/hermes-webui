@@ -254,6 +254,38 @@ class TestSSESubscribeUnsubscribe:
         finally:
             r._approval_sse_unsubscribe(sid, q)
 
+    def test_state_advanced_snapshot_suppresses_older_dispatch(self):
+        from api import route_approvals as approvals
+
+        sid = f"sse-stale-dispatch-{uuid.uuid4().hex[:8]}"
+        q = approvals._approval_sse_subscribe(sid)
+        try:
+            with approvals._lock:
+                older = approvals._approval_sse_notify_locked(
+                    sid, {"command": "old"}, 1
+                )
+                current = approvals._approval_sse_notify_locked(
+                    sid, {"command": "current"}, 1
+                )
+            approvals._dispatch_approval_sse(older)
+            approvals._dispatch_approval_sse(current)
+
+            assert q.get(timeout=1)["pending"]["command"] == "current"
+            assert q.empty()
+        finally:
+            approvals._approval_sse_unsubscribe(sid, q)
+
+    def test_empty_unowned_snapshot_releases_sequence_state(self):
+        from api import route_approvals as approvals
+
+        sid = f"sse-sequence-cleanup-{uuid.uuid4().hex[:8]}"
+        with approvals._lock:
+            notification = approvals._approval_sse_notify_locked(sid, None, 0)
+        approvals._dispatch_approval_sse(notification)
+
+        assert sid not in approvals._approval_sse_sequence
+        assert sid not in approvals._approval_sse_dispatched
+
     def test_unsubscribe_removes_queue(self):
         """After unsubscribe, the queue must not be in the subscribers list."""
         from api import routes as r
@@ -431,6 +463,7 @@ class TestSSENotifyFromSubmitPending:
 
     def test_gateway_mirror_reconcile_tags_live_head_and_purges_stale_copy(self):
         """Gateway mirrors must track the live head and disappear when the queue does."""
+        from api import route_approvals
         from api import routes as r
 
         sid = f"sse-gateway-mirror-{uuid.uuid4().hex[:8]}"
@@ -461,7 +494,8 @@ class TestSSENotifyFromSubmitPending:
                 assert r._pending[sid][0]["_gateway_mirror"] is True
                 r._gateway_queues.pop(sid, None)
                 head, total, changed = r.reconcile_gateway_pending_mirror_locked(sid)
-                r._approval_sse_notify_locked(sid, head, total)
+                notification = r._approval_sse_notify_locked(sid, head, total)
+            route_approvals._dispatch_approval_sse(notification)
             assert changed is True
 
             cleared = q.get(timeout=1)

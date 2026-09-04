@@ -321,6 +321,12 @@ Queue registry:
     STREAMS = {}               dict: stream_id -> queue.Queue
     STREAMS_LOCK = threading.Lock()
 
+`STREAMS_LOCK` protects only atomic registry snapshots and mutations. Code must
+release it before taking a per-session agent lock, interrupting an Agent,
+publishing events, persisting sessions, or calling another registry helper.
+The allowed nested order is session-agent lock then short stream-registry update;
+the reverse order is forbidden.
+
 SSE event types and their data shapes:
 
     token       {"text": "..."}                         LLM token delta
@@ -404,6 +410,11 @@ All state lives in module-level variables in that file:
 
 Because server.py imports tools.approval at module load time and everything runs in the
 same process, this state IS shared between HTTP threads and agent daemon threads.
+
+Approval and clarification state locks protect queue mutation and subscriber
+snapshots only. SSE queue publication, session-list invalidation, registered
+callbacks, and waiter signaling happen after release. Per-session notification
+sequence numbers suppress a delayed stale snapshot without reordering queue state.
 
 Important: this only works because Python imports are cached (sys.modules). The same
 module object is used everywhere. If the approval module were ever imported in a subprocess
@@ -591,6 +602,9 @@ Chat/session durability invariants:
     teardown. The relay grants each Apple-backed account one profile scope per publisher,
     so a profile's session identifiers, titles, phases, counts, and alerts never enter
     another account. Publication is best-effort and never blocks an agent or browser stream.
+    The publisher registry lock protects only pointer snapshots/swaps. Pairing HTTP,
+    initial publication, listener changes, start/stop, and terminal callbacks run after
+    releasing it; a separate transition lock preserves configure/start/stop ordering.
 
 Rendering:
     renderMessages()      Full rebuild of #msgInner from S.messages
