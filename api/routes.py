@@ -19261,7 +19261,7 @@ def _handle_list_dir(handler, parsed):
             },
         )
     except WorkspaceBindingBusy:
-        response = _chat_admission_timeout_response()
+        response = _file_operation_busy_response()
         status = response.pop("_status")
         return j(handler, response, status=status)
     except WorkspaceBindingPersistenceError as e:
@@ -19288,7 +19288,7 @@ def _file_ops_session_or_error(handler, session_id: str):
     try:
         return get_session_for_file_ops(session_id)
     except WorkspaceBindingBusy:
-        response = _chat_admission_timeout_response()
+        response = _file_operation_busy_response()
         status = response.pop("_status")
         j(handler, response, status=status)
     except KeyError:
@@ -23988,6 +23988,16 @@ def _chat_admission_timeout_response() -> dict:
     }
 
 
+def _file_operation_busy_response() -> dict:
+    return {
+        "error": "session is busy",
+        "code": "file_operation_busy",
+        "message": "The session is busy. Retry this file operation shortly.",
+        "retryable": True,
+        "_status": 409,
+    }
+
+
 def _chat_writeback_timeout_response() -> dict:
     return {
         "error": "response persistence is uncertain",
@@ -25199,6 +25209,7 @@ def start_session_turn(
     try:
         workspace = _resolve_chat_workspace_with_recovery(s, None)
     except WorkspaceBindingBusy:
+        note_chat_admission_timeout()
         return _chat_admission_timeout_response()
     except WorkspaceBindingPersistenceError as e:
         return {"error": str(e), "_status": 500}
@@ -25913,6 +25924,7 @@ def _handle_chat_start(handler, body, diag=None):
             else:
                 workspace = _resolve_chat_workspace_with_recovery(s, body.get("workspace"))
         except WorkspaceBindingBusy:
+            note_chat_admission_timeout()
             response = _chat_admission_timeout_response()
             status = response.pop("_status")
             return j(handler, response, status=status)

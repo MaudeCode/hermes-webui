@@ -868,6 +868,9 @@ def test_gateway_terminal_cancel_durably_clears_pending_turn(tmp_path, monkeypat
         assert gateway_chat._settle_gateway_terminal_cancel(
             session.session_id, stream_id
         ) is True
+        assert gateway_chat._settle_gateway_terminal_cancel(
+            session.session_id, stream_id
+        ) is True
     finally:
         config.clear_session_writeback_owner_if_owned(session.session_id, stream_id)
 

@@ -78,6 +78,7 @@ def test_workspace_recovery_lock_wait_is_bounded(monkeypatch, tmp_path):
     _write_session_sidecar(monkeypatch, tmp_path, session)
     held = threading.Lock()
     held.acquire()
+    api_config.LAST_CHAT_ADMISSION_TIMEOUT_AT = None
     monkeypatch.setattr(models, "_get_session_agent_lock", lambda _sid: held)
     try:
         with pytest.raises(
@@ -86,10 +87,10 @@ def test_workspace_recovery_lock_wait_is_bounded(monkeypatch, tmp_path):
             models.persist_recovered_workspace_binding(session, tmp_path)
     finally:
         held.release()
-        api_config.LAST_CHAT_ADMISSION_TIMEOUT_AT = None
+    assert api_config.LAST_CHAT_ADMISSION_TIMEOUT_AT is None
 
 
-def test_file_operation_busy_uses_chat_admission_timeout_response(monkeypatch):
+def test_file_operation_busy_uses_file_specific_response(monkeypatch):
     captured = {}
     monkeypatch.setattr(
         routes,
@@ -106,7 +107,7 @@ def test_file_operation_busy_uses_chat_admission_timeout_response(monkeypatch):
 
     assert routes._file_ops_session_or_error(SimpleNamespace(), "busy-session") is None
     assert captured["status"] == 409
-    assert captured["payload"]["code"] == "chat_admission_timeout"
+    assert captured["payload"]["code"] == "file_operation_busy"
     assert captured["payload"]["retryable"] is True
 
 

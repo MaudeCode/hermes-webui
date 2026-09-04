@@ -2577,6 +2577,12 @@ def _finalize_cancelled_turn(
     if ephemeral:
         _cleanup_ephemeral_cancelled_turn(session)
         return True
+    if (
+        _session_has_cancel_marker(session)
+        and getattr(session, "active_stream_id", None) is None
+        and not getattr(session, "pending_user_message", None)
+    ):
+        return True
     previous_state = {
         "messages": copy.deepcopy(getattr(session, "messages", None)),
         "active_stream_id": getattr(session, "active_stream_id", None),

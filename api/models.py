@@ -5786,7 +5786,6 @@ def persist_recovered_workspace_binding(
     path = SESSION_DIR / f"{sid}.json"
     lock = _get_session_agent_lock(sid)
     if not lock.acquire(timeout=2.0):
-        _cfg.note_chat_admission_timeout()
         raise WorkspaceBindingBusy(
             "Failed to persist recovered workspace: session is busy"
         )
