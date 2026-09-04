@@ -1042,12 +1042,14 @@ def test_sse_fetch_new_returns_advanced_cursor_and_events(monkeypatch):
     empty result."""
     bridge = _load_bridge(monkeypatch)
     # Default fake fixture has 1 event with id=7
-    new_cursor, events = bridge._kanban_sse_fetch_new(None, 0)
+    conn, new_cursor, events = bridge._kanban_sse_poll(None, None, 0)
     assert new_cursor == 7
     assert len(events) == 1
     assert events[0]["id"] == 7
+    # A successful pass must hand the connection back for reuse.
+    assert conn is not None
     # No new events past the cursor → empty list, cursor unchanged
-    new_cursor2, events2 = bridge._kanban_sse_fetch_new(None, 7)
+    conn, new_cursor2, events2 = bridge._kanban_sse_poll(conn, None, 7)
     assert new_cursor2 == 7
     assert events2 == []
 
@@ -1063,9 +1065,12 @@ def test_sse_fetch_new_self_heals_on_db_error(monkeypatch):
         raise RuntimeError("simulated transient sqlite contention")
 
     monkeypatch.setattr(kb, "connect", raising_connect)
-    new_cursor, events = bridge._kanban_sse_fetch_new(None, 5)
+    conn, new_cursor, events = bridge._kanban_sse_poll(None, None, 5)
     assert new_cursor == 5  # cursor preserved
     assert events == []  # empty, not exception
+    # No usable handle survived, so the next pass must reconnect rather
+    # than keep polling a dead one.
+    assert conn is None
 
 
 def test_sse_handler_runs_in_thread_and_streams_event(monkeypatch):
@@ -1145,6 +1150,78 @@ def test_sse_handler_runs_in_thread_and_streams_event(monkeypatch):
     assert handler.responses == [200]
     assert saw_hello.is_set(), "Initial 'event: hello' frame never appeared in stream"
     assert not error_holder, f"SSE handler raised: {error_holder!r}"
+
+
+def test_sse_stream_connects_once_for_the_whole_stream(monkeypatch):
+    """HWEB-31: the stream must hold ONE sqlite connection for its lifetime.
+
+    The old loop called kb.connect()/close() every poll pass — 3.3 cycles
+    per second per connected client. Run the handler across many poll
+    passes and assert kb.connect was called exactly once, and that events
+    still reach the client over that single reused handle.
+    """
+    import threading
+    import io
+
+    bridge = _load_bridge(monkeypatch)
+    # Many poll passes inside the window below, so a per-pass reconnect
+    # would show up as a double-digit connect count.
+    monkeypatch.setattr(bridge, "_KANBAN_SSE_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(bridge, "_KANBAN_SSE_HEARTBEAT_SECONDS", 0.05)
+
+    kb = bridge._kb()
+    original_connect = kb.connect
+    connect_calls = []
+
+    def counting_connect(*args, **kwargs):
+        connect_calls.append(kwargs.get("board"))
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr(kb, "connect", counting_connect)
+
+    class FakeHandler:
+        def __init__(self):
+            self.wfile = io.BytesIO()
+            self.headers = {}
+            self.responses = []
+
+        def send_response(self, code): self.responses.append(code)
+        def send_header(self, k, v): pass
+        def end_headers(self): pass
+
+    handler = FakeHandler()
+    done = threading.Event()
+
+    def runner():
+        try:
+            bridge._handle_events_sse_stream(handler, _parsed(query="since=0"))
+        finally:
+            done.set()
+
+    t = threading.Thread(target=runner, daemon=True)
+    t.start()
+    # Wait for the first events frame (proves the reused handle serves
+    # reads), then keep the stream open well past many more poll passes.
+    deadline = time.monotonic() + 2.0
+    saw_events = False
+    while time.monotonic() < deadline:
+        time.sleep(0.02)
+        try:
+            buf = handler.wfile.getvalue()
+        except ValueError:
+            buf = b""
+        if b"event: events" in buf:
+            saw_events = True
+            break
+    assert saw_events, "no events frame arrived over the reused connection"
+    time.sleep(0.3)  # ~30 further poll passes at 0.01s
+    handler.wfile.close()
+    done.wait(timeout=2.0)
+    assert done.is_set(), "SSE handler did not exit after writer close"
+    assert connect_calls == [None], (
+        f"stream must connect once for its lifetime; saw {len(connect_calls)} "
+        f"kb.connect calls: {connect_calls}"
+    )
 
 
 def test_handle_kanban_patch_routes_boards_slug_before_board_query_param(monkeypatch):
@@ -1257,11 +1334,11 @@ def test_sse_honours_last_event_id_header_when_since_absent(monkeypatch):
 
     captured_cursor = []
 
-    def spying_fetch(board, cursor):
+    def spying_poll(conn, board, cursor):
         captured_cursor.append(cursor)
-        return cursor, []
+        return conn, cursor, []
 
-    monkeypatch.setattr(bridge, "_kanban_sse_fetch_new", spying_fetch)
+    monkeypatch.setattr(bridge, "_kanban_sse_poll", spying_poll)
 
     class FakeHandler:
         def __init__(self):

@@ -988,12 +988,21 @@ def _switch_board_payload(slug):
 # for the same purpose; we use SSE because the WebUI's existing transport
 # is a synchronous BaseHTTPServer and SSE is the right tool for
 # unidirectional server-pushed event streams. The wire-level UX is
-# identical from the client's perspective: events arrive within ~300ms
-# of being committed to task_events.
+# identical from the client's perspective: events arrive within one poll
+# interval of being committed to task_events.
 
-# Polling interval matches the agent dashboard's _EVENT_POLL_SECONDS so
-# write-to-receive latency is identical between the two surfaces.
-_KANBAN_SSE_POLL_SECONDS = 0.3
+# Polling interval. The kanban DB is also written out-of-process (the
+# `hermes kanban` CLI, agents running against the same file), so an
+# in-process broadcast channel like api/config.py's StreamChannel cannot
+# observe every write — polling stays the only correct wake-up source for
+# this stream. What a poll must NOT do is reconnect: _kanban_sse_poll
+# holds one sqlite connection for the stream's lifetime, so a pass is a
+# single indexed SELECT on an already-open handle instead of a
+# board_exists stat + connect + query + close cycle. With that per-pass
+# cost gone, 1s is well inside this surface's latency budget (a kanban
+# card changing column is not a token stream) and drops the per-client
+# wake-up rate from 3.3 Hz to 1 Hz.
+_KANBAN_SSE_POLL_SECONDS = 1.0
 # Heartbeat keeps proxies/CDNs from reaping the connection on idle boards.
 # Identical to the approval/clarify SSE heartbeat.
 _KANBAN_SSE_HEARTBEAT_SECONDS = 15.0
@@ -1002,28 +1011,51 @@ _KANBAN_SSE_HEARTBEAT_SECONDS = 15.0
 _KANBAN_SSE_BATCH_LIMIT = 200
 
 
-def _kanban_sse_fetch_new(board, cursor):
-    """Read events with id > cursor from the given board's task_events
-    table. Returns ``(new_cursor, events_list)``. Best-effort — returns
-    the input cursor and an empty list on any DB error so the SSE loop
-    self-heals on transient sqlite contention rather than dropping the
-    client."""
+def _kanban_sse_close(conn):
+    """Close a stream's sqlite handle, tolerating an already-dead one."""
+    if conn is None:
+        return
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+
+def _kanban_sse_poll(conn, board, cursor):
+    """One poll pass over a board's task_events, reusing a held connection.
+
+    Takes the connection the previous pass left open (``None`` on the
+    first pass) and returns ``(conn, new_cursor, events_list)``. The
+    returned connection is the one the next pass must pass back in; it is
+    ``None`` whenever this pass could not leave a usable handle behind,
+    which is how the stream self-heals — the next pass reconnects rather
+    than retrying a poisoned handle forever.
+
+    Best-effort: never raises, and returns the input cursor with an empty
+    list on any DB error so transient sqlite contention does not drop the
+    client. Callers that do not stream (one-shot reads) must pass
+    ``conn=None`` and close the returned handle.
+    """
     kb = _kb()
     # Guard against a board that's been archived/removed mid-stream:
     # kb.connect(board=<slug>) auto-materialises the directory + DB on
     # first call, which would silently un-archive a board that was just
-    # removed. Skip the fetch when the board no longer exists.
+    # removed. Skip the fetch when the board no longer exists, and drop
+    # any handle we still hold so a removed board stops being served
+    # through an fd opened before the removal.
     if board is not None:
         try:
             default_slug = getattr(kb, "DEFAULT_BOARD", "default")
         except Exception:
             default_slug = "default"
         if board != default_slug and not kb.board_exists(board):
-            return cursor, []
-    try:
-        conn = kb.connect(board=board)
-    except Exception:
-        return cursor, []
+            _kanban_sse_close(conn)
+            return None, cursor, []
+    if conn is None:
+        try:
+            conn = kb.connect(board=board)
+        except Exception:
+            return None, cursor, []
     try:
         rows = conn.execute(
             "SELECT id, task_id, run_id, kind, payload, created_at "
@@ -1031,12 +1063,8 @@ def _kanban_sse_fetch_new(board, cursor):
             (int(cursor), _KANBAN_SSE_BATCH_LIMIT),
         ).fetchall()
     except Exception:
-        return cursor, []
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        _kanban_sse_close(conn)
+        return None, cursor, []
     out = []
     new_cursor = cursor
     for r in rows:
@@ -1056,7 +1084,7 @@ def _kanban_sse_fetch_new(board, cursor):
             "created_at": int(r["created_at"]) if r["created_at"] is not None else None,
         })
         new_cursor = int(r["id"])
-    return new_cursor, out
+    return conn, new_cursor, out
 
 
 def _handle_events_sse_stream(handler, parsed):
@@ -1123,9 +1151,14 @@ def _handle_events_sse_stream(handler, parsed):
         return True
 
     last_heartbeat = time.monotonic()
+    # One connection for the whole stream. Opened lazily by the first
+    # _kanban_sse_poll pass, handed back to each subsequent pass, and
+    # closed once in the finally below no matter which exit the loop
+    # takes (broken pipe, unexpected exception, board removal).
+    conn = None
     try:
         while True:
-            cursor, events = _kanban_sse_fetch_new(board, cursor)
+            conn, cursor, events = _kanban_sse_poll(conn, board, cursor)
             if events:
                 # Emit `id: <last_event_id>` on every events frame so the
                 # browser sets Last-Event-ID on auto-reconnect, letting us
@@ -1156,6 +1189,8 @@ def _handle_events_sse_stream(handler, parsed):
         # Any other unexpected exception in the SSE loop should not bubble
         # up to the request handler (which would 500 a long-lived stream).
         return True
+    finally:
+        _kanban_sse_close(conn)
 
 
 def handle_kanban_get(handler, parsed) -> bool | None:
