@@ -644,11 +644,28 @@ def test_default_worker_pins_root_home_while_cron_mutates_process_env(
     cron_home.mkdir(parents=True)
     monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", root_home)
     monkeypatch.setenv("HERMES_HOME", str(cron_home))
+    monkeypatch.setenv("OPENAI_API_KEY", "root-process-key")
 
     with profiles.profile_env_for_background_worker("default", "background title"):
         assert config._thread_local_env_value("HERMES_HOME") == str(root_home)
+        assert config._thread_local_env_value("OPENAI_API_KEY") == "root-process-key"
 
     assert os.environ["HERMES_HOME"] == str(cron_home)
+
+
+def test_default_readonly_request_pins_root_home(monkeypatch, tmp_path):
+    import api.config as config
+
+    root_home = tmp_path / "root"
+    cron_home = tmp_path / "profiles" / "cron"
+    root_home.mkdir()
+    cron_home.mkdir(parents=True)
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", root_home)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    monkeypatch.setenv("HERMES_HOME", str(cron_home))
+
+    with profiles.profile_env_for_active_request_readonly("providers"):
+        assert config._thread_local_env_value("HERMES_HOME") == str(root_home)
 
 
 def test_default_detached_worker_pins_root_home(monkeypatch, tmp_path):

@@ -1230,7 +1230,13 @@ def profile_env_for_background_worker(
             "profile environment resolution failed."
         ) from exc
 
-    thread_env = {name: "" for name in secret_env_names}
+    if _is_root_profile(profile):
+        thread_env = {
+            name: os.environ.get(name, "")
+            for name in secret_env_names
+        }
+    else:
+        thread_env = {name: "" for name in secret_env_names}
     thread_env.update(safe_runtime_env)
     thread_env["HERMES_HOME"] = str(profile_home_path)
     previous_thread_env = getattr(_thread_ctx, "env", {}).copy()
@@ -1330,7 +1336,10 @@ def profile_env_for_active_request_readonly(
     """
     profile = (get_active_profile_name() or "").strip()
     if (not profile or _is_root_profile(profile)) and not isolate_root:
-        yield
+        with profile_env_for_background_worker(
+            "default", purpose, logger_override=logger_override
+        ):
+            yield
         return
     try:
         from api.config import _clear_thread_env, _set_thread_env, _thread_ctx
