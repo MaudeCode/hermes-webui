@@ -451,8 +451,10 @@ def test_gated_write_closes_the_connection(boot_server):
         while True:
             try:
                 data = sock.recv(4096)
-            except socket.timeout:  # pragma: no cover - the bug being pinned
-                raise AssertionError("server held the connection open on a gated write")
+            except socket.timeout as exc:  # pragma: no cover - the bug being pinned
+                raise AssertionError(
+                    "server held the connection open on a gated write"
+                ) from exc
             if not data:
                 break
             chunks.append(data)
