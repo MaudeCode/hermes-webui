@@ -360,6 +360,35 @@ def test_shutdown_waits_for_supervisor_owned_late_spawn_cleanup(monkeypatch):
     assert finished.is_set()
 
 
+def test_spawn_timeout_retains_capacity_until_supervisor_cleanup(monkeypatch, tmp_path):
+    captured = {}
+
+    class NeverDone:
+        def wait(self, timeout=None):
+            return False
+
+        def is_set(self):
+            return False
+
+    def put(request):
+        request.done = NeverDone()
+        captured["request"] = request
+
+    monkeypatch.setattr(terminal, "_spawn_queue", types.SimpleNamespace(put=put))
+    monkeypatch.setattr(terminal, "_ensure_spawn_supervisor", lambda: None)
+    monkeypatch.setattr(terminal, "_ensure_terminal_reaper", lambda: None)
+
+    with pytest.raises(TimeoutError, match="terminal spawn timeout"):
+        terminal.start_terminal("late-timeout", tmp_path)
+
+    assert "late-timeout" in terminal._STARTING_TERMINALS
+    request = captured["request"]
+    request.done = threading.Event()
+    request.done.set()
+    terminal._release_timed_out_spawn_reservation(request)
+    assert "late-timeout" not in terminal._STARTING_TERMINALS
+
+
 # ── F1: writes/resizes are serialized against close (no fd-reuse injection) ───
 
 def test_write_after_close_raises_and_never_touches_fd(monkeypatch):

@@ -199,6 +199,8 @@ class _SpawnRequest:
     lock: threading.Lock = field(default_factory=threading.Lock)
     proc: subprocess.Popen | None = None
     error: BaseException | None = None
+    reservation_sid: str | None = None
+    reservation: object | None = None
 
 
 @dataclass
@@ -236,6 +238,15 @@ def _reap_abandoned_spawn(proc: subprocess.Popen) -> bool:
         print("terminal abandoned spawn cleanup failed", flush=True)
         return False
     return True
+
+
+def _release_timed_out_spawn_reservation(request: _SpawnRequest) -> None:
+    if not request.timed_out.is_set() or request.reservation is None:
+        return
+    with _LOCK:
+        if _STARTING_TERMINALS.get(request.reservation_sid or "") is request.reservation:
+            _STARTING_TERMINALS.pop(request.reservation_sid or "", None)
+            request.reservation.done.set()
 
 
 def _reap_terminal_descendants(
@@ -277,6 +288,7 @@ def _spawn_supervisor_loop() -> None:
                     else:
                         request.proc = proc
                     request.done.set()
+                _release_timed_out_spawn_reservation(request)
             except BaseException as exc:
                 with request.lock:
                     try:
@@ -284,6 +296,7 @@ def _spawn_supervisor_loop() -> None:
                     except BaseException:
                         pass
                     request.done.set()
+                _release_timed_out_spawn_reservation(request)
         except BaseException as exc:
             if request is not None:
                 try:
@@ -587,6 +600,7 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
     slave_fd = -1
     proc = None
     term = None
+    request = None
     try:
         if replaced is not None:
             _teardown_terminal(replaced)
@@ -620,7 +634,9 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
                 "stderr": slave_fd,
                 "close_fds": True,
                 "start_new_session": True,
-            }
+            },
+            reservation_sid=sid,
+            reservation=pending,
         )
         with _LOCK:
             if _STARTING_TERMINALS.get(sid) is pending:
@@ -674,8 +690,13 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
             _safe_close_fd(slave_fd)
         with _LOCK:
             if _STARTING_TERMINALS.get(sid) is pending:
-                _STARTING_TERMINALS.pop(sid, None)
-                pending.done.set()
+                if (
+                    request is None
+                    or not request.timed_out.is_set()
+                    or request.done.is_set()
+                ):
+                    _STARTING_TERMINALS.pop(sid, None)
+                    pending.done.set()
         raise
 
 
