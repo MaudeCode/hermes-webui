@@ -250,6 +250,37 @@ def test_post_execution_writeback_timeout_is_not_retryable():
     assert response["outcome_unknown"] is True
 
 
+def test_worker_writeback_lock_timeout_emits_terminal_error(monkeypatch):
+    import threading
+    from api import config, streaming
+
+    lock = threading.Lock()
+    lock.acquire()
+    events = []
+    config.register_active_run("writeback-timeout", session_id="private")
+    monkeypatch.setattr(streaming, "_CHAT_LOCK_WAIT_SECONDS", 0.02)
+    try:
+        with pytest.raises(streaming._WorkerWritebackTimeout):
+            with streaming._bounded_worker_writeback_lock(
+                "writeback-timeout", lock, "result_writeback"
+            ):
+                pytest.fail("timed-out writeback body must not run")
+        streaming._emit_worker_writeback_timeout(
+            "private", lambda event, payload: events.append((event, payload))
+        )
+        with config.ACTIVE_RUNS_LOCK:
+            assert config.ACTIVE_RUNS["writeback-timeout"]["phase"] == "finalization_blocked"
+    finally:
+        lock.release()
+        config.unregister_active_run("writeback-timeout")
+        config.LAST_CHAT_ADMISSION_TIMEOUT_AT = None
+
+    assert events[0][0] == "apperror"
+    assert events[0][1]["type"] == "chat_writeback_timeout"
+    assert events[0][1]["retryable"] is False
+    assert events[0][1]["outcome_unknown"] is True
+
+
 def test_health_only_admission_waiter_never_blocks_worker_start():
     from api import background_process, config, routes
 
