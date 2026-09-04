@@ -217,3 +217,75 @@ def test_gate_fails_open_when_no_deferred_startup_was_armed():
     started = time.monotonic()
     assert startup.await_startup_ready(None, urlparse("/api/sessions")) is True
     assert time.monotonic() - started < 1, "unarmed gate must not wait on the readiness bound"
+
+
+def test_gated_waiters_cannot_exhaust_the_request_worker_budget(boot_server):
+    """Gated requests must not starve the readiness-exempt routes.
+
+    Each waiter holds one of HTTPWorkerBudgetMixin's request-worker slots, and
+    process_request() acquires those non-blocking. Without a cap on concurrent
+    waiters, reconnecting tabs fill the budget and /health is overflow-rejected
+    at accept time — the outage this gate exists to remove.
+    """
+    from api import startup
+
+    boot = boot_server()
+    assert boot.recovery_started.wait(timeout=15), "deferred startup never reached recovery"
+
+    results = []
+    threads = [
+        threading.Thread(target=lambda: results.append(boot.get("/api/sessions", timeout=20)))
+        for _ in range(startup.STARTUP_WAIT_SLOT_COUNT + 6)
+    ]
+    for t in threads:
+        t.start()
+    try:
+        # /health must stay answerable while every gated request is outstanding.
+        status, _headers, body = boot.get("/health", timeout=10)
+        assert status == 200, f"/health starved by gated waiters, got {status}: {body}"
+    finally:
+        boot.release_recovery.set()
+        for t in threads:
+            t.join(timeout=30)
+
+    over_cap = [r for r in results if r[0] == 503]
+    assert over_cap, "expected the over-cap requests to 503 rather than queue"
+    for status, headers, body in over_cap:
+        assert headers.get("Retry-After") == "5"
+        assert json.loads(body).get("condition") == "startup_recovery"
+
+
+def test_startup_503_is_labelled_for_client_retry(boot_server):
+    """The body carries a condition clients can branch on.
+
+    static/workspace.js retries this and only this 503, so a one-shot bootstrap
+    fetch does not commit fallback settings for the rest of the boot.
+    """
+    boot = boot_server()
+    assert boot.recovery_started.wait(timeout=15), "deferred startup never reached recovery"
+
+    _status, _headers, body = boot.get("/api/sessions", timeout=10)
+    assert json.loads(body).get("condition") == "startup_recovery"
+
+
+def test_deep_health_defers_until_recovery_settles(boot_server):
+    """/health?deep=1 must not race recovery's session-index rebuild."""
+    from api import startup
+
+    boot = boot_server()
+    assert boot.recovery_started.wait(timeout=15), "deferred startup never reached recovery"
+
+    status, headers, body = boot.get("/health?deep=1", timeout=10)
+    assert status == 503, f"deep health must defer during recovery, got {status}: {body}"
+    payload = json.loads(body)
+    assert payload.get("status") == "starting"
+    assert payload.get("phase") == "session recovery"
+    assert headers.get("Retry-After") == "5"
+    assert "checks" not in payload, "deep probes ran while recovery was still active"
+
+    # Plain /health stays immediate throughout.
+    assert boot.get("/health", timeout=5)[0] == 200
+
+    boot.release_recovery.set()
+    assert startup.STARTUP_READY.wait(timeout=15), "readiness never set after recovery"
+    assert boot.get("/health?deep=1", timeout=15)[0] in (200, 503)

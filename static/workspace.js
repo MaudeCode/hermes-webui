@@ -110,7 +110,17 @@ async function api(path,opts={}){
       // Only retry on network errors (TypeError from fetch), not on HTTP errors
       // that were already thrown above. Re-throw 401 redirects immediately.
       if(e.message&&/401/.test(e.message)) throw e;
-      if(attempt<2&&attempt<maxAttempts-1 && (e instanceof TypeError || retryStatuses.includes(Number(e.status)))){
+      // A startup-readiness 503 means the socket is bound but session recovery
+      // is still running, so the value is not yet authoritative — it will be
+      // shortly. Retry for EVERY caller, not per call site: one-shot bootstrap
+      // fetches (/api/settings, /api/profile/active) otherwise fall into their
+      // catch paths and commit fallback preferences and a 'default' profile for
+      // the rest of the boot. Distinct from the worker-overflow 503, which is
+      // real backpressure and must not be retried here. (HWEB-35)
+      let _condition=null;
+      try{_condition=JSON.parse(e&&e.body||'{}').condition;}catch(_){}
+      const isStartupRecovery503 = e && Number(e.status)===503 && _condition==='startup_recovery';
+      if(attempt<2&&attempt<maxAttempts-1 && (e instanceof TypeError || isStartupRecovery503 || retryStatuses.includes(Number(e.status)))){
         if(retryDelayMs) await new Promise(resolve=>setTimeout(resolve,retryDelayMs*Math.pow(2,attempt)));
         continue;
       }

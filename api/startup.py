@@ -16,9 +16,24 @@ from pathlib import Path
 STARTUP_READY = threading.Event()
 STARTUP_READY.set()
 STARTUP_WAIT_SECONDS = 10.0
+# Cap on requests allowed to block on the gate at once. Each waiter occupies one
+# of HTTPWorkerBudgetMixin's request-worker slots (max_request_workers // 2 = 64),
+# and process_request() acquires those non-blocking — so an uncapped wait lets
+# reconnecting tabs fill the whole request budget and get /health, the app shell
+# and /api/health/restart overflow-rejected at accept time, recreating the
+# unavailable startup window this gate exists to remove. Excess waiters get the
+# same 503 immediately rather than queueing behind the bound.
+# ponytail: fixed cap; derive it from the server's request budget if that ratio
+# ever stops holding.
+STARTUP_WAIT_SLOT_COUNT = 8
+STARTUP_WAIT_SLOTS = threading.BoundedSemaphore(STARTUP_WAIT_SLOT_COUNT)
 # Session recovery is the only phase the readiness event gates; dependency
 # repair, the watcher and plugins run after it and never hold a request.
 STARTUP_PHASE = 'session recovery'
+# Machine-readable marker on the startup 503, mirroring the worker-overflow
+# response's "condition" field. Clients retry on this rather than treating a
+# startup 503 as a real failure.
+STARTUP_RECOVERY_CONDITION = 'startup_recovery'
 # Every /api/ route may touch session state, so all of them wait (fail closed).
 # These two must answer during startup: a restart trigger and a browser beacon.
 STARTUP_IMMEDIATE_PATHS = frozenset({'/api/health/restart', '/api/csp-report'})
@@ -148,6 +163,23 @@ def auto_install_agent_deps() -> bool:
         return False
 
 
+def _send_still_starting(handler) -> None:
+    """Answer a gated request with a retryable startup 503."""
+    from api.helpers import j
+    j(
+        handler,
+        {
+            'error': f'Server is still starting: {STARTUP_PHASE}',
+            'phase': STARTUP_PHASE,
+            # Distinguishes this from the worker-overflow 503 so clients can
+            # retry it instead of committing fallback state (static/workspace.js).
+            'condition': STARTUP_RECOVERY_CONDITION,
+        },
+        status=503,
+        extra_headers={'Retry-After': '5'},
+    )
+
+
 def await_startup_ready(handler, parsed) -> bool:
     """Return True if the request may proceed, else emit 503 and return False."""
     if STARTUP_READY.is_set():
@@ -155,15 +187,17 @@ def await_startup_ready(handler, parsed) -> bool:
     path = parsed.path
     if not path.startswith('/api/') or path in STARTUP_IMMEDIATE_PATHS:
         return True
-    if STARTUP_READY.wait(timeout=STARTUP_WAIT_SECONDS):
-        return True
-    from api.helpers import j
-    j(
-        handler,
-        {'error': f'Server is still starting: {STARTUP_PHASE}', 'phase': STARTUP_PHASE},
-        status=503,
-        extra_headers={'Retry-After': '5'},
-    )
+    # Bounded wait, and only for a bounded number of requests at a time, so the
+    # gate can never consume the request-worker budget the exempt routes need.
+    if not STARTUP_WAIT_SLOTS.acquire(blocking=False):
+        _send_still_starting(handler)
+        return False
+    try:
+        if STARTUP_READY.wait(timeout=STARTUP_WAIT_SECONDS):
+            return True
+    finally:
+        STARTUP_WAIT_SLOTS.release()
+    _send_still_starting(handler)
     return False
 
 
