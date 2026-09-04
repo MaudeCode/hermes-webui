@@ -139,9 +139,12 @@ class TestRespondNotifiesTrailingApproval:
                         break
                 # Re-emit head
                 if isinstance(_pending.get(sid), list) and _pending[sid]:
-                    _approval_sse_notify_locked(sid, _pending[sid][0], len(_pending[sid]))
+                    notification = _approval_sse_notify_locked(
+                        sid, _pending[sid][0], len(_pending[sid])
+                    )
                 else:
-                    _approval_sse_notify_locked(sid, None, 0)
+                    notification = _approval_sse_notify_locked(sid, None, 0)
+            r._dispatch_approval_sse(notification)
 
             # SSE must push (B, 1) so the UI surfaces the trailing approval.
             p3 = sub_q.get(timeout=1)
@@ -179,9 +182,12 @@ class TestRespondNotifiesTrailingApproval:
                 if not qlist:
                     _pending.pop(sid, None)
                 if isinstance(_pending.get(sid), list) and _pending[sid]:
-                    _approval_sse_notify_locked(sid, _pending[sid][0], len(_pending[sid]))
+                    notification = _approval_sse_notify_locked(
+                        sid, _pending[sid][0], len(_pending[sid])
+                    )
                 else:
-                    _approval_sse_notify_locked(sid, None, 0)
+                    notification = _approval_sse_notify_locked(sid, None, 0)
+            r._dispatch_approval_sse(notification)
 
             payload = sub_q.get(timeout=1)
             assert payload["pending"] is None, \

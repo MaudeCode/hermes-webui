@@ -25,7 +25,7 @@ _gateway_notify_cbs: dict[str, object] = {}
 _clarify_sse_subscribers: dict[str, list[queue.Queue]] = {}
 _clarify_sse_sequence: dict[str, int] = {}
 _clarify_sse_dispatched: dict[str, int] = {}
-_clarify_sse_dispatch_lock = threading.Lock()
+_clarify_sse_dispatch_lock = threading.RLock()
 
 
 class _ClarifyEntry:
@@ -107,17 +107,26 @@ def _clarify_sse_snapshot_locked(session_id: str, head: dict | None, total: int)
     return session_id, sequence, tuple(_clarify_sse_subscribers.get(session_id, ())), payload
 
 
-def _dispatch_clarify_sse(notification) -> None:
+def _dispatch_clarify_sse(notification, callback=None, callback_payload=None) -> bool:
     session_id, sequence, subscribers, payload = notification
     with _clarify_sse_dispatch_lock:
+        with _lock:
+            if sequence != _clarify_sse_sequence.get(session_id):
+                return False
         if sequence <= _clarify_sse_dispatched.get(session_id, 0):
-            return
+            return False
         _clarify_sse_dispatched[session_id] = sequence
         for q in subscribers:
             try:
                 q.put_nowait(payload)
             except queue.Full:
                 pass  # drop if subscriber is slow
+        if callback is not None:
+            try:
+                callback(dict(callback_payload or {}))
+            except Exception:
+                pass
+        return True
 
 
 def _clarify_sse_notify(session_id: str, head: dict | None, total: int) -> None:
@@ -184,13 +193,8 @@ def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
         notification = _clarify_sse_snapshot_locked(
             session_key, dict(gw_queue[0].data), len(gw_queue)
         )
-    _dispatch_clarify_sse(notification)
+    _dispatch_clarify_sse(notification, cb, entry.data)
     publish_session_list_changed("attention_pending")
-    if cb:
-        try:
-            cb(dict(entry.data))
-        except Exception:
-            pass
     return entry
 
 
