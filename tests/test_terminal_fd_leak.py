@@ -386,6 +386,7 @@ def test_spawn_timeout_retains_capacity_until_supervisor_cleanup(monkeypatch, tm
     request.done = threading.Event()
     request.done.set()
     terminal._release_abandoned_spawn_reservation(request)
+    terminal._close_spawn_request_fds(request)
     assert "late-timeout" not in terminal._STARTING_TERMINALS
 
 
@@ -394,18 +395,28 @@ def test_shutdown_cancelled_queued_spawns_skip_process_creation():
     for index in range(3):
         sid = f"queued-{index}"
         reservation = terminal._StartReservation(cancelled=True)
+        read_fd, spawn_fd = os.pipe()
         request = terminal._SpawnRequest(
-            {}, reservation_sid=sid, reservation=reservation
+            {},
+            reservation_sid=sid,
+            reservation=reservation,
+            spawn_fds=(spawn_fd,),
         )
         with terminal._LOCK:
             terminal._STARTING_TERMINALS[sid] = reservation
-        requests.append((sid, reservation, request))
+        requests.append((sid, reservation, request, read_fd, spawn_fd))
 
-    for sid, reservation, request in requests:
-        assert terminal._cancel_spawn_before_popen(request) is True
-        assert request.done.is_set()
-        assert reservation.done.is_set()
-        assert sid not in terminal._STARTING_TERMINALS
+    try:
+        for sid, reservation, request, _read_fd, spawn_fd in requests:
+            assert terminal._cancel_spawn_before_popen(request) is True
+            assert request.done.is_set()
+            assert reservation.done.is_set()
+            assert sid not in terminal._STARTING_TERMINALS
+            with pytest.raises(OSError):
+                os.fstat(spawn_fd)
+    finally:
+        for _sid, _reservation, _request, read_fd, _spawn_fd in requests:
+            os.close(read_fd)
 
 
 # ── F1: writes/resizes are serialized against close (no fd-reuse injection) ───

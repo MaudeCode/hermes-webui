@@ -201,6 +201,9 @@ class _SpawnRequest:
     error: BaseException | None = None
     reservation_sid: str | None = None
     reservation: object | None = None
+    spawn_fds: tuple[int, ...] = ()
+    enqueued: bool = False
+    rejected: bool = False
 
 
 @dataclass
@@ -243,13 +246,19 @@ def _reap_abandoned_spawn(proc: subprocess.Popen) -> bool:
 def _release_abandoned_spawn_reservation(request: _SpawnRequest) -> None:
     reservation = request.reservation
     if reservation is None or not (
-        request.timed_out.is_set() or getattr(reservation, "cancelled", False)
+        request.timed_out.is_set() or request.rejected
     ):
         return
     with _LOCK:
         if _STARTING_TERMINALS.get(request.reservation_sid or "") is reservation:
             _STARTING_TERMINALS.pop(request.reservation_sid or "", None)
             reservation.done.set()
+
+
+def _close_spawn_request_fds(request: _SpawnRequest) -> None:
+    fds, request.spawn_fds = request.spawn_fds, ()
+    for fd in fds:
+        _safe_close_fd(fd)
 
 
 def _cancel_spawn_before_popen(request: _SpawnRequest) -> bool:
@@ -262,7 +271,9 @@ def _cancel_spawn_before_popen(request: _SpawnRequest) -> bool:
         ):
             return False
         request.error = RuntimeError("terminal start was cancelled")
+        request.rejected = True
         request.done.set()
+    _close_spawn_request_fds(request)
     _release_abandoned_spawn_reservation(request)
     return True
 
@@ -302,6 +313,7 @@ def _spawn_supervisor_loop() -> None:
                 continue
             try:
                 proc = subprocess.Popen(**request.kwargs)
+                _close_spawn_request_fds(request)
                 with request.lock:
                     if request.timed_out.is_set():
                         _reap_abandoned_spawn(proc)
@@ -310,6 +322,7 @@ def _spawn_supervisor_loop() -> None:
                     request.done.set()
                 _release_abandoned_spawn_reservation(request)
             except BaseException as exc:
+                _close_spawn_request_fds(request)
                 with request.lock:
                     try:
                         request.error = exc
@@ -644,19 +657,21 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
             }
         )
         shell = _shell_path()
+        spawn_slave_fd = os.dup(slave_fd)
         request = _SpawnRequest(
             {
                 "args": _shell_argv(shell),
                 "cwd": cwd,
                 "env": env,
-                "stdin": slave_fd,
-                "stdout": slave_fd,
-                "stderr": slave_fd,
+                "stdin": spawn_slave_fd,
+                "stdout": spawn_slave_fd,
+                "stderr": spawn_slave_fd,
                 "close_fds": True,
                 "start_new_session": True,
             },
             reservation_sid=sid,
             reservation=pending,
+            spawn_fds=(spawn_slave_fd,),
         )
         with _LOCK:
             if _STARTING_TERMINALS.get(sid) is pending:
@@ -664,6 +679,7 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
         _ensure_spawn_supervisor()
         _ensure_terminal_reaper()
         _spawn_queue.put(request)
+        request.enqueued = True
         if not request.done.wait(timeout=5.0):
             with request.lock:
                 if not request.done.is_set():
@@ -696,6 +712,8 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
             pending.done.set()
         return term
     except BaseException:
+        if request is not None and not request.enqueued:
+            _close_spawn_request_fds(request)
         with _LOCK:
             if term is not None and _TERMINALS.get(sid) is term:
                 _TERMINALS.pop(sid, None)
