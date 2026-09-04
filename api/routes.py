@@ -25926,13 +25926,47 @@ def _handle_chat_start(handler, body, diag=None):
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config
         recovery_cleared_for_start = None
-        def _restore_cleared_recovery():
+        def _restore_cleared_recovery(*, persist: bool = False):
             if recovery_cleared_for_start is None:
                 return None
-            s.compression_recovery = recovery_cleared_for_start
-            s.recommended_recovery_action = recovery_cleared_for_start.get("recommended_action")
+
+            def _restore(target):
+                target.compression_recovery = copy.deepcopy(
+                    recovery_cleared_for_start
+                )
+                target.recommended_recovery_action = recovery_cleared_for_start.get(
+                    "recommended_action"
+                )
+
+            if not persist:
+                _restore(s)
+                return None
             try:
-                s.save()
+                with _bounded_chat_admission_lock(
+                    s.session_id,
+                    _get_session_agent_lock(s.session_id),
+                    finalization=True,
+                ) as acquired:
+                    if not acquired:
+                        return TimeoutError(
+                            "compression recovery restore session lock timed out"
+                        )
+                    try:
+                        current = get_session(s.session_id)
+                    except KeyError:
+                        return RuntimeError("session was deleted before recovery restore")
+                    if getattr(current, "active_stream_id", None):
+                        return None
+                    current_recovery = compression_recovery_payload_for_session(current)
+                    if (
+                        current_recovery is not None
+                        and current_recovery != recovery_cleared_for_start
+                    ):
+                        return None
+                    _restore(current)
+                    current.save()
+                    if current is not s:
+                        _restore(s)
             except Exception as restore_err:
                 logger.exception("failed to restore compression recovery after chat start rejection for %s", getattr(s, "session_id", None))
                 return restore_err
@@ -25948,7 +25982,7 @@ def _handle_chat_start(handler, body, diag=None):
             )
         except Exception as exc:
             if not getattr(exc, "_regeneration_accepted", False):
-                _restore_cleared_recovery()
+                _restore_cleared_recovery(persist=True)
             raise
         # Map adapter-selection NotImplementedError (501) onto the legacy
         # bad-request response shape that this route exposed historically
@@ -25960,7 +25994,9 @@ def _handle_chat_start(handler, body, diag=None):
             return j(handler, {"error": response["error"]}, status=501)
         status = int(response.pop("_status", 200) or 200)
         if status >= 400 and recovery_cleared_for_start is not None:
-            restore_err = _restore_cleared_recovery()
+            restore_err = _restore_cleared_recovery(
+                persist=response.get("code") != "chat_admission_timeout"
+            )
             if restore_err is not None:
                 return bad(handler, f"failed to restore compression recovery: {_sanitize_error(restore_err)}", 500)
         diag.stage("response_write") if diag else None

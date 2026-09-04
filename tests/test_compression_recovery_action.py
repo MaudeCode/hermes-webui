@@ -190,6 +190,62 @@ def test_chat_start_restores_recovery_when_substantive_prompt_start_is_rejected(
     assert saved["compression_recovery"]["terminal_state"] == "compression_exhausted"
 
 
+def test_chat_start_timeout_restores_recovery_without_unlocked_save(monkeypatch, tmp_path):
+    session_dir = _isolate_sessions(monkeypatch, tmp_path)
+    sid = "recoverychat-timeout"
+    session = Session(
+        session_id=sid,
+        title="Recovery",
+        workspace=str(tmp_path),
+        model="gpt-4o",
+        messages=[{"role": "user", "content": "long task"}],
+    )
+    stamp_compression_exhausted_recovery(session, message="Context length exceeded.")
+    session.save()
+    models.SESSIONS[sid] = session
+    routes.SESSIONS[sid] = session
+    monkeypatch.setattr(
+        routes,
+        "_resolve_chat_workspace_with_recovery",
+        lambda *_args, **_kwargs: str(tmp_path),
+    )
+    monkeypatch.setattr(
+        routes, "_read_profile_model_config", lambda *_args, **_kwargs: (None, None, {})
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda requested_model, requested_provider, **_kwargs: (
+            requested_model or "gpt-4o",
+            requested_provider or "openai",
+            False,
+        ),
+    )
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _config: False)
+    save_calls = []
+    monkeypatch.setattr(session, "save", lambda **_kwargs: save_calls.append(True))
+    monkeypatch.setattr(
+        routes,
+        "_start_run",
+        lambda *_args, **_kwargs: {
+            "error": "session is busy",
+            "code": "chat_admission_timeout",
+            "_status": 409,
+        },
+    )
+
+    handler = _JSONHandler()
+    routes._handle_chat_start(
+        handler, {"session_id": sid, "message": "continue by checking the repo"}
+    )
+    saved = json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
+
+    assert handler.status == 409
+    assert save_calls == []
+    assert session.recommended_recovery_action == "start_focused_continuation"
+    assert saved["compression_recovery"]["terminal_state"] == "compression_exhausted"
+
+
 def test_recovery_start_creates_focused_linked_session(monkeypatch, tmp_path):
     session_dir = _isolate_sessions(monkeypatch, tmp_path)
     sid = "recoverysrc1"
