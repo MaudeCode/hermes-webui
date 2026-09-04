@@ -13,6 +13,7 @@ Covers:
 import json
 import pathlib
 import re
+import threading
 import urllib.request
 from tests.conftest import TEST_STATE_DIR
 
@@ -1040,7 +1041,7 @@ def test_issue1734_chat_start_persists_repaired_codex_provider(monkeypatch):
         lambda current, _requested: current.workspace,
     )
     monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: value)
-    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda sid: contextlib.nullcontext())
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda sid: threading.Lock())
     monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
     monkeypatch.setattr(routes, "create_stream_channel", lambda: object())
     monkeypatch.setattr(routes.threading, "Thread", FakeThread)

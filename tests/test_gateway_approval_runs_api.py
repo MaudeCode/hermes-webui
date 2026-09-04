@@ -1714,8 +1714,14 @@ def test_start_chat_stream_marks_gateway_run_pending_before_thread_start(monkeyp
     )
 
     class _NoopLock:
+        def acquire(self, timeout=None):
+            return True
+
+        def release(self):
+            pass
+
         def __enter__(self):
-            return None
+            return self
 
         def __exit__(self, *args):
             return False
@@ -1784,8 +1790,14 @@ def test_start_chat_stream_clears_gateway_run_state_when_thread_start_fails(monk
     )
 
     class _NoopLock:
+        def acquire(self, timeout=None):
+            return True
+
+        def release(self):
+            pass
+
         def __enter__(self):
-            return None
+            return self
 
         def __exit__(self, *args):
             return False

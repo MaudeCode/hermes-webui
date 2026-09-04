@@ -14,7 +14,7 @@ def test_chat_start_appends_submitted_turn_journal_before_worker_thread_start():
 
 def test_chat_start_writes_turn_journal_after_session_lock_and_handles_failure():
     src = Path("api/routes.py").read_text(encoding="utf-8")
-    lock_idx = src.index("with session_lock:")
+    lock_idx = src.index("with _bounded_chat_admission_lock(")
     append_idx = src.index("append_turn_journal_event(", lock_idx)
     stream_registration_idx = src.index("STREAMS[stream_id] = stream", append_idx)
     lock_block = src[lock_idx:append_idx]

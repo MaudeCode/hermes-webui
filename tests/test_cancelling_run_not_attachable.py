@@ -170,9 +170,11 @@ def test_cancel_staleness_anchors_on_cancel_time_not_run_start():
 
 
 def test_attachability_predicate_edges():
-    """Non-dict/opaque entries stay attachable; only cancelling is excluded."""
+    """Non-dict/opaque entries stay attachable; terminal/wait-only rows do not."""
     assert cfg.active_run_is_attachable({"phase": "running"}) is True
     assert cfg.active_run_is_attachable({"phase": "cancelling"}) is False
     assert cfg.active_run_is_attachable({"phase": " cancelling "}) is False
+    assert cfg.active_run_is_attachable({"phase": "waiting_for_session_lock"}) is False
+    assert cfg.active_run_is_attachable({"phase": "admission_blocked"}) is False
     assert cfg.active_run_is_attachable({}) is True
     assert cfg.active_run_is_attachable(object()) is True
