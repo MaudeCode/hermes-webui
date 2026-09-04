@@ -1806,3 +1806,131 @@ def test_runner_malformed_explicit_with_valid_seq_uses_seq(monkeypatch):
         "/api/chat/stream?stream_id=run_1&after_event_id=malformed&after_seq=5",
     )
     assert calls == [("run_1", "5")]
+
+
+def _compression_journal_snapshot(monkeypatch, events):
+    """Project a live snapshot from an exact journal event sequence."""
+    import api.routes as routes
+
+    journal = [
+        {
+            "seq": index + 1,
+            "event": name,
+            "payload": payload or {},
+            "event_id": f"run_1:{index + 1}",
+            "created_at": 1000.0 + index,
+        }
+        for index, (name, payload) in enumerate(events)
+    ]
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: {
+            "session_id": "session_1",
+            "run_id": stream_id,
+            "last_seq": len(journal),
+            "last_event_id": f"{stream_id}:{len(journal)}",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_event_tail",
+        lambda session_id, run_id: {"events": journal},
+    )
+    return routes._run_journal_live_snapshot("run_1")
+
+
+def _visible_scene_rows(snapshot):
+    return [
+        (
+            row.get("role"),
+            row.get("source_event_type"),
+            row.get("status"),
+            row.get("text"),
+        )
+        for row in snapshot["anchor_activity_scene"]["activity_rows"]
+    ]
+
+
+def test_live_journal_snapshot_projects_running_compression_after_refresh(monkeypatch):
+    """A hard refresh mid-compaction restores `Compressing context`, not `Working`."""
+    snapshot = _compression_journal_snapshot(
+        monkeypatch,
+        [("compressing", {"session_id": "session_1", "message": "Compressing context"})],
+    )
+
+    assert _visible_scene_rows(snapshot) == [
+        ("lifecycle", "compressing", "running", "Compressing context")
+    ]
+    row = snapshot["anchor_activity_scene"]["activity_rows"][0]
+    assert row["kind"] == "lifecycle_status"
+    assert row["display_hints"]["compact_worklog"] == "quiet_lifecycle_row"
+    assert row["display_hints"]["transparent_stream"] == "chronological_activity"
+    # Reattach still resumes after the projected event, so the row is not replayed.
+    assert snapshot["last_seq"] == 1
+    assert snapshot["last_event_id"] == "run_1:1"
+
+
+def test_live_journal_snapshot_settles_compression_on_compressed_event(monkeypatch):
+    snapshot = _compression_journal_snapshot(
+        monkeypatch,
+        [
+            ("compressing", {"message": "Compressing context"}),
+            ("compressed", {"message": "Compression finished"}),
+        ],
+    )
+
+    assert _visible_scene_rows(snapshot) == [
+        ("lifecycle", "compressing", "running", "Compressing context"),
+        ("lifecycle", "compressed", "completed", "Context auto-compressed"),
+    ]
+
+
+def test_live_journal_snapshot_settles_compression_on_later_live_progress(monkeypatch):
+    """Post-compaction progress ends the pass even without a `compressed` event."""
+    snapshot = _compression_journal_snapshot(
+        monkeypatch,
+        [
+            ("compressing", {"message": "Compressing context"}),
+            ("token", {"text": "back to work"}),
+        ],
+    )
+
+    assert _visible_scene_rows(snapshot) == [
+        ("lifecycle", "compressed", "completed", "Context auto-compressed"),
+        ("prose", "token", "running", "back to work"),
+    ]
+
+
+def test_live_journal_snapshot_keeps_multiple_compression_passes_ordered(monkeypatch):
+    """Two passes in one turn stay ordered against prose instead of collapsing."""
+    snapshot = _compression_journal_snapshot(
+        monkeypatch,
+        [
+            ("token", {"text": "a"}),
+            ("compressing", {"message": "Compressing context"}),
+            ("compressed", {"message": "Compression finished"}),
+            ("token", {"text": "b"}),
+            ("compressing", {"message": "Compressing context"}),
+        ],
+    )
+
+    assert _visible_scene_rows(snapshot) == [
+        ("prose", "token", "completed", "a"),
+        ("lifecycle", "compressed", "completed", "Context auto-compressed"),
+        ("lifecycle", "compressed", "completed", "Context auto-compressed"),
+        ("prose", "token", "completed", "b"),
+        ("lifecycle", "compressing", "running", "Compressing context"),
+    ]
+
+
+def test_live_journal_snapshot_does_not_reclassify_other_lifecycle_events(monkeypatch):
+    """Fail closed: only the exact compression events become compression rows."""
+    snapshot = _compression_journal_snapshot(
+        monkeypatch,
+        [("warning", {"type": "fallback", "message": "Compressing the model quota"})],
+    )
+
+    assert _visible_scene_rows(snapshot) == [
+        ("lifecycle", "runtime_journal_snapshot", "running", "Working")
+    ]
