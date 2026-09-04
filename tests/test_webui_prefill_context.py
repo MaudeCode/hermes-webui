@@ -368,3 +368,29 @@ def test_prefill_script_uses_profile_scoped_config_and_environment(
     assert result["messages"] == [
         {"role": "user", "content": "profile-prefill"}
     ]
+
+
+def test_relative_prefill_file_resolves_from_profile_home(monkeypatch, tmp_path):
+    from api import config, streaming
+
+    root_home = tmp_path / "root"
+    profile_home = tmp_path / "profiles" / "member"
+    root_home.mkdir()
+    profile_home.mkdir(parents=True)
+    (root_home / "prefill.json").write_text(
+        '[{"role":"user","content":"root"}]', encoding="utf-8"
+    )
+    (profile_home / "prefill.json").write_text(
+        '[{"role":"user","content":"profile"}]', encoding="utf-8"
+    )
+    monkeypatch.setenv("HERMES_HOME", str(root_home))
+    config._set_thread_env(
+        HERMES_HOME=str(profile_home),
+        HERMES_PREFILL_MESSAGES_FILE="prefill.json",
+    )
+    try:
+        result = streaming._load_webui_prefill_context({})
+    finally:
+        config._clear_thread_env()
+
+    assert result["messages"] == [{"role": "user", "content": "profile"}]

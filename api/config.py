@@ -6183,7 +6183,7 @@ def _models_cache_catalog_fingerprint() -> dict:
     except Exception:
         provider_catalog_sha = "unavailable"
 
-    codex_home = Path(os.getenv("CODEX_HOME", "").strip() or (HOME / ".codex")).expanduser()
+    codex_home = Path(_thread_local_env_value("CODEX_HOME").strip() or (HOME / ".codex")).expanduser()
     return {
         "provider_catalog_sha256": provider_catalog_sha,
         "codex_models_cache": _models_cache_file_fingerprint(codex_home / "models_cache.json"),
@@ -6838,7 +6838,7 @@ def _read_visible_codex_cache_model_ids() -> list[str]:
     in its picker (notably ``gpt-5.3-codex-spark`` from #1680), so the WebUI
     merges this visible local catalog to stay in sync with Codex itself.
     """
-    codex_home = Path(os.getenv("CODEX_HOME", "").strip() or (HOME / ".codex")).expanduser()
+    codex_home = Path(_thread_local_env_value("CODEX_HOME").strip() or (HOME / ".codex")).expanduser()
     cache_path = codex_home / "models_cache.json"
     try:
         payload = json.loads(cache_path.read_text(encoding="utf-8"))

@@ -802,6 +802,32 @@ def test_root_stream_scope_cannot_fall_through_to_live_named_prefill(
         config._clear_thread_env()
 
 
+def test_codex_model_cache_uses_profile_thread_home(monkeypatch, tmp_path):
+    import api.config as config
+
+    root_home = tmp_path / "root-codex"
+    profile_home = tmp_path / "profile-codex"
+    root_home.mkdir()
+    profile_home.mkdir()
+    (root_home / "models_cache.json").write_text(
+        '{"models":[{"slug":"root-model"}]}', encoding="utf-8"
+    )
+    (profile_home / "models_cache.json").write_text(
+        '{"models":[{"slug":"profile-model"}]}', encoding="utf-8"
+    )
+    monkeypatch.setenv("CODEX_HOME", str(root_home))
+    config._set_thread_env(CODEX_HOME=str(profile_home))
+    try:
+        assert config._read_visible_codex_cache_model_ids() == ["profile-model"]
+        fingerprint = config._models_cache_source_fingerprint()
+    finally:
+        config._clear_thread_env()
+
+    assert fingerprint["catalog"]["codex_models_cache"]["path"] == str(
+        profile_home / "models_cache.json"
+    )
+
+
 def test_default_readonly_request_pins_root_home(monkeypatch, tmp_path):
     import api.config as config
 

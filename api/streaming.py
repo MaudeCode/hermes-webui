@@ -1047,11 +1047,8 @@ def _valid_prefill_messages(value) -> list[dict]:
 def _resolve_prefill_path(raw: str) -> Path:
     path = Path(str(raw)).expanduser()
     if not path.is_absolute():
-        try:
-            from api.config import _get_config_path
-            path = _get_config_path().parent / path
-        except Exception:
-            path = Path.cwd() / path
+        profile_home = _thread_local_env_value("HERMES_HOME")
+        path = (Path(profile_home) if profile_home else Path.cwd()) / path
     return path
 
 
