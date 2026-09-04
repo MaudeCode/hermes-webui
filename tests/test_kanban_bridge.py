@@ -1042,12 +1042,14 @@ def test_sse_fetch_new_returns_advanced_cursor_and_events(monkeypatch):
     empty result."""
     bridge = _load_bridge(monkeypatch)
     # Default fake fixture has 1 event with id=7
-    new_cursor, events = bridge._kanban_sse_fetch_new(None, 0)
+    held, new_cursor, events = bridge._kanban_sse_poll(None, None, 0)
     assert new_cursor == 7
     assert len(events) == 1
     assert events[0]["id"] == 7
+    # A successful pass must hand the (conn, board) pair back for reuse.
+    assert held is not None
     # No new events past the cursor → empty list, cursor unchanged
-    new_cursor2, events2 = bridge._kanban_sse_fetch_new(None, 7)
+    held, new_cursor2, events2 = bridge._kanban_sse_poll(held, None, 7)
     assert new_cursor2 == 7
     assert events2 == []
 
@@ -1063,9 +1065,12 @@ def test_sse_fetch_new_self_heals_on_db_error(monkeypatch):
         raise RuntimeError("simulated transient sqlite contention")
 
     monkeypatch.setattr(kb, "connect", raising_connect)
-    new_cursor, events = bridge._kanban_sse_fetch_new(None, 5)
+    held, new_cursor, events = bridge._kanban_sse_poll(None, None, 5)
     assert new_cursor == 5  # cursor preserved
     assert events == []  # empty, not exception
+    # No usable handle survived, so the next pass must reconnect rather
+    # than keep polling a dead one.
+    assert held is None
 
 
 def test_sse_handler_runs_in_thread_and_streams_event(monkeypatch):
@@ -1145,6 +1150,197 @@ def test_sse_handler_runs_in_thread_and_streams_event(monkeypatch):
     assert handler.responses == [200]
     assert saw_hello.is_set(), "Initial 'event: hello' frame never appeared in stream"
     assert not error_holder, f"SSE handler raised: {error_holder!r}"
+
+
+def test_sse_stream_connects_once_for_the_whole_stream(monkeypatch):
+    """HWEB-31: the stream must hold ONE sqlite connection for its lifetime.
+
+    The old loop called kb.connect()/close() every poll pass — 3.3 cycles
+    per second per connected client. Run the handler across many poll
+    passes and assert kb.connect was called exactly once, and that events
+    still reach the client over that single reused handle.
+    """
+    import threading
+    import io
+
+    bridge = _load_bridge(monkeypatch)
+    # Many poll passes inside the window below, so a per-pass reconnect
+    # would show up as a double-digit connect count.
+    monkeypatch.setattr(bridge, "_KANBAN_SSE_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(bridge, "_KANBAN_SSE_HEARTBEAT_SECONDS", 0.05)
+
+    kb = bridge._kb()
+    original_connect = kb.connect
+    connect_calls = []
+
+    def counting_connect(*args, **kwargs):
+        connect_calls.append(kwargs.get("board"))
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr(kb, "connect", counting_connect)
+
+    class FakeHandler:
+        def __init__(self):
+            self.wfile = io.BytesIO()
+            self.headers = {}
+            self.responses = []
+
+        def send_response(self, code): self.responses.append(code)
+        def send_header(self, k, v): pass
+        def end_headers(self): pass
+
+    handler = FakeHandler()
+    done = threading.Event()
+
+    def runner():
+        try:
+            bridge._handle_events_sse_stream(handler, _parsed(query="since=0"))
+        finally:
+            done.set()
+
+    t = threading.Thread(target=runner, daemon=True)
+    t.start()
+    # Wait for the first events frame (proves the reused handle serves
+    # reads), then keep the stream open well past many more poll passes.
+    deadline = time.monotonic() + 2.0
+    saw_events = False
+    while time.monotonic() < deadline:
+        time.sleep(0.02)
+        try:
+            buf = handler.wfile.getvalue()
+        except ValueError:
+            buf = b""
+        if b"event: events" in buf:
+            saw_events = True
+            break
+    assert saw_events, "no events frame arrived over the reused connection"
+    time.sleep(0.3)  # ~30 further poll passes at 0.01s
+    handler.wfile.close()
+    done.wait(timeout=2.0)
+    assert done.is_set(), "SSE handler did not exit after writer close"
+    # ["default"], not [None]: the pass connects on the slug it resolved
+    # rather than letting kb.connect resolve the active pointer a second
+    # time. One entry is the point — one connect for the whole stream.
+    assert connect_calls == ["default"], (
+        f"stream must connect once for its lifetime; saw {len(connect_calls)} "
+        f"kb.connect calls: {connect_calls}"
+    )
+
+
+def test_sse_unpinned_stream_follows_an_active_board_switch(monkeypatch):
+    """HWEB-31 follow-up: holding one connection must not freeze an
+    UNPINNED stream onto the board that was active when it opened.
+
+    The client omits ?board= while on the server-selected board precisely
+    so a switch (from the `hermes kanban` CLI or another tab) takes
+    effect. The old loop got that for free by calling connect(board=None)
+    every pass. Now the stream re-reads the active-board pointer and
+    reopens only when it actually moves.
+    """
+    import threading
+    import io
+
+    bridge = _load_bridge(monkeypatch)
+    monkeypatch.setattr(bridge, "_KANBAN_SSE_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(bridge, "_KANBAN_SSE_HEARTBEAT_SECONDS", 0.05)
+
+    kb = bridge._kb()
+    bridge._create_board_payload({"slug": "experiments", "name": "Exp"})
+
+    original_connect = kb.connect
+    connect_calls = []
+
+    def counting_connect(*args, **kwargs):
+        connect_calls.append(kb.get_current_board())
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr(kb, "connect", counting_connect)
+
+    class FakeHandler:
+        def __init__(self):
+            self.wfile = io.BytesIO()
+            self.headers = {}
+            self.responses = []
+
+        def send_response(self, code): self.responses.append(code)
+        def send_header(self, k, v): pass
+        def end_headers(self): pass
+
+    handler = FakeHandler()
+    done = threading.Event()
+
+    def runner():
+        try:
+            # No ?board= — the stream must track the active-board pointer.
+            bridge._handle_events_sse_stream(handler, _parsed(query="since=0"))
+        finally:
+            done.set()
+
+    t = threading.Thread(target=runner, daemon=True)
+    t.start()
+    # Let it settle on the default board over several passes.
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and not connect_calls:
+        time.sleep(0.02)
+    assert connect_calls == ["default"], f"expected one connect on default, saw {connect_calls}"
+    time.sleep(0.15)  # ~15 further passes, still no reconnect
+    assert connect_calls == ["default"], (
+        f"a stream on a stable board must not reconnect; saw {connect_calls}"
+    )
+
+    # Now move the shared pointer, as the CLI or another tab would.
+    kb.set_current_board("experiments")
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and len(connect_calls) < 2:
+        time.sleep(0.02)
+    handler.wfile.close()
+    done.wait(timeout=2.0)
+    assert done.is_set(), "SSE handler did not exit after writer close"
+    assert connect_calls == ["default", "experiments"], (
+        "an unpinned stream must reopen exactly once against the newly "
+        f"active board; saw {connect_calls}"
+    )
+
+
+def test_sse_connects_on_the_board_it_resolved_not_a_second_resolution(monkeypatch):
+    """HWEB-31 follow-up: the pass must connect on the slug it resolved.
+
+    Passing board=None to kb.connect would let it resolve the active
+    pointer a second time, independently of the read that decided which
+    board this pass is for. A switch landing between the two would open
+    board C while the handle records B, and the next pass's equality
+    check (B == B) would keep the stream on C indefinitely — wrong
+    board's events, advanced against the wrong cursor.
+    """
+    bridge = _load_bridge(monkeypatch)
+    kb = bridge._kb()
+    bridge._create_board_payload({"slug": "experiments", "name": "Exp"})
+    kb.set_current_board("experiments")
+
+    original_connect = kb.connect
+    seen = []
+
+    def spying_connect(*args, **kwargs):
+        seen.append(kwargs.get("board"))
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr(kb, "connect", spying_connect)
+
+    # Unpinned pass: board=None on the wire, but the pointer resolves to
+    # "experiments", and that is what connect must receive.
+    held, _cursor, _events = bridge._kanban_sse_poll(None, None, 0)
+    assert seen == ["experiments"], (
+        f"unpinned pass must connect on the resolved slug; connect saw {seen}"
+    )
+    assert held is not None and held[1] == "experiments", (
+        f"stored identity must match the handle's board; held={held!r}"
+    )
+
+    # Pinned pass is unaffected: resolved is the pinned slug itself.
+    seen.clear()
+    held, _cursor, _events = bridge._kanban_sse_poll(None, "experiments", 0)
+    assert seen == ["experiments"]
+    assert held is not None and held[1] == "experiments"
 
 
 def test_handle_kanban_patch_routes_boards_slug_before_board_query_param(monkeypatch):
@@ -1257,11 +1453,11 @@ def test_sse_honours_last_event_id_header_when_since_absent(monkeypatch):
 
     captured_cursor = []
 
-    def spying_fetch(board, cursor):
+    def spying_poll(held, board, cursor):
         captured_cursor.append(cursor)
-        return cursor, []
+        return held, cursor, []
 
-    monkeypatch.setattr(bridge, "_kanban_sse_fetch_new", spying_fetch)
+    monkeypatch.setattr(bridge, "_kanban_sse_poll", spying_poll)
 
     class FakeHandler:
         def __init__(self):
