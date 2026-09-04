@@ -1997,23 +1997,39 @@ def get_extension_registry() -> Dict[str, Any]:
         cached_at = _REGISTRY_CACHE.get("fetched_at", 0.0)
         if cached is not None and (now - cached_at) < _REGISTRY_TTL_SECONDS:
             return {"entries": cached}
+        if _REGISTRY_CACHE.get("refresh_claim") is not None:
+            return {"entries": cached} if cached is not None else {
+                "entries": [], "error": "registry_unavailable"
+            }
+        claim = object()
+        _REGISTRY_CACHE["refresh_claim"] = claim
+    try:
+        opener = _build_gallery_opener()
+        response = opener.open(_REGISTRY_URL, timeout=10)
         try:
-            opener = _build_gallery_opener()
-            raw = opener.open(_REGISTRY_URL, timeout=10).read(2 * 1024 * 1024)
-            data = json.loads(raw.decode("utf-8"))
-            if isinstance(data, list):
-                entries = data
-            elif isinstance(data, dict):
-                entries = data.get("extensions") or data.get("entries") or []
-            else:
-                entries = []
-            if not isinstance(entries, list):
-                entries = []
-            _REGISTRY_CACHE["data"] = entries
-            _REGISTRY_CACHE["fetched_at"] = now
-            return {"entries": entries}
-        except Exception:
-            return {"entries": [], "error": "registry_unavailable"}
+            raw = response.read(2 * 1024 * 1024)
+        finally:
+            response.close()
+        data = json.loads(raw.decode("utf-8"))
+        if isinstance(data, list):
+            entries = data
+        elif isinstance(data, dict):
+            entries = data.get("extensions") or data.get("entries") or []
+        else:
+            entries = []
+        if not isinstance(entries, list):
+            entries = []
+        with _REGISTRY_LOCK:
+            if _REGISTRY_CACHE.get("refresh_claim") is claim:
+                _REGISTRY_CACHE["data"] = entries
+                _REGISTRY_CACHE["fetched_at"] = now
+                _REGISTRY_CACHE.pop("refresh_claim", None)
+        return {"entries": entries}
+    except Exception:
+        with _REGISTRY_LOCK:
+            if _REGISTRY_CACHE.get("refresh_claim") is claim:
+                _REGISTRY_CACHE.pop("refresh_claim", None)
+        return {"entries": [], "error": "registry_unavailable"}
 
 
 def inject_extension_tags(index_html: str) -> str:
