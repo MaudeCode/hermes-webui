@@ -411,9 +411,10 @@ def test_routes_session_sse_uses_session_channel_subscribe():
 
 
 def test_server_starts_session_channel_reaper():
-    src = (REPO_ROOT / "server.py").read_text()
-    assert "start_session_channel_reaper" in src
-    assert "stop_session_channel_reaper" in src
+    # The reaper start moved into api/startup.py's deferred startup, which runs
+    # behind the socket bind (HWEB-35); server.py still stops it on shutdown.
+    assert "start_session_channel_reaper" in (REPO_ROOT / "api" / "startup.py").read_text()
+    assert "stop_session_channel_reaper" in (REPO_ROOT / "server.py").read_text()
 
 
 def test_frontend_opens_session_stream():
