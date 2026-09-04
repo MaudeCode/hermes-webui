@@ -2942,6 +2942,7 @@ from api.config import (
     ACTIVE_RUNS_LOCK,
     register_active_run,
     update_active_run,
+    note_chat_admission_timeout,
     register_stream_owner,
     register_session_writeback_owner,
     clear_session_writeback_owner_if_owned,
@@ -13060,13 +13061,13 @@ def _run_lifecycle_health() -> dict:
 
     now = time.time()
     admission_timeout_age = (
-        max(0.0, now - float(_LAST_CHAT_ADMISSION_TIMEOUT_AT))
-        if _LAST_CHAT_ADMISSION_TIMEOUT_AT
+        max(0.0, now - float(_live_config.LAST_CHAT_ADMISSION_TIMEOUT_AT))
+        if _live_config.LAST_CHAT_ADMISSION_TIMEOUT_AT
         else None
     )
     recent_admission_timeout = bool(
         admission_timeout_age is not None
-        and admission_timeout_age < _CHAT_ADMISSION_HEALTH_WINDOW_SECONDS
+        and admission_timeout_age < _live_config.CHAT_ADMISSION_HEALTH_WINDOW_SECONDS
     )
     degraded_runs = 0
     with _live_config.ACTIVE_RUNS_LOCK:
@@ -23926,10 +23927,6 @@ def _is_hidden_empty_session(s) -> bool:
     )
 
 
-_LAST_CHAT_ADMISSION_TIMEOUT_AT = None
-_CHAT_ADMISSION_HEALTH_WINDOW_SECONDS = 30.0
-
-
 def _chat_admission_timeout_response() -> dict:
     return {
         "error": "session is busy",
@@ -23943,7 +23940,6 @@ def _chat_admission_timeout_response() -> dict:
 @contextmanager
 def _bounded_chat_admission_lock(session_id: str, lock, timeout=None):
     """Expose and bound route-layer waiting for the session write lock."""
-    global _LAST_CHAT_ADMISSION_TIMEOUT_AT
     wait_seconds = _CHAT_LOCK_WAIT_SECONDS if timeout is None else timeout
     admission_id = f"admission-{uuid.uuid4().hex}"
     started_at = time.time()
@@ -23960,7 +23956,7 @@ def _bounded_chat_admission_lock(session_id: str, lock, timeout=None):
         with _try_acquire_chat_lock(lock, wait_seconds) as acquired:
             if not acquired:
                 update_active_run(admission_id, phase="admission_blocked")
-                _LAST_CHAT_ADMISSION_TIMEOUT_AT = time.time()
+                note_chat_admission_timeout()
             else:
                 unregister_active_run(admission_id)
                 registered = False

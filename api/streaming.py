@@ -41,6 +41,7 @@ from api.config import (
     _get_session_agent_lock, _alias_session_agent_lock,
     _set_thread_env, _clear_thread_env, _thread_ctx,
     register_active_run, update_active_run, publish_active_run_finished,
+    note_chat_admission_timeout,
     unregister_stream_owner,
     stream_owner_session_id,
     session_writeback_owner,
@@ -9685,6 +9686,7 @@ def _run_agent_streaming(
         with _try_acquire_chat_lock(_agent_lock, _CHAT_LOCK_WAIT_SECONDS) as acquired:
             if not acquired:
                 _admission_lock_timed_out = True
+                note_chat_admission_timeout()
                 _mark_chat_admission_timeout_stale(s, stream_id)
                 update_active_run(
                     stream_id,
@@ -14286,18 +14288,19 @@ def cancel_stream(stream_id: str) -> bool:
                     lock_wait_started_at=cancel_lock_wait_started_at,
                     lock_wait_seconds=_CHAT_LOCK_WAIT_SECONDS,
                 )
-                try:
-                    stale_session = get_session(_cancel_session_id)
-                    _mark_chat_admission_timeout_stale(stale_session, stream_id)
-                except Exception:
-                    pass
-                if q is not None:
+                if not active_run_entry:
                     try:
-                        payload = _cancel_event_payload("Cancelled by user")
-                        payload["session_id"] = _cancel_session_id
-                        q.put_nowait(("cancel", payload))
+                        stale_session = get_session(_cancel_session_id)
+                        _mark_chat_admission_timeout_stale(stale_session, stream_id)
                     except Exception:
-                        logger.debug("Failed to settle blocked early cancel for %s", stream_id)
+                        pass
+                    if q is not None:
+                        try:
+                            payload = _cancel_event_payload("Cancelled by user")
+                            payload["session_id"] = _cancel_session_id
+                            q.put_nowait(("cancel", payload))
+                        except Exception:
+                            logger.debug("Failed to settle blocked early cancel for %s", stream_id)
                 return True
             try:
                 _cs = get_session(_cancel_session_id)

@@ -112,7 +112,7 @@ def test_route_admission_lock_is_bounded_and_visible_to_health():
         assert health["active_runs"] == 0
     finally:
         lock.release()
-        routes._LAST_CHAT_ADMISSION_TIMEOUT_AT = None
+        config.LAST_CHAT_ADMISSION_TIMEOUT_AT = None
         with config.ACTIVE_RUNS_LOCK:
             config.ACTIVE_RUNS.clear()
 

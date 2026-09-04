@@ -9498,7 +9498,14 @@ SESSION_CHANNEL_SUBSCRIBER_GRACE_SECS: int = 60  # subscribers-empty grace
 ACTIVE_RUNS: dict = {}
 ACTIVE_RUNS_LOCK = threading.Lock()
 LAST_RUN_FINISHED_AT: float | None = None
+LAST_CHAT_ADMISSION_TIMEOUT_AT: float | None = None
+CHAT_ADMISSION_HEALTH_WINDOW_SECONDS = 30.0
 SERVER_START_TIME = time.time()
+
+
+def note_chat_admission_timeout() -> None:
+    global LAST_CHAT_ADMISSION_TIMEOUT_AT
+    LAST_CHAT_ADMISSION_TIMEOUT_AT = time.time()
 
 
 def active_run_is_attachable(run_entry) -> bool:
