@@ -186,6 +186,9 @@ def _approval_sse_notify_locked(session_id: str, head: dict | None, total: int):
 def _dispatch_approval_sse(notification) -> None:
     session_id, sequence, subs, payload = notification
     with _approval_sse_dispatch_lock:
+        with _lock:
+            if sequence != _approval_sse_sequence.get(session_id):
+                return
         if sequence <= _approval_sse_dispatched.get(session_id, 0):
             return
         _approval_sse_dispatched[session_id] = sequence

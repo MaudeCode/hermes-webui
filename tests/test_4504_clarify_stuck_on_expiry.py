@@ -36,7 +36,6 @@ The tests intentionally mirror the static-analysis + unit pattern already in
 from __future__ import annotations
 
 import os
-import queue
 
 import pytest
 
@@ -90,14 +89,12 @@ class TestClearPendingNotifiesSSE:
             "down (#4504)."
         )
 
-    def test_clear_pending_no_op_does_not_notify(self, clarify_mod):
+    def test_clear_pending_no_op_still_supersedes_older_snapshots(self, clarify_mod):
         sid = "sess-4504-b"
         sub = clarify_mod.sse_subscribe(sid)
-        # No pending entry → no clear → no spurious notify.
         cleared = clarify_mod.clear_pending(sid)
         assert cleared == 0
-        with pytest.raises(queue.Empty):
-            sub.get(timeout=0.1)
+        assert sub.get(timeout=1.0) == {"pending": None, "pending_count": 0}
 
     def test_clear_pending_unblocks_caller_event(self, clarify_mod):
         """The existing event.set() on the cleared entry stays in place."""

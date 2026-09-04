@@ -76,8 +76,8 @@ def clear_pending(session_key: str) -> int:
     with _lock:
         entries = _clear_queue_locked(session_key)
         notification = _clarify_sse_snapshot_locked(session_key, None, 0)
+    _dispatch_clarify_sse(notification)
     if entries:
-        _dispatch_clarify_sse(notification)
         publish_session_list_changed("attention_cleared")
     for entry in entries:
         entry.event.set()
@@ -190,10 +190,11 @@ def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
             gw_queue.append(entry)
             _pending[session_key] = gw_queue[0].data
         cb = _gateway_notify_cbs.get(session_key)
+        callback_payload = dict(gw_queue[0].data)
         notification = _clarify_sse_snapshot_locked(
             session_key, dict(gw_queue[0].data), len(gw_queue)
         )
-    _dispatch_clarify_sse(notification, cb, entry.data)
+    _dispatch_clarify_sse(notification, cb, callback_payload)
     publish_session_list_changed("attention_pending")
     return entry
 
@@ -232,13 +233,17 @@ def resolve_clarify(session_key: str, response: str, resolve_all: bool = False) 
         entries = list(q) if resolve_all else [q.pop(0)]
         if q:
             _pending[session_key] = q[0].data
+            cb = _gateway_notify_cbs.get(session_key)
+            callback_payload = dict(q[0].data)
             notification = _clarify_sse_snapshot_locked(
                 session_key, dict(q[0].data), len(q)
             )
         else:
+            cb = None
+            callback_payload = None
             _clear_queue_locked(session_key)
             notification = _clarify_sse_snapshot_locked(session_key, None, 0)
-    _dispatch_clarify_sse(notification)
+    _dispatch_clarify_sse(notification, cb, callback_payload)
     publish_session_list_changed("attention_resolved")
     count = 0
     for entry in entries:
@@ -268,13 +273,17 @@ def resolve_clarify_by_id(session_key: str, clarify_id: str, response: str) -> b
         q.pop(index)
         if q:
             _pending[session_key] = q[0].data
+            cb = _gateway_notify_cbs.get(session_key) if index == 0 else None
+            callback_payload = dict(q[0].data) if cb is not None else None
             notification = _clarify_sse_snapshot_locked(
                 session_key, dict(q[0].data), len(q)
             )
         else:
+            cb = None
+            callback_payload = None
             _clear_queue_locked(session_key)
             notification = _clarify_sse_snapshot_locked(session_key, None, 0)
-    _dispatch_clarify_sse(notification)
+    _dispatch_clarify_sse(notification, cb, callback_payload)
     publish_session_list_changed("attention_resolved")
     entry.result = response
     entry.event.set()

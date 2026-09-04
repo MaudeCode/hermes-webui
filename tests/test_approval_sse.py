@@ -254,6 +254,27 @@ class TestSSESubscribeUnsubscribe:
         finally:
             r._approval_sse_unsubscribe(sid, q)
 
+    def test_state_advanced_snapshot_suppresses_older_dispatch(self):
+        from api import route_approvals as approvals
+
+        sid = f"sse-stale-dispatch-{uuid.uuid4().hex[:8]}"
+        q = approvals._approval_sse_subscribe(sid)
+        try:
+            with approvals._lock:
+                older = approvals._approval_sse_notify_locked(
+                    sid, {"command": "old"}, 1
+                )
+                current = approvals._approval_sse_notify_locked(
+                    sid, {"command": "current"}, 1
+                )
+            approvals._dispatch_approval_sse(older)
+            approvals._dispatch_approval_sse(current)
+
+            assert q.get(timeout=1)["pending"]["command"] == "current"
+            assert q.empty()
+        finally:
+            approvals._approval_sse_unsubscribe(sid, q)
+
     def test_unsubscribe_removes_queue(self):
         """After unsubscribe, the queue must not be in the subscribers list."""
         from api import routes as r

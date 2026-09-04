@@ -138,6 +138,41 @@ class TestClarifyUnblocking:
 
         assert worker.is_alive() is False
 
+    def test_reversed_submit_dispatch_keeps_callback_on_authoritative_head(
+        self, monkeypatch
+    ):
+        from api import clarify
+
+        sid = f"unit-ordered-{uuid.uuid4().hex[:8]}"
+        first_waiting = threading.Event()
+        release_first = threading.Event()
+        callbacks = []
+        original_dispatch = clarify._dispatch_clarify_sse
+
+        def delayed_dispatch(notification, callback=None, callback_payload=None):
+            if notification[1] == 1:
+                first_waiting.set()
+                assert release_first.wait(2)
+            return original_dispatch(notification, callback, callback_payload)
+
+        monkeypatch.setattr(clarify, "_dispatch_clarify_sse", delayed_dispatch)
+        register_gateway_notify(sid, lambda data: callbacks.append(data["question"]))
+        first = threading.Thread(
+            target=lambda: submit_pending(sid, {"question": "A", "choices_offered": []})
+        )
+        first.start()
+        assert first_waiting.wait(1)
+        second = submit_pending(sid, {"question": "B", "choices_offered": []})
+        release_first.set()
+        first.join(1)
+
+        assert callbacks == ["A"]
+        assert resolve_clarify(sid, "done") == 1
+        assert callbacks == ["A", "B"]
+        assert second.event.is_set() is False
+        clear_pending(sid)
+        unregister_gateway_notify(sid)
+
 
 class TestClarifyModuleExports:
     def test_register_gateway_notify_exported(self):
