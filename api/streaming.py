@@ -12672,6 +12672,7 @@ def _run_agent_streaming(
                     return
                 with _stream_writeback_stage(_writeback_timings, "session_save"):
                     s.save()
+                _success_writeback_committed = True
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                     try:
@@ -12774,9 +12775,8 @@ def _run_agent_streaming(
             # is still settling as a normal completion. The pause re-read, clear,
             # restore, and save must stay under the session lock so a concurrent
             # suppression cannot observe stale pause state or lose its update.
-            with _bounded_worker_writeback_lock(
-                stream_id, _agent_lock, "success_finalize"
-            ):
+            def _finalize_process_wakeup_pause() -> bool:
+                nonlocal s
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                     try:
@@ -12792,7 +12792,7 @@ def _run_agent_streaming(
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                     put('cancel', _turn_cancel_payload())
-                    return
+                    return True
                 try:
                     _latest_pause_owner = get_session(getattr(s, 'session_id', session_id))
                     if _latest_pause_owner is not None:
@@ -12824,7 +12824,7 @@ def _run_agent_streaming(
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                         put('cancel', _turn_cancel_payload())
-                        return
+                        return True
                     with _stream_writeback_stage(_writeback_timings, "process_wakeup_pause_clear_save"):
                         s.save(touch_updated_at=False)
                     if cancel_event.is_set():
@@ -12847,8 +12847,18 @@ def _run_agent_streaming(
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                         put('cancel', _turn_cancel_payload())
-                        return
-                _success_writeback_committed = True
+                        return True
+                return False
+
+            with _terminal_writeback_lock("success_finalize") as acquired:
+                if not acquired:
+                    logger.warning(
+                        "Skipped post-commit process-wakeup pause finalization because "
+                        "session %s remained busy",
+                        getattr(s, "session_id", session_id),
+                    )
+                elif _finalize_process_wakeup_pause():
+                    return
             usage = {
                 'input_tokens': input_tokens,
                 'output_tokens': output_tokens,
