@@ -31,7 +31,7 @@ import http.client
 import socket as _socket
 from collections import defaultdict, deque, OrderedDict
 from pathlib import Path
-from contextlib import closing, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
@@ -2940,6 +2940,8 @@ from api.config import (
     MAX_UPLOAD_BYTES,
     ACTIVE_RUNS,
     ACTIVE_RUNS_LOCK,
+    register_active_run,
+    update_active_run,
     register_stream_owner,
     register_session_writeback_owner,
     clear_session_writeback_owner_if_owned,
@@ -11177,6 +11179,8 @@ from api.streaming import (
     generate_session_title_for_session,
     _compact_for_echo_compare,
     _strip_compact_echo_suffix,
+    _try_acquire_chat_lock,
+    _CHAT_LOCK_WAIT_SECONDS,
 )
 from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
 from api.run_journal import (
@@ -23909,6 +23913,33 @@ def _is_hidden_empty_session(s) -> bool:
     )
 
 
+@contextmanager
+def _bounded_chat_admission_lock(session_id: str, lock, timeout=None):
+    """Expose and bound route-layer waiting for the session write lock."""
+    wait_seconds = _CHAT_LOCK_WAIT_SECONDS if timeout is None else timeout
+    admission_id = f"admission-{uuid.uuid4().hex}"
+    started_at = time.time()
+    register_active_run(
+        admission_id,
+        session_id=session_id,
+        started_at=started_at,
+        phase="waiting_for_session_lock",
+        lock_wait_started_at=started_at,
+    )
+    registered = True
+    try:
+        with _try_acquire_chat_lock(lock, wait_seconds) as acquired:
+            if not acquired:
+                update_active_run(admission_id, phase="admission_blocked")
+            else:
+                unregister_active_run(admission_id)
+                registered = False
+            yield acquired
+    finally:
+        if registered:
+            unregister_active_run(admission_id)
+
+
 def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
     """Return whether an active_stream_id still owns this session's next turn.
 
@@ -24395,7 +24426,15 @@ def _start_chat_stream_for_session(
     process_wakeup_lineage_seen: set[str] = set()
     diag.stage("session_lock_wait") if diag else None
     while True:
-        with session_lock:
+        with _bounded_chat_admission_lock(s.session_id, session_lock) as acquired:
+            if not acquired:
+                return {
+                    "error": "session is busy",
+                    "code": "chat_admission_timeout",
+                    "message": "Chat could not start because this session is busy. Try again shortly.",
+                    "retryable": True,
+                    "_status": 409,
+                }
             # Re-resolve under the same lock used by delete/draft/recovery.
             # A caller may hold a stale Session object captured before delete;
             # saving through that handle would recreate the sidecar/index and

@@ -14284,6 +14284,18 @@ def cancel_stream(stream_id: str) -> bool:
                     lock_wait_started_at=cancel_lock_wait_started_at,
                     lock_wait_seconds=_CHAT_LOCK_WAIT_SECONDS,
                 )
+                try:
+                    stale_session = get_session(_cancel_session_id)
+                    _mark_chat_admission_timeout_stale(stale_session, stream_id)
+                except Exception:
+                    pass
+                if q is not None:
+                    try:
+                        payload = _cancel_event_payload("Cancelled by user")
+                        payload["session_id"] = _cancel_session_id
+                        q.put_nowait(("cancel", payload))
+                    except Exception:
+                        logger.debug("Failed to settle blocked early cancel for %s", stream_id)
                 return True
             try:
                 _cs = get_session(_cancel_session_id)

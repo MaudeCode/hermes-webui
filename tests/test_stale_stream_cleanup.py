@@ -117,15 +117,15 @@ def test_chat_start_rechecks_active_stream_under_session_lock(monkeypatch, tmp_p
     routes.PENDING_BG_TASK_COMPLETIONS.add(session.session_id)
 
     class MutatingSessionLock:
-        def __enter__(self):
+        def acquire(self, timeout=None):
             session.active_stream_id = existing_stream_id
             session.pending_user_message = "prompt already claimed by another start"
             session.pending_started_at = 123.0
             routes.STREAMS[existing_stream_id] = queue.Queue()
-            return self
+            return True
 
-        def __exit__(self, exc_type, exc, tb):
-            return False
+        def release(self):
+            pass
 
     class NoopThread:
         def __init__(self, *args, **kwargs):
@@ -246,16 +246,16 @@ def test_process_wakeup_retargets_snapshot_created_while_waiting_for_admission(
         def __init__(self, session_id):
             self.session_id = session_id
 
-        def __enter__(self):
+        def acquire(self, timeout=None):
             lock_entries.append(self.session_id)
             if self.session_id == parent.session_id:
                 # The caller captured a writable parent, then the active turn
                 # compressed it before this queued wakeup acquired admission.
                 parent.pre_compression_snapshot = True
-            return self
+            return True
 
-        def __exit__(self, exc_type, exc, tb):
-            return False
+        def release(self):
+            pass
 
     prepared = []
 

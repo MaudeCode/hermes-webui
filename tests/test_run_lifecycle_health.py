@@ -95,3 +95,22 @@ def test_admission_timeout_marks_only_its_owned_turn_stale():
     assert owned.pending_started_at is None
     assert _mark_chat_admission_timeout_stale(replaced, "old") is False
     assert replaced.pending_started_at == 456.0
+
+
+def test_route_admission_lock_is_bounded_and_visible_to_health():
+    import threading
+    from api import config, routes
+
+    lock = threading.Lock()
+    lock.acquire()
+    try:
+        with routes._bounded_chat_admission_lock("private-session", lock, 0.02) as acquired:
+            assert acquired is False
+            health = routes._run_lifecycle_health()
+            assert health["status"] == "degraded"
+            assert health["runs"][0]["phase"] == "admission_blocked"
+            assert "session_id" not in health["runs"][0]
+    finally:
+        lock.release()
+        with config.ACTIVE_RUNS_LOCK:
+            config.ACTIVE_RUNS.clear()

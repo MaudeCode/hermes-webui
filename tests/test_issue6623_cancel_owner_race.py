@@ -132,6 +132,33 @@ def test_issue6623_owner_must_be_captured_before_stream_pop(tmp_path, monkeypatc
     assert config.STREAM_SESSION_OWNERS.get(stream_id) is None
 
 
+def test_early_cancel_lock_timeout_still_emits_terminal_event(tmp_path, monkeypatch):
+    sid = "sess_early_cancel_timeout"
+    stream_id = "stream_early_cancel_timeout"
+    session = Session(session_id=sid, messages=[])
+    session.active_stream_id = stream_id
+    session.pending_user_message = "hello"
+    session.pending_started_at = time.time()
+    models.SESSIONS[sid] = session
+    event_queue = queue.Queue()
+    config.STREAMS[stream_id] = event_queue
+    config.register_stream_owner(stream_id, sid)
+    config.CANCEL_FLAGS[stream_id] = threading.Event()
+    blocked_lock = threading.Lock()
+    blocked_lock.acquire()
+    monkeypatch.setattr(streaming, "_CHAT_LOCK_WAIT_SECONDS", 0.02)
+    monkeypatch.setattr(streaming, "_get_session_agent_lock", lambda _sid: blocked_lock)
+    try:
+        assert streaming.cancel_stream(stream_id) is True
+    finally:
+        blocked_lock.release()
+
+    event, payload = event_queue.get(timeout=1)
+    assert event == "cancel"
+    assert payload["session_id"] == sid
+    assert session.pending_started_at is None
+
+
 def test_issue6623_newer_stream_stale_writeback_still_rejected(tmp_path, monkeypatch):
     """Control: with the owner captured before the pop, a session whose
     active_stream_id has rotated to a NEWER stream must still be left alone —
