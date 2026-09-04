@@ -7,6 +7,24 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# A request thread must never park on a locked ``state.db``. The agent CLI owns
+# that multi-GB WAL database and can hold a lock for seconds; sqlite's default
+# 5s busy timeout turns any such lock into a stalled worker (HWEB-34, and it
+# compounds the profile-lock starvation in HWEB-26/HWEB-29). Every WebUI open of
+# the agent DB is bounded to a quarter second and raises instead of blocking —
+# every caller already wraps its read in try/except and degrades. Matches the
+# bound ``_state_db_session_signature`` in ``api/routes.py`` already uses.
+STATE_DB_BUSY_TIMEOUT_MS = 250
+STATE_DB_CONNECT_TIMEOUT_S = STATE_DB_BUSY_TIMEOUT_MS / 1000.0
+
+# Two reads are NOT on a request thread and must not take the budget above: for
+# them a wrong answer costs more than a slow one, and there is no worker to
+# stall. ``resolve_live_compression_tip`` runs in the streaming worker, and its
+# fail-closed return value (the requested id) is the *closed ancestor* — a cold
+# agent built on it has every durable append rejected. Keep sqlite's original
+# 5s wait there, so lock contention still resolves to the right answer.
+STATE_DB_RECOVERY_BUSY_TIMEOUT_MS = 5000
+
 _USER_MESSAGE_INDEX_PRIME_LOCK = threading.Lock()
 _USER_MESSAGE_INDEX_PRIME_ATTEMPTED: set[str] = set()
 
@@ -37,7 +55,12 @@ def _prime_user_message_index_async(db_path: Path) -> None:
     ).start()
 
 
-def open_state_db_readonly(db_path: Path, log: logging.Logger | None = None) -> sqlite3.Connection:
+def open_state_db_readonly(
+    db_path: Path,
+    log: logging.Logger | None = None,
+    *,
+    busy_timeout_ms: int = STATE_DB_BUSY_TIMEOUT_MS,
+) -> sqlite3.Connection:
     """Open the live agent ``state.db`` read-only for a pure-read projection.
 
     Same rationale as the session-listing path (#5455): a write-capable handle
@@ -52,21 +75,35 @@ def open_state_db_readonly(db_path: Path, log: logging.Logger | None = None) -> 
     fallback is only for an *existing* DB whose read-only open fails on an exotic
     filesystem, so a real read never loses data.
 
+    Lock waits are bounded to ``busy_timeout_ms`` so a request thread degrades
+    (``sqlite3.OperationalError``, which every call site already catches)
+    instead of blocking on sqlite's 5s default. Off-request reads whose
+    fail-closed value would be *wrong* rather than merely empty pass
+    ``STATE_DB_RECOVERY_BUSY_TIMEOUT_MS`` to keep the original generous wait.
+
     Callers own the returned connection (wrap it in ``contextlib.closing``).
     """
     log = log or logger
     if not db_path.exists():
         raise FileNotFoundError(f"agent state.db not found: {db_path}")
     read_only_uri = f"{db_path.resolve().as_uri()}?mode=ro"
+    connect_timeout_s = busy_timeout_ms / 1000.0
     try:
-        return sqlite3.connect(read_only_uri, uri=True)
+        conn = sqlite3.connect(read_only_uri, uri=True, timeout=connect_timeout_s)
     except sqlite3.Error as exc:
         log.warning(
             "agent state.db read-only open failed for %s; falling back to writable connection: %s",
             db_path,
             exc,
         )
-        return sqlite3.connect(str(db_path))
+        conn = sqlite3.connect(str(db_path), timeout=connect_timeout_s)
+    try:
+        conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
+    except sqlite3.Error:
+        # Never leak a handle on the agent's DB when the bound can't be applied.
+        conn.close()
+        raise
+    return conn
 
 
 MESSAGING_SOURCES = {
@@ -573,19 +610,11 @@ def read_importable_agent_session_rows(
     # Open read-only for this projection/listing path: it is a pure read, and
     # holding a write-capable handle on the live (multi-GB, WAL) state.db while
     # the agent streams into it adds needless checkpoint/lock surface (#5455).
+    # Share the opener rather than inlining it, so this — the /api/sessions hot
+    # path — gets the bounded lock wait too (HWEB-34).
     # The defensive index self-heal below still runs, but through a separate
     # short-lived writable connection on the rare missing-index path only.
-    read_only_uri = f"{db_path.resolve().as_uri()}?mode=ro"
-    try:
-        conn = sqlite3.connect(read_only_uri, uri=True)
-    except sqlite3.Error as exc:
-        log.warning(
-            "agent session listing read-only open failed for %s; falling back to writable connection: %s",
-            db_path,
-            exc,
-        )
-        conn = sqlite3.connect(str(db_path))
-    with closing(conn):
+    with closing(open_state_db_readonly(db_path, log)) as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
 
@@ -652,7 +681,11 @@ def read_importable_agent_session_rows(
                 # read-only/locked db this fails and we degrade to the
                 # pre-aggregated cron-only path below, exactly as before.
                 try:
-                    with closing(sqlite3.connect(str(db_path))) as _heal:
+                    with closing(
+                        sqlite3.connect(
+                            str(db_path), timeout=STATE_DB_CONNECT_TIMEOUT_S
+                        )
+                    ) as _heal:
                         _heal.execute(
                             "CREATE INDEX IF NOT EXISTS idx_messages_session "
                             "ON messages(session_id, timestamp)"
@@ -960,7 +993,15 @@ def resolve_live_compression_tip(
         return sid
 
     try:
-        with closing(open_state_db_readonly(db_path)) as conn:
+        # Not a request thread, and failing closed here returns the CLOSED
+        # ancestor rather than an empty result — the streaming worker would then
+        # build a cold agent whose every durable append is rejected. Wait out
+        # lock contention instead of taking the request-path budget (HWEB-34).
+        with closing(
+            open_state_db_readonly(
+                db_path, busy_timeout_ms=STATE_DB_RECOVERY_BUSY_TIMEOUT_MS
+            )
+        ) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(sessions)")

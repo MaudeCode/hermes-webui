@@ -11410,10 +11410,14 @@ def _run_agent_streaming(
             # or has been zeroed out (e.g. via a buggy migration / manual file edit).
             # Truthy-check covers None, missing-attr, and 0 uniformly.
             _turn_started_at = _pending_started_at if _pending_started_at else time.time()
+            # Off-request worker feeding model context: a lock-induced empty
+            # snapshot would send stale/incomplete history to the model, so wait
+            # out contention rather than take the request-path budget (HWEB-34).
             _external_state_snapshot = get_state_db_session_messages(
                 session_id,
                 profile=getattr(s, 'profile', None),
                 with_revision=True,
+                authoritative=True,
             )
 
             def _context_and_revision_from_state_snapshot(state_snapshot):
@@ -11441,6 +11445,7 @@ def _run_agent_streaming(
                     session_id,
                     profile=getattr(s, 'profile', None),
                     with_revision=True,
+                    authoritative=True,
                 )
                 return _context_and_revision_from_state_snapshot(fresh_state_snapshot)
 

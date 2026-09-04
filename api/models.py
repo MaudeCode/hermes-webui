@@ -37,6 +37,8 @@ from api.config import (
 from api.workspace import get_last_workspace
 from api.usage import prompt_cache_hit_percent
 from api.agent_sessions import (
+    STATE_DB_CONNECT_TIMEOUT_S,
+    STATE_DB_RECOVERY_BUSY_TIMEOUT_MS,
     _is_continuation_session,
     is_cli_session_row,
     normalize_agent_session_source,
@@ -8441,6 +8443,7 @@ def get_state_db_session_messages(
     include_inactive: bool = False,
     limit=None,
     with_revision: Literal[False] = False,
+    authoritative: bool = False,
 ) -> list: ...
 
 
@@ -8454,6 +8457,7 @@ def get_state_db_session_messages(
     include_inactive: bool = False,
     limit=None,
     with_revision: Literal[True],
+    authoritative: bool = False,
 ) -> StateDBSessionMessagesSnapshot: ...
 
 
@@ -8466,6 +8470,7 @@ def get_state_db_session_messages(
     include_inactive: bool = False,
     limit=None,
     with_revision: bool = False,
+    authoritative: bool = False,
 ):
     """Read messages for a Hermes session from state.db.
 
@@ -8501,6 +8506,13 @@ def get_state_db_session_messages(
     Its revision is derived from the exact rows fetched by the same SQLite
     query and is available only for an unbounded, active, current-segment read.
     Existing callers keep the historical list return by default.
+
+    ``authoritative=True`` is for callers that are NOT on a request thread and
+    for which an empty result is a *wrong* answer rather than a missing one —
+    the streaming worker's model-context read, where a lock-induced empty
+    snapshot would send stale history to the model. Those wait out contention
+    (``STATE_DB_RECOVERY_BUSY_TIMEOUT_MS``) instead of taking the request-path
+    budget (HWEB-34). Request handlers must leave it False.
     """
     try:
         import sqlite3
@@ -8514,8 +8526,11 @@ def get_state_db_session_messages(
     if not db_path.exists():
         return _state_db_session_messages_result([], None, with_revision=with_revision)
 
+    open_kwargs = (
+        {'busy_timeout_ms': STATE_DB_RECOVERY_BUSY_TIMEOUT_MS} if authoritative else {}
+    )
     try:
-        with closing(open_state_db_readonly(db_path)) as conn:
+        with closing(open_state_db_readonly(db_path, **open_kwargs)) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(messages)")
@@ -11830,7 +11845,14 @@ def _process_stale_cleanup_manifests(hermes_home) -> bool:
         # state.db disappears between the existence check and connect().
         try:
             db_uri = f"{db_path.resolve().as_uri()}?mode=ro"
-            with closing(sqlite3.connect(db_uri, uri=True)) as conn:
+            # Bounded: this runs on the DELETE /api/session request thread, and
+            # the handler below already treats a lock as an expected fail-closed
+            # outcome that a later call retries (HWEB-34).
+            with closing(
+                sqlite3.connect(
+                    db_uri, uri=True, timeout=STATE_DB_CONNECT_TIMEOUT_S
+                )
+            ) as conn:
                 cursor = conn.execute(
                     "SELECT id FROM sessions WHERE id IN ({})".format(
                         ",".join("?" * len(pending_ids))

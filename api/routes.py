@@ -42,9 +42,12 @@ from api.agent_runtime import (
 )
 from api.agent_sessions import (
     MESSAGING_SOURCES,
+    STATE_DB_BUSY_TIMEOUT_MS,
+    STATE_DB_CONNECT_TIMEOUT_S,
     _looks_like_default_cli_title,
     is_cli_session_row,
     is_cli_session_row_visible,
+    open_state_db_readonly,
     read_session_lineage_report,
 )
 from api.compression_anchor import visible_messages_for_anchor
@@ -330,7 +333,7 @@ def _latest_cron_session_info_for_jobs(
     if not db_path or not Path(db_path).exists():
         return {jid: {"session_id": "", "message_count": None} for jid in requested}
     try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
+        with closing(open_state_db_readonly(Path(db_path))) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(sessions)")
@@ -9930,9 +9933,14 @@ def _state_db_target_session_signature(db_path, session_id):
     try:
         uri_path = quote(str(Path(db_path).resolve()), safe="/")
         with closing(
-            sqlite3.connect(f"file:{uri_path}?mode=ro", uri=True, timeout=5.0)
+            sqlite3.connect(
+                f"file:{uri_path}?mode=ro",
+                uri=True,
+                timeout=STATE_DB_CONNECT_TIMEOUT_S,
+            )
         ) as conn:
             conn.execute("PRAGMA query_only=ON")
+            conn.execute(f"PRAGMA busy_timeout={STATE_DB_BUSY_TIMEOUT_MS}")
             columns = [str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")]
             if "session_id" not in columns or "id" not in columns:
                 return None
@@ -10012,10 +10020,14 @@ def _state_db_target_session_revision(db_path, session_id):
     try:
         uri_path = quote(str(Path(db_path).resolve()), safe="/")
         with closing(
-            sqlite3.connect(f"file:{uri_path}?mode=ro", uri=True, timeout=0.25)
+            sqlite3.connect(
+                f"file:{uri_path}?mode=ro",
+                uri=True,
+                timeout=STATE_DB_CONNECT_TIMEOUT_S,
+            )
         ) as conn:
             conn.execute("PRAGMA query_only=ON")
-            conn.execute("PRAGMA busy_timeout=250")
+            conn.execute(f"PRAGMA busy_timeout={STATE_DB_BUSY_TIMEOUT_MS}")
             message_columns = {
                 str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")
             }
@@ -12696,7 +12708,7 @@ def _handle_insights(handler, parsed) -> bool:
         from api.models import _active_state_db_path
         db_path = _active_state_db_path()
         if db_path and db_path.exists():
-            with closing(sqlite3.connect(str(db_path))) as conn:
+            with closing(open_state_db_readonly(db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
                 # cache_read_tokens may not exist on older agent state DBs;
@@ -13380,7 +13392,7 @@ def _deep_health_checks(stream_check: dict | None = None) -> tuple[dict, bool]:
                 "ms": round((time.time() - t0) * 1000, 1),
             }
         else:
-            with closing(sqlite3.connect(str(db_path))) as conn:
+            with closing(open_state_db_readonly(db_path)) as conn:
                 conn.execute("PRAGMA schema_version").fetchone()
             checks["state_db"] = {
                 "status": "ok",
@@ -29432,7 +29444,9 @@ def _persist_handoff_summary_to_state_db(sid: str, message: dict) -> bool:
 
     marker_payload = _extract_handoff_summary_payload(message)
     try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
+        with closing(
+            sqlite3.connect(str(db_path), timeout=STATE_DB_CONNECT_TIMEOUT_S)
+        ) as conn:
             try:
                 if marker_payload is not None:
                     cur = conn.execute(
