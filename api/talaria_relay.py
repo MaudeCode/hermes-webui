@@ -501,7 +501,11 @@ class TalariaRelayPublisher:
         from api.profiles import _profiles_match
 
         with ACTIVE_RUNS_LOCK:
-            runs = [dict(item) for item in ACTIVE_RUNS.values() if isinstance(item, dict)]
+            runs = [
+                dict(item)
+                for item in ACTIVE_RUNS.values()
+                if isinstance(item, dict) and not item.get("health_only")
+            ]
 
         cutoff = time.time() - 15 * 60
         with self._terminal_lock:
