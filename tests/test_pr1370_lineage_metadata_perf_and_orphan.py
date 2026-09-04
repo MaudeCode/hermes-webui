@@ -248,6 +248,9 @@ def test_in_clause_chunked_for_large_session_set(tmp_path, monkeypatch):
             self._real = real_connect(*args, **kw)
         def cursor(self):
             return _TrackingCursor(self._real.cursor())
+        # Pass everything else (execute, close, ...) straight through, so the
+        # double keeps working as the opener grows (e.g. its busy_timeout pragma).
+        def __getattr__(self, name): return getattr(self._real, name)
         def __enter__(self): return self
         def __exit__(self, *a): return self._real.__exit__(*a)
         @property

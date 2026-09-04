@@ -36,6 +36,7 @@ import threading
 from contextlib import closing
 from pathlib import Path
 
+from api.agent_sessions import open_state_db_readonly
 from api.turn_journal import (
     derive_turn_journal_states,
     is_terminal_turn_event,
@@ -439,7 +440,7 @@ def _state_db_has_session(session_id: str, state_db_path: Path | None) -> bool:
     if state_db_path is None or not state_db_path.exists():
         return True
     try:
-        with closing(sqlite3.connect(f"file:{state_db_path}?mode=ro", uri=True)) as conn:
+        with closing(open_state_db_readonly(state_db_path)) as conn:
             cur = conn.execute(
                 "select 1 from sqlite_master where type='table' and name='sessions'"
             )
@@ -504,7 +505,7 @@ def _read_state_db_missing_sidecar_rows(
     if state_db_path is None or not state_db_path.exists():
         return []
     try:
-        with closing(sqlite3.connect(f"file:{state_db_path}?mode=ro", uri=True)) as conn:
+        with closing(open_state_db_readonly(state_db_path)) as conn:
             conn.row_factory = sqlite3.Row
             session_cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
             message_cols = {row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}

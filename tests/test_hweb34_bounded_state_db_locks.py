@@ -1,0 +1,253 @@
+"""Regression tests for HWEB-34 — bound state.db lock waits on request threads.
+
+``open_state_db_readonly`` used sqlite's default 5-second busy timeout, so any
+request touching the agent-owned ``state.db`` could park a worker for seconds
+while the agent CLI held a lock. Three ``api/routes.py`` read handlers also
+opened plain write-capable connections on that multi-GB WAL database.
+
+These pin both halves: every WebUI open of the agent DB is bounded and degrades
+instead of blocking, and the read handlers hold no write-capable handle. The one
+genuine writer (``_persist_handoff_summary_to_state_db``, which INSERTs a tool
+message) keeps its writable connection but gets the same bound.
+"""
+import inspect
+import sqlite3
+import time
+from contextlib import closing, contextmanager
+
+import pytest
+
+import api.agent_sessions as agent_sessions
+import api.models as models
+import api.routes as routes
+from api.agent_sessions import (
+    STATE_DB_CONNECT_TIMEOUT_S,
+    open_state_db_readonly,
+    read_importable_agent_session_rows,
+)
+
+# The bound is 250 ms; the pre-fix default was 5 s. Anything under a second
+# proves the wait is bounded without making the test flaky on a loaded machine.
+LOCK_BUDGET_S = 1.0
+
+
+def _make_state_db(path):
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY, parent_session_id TEXT, end_reason TEXT,
+            source TEXT, session_source TEXT, title TEXT, model TEXT,
+            message_count INTEGER, started_at REAL, ended_at REAL,
+            archived INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT,
+            timestamp REAL, tool_calls TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, source, session_source, title, model, "
+        "message_count, started_at, ended_at) VALUES (?,?,?,?,?,?,?,?)",
+        ("sess-1", "cli", "cli", "Root", "sonnet", 2, 1000.0, 1100.0),
+    )
+    conn.executemany(
+        "INSERT INTO messages (id, session_id, role, content, timestamp, tool_calls) "
+        "VALUES (?,?,?,?,?,?)",
+        [
+            (1, "sess-1", "user", "hi", 1000.0, None),
+            (2, "sess-1", "assistant", "hello", 1001.0, None),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+
+@contextmanager
+def _write_locked(db):
+    """Hold the same exclusive write lock the agent CLI takes while streaming."""
+    holder = sqlite3.connect(str(db), timeout=0)
+    holder.execute("BEGIN EXCLUSIVE")
+    try:
+        yield
+    finally:
+        holder.rollback()
+        holder.close()
+
+
+def _elapsed(fn):
+    t0 = time.monotonic()
+    try:
+        fn()
+    except sqlite3.OperationalError:
+        pass  # bounded failure is the intended degradation
+    return time.monotonic() - t0
+
+
+# ── the wait is bounded ──────────────────────────────────────────────────────
+
+def test_opener_bounds_the_lock_wait(tmp_path):
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+
+    with _write_locked(db):
+        def read():
+            with closing(open_state_db_readonly(db)) as conn:
+                conn.execute("SELECT 1 FROM sessions").fetchone()
+
+        elapsed = _elapsed(read)
+
+    assert elapsed < LOCK_BUDGET_S, (
+        f"locked state.db read took {elapsed:.2f}s; the busy timeout is unbounded"
+    )
+
+
+def test_session_listing_read_is_bounded(tmp_path):
+    """The /api/sessions listing projection is the hot path the bound protects."""
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+
+    with _write_locked(db):
+        elapsed = _elapsed(lambda: read_importable_agent_session_rows(db))
+
+    assert elapsed < LOCK_BUDGET_S, (
+        f"/api/sessions listing read took {elapsed:.2f}s on a locked state.db"
+    )
+
+
+def test_sidebar_enrichment_degrades_instead_of_blocking(tmp_path):
+    """A caller that depended on a successful read still returns its empty
+    value — quickly — when the bounded opener gives up."""
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+
+    # Sanity: it really does read this DB when nothing holds a lock.
+    assert models._read_state_db_sidebar_overrides(db, {"sess-1"})
+
+    with _write_locked(db):
+        t0 = time.monotonic()
+        overrides = models._read_state_db_sidebar_overrides(db, {"sess-1"})
+        elapsed = time.monotonic() - t0
+
+    assert overrides == {}
+    assert elapsed < LOCK_BUDGET_S
+
+
+def test_bounded_read_still_returns_correct_data_unlocked(tmp_path):
+    """The bound must not change the result of an uncontended read."""
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+
+    with closing(open_state_db_readonly(db)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == (
+            agent_sessions.STATE_DB_BUSY_TIMEOUT_MS
+        )
+
+    rows = read_importable_agent_session_rows(db)
+    assert [row["id"] for row in rows] == ["sess-1"]
+
+
+def test_opener_does_not_leak_a_handle_when_the_bound_cannot_be_applied(tmp_path):
+    """If the busy_timeout pragma fails, the connection is closed, not leaked."""
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+    closed = []
+
+    class PragmaHostileConnection(sqlite3.Connection):
+        def execute(self, *args, **kwargs):
+            raise sqlite3.OperationalError("synthetic pragma failure")
+
+        def close(self):
+            closed.append(True)
+            super().close()
+
+    real_connect = sqlite3.connect
+    monkeypatch_target = agent_sessions.sqlite3
+
+    def spy(*args, **kwargs):
+        return real_connect(*args, factory=PragmaHostileConnection, **kwargs)
+
+    orig = monkeypatch_target.connect
+    monkeypatch_target.connect = spy
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            open_state_db_readonly(db)
+    finally:
+        monkeypatch_target.connect = orig
+
+    assert closed, "opener leaked the connection when the pragma failed"
+
+
+# ── no request read handler holds a write-capable handle ─────────────────────
+
+READ_HANDLERS = (
+    routes._latest_cron_session_info_for_jobs,  # cron chip enrichment
+    routes._handle_insights,                    # analytics rollup
+    routes._deep_health_checks,                 # /api/health?deep=1 probe
+)
+
+
+@pytest.mark.parametrize("handler", READ_HANDLERS, ids=lambda f: f.__name__)
+def test_read_handler_opens_state_db_read_only(handler):
+    src = inspect.getsource(handler)
+    assert "open_state_db_readonly" in src, (
+        f"{handler.__name__} must read state.db through the read-only opener"
+    )
+    assert "sqlite3.connect(str(db_path))" not in src, (
+        f"{handler.__name__} must not open a write-capable handle on state.db"
+    )
+
+
+def test_handoff_marker_writer_keeps_a_bounded_writable_connection():
+    """The lone request-thread writer really does INSERT, so it must stay
+    writable — but it must not park the worker on a locked DB either."""
+    src = inspect.getsource(routes._persist_handoff_summary_to_state_db)
+    assert "INSERT INTO messages" in src
+    assert "open_state_db_readonly" not in src, (
+        "a read-only downgrade would make the handoff marker silently no-op"
+    )
+    assert "STATE_DB_CONNECT_TIMEOUT_S" in src, (
+        "the writer must bound its lock wait like every other request-thread open"
+    )
+
+
+def test_handoff_marker_write_is_bounded(tmp_path, monkeypatch):
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+    import api.profiles as profiles
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        routes, "_extract_handoff_summary_payload", lambda _m: None, raising=False
+    )
+
+    def persist():
+        return routes._persist_handoff_summary_to_state_db(
+            "sess-1", {"content": "summary", "timestamp": 1200.0}
+        )
+
+    assert persist() is True
+    with closing(sqlite3.connect(str(db))) as check:  # wrote to the tmp DB, not a real one
+        assert check.execute(
+            "SELECT COUNT(*) FROM messages WHERE role = 'tool'"
+        ).fetchone()[0] == 1
+
+    with _write_locked(db):
+        t0 = time.monotonic()
+        assert persist() is False  # degrades; the caller falls back to local persistence
+        elapsed = time.monotonic() - t0
+
+    assert elapsed < LOCK_BUDGET_S
+
+
+def test_connect_timeout_matches_the_declared_bound():
+    assert STATE_DB_CONNECT_TIMEOUT_S == pytest.approx(
+        agent_sessions.STATE_DB_BUSY_TIMEOUT_MS / 1000.0
+    )
