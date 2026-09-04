@@ -310,6 +310,8 @@ def _active_run_ids_for_session(
             for run_key, meta in list((_cfg.ACTIVE_RUNS or {}).items()):
                 if not isinstance(meta, dict) or meta.get("session_id") != sid:
                     continue
+                if meta.get("health_only"):
+                    continue
                 stream_id = str(meta.get("stream_id") or run_key or "").strip()
                 if not stream_id:
                     continue
