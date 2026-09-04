@@ -341,6 +341,25 @@ def test_shutdown_wait_covers_full_pending_start_cleanup_path():
     assert terminal._TERMINAL_SHUTDOWN_WAIT_SECONDS >= 11.0
 
 
+def test_shutdown_waits_for_supervisor_owned_late_spawn_cleanup(monkeypatch):
+    reservation = terminal._StartReservation()
+    reservation.done.set()
+    reservation.spawn_done = threading.Event()
+    with terminal._LOCK:
+        terminal._STARTING_TERMINALS["late-spawn"] = reservation
+    finished = threading.Event()
+    shutdown = threading.Thread(
+        target=lambda: (terminal.close_all_terminals(), finished.set())
+    )
+    shutdown.start()
+    assert finished.wait(0.1) is False
+
+    reservation.spawn_done.set()
+    shutdown.join(1)
+
+    assert finished.is_set()
+
+
 # ── F1: writes/resizes are serialized against close (no fd-reuse injection) ───
 
 def test_write_after_close_raises_and_never_touches_fd(monkeypatch):

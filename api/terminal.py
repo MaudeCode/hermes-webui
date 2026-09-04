@@ -204,6 +204,7 @@ class _SpawnRequest:
 @dataclass
 class _StartReservation:
     done: threading.Event = field(default_factory=threading.Event)
+    spawn_done: threading.Event | None = None
     cancelled: bool = False
 
 
@@ -621,6 +622,9 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
                 "start_new_session": True,
             }
         )
+        with _LOCK:
+            if _STARTING_TERMINALS.get(sid) is pending:
+                pending.spawn_done = request.done
         _ensure_spawn_supervisor()
         _ensure_terminal_reaper()
         _spawn_queue.put(request)
@@ -822,6 +826,9 @@ def close_all_terminals() -> None:
     deadline = time.monotonic() + _TERMINAL_SHUTDOWN_WAIT_SECONDS
     for reservation in pending:
         reservation.done.wait(max(0.0, deadline - time.monotonic()))
+        spawn_done = reservation.spawn_done
+        if spawn_done is not None:
+            spawn_done.wait(max(0.0, deadline - time.monotonic()))
 
 
 atexit.register(close_all_terminals)
