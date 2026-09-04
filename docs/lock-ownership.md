@@ -1,12 +1,14 @@
 # Filesystem lock ownership
 
-Process-wide locks may protect an atomic local-state transaction, but they must
-not cover network, model, tool, subprocess, callback, queue-wait, join, or sleep
-work. The remaining local-I/O scopes are intentionally narrow:
+Process-wide locks may protect an atomic local-state transaction. Except for the
+bounded models-catalog single-flight called out below, they do not cover network,
+model, tool, subprocess, callback, queue-wait, join, or sleep work. The remaining
+local-I/O scopes are:
 
 | State owner | Lock and contention domain | I/O kept inside and why |
 |---|---|---|
 | Agent configuration | `api.config._cfg_lock`; configuration writers for all HTTP threads | One `config.yaml` read-modify-atomic-write transaction. Releasing between read and replace would lose a concurrent setting update. YAML cache misses parse outside `_yaml_file_cache_lock`; no external I/O runs here. |
+| Models catalog | `api.config._available_models_cache_lock`; all cold `/api/models` readers | One single-flight catalog build and cache publication. The normal path delegates live probes to a daemon worker and waits at most the configured four-second budget while holding the reentrant coordination lock; publishing includes the atomic disk-cache write. The operator-only `budget <= 0` compatibility mode performs the live rebuild synchronously under the same lock and is intentionally unbounded. This scope prevents duplicate provider probes and conflicting cache publishers. |
 | Session index | `api.models._INDEX_WRITE_LOCK`; session metadata writers | `_index.json` read/repair/atomic-write must observe one ordered session mutation. Transcript resolution and Agent database reads are outside this lock. |
 | Zero-message orphan tombstones | `api.models._WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_LOCK`; sidebar prune and session-save writers | One bounded tombstone load, record/clear mutation, and fsync/atomic-replace or final unlink. The transaction prevents concurrent pruning and revival from losing each other's decision. |
 | Deleted-session tombstones | `api.models._WEBUI_DELETED_SESSION_TOMBSTONE_LOCK`; delete and session-recreation writers | One bounded tombstone load, record/clear mutation, and fsync/atomic-replace or final unlink. Keeping the whole transaction ordered prevents a concurrent save/import from resurrecting an explicitly deleted WebUI session. |
@@ -27,6 +29,10 @@ work. The remaining local-I/O scopes are intentionally narrow:
 | Project metadata | `api.models._PROJECTS_MUTATION_LOCK`; project/cron/webhook metadata writers | One `projects.json` lookup-or-create/read-modify-atomic-write transaction prevents parallel profile projections from overwriting each other. Session scanning and external work remain outside. |
 | In-place compatibility writes | `api.paths._IN_PLACE_WRITE_LOCK`; rare config/profile targets that cannot use atomic rename | One verified-inode truncate/write/mode-restore/fsync sequence. Normal writes use same-directory temp files and atomic replace without this global lock; the compatibility lock exists only to prevent byte interleaving when inode preservation is mandatory. |
 
-When a local filesystem operation fails, its owning API must return or log an
-explicit degraded/error result; it must not silently use another profile's state
-or report an uncommitted mutation as successful.
+When a local filesystem operation fails, its owning API returns or logs an
+explicit degraded/error result and never silently uses another profile's state.
+Auth session persistence is the documented availability exception: failure to
+replace `.sessions.json` is logged, while the newly signed session remains valid
+in the process-local session map until restart. Callers therefore receive a
+working cookie, but that login is explicitly best-effort durable rather than a
+committed disk mutation.
