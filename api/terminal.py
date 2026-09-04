@@ -612,7 +612,8 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
                 raise RuntimeError("terminal subsystem is shutting down")
             current = _TERMINALS.get(sid)
             if current and current.is_alive() and not restart and current.workspace == cwd:
-                break
+                _set_size(current, rows, cols)
+                return current
             pending = _STARTING_TERMINALS.get(sid)
             if pending is None:
                 if current is None and len(_TERMINALS) + len(_STARTING_TERMINALS) >= _MAX_TERMINALS:
@@ -624,10 +625,6 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
                 break
         if not pending.done.wait(timeout=5.0):
             raise TimeoutError("terminal start already in progress")
-
-    if current is not None:
-        _set_size(current, rows, cols)
-        return current
 
     master_fd = -1
     slave_fd = -1
@@ -711,9 +708,12 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
             _STARTING_TERMINALS.pop(sid, None)
             pending.done.set()
         return term
-    except BaseException:
+    except BaseException as exc:
         if request is not None and not request.enqueued:
             _close_spawn_request_fds(request)
+            with request.lock:
+                request.error = exc
+                request.done.set()
         with _LOCK:
             if term is not None and _TERMINALS.get(sid) is term:
                 _TERMINALS.pop(sid, None)

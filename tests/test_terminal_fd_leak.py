@@ -167,6 +167,33 @@ def test_cap_reuse_of_existing_sid_evicts_nothing(monkeypatch):
         assert {"keep-a", "keep-b"} <= set(terminal._TERMINALS)
 
 
+def test_reused_terminal_resize_is_atomic_with_registry_close(monkeypatch, tmp_path):
+    current = _make_registered_term(monkeypatch, "reuse-atomic", alive=True)
+    current.workspace = str(terminal.Path(current.workspace).resolve())
+    close_started = threading.Event()
+    close_finished = threading.Event()
+    closer = None
+
+    def resize(_term, _rows, _cols):
+        nonlocal closer
+        closer = threading.Thread(
+            target=lambda: (
+                close_started.set(),
+                terminal.close_terminal("reuse-atomic", expected=current),
+                close_finished.set(),
+            )
+        )
+        closer.start()
+        assert close_started.wait(1)
+        assert close_finished.wait(0.1) is False
+
+    monkeypatch.setattr(terminal, "_set_size", resize)
+
+    assert terminal.start_terminal("reuse-atomic", terminal.Path(current.workspace)) is current
+    closer.join(1)
+    assert close_finished.is_set()
+
+
 def test_blocked_spawn_does_not_delay_unrelated_close(monkeypatch, tmp_path):
     other = _make_registered_term(monkeypatch, "other", alive=False)
     request_ready = threading.Event()
@@ -219,6 +246,30 @@ def test_pty_setup_failure_releases_start_reservation(monkeypatch, tmp_path):
         terminal.start_terminal("pty-failure", tmp_path)
 
     assert "pty-failure" not in terminal._STARTING_TERMINALS
+
+
+def test_pre_enqueue_failure_signals_spawn_event(monkeypatch, tmp_path):
+    captured = {}
+    original_request = terminal._SpawnRequest
+
+    def capture_request(*args, **kwargs):
+        request = original_request(*args, **kwargs)
+        captured["request"] = request
+        return request
+
+    monkeypatch.setattr(terminal, "_SpawnRequest", capture_request)
+    monkeypatch.setattr(terminal, "_ensure_spawn_supervisor", lambda: None)
+    monkeypatch.setattr(
+        terminal,
+        "_ensure_terminal_reaper",
+        lambda: (_ for _ in ()).throw(RuntimeError("thread unavailable")),
+    )
+
+    with pytest.raises(RuntimeError, match="thread unavailable"):
+        terminal.start_terminal("pre-enqueue-failure", tmp_path)
+
+    assert captured["request"].done.is_set()
+    assert "pre-enqueue-failure" not in terminal._STARTING_TERMINALS
 
 
 def test_cancelled_start_keeps_capacity_until_owner_cleans_up(monkeypatch, tmp_path):
