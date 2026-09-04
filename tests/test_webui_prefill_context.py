@@ -340,3 +340,31 @@ def test_prefill_status_redactor_handles_secret_shaped_text():
 
     assert "redaction-test-placeholder" not in redacted
     assert "[REDACTED]" in redacted
+
+
+def test_prefill_script_uses_profile_scoped_config_and_environment(
+    monkeypatch, tmp_path
+):
+    from api import config, streaming
+
+    script = tmp_path / "profile-prefill.py"
+    script.write_text(
+        "import json, os\n"
+        "print(json.dumps([{'role': 'user', 'content': os.environ['PROFILE_PREFILL_MARKER']}]))\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PROFILE_PREFILL_MARKER", "root-prefill")
+    monkeypatch.delenv("HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT", raising=False)
+    config._set_thread_env(
+        HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT=f'{sys.executable} "{script}"',
+        PROFILE_PREFILL_MARKER="profile-prefill",
+    )
+    try:
+        result = streaming._load_webui_prefill_context({})
+    finally:
+        config._clear_thread_env()
+
+    assert result["status"] == "loaded"
+    assert result["messages"] == [
+        {"role": "user", "content": "profile-prefill"}
+    ]

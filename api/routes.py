@@ -25923,12 +25923,12 @@ def _handle_chat_sync(handler, body):
 
             runtime_cwd_token = set_session_cwd(str(workspace))
             runtime_scope.callback(_SESSION_CWD.reset, runtime_cwd_token)
-        except ImportError:
+        except ImportError as exc:
             if _HERMES_FOUND:
                 raise RuntimeError(
                     "Cannot safely start synchronous chat: the installed Hermes Agent "
                     "lacks context-local terminal working directories."
-                )
+                ) from exc
 
         terminal_runtime_env = profiles_api.filter_runtime_env_for_gateway_parity(
             profiles_api.get_profile_runtime_env(profile_home)
@@ -25939,7 +25939,7 @@ def _handle_chat_sync(handler, body):
             terminal_policy = terminal_scope.build_profile_terminal_scope(profile_home)
             terminal_token = terminal_scope.set_terminal_scope(terminal_policy)
             runtime_scope.callback(terminal_scope.reset_terminal_scope, terminal_token)
-        except ImportError:
+        except ImportError as exc:
             if _HERMES_FOUND and any(
                 key.startswith("TERMINAL_") and key != "TERMINAL_CWD"
                 for key in terminal_runtime_env
@@ -25947,7 +25947,7 @@ def _handle_chat_sync(handler, body):
                 raise RuntimeError(
                     "Cannot safely start synchronous chat: the installed Hermes Agent "
                     "lacks context-local terminal policy."
-                )
+                ) from exc
 
         _prewarm_skill_tool_modules()
         if _HERMES_FOUND and not profiles_api._skill_modules_support_profile_home(

@@ -38,7 +38,7 @@ from api.config import (
     STREAM_LAST_EVENT_ID,
     LOCK, SESSIONS, SESSIONS_MAX, SESSION_DIR,
     _get_session_agent_lock, _alias_session_agent_lock,
-    _set_thread_env, _clear_thread_env, _thread_ctx,
+    _set_thread_env, _clear_thread_env, _thread_ctx, _thread_local_env_value,
     register_active_run, update_active_run, unregister_active_run,
     unregister_stream_owner,
     stream_owner_session_id,
@@ -1060,7 +1060,7 @@ _PREFILL_CONTEXT_DEFAULT_MAX_CHARS = 12_000
 
 
 def _prefill_context_max_chars(config_data: dict) -> int:
-    raw = os.getenv("HERMES_WEBUI_PREFILL_CONTEXT_MAX_CHARS", "") or str(
+    raw = _thread_local_env_value("HERMES_WEBUI_PREFILL_CONTEXT_MAX_CHARS") or str(
         config_data.get("webui_prefill_context_max_chars") or ""
     )
     try:
@@ -1109,7 +1109,7 @@ def _apply_prefill_context_budget(context: dict, config_data: dict) -> dict:
     if char_count <= max_chars:
         return context
 
-    file_raw = os.getenv("HERMES_PREFILL_MESSAGES_FILE", "") or str(config_data.get("prefill_messages_file") or "")
+    file_raw = _thread_local_env_value("HERMES_PREFILL_MESSAGES_FILE") or str(config_data.get("prefill_messages_file") or "")
     if context.get("source") == "script" and file_raw:
         fallback = _load_prefill_messages_file(file_raw, source="file_budget_fallback")
         fallback_messages = fallback.get("messages") if isinstance(fallback, dict) else []
@@ -1143,7 +1143,7 @@ def _load_prefill_messages_file(file_raw: str, *, source: str = "file", status: 
 
 
 def _prefill_script_timeout(config_data: dict) -> float:
-    raw = os.getenv("HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT_TIMEOUT", "") or str(config_data.get("webui_prefill_messages_script_timeout") or "")
+    raw = _thread_local_env_value("HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT_TIMEOUT") or str(config_data.get("webui_prefill_messages_script_timeout") or "")
     try:
         return max(0.1, min(float(raw or 5), 30.0))
     except Exception:
@@ -1180,7 +1180,7 @@ def _messages_from_prefill_script_output(text: str) -> list[dict]:
 
 
 def _load_prefill_messages_script(config_data: dict) -> dict:
-    script_raw = os.getenv("HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT", "") or config_data.get("webui_prefill_messages_script")
+    script_raw = _thread_local_env_value("HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT") or config_data.get("webui_prefill_messages_script")
     if not script_raw:
         return _prefill_not_configured()
     command = _prefill_script_command(script_raw)
@@ -1188,6 +1188,11 @@ def _load_prefill_messages_script(config_data: dict) -> dict:
     if not command:
         return {"status": "error", "source": "script", "label": label, "messages": [], "message_count": 0, "error": "prefill script is empty"}
     try:
+        script_env = os.environ.copy()
+        script_env.update({
+            str(key): str(value)
+            for key, value in getattr(_thread_ctx, "env", {}).items()
+        })
         proc = subprocess.run(
             command,
             text=True,
@@ -1195,6 +1200,7 @@ def _load_prefill_messages_script(config_data: dict) -> dict:
             stderr=subprocess.PIPE,
             timeout=_prefill_script_timeout(config_data),
             check=False,
+            env=script_env,
         )
     except subprocess.TimeoutExpired:
         return {"status": "error", "source": "script", "label": label, "messages": [], "message_count": 0, "error": "prefill script timed out"}
@@ -1228,7 +1234,7 @@ def _load_webui_prefill_context(
     """
     cfg = config_data if isinstance(config_data, dict) else get_config()
     script_context = _load_prefill_messages_script(cfg)
-    file_raw = os.getenv("HERMES_PREFILL_MESSAGES_FILE", "") or str(cfg.get("prefill_messages_file") or "")
+    file_raw = _thread_local_env_value("HERMES_PREFILL_MESSAGES_FILE") or str(cfg.get("prefill_messages_file") or "")
     if script_context.get("status") == "not_configured":
         if file_raw:
             return _apply_prefill_context_budget(_load_prefill_messages_file(file_raw), cfg)
