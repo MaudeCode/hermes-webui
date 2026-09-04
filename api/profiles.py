@@ -1135,16 +1135,20 @@ def _profile_secret_thread_env(profile: str, profile_home_path: Path) -> dict[st
         and (profile or "") == _isolated_profile_name()
         and Path(profile_home_path).expanduser() == Path(_INITIAL_HERMES_HOME).expanduser()
     )
-    source = _INITIAL_PROCESS_ENV if owns_startup_env else {}
+    source = (
+        filter_runtime_env_for_gateway_parity(_INITIAL_PROCESS_ENV)
+        if owns_startup_env
+        else {}
+    )
     names = _profile_secret_env_names(profile_home_path) | {
         "HERMES_MODEL",
         "OPENAI_MODEL",
         "LLM_MODEL",
     }
-    return {
-        name: source.get(name, "")
-        for name in names
-    }
+    result = dict(source)
+    for name in names:
+        result.setdefault(name, "")
+    return result
 
 
 def retire_startup_env_keys_for_home(profile_home_path: Path, names) -> None:

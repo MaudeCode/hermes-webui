@@ -2918,6 +2918,7 @@ def _get_cached_session_list_payload(
 
 from api.config import (
     _HERMES_FOUND,
+    _thread_local_env_value,
     STATE_DIR,
     SESSION_DIR,
     DEFAULT_WORKSPACE,
@@ -7370,7 +7371,7 @@ def _custom_provider_api_key_for_context(entry: dict, provider: str) -> str:
         api_key_text = str(raw_api_key).strip()
         if api_key_text.startswith("${") and api_key_text.endswith("}") and len(api_key_text) > 3:
             env_name = api_key_text[2:-1]
-            resolved = os.getenv(env_name, "").strip()
+            resolved = _thread_local_env_value(env_name).strip()
             if resolved:
                 return resolved
             logger.debug(
@@ -7383,7 +7384,7 @@ def _custom_provider_api_key_for_context(entry: dict, provider: str) -> str:
 
     key_env = str(entry.get("key_env") or "").strip()
     if key_env:
-        resolved = os.getenv(key_env, "").strip()
+        resolved = _thread_local_env_value(key_env).strip()
         if resolved:
             return resolved
 
@@ -7410,14 +7411,14 @@ def _context_length_config_api_key_for_provider(
             and api_key_text.endswith("}")
             and len(api_key_text) > 3
         ):
-            resolved = os.getenv(api_key_text[2:-1], "").strip()
+            resolved = _thread_local_env_value(api_key_text[2:-1]).strip()
             if resolved:
                 return resolved
         elif api_key_text:
             return api_key_text
         key_env = str(raw_key_env or "").strip()
         if key_env:
-            resolved = os.getenv(key_env, "").strip()
+            resolved = _thread_local_env_value(key_env).strip()
             if resolved:
                 return resolved
         return ""

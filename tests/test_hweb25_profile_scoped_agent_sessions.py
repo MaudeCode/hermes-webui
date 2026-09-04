@@ -724,6 +724,40 @@ def test_root_profile_projects_startup_model_override(monkeypatch, tmp_path):
     ] == "deployment-model"
 
 
+def test_root_profile_projects_filtered_startup_config_environment(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(profiles, "_profile_secret_env_names", lambda _home: set())
+    monkeypatch.setitem(
+        profiles._INITIAL_PROCESS_ENV, "CUSTOM_BASE_URL", "https://root.example"
+    )
+    monkeypatch.setitem(profiles._INITIAL_PROCESS_ENV, "HOME", "/private/root")
+
+    env = profiles._profile_secret_thread_env("default", tmp_path)
+
+    assert env["CUSTOM_BASE_URL"] == "https://root.example"
+    assert "HOME" not in env
+
+
+def test_context_length_credentials_use_profile_thread_env(monkeypatch):
+    import api.config as config
+    import api.routes as routes
+
+    monkeypatch.setenv("PROFILE_CONTEXT_KEY", "root-key")
+    config._set_thread_env(PROFILE_CONTEXT_KEY="profile-key")
+    try:
+        entry = {"name": "Scoped", "key_env": "PROFILE_CONTEXT_KEY"}
+        assert routes._custom_provider_api_key_for_context(
+            entry, "custom:scoped"
+        ) == "profile-key"
+        assert routes._context_length_config_api_key_for_provider(
+            "custom:scoped",
+            {"providers": {"custom:scoped": entry}},
+        ) == "profile-key"
+    finally:
+        config._clear_thread_env()
+
+
 def test_default_readonly_request_pins_root_home(monkeypatch, tmp_path):
     import api.config as config
 
