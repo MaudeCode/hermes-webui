@@ -12,7 +12,7 @@ def test_session_events_endpoint_and_bus_are_defined():
     assert "def publish_session_list_changed" in SESSION_EVENTS
     assert "def _handle_session_events_stream" in ROUTES
     assert "parsed.path == '/api/sessions/events'" in ROUTES
-    assert "Content-Type', 'text/event-stream; charset=utf-8'" in ROUTES
+    assert "start_sse_response(handler)" in ROUTES
 
 
 def test_session_events_publish_for_minimal_sidebar_mutations():

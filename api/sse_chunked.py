@@ -15,11 +15,13 @@ historical unframed stream, and only deployments behind a buffering proxy
 need to set the flag. It sits alongside the existing ``X-Accel-Buffering: no``
 proxy-compatibility hint on these same handlers.
 
-Usage: in an SSE handler, replace ``handler.end_headers()`` with
-``end_sse_headers(handler)``. When the flag is set, all subsequent
-``handler.wfile.write()`` calls are framed transparently.
+Usage: call ``start_sse_response(handler)`` before writing the stream body.
+It claims the shared SSE worker budget and emits the standard headers. When
+chunking is enabled, subsequent ``handler.wfile.write()`` calls are framed
+transparently.
 """
 
+import json
 import os
 
 _TRUTHY = {"1", "true", "yes", "on"}
@@ -28,6 +30,31 @@ _TRUTHY = {"1", "true", "yes", "on"}
 def chunked_sse_enabled() -> bool:
     """True when ``HERMES_WEBUI_SSE_CHUNKED`` opts into chunked SSE framing."""
     return os.getenv("HERMES_WEBUI_SSE_CHUNKED", "").strip().lower() in _TRUTHY
+
+
+def start_sse_response(handler, *, connection_close: bool = False) -> bool:
+    """Claim SSE capacity and send the shared stream response headers."""
+    promote = getattr(getattr(handler, "server", None), "promote_request_to_stream", None)
+    rejection = promote(handler) if promote else None
+    if rejection:
+        body = json.dumps(rejection, separators=(",", ":")).encode("utf-8")
+        handler.send_response(503)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Connection", "close")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+        handler.close_connection = True
+        return False
+
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+    handler.send_header("Cache-Control", "no-cache")
+    handler.send_header("X-Accel-Buffering", "no")
+    if connection_close:
+        handler.send_header("Connection", "close")
+    end_sse_headers(handler)
+    return True
 
 
 class _ChunkedSSEWriter:

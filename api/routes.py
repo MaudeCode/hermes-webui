@@ -12,7 +12,7 @@ import errno
 import io
 import gzip
 import json
-from api.sse_chunked import end_sse_headers
+from api.sse_chunked import start_sse_response
 import logging
 import os
 import queue
@@ -20212,12 +20212,8 @@ def _stream_runner_run_events(handler, run_id: str, cursor: str | None = None) -
     if adapter is None:
         return False
 
-    handler.send_response(200)
-    handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
-    handler.send_header("Cache-Control", "no-cache")
-    handler.send_header("X-Accel-Buffering", "no")
-    handler.send_header("Connection", "close")
-    end_sse_headers(handler)
+    if not start_sse_response(handler, connection_close=True):
+        return True
     cursor_value = cursor
     try:
         while True:
@@ -20304,12 +20300,8 @@ def _handle_sse_stream(handler, parsed):
             last_seq = 0
         if dead_after_seq is not None and dead_after_seq > last_seq:
             dead_after_seq = 0
-        handler.send_response(200)
-        handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        handler.send_header("Cache-Control", "no-cache")
-        handler.send_header("X-Accel-Buffering", "no")
-        handler.send_header("Connection", "close")
-        end_sse_headers(handler)
+        if not start_sse_response(handler, connection_close=True):
+            return True
         try:
             _replay_run_journal(handler, stream_id, dead_after_seq)
         except _CLIENT_DISCONNECT_ERRORS:
@@ -20320,12 +20312,10 @@ def _handle_sse_stream(handler, parsed):
     else:
         subscriber = stream.subscribe() if hasattr(stream, "subscribe") else stream
         stream_snapshot = {}
-    handler.send_response(200)
-    handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
-    handler.send_header("Cache-Control", "no-cache")
-    handler.send_header("X-Accel-Buffering", "no")
-    handler.send_header("Connection", "close")
-    end_sse_headers(handler)
+    if not start_sse_response(handler, connection_close=True):
+        if subscriber is not stream and hasattr(stream, "unsubscribe"):
+            stream.unsubscribe(subscriber)
+        return True
     _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
     # Replay shares the drain loop's try/finally so every exit path unsubscribes.
     try:
@@ -20387,19 +20377,16 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
 
     # Parse the resume cursor and baseline the journal BEFORE committing SSE headers
     # (and thus before any run could complete mid-handler). Capturing after
-    # end_sse_headers() leaves a window where a run finishing between header commit
+    # start_sse_response() leaves a window where a run finishing between header commit
     # and baseline is absorbed into the baseline and silently lost. Both operations
     # are side-effect-free (header read + stat-only fingerprint), safe pre-response.
     resume_event_id = _session_events_resume_event_id(handler, parsed)
     _idle_journal_fp = session_journal_fingerprint(session_id)
 
-    handler.send_response(200)
-    handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
-    handler.send_header("Cache-Control", "no-cache")
-    handler.send_header("X-Accel-Buffering", "no")
     # #3103: see _handle_gateway_sse_stream — `Connection: close` causes
     # EventSource reconnect storms in browsers on long-lived SSE.
-    end_sse_headers(handler)
+    if not start_sse_response(handler):
+        return True
     _sse_set_write_deadline(handler)
 
     active_stream_id = _active_run_stream_for_session(session_id)
@@ -20690,12 +20677,8 @@ def _handle_terminal_output(handler, parsed):
     # terminal permanently unreapable: the exact fd/thread leak this reaper
     # exists to prevent. Hence the try starts immediately after the attach.
     try:
-        handler.send_response(200)
-        handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        handler.send_header("Cache-Control", "no-cache")
-        handler.send_header("X-Accel-Buffering", "no")
-        handler.send_header("Connection", "close")
-        end_sse_headers(handler)
+        if not start_sse_response(handler, connection_close=True):
+            return True
         _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
         while True:
             try:
@@ -20784,10 +20767,6 @@ def _handle_gateway_sse_stream(handler, parsed):
     if not _probe_body['watcher_running']:
         return j(handler, {'error': 'watcher not started'}, status=503)
 
-    handler.send_response(200)
-    handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
-    handler.send_header('Cache-Control', 'no-cache')
-    handler.send_header('X-Accel-Buffering', 'no')
     # #3103: do NOT emit `Connection: close` on long-lived SSE streams.
     # The python BaseHTTPServer worker only handles one request per
     # connection anyway, but browsers (Chrome/Firefox) treat the close
@@ -20796,7 +20775,8 @@ def _handle_gateway_sse_stream(handler, parsed):
     # connect/sessions_changed snapshot/disconnect that thrashes the
     # session list every ~1s. Letting the server close the socket
     # naturally after the stream ends is sufficient.
-    end_sse_headers(handler)
+    if not start_sse_response(handler):
+        return True
     _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
     q = watcher.subscribe()
@@ -20825,13 +20805,10 @@ def _handle_gateway_sse_stream(handler, parsed):
 
 def _handle_session_events_stream(handler):
     """SSE endpoint for lightweight session-list invalidation events."""
-    handler.send_response(200)
-    handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
-    handler.send_header('Cache-Control', 'no-cache')
-    handler.send_header('X-Accel-Buffering', 'no')
     # #3103: see _handle_gateway_sse_stream — `Connection: close` causes
     # EventSource reconnect storms in browsers on long-lived SSE.
-    end_sse_headers(handler)
+    if not start_sse_response(handler):
+        return True
     _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
     q = subscribe_session_events()
@@ -22553,12 +22530,9 @@ def _handle_approval_sse_stream(handler, parsed):
             initial_pending = dict(q_list)
             initial_count = 1
 
-    handler.send_response(200)
-    handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
-    handler.send_header('Cache-Control', 'no-cache')
-    handler.send_header('X-Accel-Buffering', 'no')
-    handler.send_header('Connection', 'close')
-    end_sse_headers(handler)
+    if not start_sse_response(handler, connection_close=True):
+        _approval_sse_unsubscribe(sid, q)
+        return True
     _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
     from api.streaming import _sse
@@ -22655,12 +22629,9 @@ def _handle_clarify_sse_stream(handler, parsed):
                 initial_pending = dict(_legacy)
                 initial_count = 1
 
-    handler.send_response(200)
-    handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
-    handler.send_header('Cache-Control', 'no-cache')
-    handler.send_header('X-Accel-Buffering', 'no')
-    handler.send_header('Connection', 'close')
-    end_sse_headers(handler)
+    if not start_sse_response(handler, connection_close=True):
+        clarify_sse_unsubscribe(sid, q)
+        return True
     _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
     from api.streaming import _sse
@@ -22745,15 +22716,12 @@ def _handle_session_sse_stream(handler, parsed):
     # the subscribe onward — header setup included — runs inside one
     # try/finally that unconditionally unsubscribes.
     try:
-        handler.send_response(200)
-        handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
-        handler.send_header('Cache-Control', 'no-cache')
-        handler.send_header('X-Accel-Buffering', 'no')
         # #3103: omit the Connection header — rely on the HTTP/1.1 keep-alive
         # default, matching the other long-lived SSE handlers (gateway/session
         # events) that fixed the reconnect-storm. An explicit value here is a
         # third, inconsistent approach (greptile flag).
-        end_sse_headers(handler)
+        if not start_sse_response(handler):
+            return True
         _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
         from api.streaming import _sse

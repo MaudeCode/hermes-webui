@@ -1008,9 +1008,9 @@ def test_session_sse_stream_unsubscribes_on_header_write_failure():
     sub_ix = body.find("subscribe_to_session_channel(")
     assert sub_ix != -1, "subscribe call not found"
     try_ix = body.find("try:", sub_ix)
-    # SSE handlers finish their headers via end_sse_headers() (api/sse_chunked),
-    # which is exactly handler.end_headers() unless chunked framing is opted in.
-    end_headers_ix = body.find("end_sse_headers(handler)", sub_ix)
+    # SSE handlers claim capacity and finish their headers through the shared
+    # start_sse_response() helper.
+    end_headers_ix = body.find("start_sse_response(handler)", sub_ix)
     finally_ix = body.find("finally:", sub_ix)
     unsub_ix = body.find("ch.unsubscribe(q)", finally_ix if finally_ix != -1 else sub_ix)
 

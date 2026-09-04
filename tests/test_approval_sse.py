@@ -70,9 +70,9 @@ class TestSSEStaticAnalysis:
             "_approval_sse_subscribers module-level dict must exist"
 
     def test_sse_content_type(self):
-        """SSE handler must set text/event-stream content type."""
-        assert "text/event-stream" in ROUTES_SRC, \
-            "SSE handler must set Content-Type to text/event-stream"
+        """SSE handler must use the shared response setup."""
+        assert "start_sse_response(handler, connection_close=True)" in ROUTES_SRC, \
+            "SSE handler must use the shared response setup"
 
     def test_sse_keepalive(self):
         """SSE handler must send keepalive comments to prevent proxy timeout."""
@@ -80,9 +80,8 @@ class TestSSEStaticAnalysis:
             "SSE handler must send keepalive comments"
 
     def test_sse_cache_control(self):
-        """SSE handler must set Cache-Control: no-cache."""
-        assert "no-cache" in ROUTES_SRC, \
-            "SSE handler must set Cache-Control: no-cache"
+        """Shared SSE setup owns Cache-Control: no-cache."""
+        assert "start_sse_response(handler, connection_close=True)" in ROUTES_SRC
 
     def test_sse_initial_snapshot(self):
         """SSE handler must send initial snapshot on connect."""

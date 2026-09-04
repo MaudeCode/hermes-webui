@@ -96,7 +96,7 @@ def test_dead_stream_sse_replays_journal_before_404_fallback():
     assert "stream not found" in block
     assert "_replay_run_journal" in block
     assert "_chat_stream_resume_cursor" in block
-    assert 'Content-Type", "text/event-stream; charset=utf-8"' in block
+    assert "start_sse_response(handler, connection_close=True)" in block
 
 
 def test_active_stream_replay_uses_snapshot_cutoff_and_skips_duplicate_queue_items(monkeypatch):

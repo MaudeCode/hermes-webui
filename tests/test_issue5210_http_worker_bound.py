@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import http.client
+import json
 import socket
 import ssl
 import subprocess
@@ -14,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from server import QuietHTTPServer
+from api.sse_chunked import start_sse_response
 
 
 def _free_port() -> int:
@@ -57,7 +59,24 @@ def _wait_for_worker_slot_release(server: _ObservedQuietHTTPServer, *, timeout: 
     raise AssertionError("timed out waiting for worker slot release")
 
 
-def _request(port: int, path: str, *, use_ssl: bool = False, timeout: float = 2.0) -> tuple[int, dict[str, str], bytes]:
+def _wait_for_stream_release(server: _ObservedQuietHTTPServer, *, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with server._stream_clients_lock:
+            if not server._stream_clients:
+                return
+        time.sleep(0.01)
+    raise AssertionError("timed out waiting for SSE client count release")
+
+
+def _request(
+    port: int,
+    path: str,
+    *,
+    headers: dict[str, str] | None = None,
+    use_ssl: bool = False,
+    timeout: float = 2.0,
+) -> tuple[int, dict[str, str], bytes]:
     if use_ssl:
         context = ssl.create_default_context()
         context.check_hostname = False
@@ -66,12 +85,26 @@ def _request(port: int, path: str, *, use_ssl: bool = False, timeout: float = 2.
     else:
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
-        conn.request("GET", path)
+        conn.request("GET", path, headers=headers or {})
         resp = conn.getresponse()
         body = resp.read()
         return resp.status, {k: v for k, v in resp.getheaders()}, body
     finally:
         conn.close()
+
+
+def _assert_request_capacity_rejection(
+    status: int,
+    headers: dict[str, str],
+    body: bytes,
+) -> None:
+    assert status == 503
+    assert headers["Connection"].lower() == "close"
+    assert headers["Content-Type"] == "application/json"
+    assert json.loads(body) == {
+        "error": "Request worker capacity exhausted",
+        "condition": "request_worker_capacity",
+    }
 
 
 def _start_request_thread(port: int, path: str, *, use_ssl: bool = False) -> tuple[threading.Thread, dict[str, object]]:
@@ -164,10 +197,40 @@ class _GateHandler(BaseHTTPRequestHandler):
                 raise TimeoutError("release_event not set")
             self._send_ok()
             return
-        if self.path == "/fast":
+        if self.path in {"/fast", "/api/health"}:
             self._send_ok()
             return
         self.send_error(404)
+
+
+class _SSEGateHandler(_GateHandler):
+    def do_GET(self):  # noqa: N802
+        if self.path != "/stream":
+            return super().do_GET()
+        identity = self.headers.get("X-Test-Identity")
+        if identity:
+            self._trusted_auth_session_reconciled = {
+                "auth_type": "test",
+                "username": identity,
+            }
+        if not start_sse_response(self, connection_close=True):
+            return
+        self.wfile.write(b"data: ready\n\n")
+        self.wfile.flush()
+        self.server.release_event.wait(timeout=5)
+
+
+def _open_stream(
+    port: int,
+    identity: str | None,
+) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+    headers = {"X-Test-Identity": identity} if identity else {}
+    conn.request("GET", "/stream", headers=headers)
+    response = conn.getresponse()
+    assert response.status == 200
+    assert response.readline() == b"data: ready\n"
+    return conn, response
 
 
 class _ServerRunner:
@@ -199,9 +262,7 @@ def test_over_capacity_plain_http_gets_fast_503_without_starting_handler(monkeyp
 
         status, headers, body = _request(srv.port, "/fast")
 
-        assert status == 503
-        assert headers["Connection"].lower() == "close"
-        assert body == b""
+        _assert_request_capacity_rejection(status, headers, body)
         _assert_worker_count_stays(srv.httpd, 1)
 
         srv.httpd.release_event.set()
@@ -237,9 +298,7 @@ def test_slow_overflow_cleanup_does_not_block_later_rejects(monkeypatch):
         try:
             assert drain_entered.wait(timeout=5)
             status, headers, body = _request(srv.port, "/fast", timeout=1)
-            assert status == 503
-            assert headers["Connection"].lower() == "close"
-            assert body == b""
+            _assert_request_capacity_rejection(status, headers, body)
             _assert_worker_count_stays(srv.httpd, 1)
         finally:
             release_drain.set()
@@ -260,9 +319,7 @@ def test_worker_slot_releases_after_request_finishes(monkeypatch):
         _wait_for_worker_count(srv.httpd, 1)
 
         status, headers, body = _request(srv.port, "/fast")
-        assert status == 503
-        assert headers["Connection"].lower() == "close"
-        assert body == b""
+        _assert_request_capacity_rejection(status, headers, body)
 
         srv.httpd.release_event.set()
         hold_thread.join(timeout=5)
@@ -296,9 +353,7 @@ def test_worker_slot_releases_after_handler_error_or_disconnect(monkeypatch, mod
 
         _wait_for_worker_count(srv.httpd, 1)
         status, headers, body = _request(srv.port, "/fast")
-        assert status == 503
-        assert headers["Connection"].lower() == "close"
-        assert body == b""
+        _assert_request_capacity_rejection(status, headers, body)
 
         if mode == "boom":
             srv.httpd.release_event.set()
@@ -316,7 +371,7 @@ def test_worker_slot_releases_after_handler_error_or_disconnect(monkeypatch, mod
 
 
 def test_long_running_request_does_not_reject_healthy_in_cap_request(monkeypatch):
-    monkeypatch.setattr(QuietHTTPServer, "max_request_workers", 2, raising=False)
+    monkeypatch.setattr(QuietHTTPServer, "max_request_workers", 4, raising=False)
 
     with _ServerRunner(_GateHandler) as srv:
         hold_thread, hold_result = _start_request_thread(srv.port, "/hold")
@@ -333,6 +388,87 @@ def test_long_running_request_does_not_reject_healthy_in_cap_request(monkeypatch
         hold_thread.join(timeout=5)
         assert "error" not in hold_result, hold_result.get("error")
         assert hold_result["value"][0] == 200
+
+
+def test_sse_budget_rejects_excess_streams_without_consuming_request_workers(monkeypatch):
+    monkeypatch.setattr(QuietHTTPServer, "max_request_workers", 4, raising=False)
+
+    with _ServerRunner(_SSEGateHandler) as srv:
+        streams = [_open_stream(srv.port, identity) for identity in ("alice", "bob")]
+        try:
+            status, headers, body = _request(
+                srv.port,
+                "/stream",
+                headers={"X-Test-Identity": "carol"},
+            )
+            assert status == 503
+            assert headers["Content-Type"] == "application/json"
+            assert json.loads(body)["condition"] == "stream_worker_capacity"
+
+            status, _, body = _request(srv.port, "/api/health")
+            assert status == 200
+            assert body == b"ok"
+        finally:
+            for conn, response in streams:
+                response.close()
+                conn.close()
+
+
+def test_sse_per_client_cap_does_not_affect_another_authenticated_identity(monkeypatch):
+    monkeypatch.setattr(QuietHTTPServer, "max_request_workers", 8, raising=False)
+    monkeypatch.setattr(QuietHTTPServer, "max_client_streams", 2, raising=False)
+
+    with _ServerRunner(_SSEGateHandler) as srv:
+        streams = [_open_stream(srv.port, "alice") for _ in range(2)]
+        try:
+            status, headers, body = _request(
+                srv.port,
+                "/stream",
+                headers={"X-Test-Identity": "alice"},
+            )
+            assert status == 503
+            assert headers["Content-Type"] == "application/json"
+            assert json.loads(body)["condition"] == "client_stream_limit"
+
+            other = _open_stream(srv.port, "bob")
+            streams.append(other)
+        finally:
+            for conn, response in streams:
+                response.close()
+                conn.close()
+
+
+def test_sse_budget_and_client_count_release_when_handler_finishes(monkeypatch):
+    monkeypatch.setattr(QuietHTTPServer, "max_request_workers", 2, raising=False)
+
+    with _ServerRunner(_SSEGateHandler) as srv:
+        conn, response = _open_stream(srv.port, "alice")
+        with srv.httpd._stream_clients_lock:
+            assert srv.httpd._stream_clients == {("identity", "alice"): 1}
+
+        srv.httpd.release_event.set()
+        response.close()
+        conn.close()
+        _wait_for_stream_release(srv.httpd)
+
+        replacement, replacement_response = _open_stream(srv.port, "alice")
+        replacement_response.close()
+        replacement.close()
+
+
+def test_sse_per_client_cap_falls_back_to_client_address(monkeypatch):
+    monkeypatch.setattr(QuietHTTPServer, "max_request_workers", 4, raising=False)
+    monkeypatch.setattr(QuietHTTPServer, "max_client_streams", 1, raising=False)
+
+    with _ServerRunner(_SSEGateHandler) as srv:
+        conn, response = _open_stream(srv.port, None)
+        try:
+            status, _, body = _request(srv.port, "/stream")
+            assert status == 503
+            assert json.loads(body)["condition"] == "client_stream_limit"
+        finally:
+            response.close()
+            conn.close()
 
 
 def test_tls_overflow_does_not_force_accept_loop_handshake(monkeypatch, tmp_path):
