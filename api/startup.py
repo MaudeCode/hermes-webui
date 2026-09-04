@@ -1,7 +1,21 @@
 """Hermes Web UI -- startup helpers."""
 from __future__ import annotations
-import os, stat, subprocess, sys
+import os, stat, subprocess, sys, threading
 from pathlib import Path
+
+# Startup readiness: server.py binds the listening socket before this module's
+# run_deferred_startup() scans sessions, so a restart answers /health and serves
+# the UI shell immediately instead of hiding behind a full session scan.
+# Requests that read recovered session state wait on this event instead of
+# racing it.
+STARTUP_READY = threading.Event()
+STARTUP_WAIT_SECONDS = 10.0
+# Session recovery is the only phase the readiness event gates; dependency
+# repair, the watcher and plugins run after it and never hold a request.
+STARTUP_PHASE = 'session recovery'
+# Every /api/ route may touch session state, so all of them wait (fail closed).
+# These two must answer during startup: a restart trigger and a browser beacon.
+STARTUP_IMMEDIATE_PATHS = frozenset({'/api/health/restart', '/api/csp-report'})
 
 # Credential files that should never be world-readable
 _SENSITIVE_FILES = (
@@ -126,3 +140,105 @@ def auto_install_agent_deps() -> bool:
     except Exception as e:
         print(f'[!!] Auto-install error: {e}', flush=True)
         return False
+
+
+def await_startup_ready(handler, parsed) -> bool:
+    """Return True if the request may proceed, else emit 503 and return False."""
+    if STARTUP_READY.is_set():
+        return True
+    path = parsed.path
+    if not path.startswith('/api/') or path in STARTUP_IMMEDIATE_PATHS:
+        return True
+    if STARTUP_READY.wait(timeout=STARTUP_WAIT_SECONDS):
+        return True
+    from api.helpers import j
+    j(
+        handler,
+        {'error': f'Server is still starting: {STARTUP_PHASE}', 'phase': STARTUP_PHASE},
+        status=503,
+        extra_headers={'Retry-After': '5'},
+    )
+    return False
+
+
+def run_deferred_startup() -> None:
+    """Run recovery, dependency repair and background workers behind the bind.
+
+    Everything here used to run in server.py's main() in front of
+    ``QuietHTTPServer(...)``, so a restart could leave the port unreachable for
+    minutes (worst case: a pip install with a 120s timeout). Session recovery
+    runs first and releases the readiness event as soon as it settles — success
+    or failure — so a slow pip install or plugin import can never hold a
+    request.
+    """
+    from api.config import SESSION_DIR, verify_hermes_imports, _HERMES_FOUND
+
+    try:
+        from api.models import _active_state_db_path
+        from api.session_recovery import recover_all_sessions_on_startup
+        result = recover_all_sessions_on_startup(
+            SESSION_DIR,
+            rebuild_index=True,
+            state_db_path=_active_state_db_path(),
+        )
+        if result.get("restored"):
+            print(f"[recovery] Restored {result['restored']}/{result['scanned']} sessions from .bak (see #1558).", flush=True)
+    except Exception as exc:
+        # Recovery is best-effort; never block server startup.
+        print(f"[recovery] startup recovery failed: {exc}", flush=True)
+    finally:
+        # Released on every exit path, so a raising recovery cannot wedge every
+        # /api/ request behind the readiness bound for the process lifetime.
+        STARTUP_READY.set()
+
+    ok, missing, errors = verify_hermes_imports()
+    if not ok and _HERMES_FOUND:
+        # pip only runs when an agent import actually failed.
+        print(f'[!!] Warning: Hermes agent found but missing modules: {missing}', flush=True)
+        for mod, err in errors.items():
+            print(f'     {mod}: {err}', flush=True)
+        print('     Attempting to install missing dependencies from agent requirements.txt...', flush=True)
+        auto_install_agent_deps()
+        ok, missing, errors = verify_hermes_imports()
+        if not ok:
+            print(f'[!!] Still missing after install attempt: {missing}', flush=True)
+            for mod, err in errors.items():
+                print(f'     {mod}: {err}', flush=True)
+            print('     Agent features may not work correctly.', flush=True)
+        else:
+            print('[ok] Agent dependencies installed successfully.', flush=True)
+
+    try:
+        from api.gateway_watcher import start_watcher
+
+        def _start_watcher_safe():
+            try:
+                start_watcher()
+            except Exception as e:
+                print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
+
+        threading.Thread(target=_start_watcher_safe, daemon=True).start()
+    except Exception as e:
+        print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
+
+    try:
+        from api.background_process import start_drain_thread
+        if start_drain_thread():
+            print('[ok] bg_task_complete drain thread started', flush=True)
+    except Exception as e:
+        print(f'[!!] WARNING: bg_task_complete drain failed to start: {e}', flush=True)
+
+    try:
+        from api.background_process import start_session_channel_reaper
+        if start_session_channel_reaper():
+            print('[ok] SessionChannel reaper thread started', flush=True)
+    except Exception as e:
+        print(f'[!!] WARNING: SessionChannel reaper failed to start: {e}', flush=True)
+
+    try:
+        from api.plugins import load_plugins
+        load_plugins()
+        from api.talaria_relay import start_talaria_relay_publisher
+        start_talaria_relay_publisher()
+    except Exception as e:
+        print(f'[!!] WARNING: Plugin loading failed: {e}', flush=True)

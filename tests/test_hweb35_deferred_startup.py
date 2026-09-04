@@ -67,7 +67,7 @@ def boot_server(monkeypatch):
     import server
 
     from api import background_process, config, gateway_watcher, plugins
-    from api import session_lifecycle, session_recovery, talaria_relay
+    from api import session_lifecycle, session_recovery, startup, talaria_relay
 
     boots = []
 
@@ -85,7 +85,7 @@ def boot_server(monkeypatch):
         monkeypatch.setattr(config, "verify_hermes_imports", lambda: (True, [], {}))
         monkeypatch.setattr(config, "print_startup_config", lambda *a, **k: None)
         monkeypatch.setattr(
-            server, "auto_install_agent_deps", lambda: boot.auto_install_calls.append(1)
+            startup, "auto_install_agent_deps", lambda: boot.auto_install_calls.append(1)
         )
         monkeypatch.setattr(server, "install_crash_visibility", lambda *a, **k: None)
         monkeypatch.setattr(server, "_ignore_sigpipe", lambda: None)
@@ -101,7 +101,7 @@ def boot_server(monkeypatch):
         monkeypatch.setattr(background_process, "stop_session_channel_reaper", lambda *a, **k: None)
         monkeypatch.setattr(session_lifecycle, "drain_all_on_shutdown", lambda *a, **k: None)
         monkeypatch.setattr(plugins, "load_plugins", lambda *a, **k: None)
-        # Last call in _run_deferred_startup — signals the thread ran to the end.
+        # Last call in run_deferred_startup — signals the thread ran to the end.
         monkeypatch.setattr(
             talaria_relay,
             "start_talaria_relay_publisher",
@@ -117,8 +117,8 @@ def boot_server(monkeypatch):
         monkeypatch.setattr(server, "QuietHTTPServer", capture)
         monkeypatch.setattr(server, "HOST", "127.0.0.1")
         monkeypatch.setattr(server, "PORT", 0)  # ephemeral; real port read back off httpd
-        monkeypatch.setattr(server, "_STARTUP_READY", threading.Event())
-        monkeypatch.setattr(server, "_STARTUP_WAIT_SECONDS", GATE_WAIT_SECONDS)
+        monkeypatch.setattr(startup, "STARTUP_READY", threading.Event())
+        monkeypatch.setattr(startup, "STARTUP_WAIT_SECONDS", GATE_WAIT_SECONDS)
 
         boot.main_thread = threading.Thread(target=server.main, daemon=True)
         boot.main_thread.start()
@@ -141,11 +141,11 @@ def boot_server(monkeypatch):
 
 def test_port_accepts_connection_before_recovery_completes(boot_server):
     """The bind must not wait on the session scan."""
-    import server
+    from api import startup
 
     boot = boot_server()
     assert boot.recovery_started.wait(timeout=15), "deferred startup never reached recovery"
-    assert not server._STARTUP_READY.is_set(), "readiness set while recovery still running"
+    assert not startup.STARTUP_READY.is_set(), "readiness set while recovery still running"
 
     with boot.connect() as sock:
         assert sock is not None
@@ -157,7 +157,7 @@ def test_port_accepts_connection_before_recovery_completes(boot_server):
 
 def test_recovery_dependent_request_503s_during_startup_then_succeeds(boot_server):
     """/api/sessions waits on the readiness bound, then 503s instead of hanging."""
-    import server
+    from api import startup
 
     boot = boot_server()
     assert boot.recovery_started.wait(timeout=15), "deferred startup never reached recovery"
@@ -173,7 +173,7 @@ def test_recovery_dependent_request_503s_during_startup_then_succeeds(boot_serve
     )
 
     boot.release_recovery.set()
-    assert server._STARTUP_READY.wait(timeout=15), "readiness never set after recovery"
+    assert startup.STARTUP_READY.wait(timeout=15), "readiness never set after recovery"
 
     status, _headers, body = boot.get("/api/sessions", timeout=15)
     assert status == 200, f"expected success once recovery finished, got {status}: {body}"
@@ -189,12 +189,12 @@ def test_auto_install_not_invoked_when_agent_imports_resolve(boot_server):
 
 def test_server_still_serves_when_background_recovery_raises(boot_server):
     """A raising recovery must release readiness, not wedge every /api/ request."""
-    import server
+    from api import startup
 
     boot = boot_server(recovery_error=RuntimeError("simulated recovery failure HWEB-35"))
     assert boot.recovery_started.wait(timeout=15), "deferred startup never reached recovery"
     boot.release_recovery.set()
-    assert server._STARTUP_READY.wait(timeout=15), "readiness never set after recovery raised"
+    assert startup.STARTUP_READY.wait(timeout=15), "readiness never set after recovery raised"
 
     status, _headers, body = boot.get("/api/sessions", timeout=15)
     assert status == 200, f"server must keep serving after recovery raised, got {status}: {body}"

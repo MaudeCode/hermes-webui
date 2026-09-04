@@ -111,8 +111,10 @@ def test_audit_reports_startup_install_dependencies():
     assert ("api/startup.py", "HERMES_WEBUI_AGENT_DIR") in anchors
     assert ("bootstrap.py", "HERMES_WEBUI_AGENT_DIR") in anchors
     assert ("start.ps1", "HERMES_WEBUI_AGENT_DIR") in anchors
+    # The install call moved out of the server shell into api/startup.py
+    # alongside its definition when startup work was deferred behind the
+    # socket bind (HWEB-35), so server.py no longer anchors this dependency.
     assert ("api/startup.py", "auto_install_agent_deps") in anchors
-    assert ("server.py", "auto_install_agent_deps") in anchors
     assert any("uv pip install" in text and "[all]" in text for text in texts)
 
 
