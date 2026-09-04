@@ -82,6 +82,33 @@ def _write_locked(db):
         holder.close()
 
 
+@contextmanager
+def _write_locked_briefly(db, hold_s=0.75):
+    """Hold the lock longer than the request budget but well under the recovery
+    one. Only a caller that waits out contention sees the real rows."""
+    import threading
+
+    released = threading.Event()
+    ready = threading.Event()
+
+    def hold():
+        conn = sqlite3.connect(str(db), timeout=0)
+        conn.execute("BEGIN EXCLUSIVE")
+        ready.set()
+        released.wait(hold_s)
+        conn.rollback()
+        conn.close()
+
+    t = threading.Thread(target=hold, daemon=True)
+    t.start()
+    ready.wait(5)
+    try:
+        yield
+    finally:
+        released.set()
+        t.join(timeout=10)
+
+
 def _elapsed(fn):
     t0 = time.monotonic()
     try:
@@ -328,4 +355,70 @@ def test_session_delete_cleanup_manifest_read_is_bounded(tmp_path):
     assert manifest.exists(), "fail-closed must preserve the manifest for a retry"
     assert elapsed < LOCK_BUDGET_S, (
         f"stale-cleanup liveness read took {elapsed:.2f}s on a locked state.db"
+    )
+
+
+def test_recovery_audit_does_not_report_clean_on_a_locked_db(tmp_path):
+    """`[]` from the sidecar scan means "nothing missing", and the audit turns
+    that into status="ok". A lock must not masquerade as a clean database."""
+    import api.session_recovery as session_recovery
+
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    # A WebUI-origin row with no JSON sidecar on disk: a real missing sidecar.
+    with closing(sqlite3.connect(str(db))) as conn:
+        conn.execute(
+            "INSERT INTO sessions (id, source, session_source, title, model, "
+            "message_count, started_at) VALUES (?,?,?,?,?,?,?)",
+            ("webui-orphan", "webui", "webui", "Orphan", "sonnet", 1, 1300.0),
+        )
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp) "
+            "VALUES (?,?,?,?)",
+            ("webui-orphan", "user", "hi", 1300.0),
+        )
+        conn.commit()
+
+    found = session_recovery._read_state_db_missing_sidecar_rows(session_dir, db)
+    assert [r["id"] for r in found] == ["webui-orphan"], (
+        "fixture must produce a genuinely missing sidecar, or the lock case proves nothing"
+    )
+
+    with _write_locked_briefly(db):
+        locked = session_recovery._read_state_db_missing_sidecar_rows(session_dir, db)
+
+    assert [r["id"] for r in locked] == ["webui-orphan"], (
+        "a locked state.db reported an empty scan — the audit would call this clean"
+    )
+
+
+def test_streaming_context_read_waits_out_contention(tmp_path, monkeypatch):
+    """The streaming worker's model-context read must not degrade to an empty
+    snapshot on a lock — that sends stale history to the model."""
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db)
+
+    assert models.get_state_db_session_messages("sess-1", authoritative=True)
+
+    with _write_locked_briefly(db):
+        msgs = models.get_state_db_session_messages("sess-1", authoritative=True)
+    assert msgs, "authoritative context read returned an empty snapshot on a lock"
+
+    # A request-thread read of the same data still degrades fast.
+    with _write_locked_briefly(db):
+        t0 = time.monotonic()
+        assert models.get_state_db_session_messages("sess-1") == []
+        assert time.monotonic() - t0 < LOCK_BUDGET_S
+
+
+def test_streaming_worker_asks_for_the_authoritative_context_read():
+    src = inspect.getsource(routes) if False else None
+    import api.streaming as streaming
+
+    src = inspect.getsource(streaming._run_agent_streaming)
+    assert src.count("authoritative=True") == 2, (
+        "both streaming context reads must opt into the authoritative budget"
     )
