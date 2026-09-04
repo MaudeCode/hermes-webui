@@ -1,9 +1,9 @@
 # Filesystem lock ownership
 
 Process-wide locks may protect an atomic local-state transaction. The catalog,
-runtime reload/publication, Talaria pairing, repository Git, application-update,
-and Windows session-index replace coordination exceptions below include bounded waits,
-subprocesses, sleeps, or network work because exposing
+runtime reload/publication, Talaria pairing, Gateway lifecycle, repository Git,
+application-update, and Windows session-index replace coordination exceptions below
+include bounded waits, subprocesses, sleeps, or network work because exposing
 their partially mutated shared state would be unsafe. Other listed locks do not cover network,
 model, tool, subprocess, callback, queue-wait, join, or sleep work.
 
@@ -44,6 +44,8 @@ model, tool, subprocess, callback, queue-wait, join, or sleep work.
 | Workspace Git mutations | Per-repository lock from `api.workspace_git._git_mutation_lock`; one canonical repository | Subprocess-backed checkout, stage, commit, fetch, pull, and push sequences hold the repository lock across their complete index/worktree/ref transaction. Different repositories use different locks; readers use hardened read-only commands without the mutation lock. |
 | Background-process recovery | `api.background_process._PROCESS_RECOVERY_LOCK`; all WebUI startup recovery callers | One process-wide single-flight covers checkpoint recovery, recovered-process enumeration, process lookup, and metadata-only owner-session resolution, which may read and parse cold session sidecars. It prevents duplicate recovery and publishes the recovered-once flags only after the registry-to-WebUI routing scan finishes. |
 | Talaria pairing and publisher transition | `api.talaria_relay._pairing_lock`; all pairing requests, nesting `_publisher_transition_lock` during publisher validation/swap | One complete registration or profile-enrollment transaction reads/creates profile identity, loads relay state, performs the ten-second network request, atomically writes the private key and configuration, then validates and publishes the initial snapshot before swapping publishers. The pairing lock prevents duplicate invitation redemption or conflicting credentials; the transition lock keeps publisher listener, terminal-state, revision, and live-instance handoff atomic. |
+| Gateway lifecycle action | `api.routes._GATEWAY_ACTION_LOCK`; all authenticated start/stop/restart requests | Nonblocking single-flight acquisition covers Agent-checkout resolution and entrypoint existence checks plus the complete `hermes gateway` subprocess, bounded by 60 seconds. It prevents overlapping lifecycle commands from racing the same service state; a concurrent request receives 409. |
+| Gateway background restart | `api.gateway_restart._GATEWAY_RESTART_LOCK`; all active-profile restart helpers | Nonblocking single-flight acquisition covers profile/command discovery, process launch, the quick completion window, and, when draining continues, the background process wait bounded at 240 seconds plus bounded terminate/kill reap attempts. The lock is released only after the one restart process completes or is terminated. |
 | Application update | `api.updates._apply_lock`; all WebUI self-update attempts | One fetch/status/stash/pull-or-fast-forward/stash-pop sequence, including Git network and subprocess work. The process-wide single-flight prevents concurrent update attempts from observing or publishing a half-applied checkout; status/cache reads remain independently available. |
 
 When a local filesystem operation fails, its owning API returns or logs an
