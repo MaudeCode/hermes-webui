@@ -1,14 +1,15 @@
 # Filesystem lock ownership
 
 Process-wide locks may protect an atomic local-state transaction. The catalog,
-repository Git, and application-update coordination exceptions below include
-bounded waits, subprocesses, or network work because exposing their partially
-mutated shared state would be unsafe. Other listed locks do not cover network,
+runtime reload, repository Git, and application-update coordination exceptions
+below include bounded waits, subprocesses, or network work because exposing
+their partially mutated shared state would be unsafe. Other listed locks do not cover network,
 model, tool, subprocess, callback, queue-wait, join, or sleep work.
 
 | State owner | Lock and contention domain | I/O kept inside and why |
 |---|---|---|
 | Agent configuration | `api.config._cfg_lock`; configuration writers for all HTTP threads | One `config.yaml` read-modify-atomic-write transaction. Releasing between read and replace would lose a concurrent setting update. YAML cache misses parse outside `_yaml_file_cache_lock`; no external I/O runs here. |
+| Runtime reload commands | `api.commands._CODEX_RUNTIME_LOCK`, `_RELOAD_MCP_LOCK`, and `_RELOAD_SKILLS_LOCK`; one command family per process | Codex-runtime switching holds its lock across config read/mutate/atomic-write/reload. MCP reload holds its lock across shutdown and network-backed rediscovery. Skills reload holds its lock across the complete disk rescan. Each command-level single-flight prevents overlapping requests from interleaving teardown/rebuild or publishing a partially reloaded runtime; unrelated command families remain independent. |
 | Models catalog | `api.config._available_models_cache_lock`; all cold `/api/models` readers | One single-flight catalog build and cache publication. The normal path delegates live probes to a daemon worker and waits at most the configured four-second budget while holding the reentrant coordination lock; publishing includes the atomic disk-cache write. The operator-only `budget <= 0` compatibility mode performs the live rebuild synchronously under the same lock and is intentionally unbounded. This scope prevents duplicate provider probes and conflicting cache publishers. |
 | Session index | `api.models._INDEX_WRITE_LOCK`; session metadata writers | `_index.json` read/repair/atomic-write must observe one ordered session mutation. Transcript resolution and Agent database reads are outside this lock. |
 | Zero-message orphan tombstones | `api.models._WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_LOCK`; sidebar prune and session-save writers | One bounded tombstone load, record/clear mutation, and fsync/atomic-replace or final unlink. The transaction prevents concurrent pruning and revival from losing each other's decision. |
