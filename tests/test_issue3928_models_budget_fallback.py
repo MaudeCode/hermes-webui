@@ -257,6 +257,28 @@ def test_worker_scope_entry_failure_releases_catalog_waiters(
     assert "groups" in result
 
 
+def test_worker_rebuild_failure_still_propagates(
+    monkeypatch,
+    isolate_models_catalog_state,
+):
+    monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.05, raising=False)
+    monkeypatch.setattr(
+        profiles,
+        "profile_scope_for_detached_worker",
+        lambda *_args, **_kwargs: contextlib.nullcontext(),
+    )
+    monkeypatch.setattr(
+        cfg,
+        "_invoke_models_rebuild",
+        lambda _builder: (_ for _ in ()).throw(RuntimeError("rebuild failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="rebuild failed"):
+        cfg.get_available_models()
+
+    assert cfg._cache_build_in_progress is False
+
+
 def test_budget_exceeded_uses_shape_only_stale_cache_before_static_fallback(
     monkeypatch,
     isolate_models_catalog_state,

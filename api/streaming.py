@@ -9810,8 +9810,7 @@ def _run_agent_streaming(
             and _is_root_profile is not None
             and not _is_root_profile(_streaming_profile)
         )
-        if _streaming_profile_is_named:
-            _thread_ctx.block_process_env_fallback = True
+        _thread_ctx.block_process_env_fallback = True
         if _resolve_secret_scope_module is not None:
             _streaming_secret_scope_mod = _resolve_secret_scope_module()
             if _streaming_secret_scope_mod is not None:

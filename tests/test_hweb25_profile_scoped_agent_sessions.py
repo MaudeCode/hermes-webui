@@ -776,6 +776,32 @@ def test_ordinary_named_profile_removal_keeps_root_startup_key(
     assert profiles._INITIAL_PROCESS_ENV["OPENAI_API_KEY"] == "root-deployment-key"
 
 
+def test_root_stream_scope_cannot_fall_through_to_live_named_prefill(
+    monkeypatch, tmp_path
+):
+    import api.config as config
+
+    monkeypatch.delenv("HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT", raising=False)
+    monkeypatch.delitem(
+        profiles._INITIAL_PROCESS_ENV,
+        "HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT",
+        raising=False,
+    )
+    env = profiles._profile_secret_thread_env("default", tmp_path)
+    monkeypatch.setenv(
+        "HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT", "named-profile-script"
+    )
+    config._set_thread_env(**env)
+    config._thread_ctx.block_process_env_fallback = True
+    try:
+        assert config._thread_local_env_value(
+            "HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT"
+        ) == ""
+    finally:
+        config._thread_ctx.block_process_env_fallback = False
+        config._clear_thread_env()
+
+
 def test_default_readonly_request_pins_root_home(monkeypatch, tmp_path):
     import api.config as config
 

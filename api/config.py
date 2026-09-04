@@ -8652,6 +8652,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 # isolate the selected profile. Wake foreground waiters instead
                 # of leaving the catalog build flag stuck forever.
                 box["error"] = exc
+                box["scope_error"] = True
                 build_done.set()
                 if budget_exceeded.is_set() and _claim_publish():
                     _clear_build_in_progress()
@@ -8668,7 +8669,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             # synchronously, exactly like the legacy path.
             if "error" in box:
                 _clear_build_in_progress()
-                return copy.deepcopy(_profile_safe_static_models_catalog())
+                if box.get("scope_error"):
+                    return copy.deepcopy(_profile_safe_static_models_catalog())
+                raise box["error"]
             if _claim_publish():
                 _publish_models_result(box["result"])
             return copy.deepcopy(box["result"])
