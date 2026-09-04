@@ -631,6 +631,7 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
     proc = None
     term = None
     request = None
+    spawn_slave_fd = -1
     try:
         if replaced is not None:
             _teardown_terminal(replaced)
@@ -670,6 +671,7 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
             reservation=pending,
             spawn_fds=(spawn_slave_fd,),
         )
+        spawn_slave_fd = -1
         with _LOCK:
             if _STARTING_TERMINALS.get(sid) is pending:
                 pending.spawn_done = request.done
@@ -726,6 +728,8 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
             _safe_close_fd(master_fd)
         if slave_fd >= 0:
             _safe_close_fd(slave_fd)
+        if spawn_slave_fd >= 0:
+            _safe_close_fd(spawn_slave_fd)
         with _LOCK:
             if _STARTING_TERMINALS.get(sid) is pending:
                 if (

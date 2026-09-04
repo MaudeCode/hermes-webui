@@ -272,6 +272,25 @@ def test_pre_enqueue_failure_signals_spawn_event(monkeypatch, tmp_path):
     assert "pre-enqueue-failure" not in terminal._STARTING_TERMINALS
 
 
+def test_request_construction_failure_closes_untransferred_slave_fd(
+    monkeypatch, tmp_path
+):
+    closed = []
+    monkeypatch.setattr(terminal.os, "openpty", lambda: (100, 101))
+    monkeypatch.setattr(terminal.os, "dup", lambda _fd: 102)
+    monkeypatch.setattr(terminal, "_safe_close_fd", lambda fd: closed.append(fd))
+    monkeypatch.setattr(
+        terminal,
+        "_SpawnRequest",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(MemoryError("allocation")),
+    )
+
+    with pytest.raises(MemoryError, match="allocation"):
+        terminal.start_terminal("request-allocation-failure", tmp_path)
+
+    assert set(closed) == {100, 101, 102}
+
+
 def test_cancelled_start_keeps_capacity_until_owner_cleans_up(monkeypatch, tmp_path):
     monkeypatch.setattr(terminal, "_MAX_TERMINALS", 1)
     request_ready = threading.Event()
