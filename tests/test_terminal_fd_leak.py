@@ -76,8 +76,8 @@ def _clean_terminals(monkeypatch):
         sids = list(terminal._TERMINALS)
         pending = list(terminal._STARTING_TERMINALS.values())
         terminal._STARTING_TERMINALS.clear()
-    for event in pending:
-        event.set()
+    for reservation in pending:
+        reservation.done.set()
     for sid in sids:
         try:
             terminal.close_terminal(sid)
@@ -217,6 +217,103 @@ def test_pty_setup_failure_releases_start_reservation(monkeypatch, tmp_path):
         terminal.start_terminal("pty-failure", tmp_path)
 
     assert "pty-failure" not in terminal._STARTING_TERMINALS
+
+
+def test_cancelled_start_keeps_capacity_until_owner_cleans_up(monkeypatch, tmp_path):
+    monkeypatch.setattr(terminal, "_MAX_TERMINALS", 1)
+    request_ready = threading.Event()
+    captured = {}
+    errors = []
+
+    def put(request):
+        captured["request"] = request
+        request_ready.set()
+
+    monkeypatch.setattr(terminal, "_spawn_queue", types.SimpleNamespace(put=put))
+    monkeypatch.setattr(terminal, "_ensure_spawn_supervisor", lambda: None)
+    monkeypatch.setattr(terminal, "_ensure_terminal_reaper", lambda: None)
+
+    def start_blocked():
+        try:
+            terminal.start_terminal("blocked-cap", tmp_path)
+        except Exception as exc:
+            errors.append(exc)
+
+    owner = threading.Thread(target=start_blocked)
+    owner.start()
+    assert request_ready.wait(1)
+    assert terminal.close_terminal("blocked-cap") is True
+
+    with pytest.raises(RuntimeError, match="capacity is busy"):
+        terminal.start_terminal("second", tmp_path)
+
+    captured["request"].error = RuntimeError("synthetic spawn failure")
+    captured["request"].done.set()
+    owner.join(1)
+
+    assert errors
+    assert "blocked-cap" not in terminal._STARTING_TERMINALS
+
+
+def test_reader_start_failure_rolls_back_published_terminal(monkeypatch, tmp_path):
+    class BrokenThread:
+        def start(self):
+            raise RuntimeError("thread exhaustion")
+
+    def put(request):
+        request.proc = _FakeProc(alive=False)
+        request.done.set()
+
+    monkeypatch.setattr(terminal, "_spawn_queue", types.SimpleNamespace(put=put))
+    monkeypatch.setattr(terminal, "_ensure_spawn_supervisor", lambda: None)
+    monkeypatch.setattr(terminal, "_ensure_terminal_reaper", lambda: None)
+    monkeypatch.setattr(terminal, "_set_nonblocking", lambda _fd: None)
+    monkeypatch.setattr(terminal, "_set_size", lambda *_args: None)
+    monkeypatch.setattr(terminal.threading, "Thread", lambda *_args, **_kwargs: BrokenThread())
+
+    with pytest.raises(RuntimeError, match="thread exhaustion"):
+        terminal.start_terminal("reader-failure", tmp_path)
+
+    assert "reader-failure" not in terminal._TERMINALS
+    assert "reader-failure" not in terminal._STARTING_TERMINALS
+
+
+def test_close_all_waits_for_pending_start_cleanup(monkeypatch, tmp_path):
+    request_ready = threading.Event()
+    captured = {}
+
+    def put(request):
+        captured["request"] = request
+        request_ready.set()
+
+    monkeypatch.setattr(terminal, "_spawn_queue", types.SimpleNamespace(put=put))
+    monkeypatch.setattr(terminal, "_ensure_spawn_supervisor", lambda: None)
+    monkeypatch.setattr(terminal, "_ensure_terminal_reaper", lambda: None)
+
+    owner = threading.Thread(
+        target=lambda: pytest.raises(
+            RuntimeError,
+            terminal.start_terminal,
+            "shutdown-pending",
+            tmp_path,
+        )
+    )
+    owner.start()
+    assert request_ready.wait(1)
+    closed = threading.Event()
+    shutdown = threading.Thread(
+        target=lambda: (terminal.close_all_terminals(), closed.set())
+    )
+    shutdown.start()
+    assert closed.wait(0.1) is False
+
+    captured["request"].error = RuntimeError("shutdown")
+    captured["request"].done.set()
+    owner.join(1)
+    shutdown.join(1)
+
+    assert closed.is_set()
+    assert "shutdown-pending" not in terminal._STARTING_TERMINALS
 
 
 # ── F1: writes/resizes are serialized against close (no fd-reuse injection) ───

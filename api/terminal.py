@@ -159,7 +159,7 @@ class TerminalSession:
 
 _TERMINALS: dict[str, TerminalSession] = {}
 _LOCK = threading.RLock()
-_STARTING_TERMINALS: dict[str, threading.Event] = {}
+_STARTING_TERMINALS: dict[str, "_StartReservation"] = {}
 # Hard cap on concurrently live embedded terminals. Each holds a shell process,
 # a pty master fd, and a reader thread; a client that drops its output stream
 # without POSTing /api/terminal/close (tab close, crash, network drop) leaves
@@ -197,6 +197,12 @@ class _SpawnRequest:
     lock: threading.Lock = field(default_factory=threading.Lock)
     proc: subprocess.Popen | None = None
     error: BaseException | None = None
+
+
+@dataclass
+class _StartReservation:
+    done: threading.Event = field(default_factory=threading.Event)
+    cancelled: bool = False
 
 
 def _reap_abandoned_spawn(proc: subprocess.Popen) -> bool:
@@ -560,12 +566,12 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
             if pending is None:
                 if current is None and len(_TERMINALS) + len(_STARTING_TERMINALS) >= _MAX_TERMINALS:
                     raise RuntimeError("terminal capacity is busy")
-                pending = threading.Event()
+                pending = _StartReservation()
                 _STARTING_TERMINALS[sid] = pending
                 replaced = _TERMINALS.pop(sid, None)
                 current = None
                 break
-        if not pending.wait(timeout=5.0):
+        if not pending.done.wait(timeout=5.0):
             raise TimeoutError("terminal start already in progress")
 
     if current is not None:
@@ -638,14 +644,17 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
         _set_size(term, rows, cols)
         term.reader = threading.Thread(target=_reader_loop, args=(term,), daemon=True)
         with _LOCK:
-            if _STARTING_TERMINALS.get(sid) is not pending:
+            if _STARTING_TERMINALS.get(sid) is not pending or pending.cancelled:
                 raise RuntimeError("terminal start was cancelled")
             _TERMINALS[sid] = term
             term.reader.start()
             _STARTING_TERMINALS.pop(sid, None)
-            pending.set()
+            pending.done.set()
         return term
     except BaseException:
+        with _LOCK:
+            if term is not None and _TERMINALS.get(sid) is term:
+                _TERMINALS.pop(sid, None)
         if term is not None:
             _teardown_terminal(term)
             master_fd = -1
@@ -658,7 +667,7 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
         with _LOCK:
             if _STARTING_TERMINALS.get(sid) is pending:
                 _STARTING_TERMINALS.pop(sid, None)
-                pending.set()
+                pending.done.set()
         raise
 
 
@@ -748,10 +757,10 @@ def close_terminal(session_id: str, *, expected: TerminalSession | None = None) 
     with _LOCK:
         if expected is not None and _TERMINALS.get(sid) is not expected:
             return False
-        pending = _STARTING_TERMINALS.pop(sid, None)
+        pending = _STARTING_TERMINALS.get(sid)
+        if pending is not None:
+            pending.cancelled = True
         term = _TERMINALS.pop(sid, None)
-    if pending is not None:
-        pending.set()
     if not term:
         return pending is not None
     _teardown_terminal(term)
@@ -799,8 +808,14 @@ def close_all_terminals() -> None:
     """Best-effort reap of embedded shells during graceful WebUI shutdown."""
     with _LOCK:
         session_ids = list(_TERMINALS)
+        pending = list(_STARTING_TERMINALS.values())
+        for reservation in pending:
+            reservation.cancelled = True
     for session_id in session_ids:
         close_terminal(session_id)
+    deadline = time.monotonic() + 6.0
+    for reservation in pending:
+        reservation.done.wait(max(0.0, deadline - time.monotonic()))
 
 
 atexit.register(close_all_terminals)
