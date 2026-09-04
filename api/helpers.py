@@ -246,6 +246,10 @@ def _json_response_body(payload, *, pretty: bool = True) -> bytes:
     the public helper default stable for existing tests/callers; hot paths can
     opt into compact JSON with ``pretty=False``.
     """
+    if isinstance(payload, (bytes, bytearray)):
+        # Already-serialized body (the /api/sessions response-bytes cache). Not
+        # ambiguous: json.dumps() cannot produce bytes for any real payload.
+        return bytes(payload)
     if pretty:
         return _json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
     return _json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')

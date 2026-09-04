@@ -183,6 +183,12 @@ def _install_common_monkeypatches(monkeypatch, rows):
     monkeypatch.setattr(routes, "_enrich_sidebar_lineage_metadata", lambda _rows: None)
     monkeypatch.setattr(
         routes,
+        "approvals_pending_session_keys",
+        lambda: {"attention-row"},
+    )
+    monkeypatch.setattr(routes, "clarify_pending_session_keys", lambda: set())
+    monkeypatch.setattr(
+        routes,
         "_session_attention_summary",
         lambda session_id: {"kind": "clarify", "count": 1}
         if str(session_id) == "attention-row"

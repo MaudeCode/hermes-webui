@@ -246,6 +246,17 @@ def has_pending(session_key: str) -> bool:
         return bool(_gateway_queues.get(session_key))
 
 
+def pending_session_keys() -> set[str]:
+    """Return every session id that could carry clarify state right now.
+
+    The sidebar needs this so ``/api/sessions`` can reconcile attention for the
+    handful of sessions that actually have a prompt outstanding instead of
+    taking ``_lock`` once per session row.
+    """
+    with _lock:
+        return set(_pending) | set(_gateway_queues)
+
+
 def pending_count(session_key: str) -> int:
     """Return the number of unresolved clarify prompts for a session."""
     with _lock:

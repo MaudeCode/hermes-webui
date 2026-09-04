@@ -262,6 +262,19 @@ def _normalize_pending_queue_locked(session_key: str) -> list[dict]:
     return queue_list
 
 
+def pending_session_keys() -> set[str]:
+    """Return every session id that could carry approval state right now.
+
+    Superset by construction: a session absent from both ``_pending`` and
+    ``_gateway_queues`` has nothing for
+    ``reconcile_gateway_pending_mirror_locked`` to reconcile (it would create an
+    empty queue entry and immediately pop it again) and no pending approvals, so
+    the sidebar can skip it without changing the response.
+    """
+    with _lock:
+        return set(_pending) | set(_gateway_queues)
+
+
 def reconcile_gateway_pending_mirror_locked(session_key: str) -> tuple[dict | None, int, bool]:
     """Purge stale gateway mirrors and ensure at most one live head mirror exists.
 

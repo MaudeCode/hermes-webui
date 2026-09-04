@@ -1987,6 +1987,7 @@ _session_list_cache_clear = _route_session_list_cache._session_list_cache_clear
 _session_list_cache_claim_rebuild = _route_session_list_cache._session_list_cache_claim_rebuild
 _session_list_cache_done = _route_session_list_cache._session_list_cache_done
 _session_list_cache_get = _route_session_list_cache._session_list_cache_get
+_session_list_cache_lookup = _route_session_list_cache._session_list_cache_lookup
 _session_list_cache_invalidation_stamp = _route_session_list_cache._session_list_cache_invalidation_stamp
 _route_session_list_cache_key = _route_session_list_cache._session_list_cache_key
 _session_list_cache_overlay_runtime_rows = _route_session_list_cache._session_list_cache_overlay_runtime_rows
@@ -2674,8 +2675,11 @@ def _session_list_payload_to_response(
     payload: dict,
     *,
     settings: dict | None = None,
+    attention_by_session: dict[str, dict] | None = None,
 ) -> dict:
     safe_merged = []
+    if attention_by_session is None:
+        attention_by_session = _session_attention_snapshot()
     runtime_rows = _session_list_cache_overlay_runtime_rows(payload.get("sessions", []) or [])
     # Read the redaction setting ONCE for the whole response and thread it through
     # every row, instead of letting each row's _redact_text() re-read settings.json
@@ -2693,11 +2697,15 @@ def _session_list_payload_to_response(
     # Fail safe: an absent/unreadable settings snapshot must redact.
     _redact_enabled = bool(settings.get("api_redact_enabled", True)) if isinstance(settings, dict) else True
     for s in runtime_rows:
-        item = _sidebar_session_response_item(s, redact_enabled=_redact_enabled) if isinstance(s, dict) else {}
+        item = _sidebar_session_response_item(
+            s, redact_enabled=_redact_enabled, attention_by_session=attention_by_session
+        ) if isinstance(s, dict) else {}
         safe_merged.append(item)
     safe_reference = []
     for s in payload.get("sidebar_reference_sessions", []) or []:
-        item = _sidebar_session_response_item(s, redact_enabled=_redact_enabled) if isinstance(s, dict) else {}
+        item = _sidebar_session_response_item(
+            s, redact_enabled=_redact_enabled, attention_by_session=attention_by_session
+        ) if isinstance(s, dict) else {}
         if item:
             item["_sidebar_reference_only"] = True
         safe_reference.append(item)
@@ -2723,6 +2731,123 @@ def _session_list_payload_to_response(
         response["archived_limit"] = int(payload.get("archived_limit") or 0)
         response["archived_offset"] = int(payload.get("archived_offset") or 0)
     return response
+
+
+# ── /api/sessions serialized-response cache ──────────────────────────────────
+# Holding the built payload still left every request paying the full
+# O(N-sessions) tail: the runtime overlay, the per-row reshape and a complete
+# JSON serialize. All of that is a pure function of (cached payload object,
+# runtime overlay state, redaction setting), so cache the serialized bytes
+# against a signature of exactly those inputs. Only `server_time`/`server_tz`
+# vary per request, and they are spliced in as a fresh prefix.
+#
+# Entries are large (the whole sidebar body), so this cap is deliberately much
+# smaller than `_SESSIONS_CACHE_MAX_ENTRIES` — a browser polls one key per tab
+# configuration, not sixty.
+_SESSION_LIST_RESPONSE_CACHE_MAX_ENTRIES = 8
+_SESSION_LIST_RESPONSE_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
+_SESSION_LIST_RESPONSE_CACHE_LOCK = threading.Lock()
+
+
+def _session_list_response_row_ids(payload: dict) -> frozenset:
+    """Session ids the response actually renders, computed once per payload."""
+    ids = set()
+    for bucket in ("sessions", "sidebar_reference_sessions"):
+        for row in payload.get(bucket, []) or []:
+            if isinstance(row, dict):
+                sid = str(row.get("session_id") or "").strip()
+                if sid:
+                    ids.add(sid)
+    return frozenset(ids)
+
+
+def _session_list_response_signature(
+    row_ids: frozenset,
+    redact_enabled: bool,
+    attention_by_session: dict[str, dict] | None,
+):
+    """Snapshot every runtime input the serialized response depends on.
+
+    Returns ``None`` when the snapshot cannot be taken, which disables byte
+    reuse for that request rather than serving a response built from state we
+    could not confirm. The live-session scan walks ``SESSIONS`` (bounded by
+    ``SESSIONS_MAX``) and filters to rendered ids, instead of doing one
+    ``SESSIONS.get()`` per row, so it stays cheap on a large store.
+    """
+    if attention_by_session is None:
+        return None
+    try:
+        active_stream_ids = set(
+            str(x) for x in (_route_session_list_cache._session_list_cache_active_stream_ids() or ())
+        )
+        running_cron_jobs = dict(_route_session_list_cache._session_list_cache_running_cron_jobs())
+        with LOCK:
+            live = {
+                sid: (
+                    getattr(sess, "active_stream_id", None),
+                    bool(getattr(sess, "pending_user_message", None)),
+                    getattr(sess, "pending_started_at", None),
+                    getattr(sess, "updated_at", None),
+                    getattr(sess, "last_message_at", None),
+                )
+                for sid, sess in SESSIONS.items()
+                if sid in row_ids
+            }
+    except Exception:
+        logger.exception("session list response signature snapshot failed")
+        return None
+    return (live, active_stream_ids, running_cron_jobs, dict(attention_by_session), bool(redact_enabled))
+
+
+def _session_list_response_time_prefix() -> bytes:
+    return b'{"server_time":%s,"server_tz":%s,' % (
+        json.dumps(time.time()).encode("utf-8"),
+        json.dumps(time.strftime("%z")).encode("utf-8"),
+    )
+
+
+def _session_list_response_body(key: tuple, payload: dict, *, settings: dict | None = None) -> bytes:
+    """Return the serialized /api/sessions body, reusing cached bytes when possible."""
+    if settings is None:
+        try:
+            settings = load_settings()
+        except Exception:
+            settings = None
+    # Fail safe: an absent/unreadable settings snapshot must redact.
+    redact_enabled = bool(settings.get("api_redact_enabled", True)) if isinstance(settings, dict) else True
+
+    with _SESSION_LIST_RESPONSE_CACHE_LOCK:
+        entry = _SESSION_LIST_RESPONSE_CACHE.get(key)
+        # Identity, not equality: while we hold this reference the cached payload
+        # object cannot be recycled, so `is` proves the build is the same one.
+        if entry is not None and entry[0] is not payload:
+            entry = None
+
+    row_ids = entry[1] if entry is not None else _session_list_response_row_ids(payload)
+    attention_by_session = _session_attention_snapshot()
+    signature = _session_list_response_signature(row_ids, redact_enabled, attention_by_session)
+    if entry is not None and signature is not None and entry[2] == signature:
+        return _session_list_response_time_prefix() + entry[3]
+
+    response = _session_list_payload_to_response(
+        payload, settings=settings, attention_by_session=attention_by_session
+    )
+    tail = _json_response_body(
+        {k: v for k, v in response.items() if k not in ("server_time", "server_tz")},
+        pretty=False,
+    )
+    if len(tail) <= 2:
+        # Degenerate body ({}), so there is nothing to splice a prefix onto.
+        return _json_response_body(response, pretty=False)
+    tail = tail[1:]
+
+    if signature is not None:
+        with _SESSION_LIST_RESPONSE_CACHE_LOCK:
+            _SESSION_LIST_RESPONSE_CACHE[key] = (payload, row_ids, signature, tail)
+            _SESSION_LIST_RESPONSE_CACHE.move_to_end(key)
+            while len(_SESSION_LIST_RESPONSE_CACHE) > _SESSION_LIST_RESPONSE_CACHE_MAX_ENTRIES:
+                _SESSION_LIST_RESPONSE_CACHE.popitem(last=False)
+    return _session_list_response_time_prefix() + tail
 
 
 def _hidden_archived_sidebar_reference_sessions(
@@ -2784,7 +2909,7 @@ def _get_cached_session_list_payload(
         except Exception:
             pass
 
-    cached, is_fresh = _session_list_cache_get(key, allow_stale=True)
+    cached, is_fresh, stale_reason = _session_list_cache_lookup(key, allow_stale=True)
     if cached is not None and is_fresh:
         if diag is not None:
             try:
@@ -2794,7 +2919,9 @@ def _get_cached_session_list_payload(
         return cached
 
     stale = cached  # now actually a stale payload when one exists, else None
-    stale_reason = _session_list_cache_stale_reason(key) if stale is not None else None
+    # `stale_reason` came back from the same lookup above, so the source stamp
+    # (a SQLite connect, two queries and five stat() calls) is computed once per
+    # request instead of once here and once in the lookup.
     if stale is not None and stale_reason != "source":
         event, is_owner = _session_list_cache_claim_rebuild(key)
         if is_owner:
@@ -2995,6 +3122,7 @@ from api.helpers import (
     public_session_projection,
     strip_public_internal_fields,
     _redact_text,
+    _json_response_body,
     _CLIENT_DISCONNECT_ERRORS,
 )
 from api.agent_health import build_agent_health_payload
@@ -11268,6 +11396,7 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     set_session_yolo_enabled,
     submit_gateway_pending_mirror,
     submit_pending,
+    pending_session_keys as approvals_pending_session_keys,
 )
 
 # Clarify prompts (optional -- graceful fallback if agent not available)
@@ -11276,6 +11405,7 @@ try:
         submit_pending as submit_clarify_pending,
         get_pending as get_clarify_pending,
         pending_count as get_clarify_pending_count,
+        pending_session_keys as clarify_pending_session_keys,
         resolve_clarify,
         resolve_clarify_by_id,
         sse_subscribe as clarify_sse_subscribe,
@@ -11285,6 +11415,7 @@ except ImportError:
     submit_clarify_pending = lambda *a, **k: None
     get_clarify_pending = lambda *a, **k: None
     get_clarify_pending_count = lambda *a, **k: 0
+    clarify_pending_session_keys = lambda *a, **k: set()
     clarify_sse_subscribe = None
     resolve_clarify = lambda *a, **k: 0
     resolve_clarify_by_id = lambda *a, **k: False
@@ -11315,6 +11446,34 @@ def _session_attention_summary(session_id: str) -> dict | None:
             "severity": "question",
         }
     return None
+
+
+def _session_attention_snapshot() -> dict[str, dict] | None:
+    """Return ``{session_id: attention}`` for every session that has any.
+
+    ``_session_attention_summary`` takes the global approvals lock and, via
+    ``api.clarify``, the global clarify lock. Calling it once per sidebar row
+    meant two global lock acquisitions per session on locks that approval submit
+    and resolve also use. Both keyspaces are normally empty, so snapshot them
+    once per response and only reconcile the sessions that appear in them.
+
+    Returns ``None`` when a keyspace cannot be read, which tells callers to fall
+    back to the per-row lookup rather than silently reporting "no attention".
+    """
+    try:
+        keys = set(approvals_pending_session_keys()) | set(clarify_pending_session_keys())
+    except Exception:
+        logger.exception("session attention keyspace snapshot failed")
+        return None
+    snapshot: dict[str, dict] = {}
+    for session_id in keys:
+        sid = str(session_id or "").strip()
+        if not sid:
+            continue
+        summary = _session_attention_summary(sid)
+        if summary:
+            snapshot[sid] = summary
+    return snapshot
 
 
 _SIDEBAR_SESSION_RESPONSE_FIELDS = {
@@ -11384,7 +11543,12 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
 }
 
 
-def _sidebar_session_response_item(session: dict, *, redact_enabled: bool | None = None) -> dict:
+def _sidebar_session_response_item(
+    session: dict,
+    *,
+    redact_enabled: bool | None = None,
+    attention_by_session: dict[str, dict] | None = None,
+) -> dict:
     """Return the bounded /api/sessions row shape used by the sidebar.
 
     Full session/detail fields such as messages, tool calls, compression
@@ -11401,7 +11565,15 @@ def _sidebar_session_response_item(session: dict, *, redact_enabled: bool | None
     if isinstance(item.get("title"), str):
         item["title"] = _redact_text(item["title"], _enabled=redact_enabled)
     _redact_sidebar_title_fields(item, redact_enabled)
-    item["attention"] = _session_attention_summary(str(item.get("session_id") or ""))
+    session_id = str(item.get("session_id") or "")
+    # `attention_by_session` is the once-per-response snapshot of the (normally
+    # empty) pending approval/clarify keyspace; absent one, fall back to the
+    # per-row lookup so a single-row caller still gets live attention.
+    item["attention"] = (
+        attention_by_session.get(session_id)
+        if attention_by_session is not None
+        else _session_attention_summary(session_id)
+    )
     return item
 
 
@@ -15099,7 +15271,7 @@ def handle_get(handler, parsed) -> bool:
             diag.stage("response_write")
             return j(
                 handler,
-                _session_list_payload_to_response(payload, settings=settings),
+                _session_list_response_body(key, payload, settings=settings),
                 pretty=False,
             )
         finally:
