@@ -1011,32 +1011,66 @@ _KANBAN_SSE_HEARTBEAT_SECONDS = 15.0
 _KANBAN_SSE_BATCH_LIMIT = 200
 
 
-def _kanban_sse_close(conn):
-    """Close a stream's sqlite handle, tolerating an already-dead one."""
-    if conn is None:
+def _kanban_sse_close(held):
+    """Close a stream's held ``(conn, board)`` handle, tolerating a dead one."""
+    if not held:
         return
     try:
-        conn.close()
+        held[0].close()
     except Exception:
         pass
 
 
-def _kanban_sse_poll(conn, board, cursor):
+def _kanban_sse_resolve_board(board):
+    """The board a poll pass must be reading *right now*.
+
+    An explicit ``?board=<slug>`` pins the stream for its whole life. With
+    no param the stream follows the shared active-board pointer, which the
+    `hermes kanban` CLI or another tab can move mid-stream — the client
+    omits ``board=`` precisely so a server-side switch takes effect (see
+    ``_kanbanBoardQuery`` in static/panels.js). The old loop re-resolved
+    that pointer for free because it called ``kb.connect(board=None)``
+    every pass; now that the connection is held, the pointer must be
+    re-read explicitly or an unpinned stream would stay attached to the
+    board that happened to be active when it opened.
+
+    Returns ``None`` when the pointer cannot be read, which the caller
+    treats as "no change" — that is what ``kb.connect(board=None)`` would
+    have resolved to anyway.
+    """
+    if board is not None:
+        return board
+    kb = _kb()
+    try:
+        return kb.get_current_board()
+    except Exception:
+        return None
+
+
+def _kanban_sse_poll(held, board, cursor):
     """One poll pass over a board's task_events, reusing a held connection.
 
-    Takes the connection the previous pass left open (``None`` on the
-    first pass) and returns ``(conn, new_cursor, events_list)``. The
-    returned connection is the one the next pass must pass back in; it is
-    ``None`` whenever this pass could not leave a usable handle behind,
-    which is how the stream self-heals — the next pass reconnects rather
-    than retrying a poisoned handle forever.
+    Takes the ``(conn, resolved_board)`` pair the previous pass left open
+    (``None`` on the first pass) and returns ``(held, new_cursor,
+    events_list)``. The returned pair is what the next pass must pass back
+    in; it is ``None`` whenever this pass could not leave a usable handle
+    behind, which is how the stream self-heals — the next pass reconnects
+    rather than retrying a poisoned handle forever.
 
     Best-effort: never raises, and returns the input cursor with an empty
     list on any DB error so transient sqlite contention does not drop the
     client. Callers that do not stream (one-shot reads) must pass
-    ``conn=None`` and close the returned handle.
+    ``held=None`` and close the returned pair.
     """
     kb = _kb()
+    # An unpinned stream follows the active-board pointer, so a switch
+    # while we hold a connection must reopen against the new board. That
+    # is one pointer read per pass at 1 Hz, versus the connect + stat +
+    # query + close this loop used to do 3.3 times a second.
+    resolved = _kanban_sse_resolve_board(board)
+    if held is not None and resolved is not None and held[1] != resolved:
+        _kanban_sse_close(held)
+        held = None
     # Guard against a board that's been archived/removed mid-stream:
     # kb.connect(board=<slug>) auto-materialises the directory + DB on
     # first call, which would silently un-archive a board that was just
@@ -1049,21 +1083,21 @@ def _kanban_sse_poll(conn, board, cursor):
         except Exception:
             default_slug = "default"
         if board != default_slug and not kb.board_exists(board):
-            _kanban_sse_close(conn)
+            _kanban_sse_close(held)
             return None, cursor, []
-    if conn is None:
+    if held is None:
         try:
-            conn = kb.connect(board=board)
+            held = (kb.connect(board=board), resolved)
         except Exception:
             return None, cursor, []
     try:
-        rows = conn.execute(
+        rows = held[0].execute(
             "SELECT id, task_id, run_id, kind, payload, created_at "
             "FROM task_events WHERE id > ? ORDER BY id ASC LIMIT ?",
             (int(cursor), _KANBAN_SSE_BATCH_LIMIT),
         ).fetchall()
     except Exception:
-        _kanban_sse_close(conn)
+        _kanban_sse_close(held)
         return None, cursor, []
     out = []
     new_cursor = cursor
@@ -1084,7 +1118,7 @@ def _kanban_sse_poll(conn, board, cursor):
             "created_at": int(r["created_at"]) if r["created_at"] is not None else None,
         })
         new_cursor = int(r["id"])
-    return conn, new_cursor, out
+    return held, new_cursor, out
 
 
 def _handle_events_sse_stream(handler, parsed):
@@ -1154,11 +1188,13 @@ def _handle_events_sse_stream(handler, parsed):
     # One connection for the whole stream. Opened lazily by the first
     # _kanban_sse_poll pass, handed back to each subsequent pass, and
     # closed once in the finally below no matter which exit the loop
-    # takes (broken pipe, unexpected exception, board removal).
-    conn = None
+    # takes (broken pipe, unexpected exception, board removal). The one
+    # case that legitimately reopens is an unpinned stream whose active
+    # board was switched under it — a user action, not a per-pass cost.
+    held = None
     try:
         while True:
-            conn, cursor, events = _kanban_sse_poll(conn, board, cursor)
+            held, cursor, events = _kanban_sse_poll(held, board, cursor)
             if events:
                 # Emit `id: <last_event_id>` on every events frame so the
                 # browser sets Last-Event-ID on auto-reconnect, letting us
@@ -1190,7 +1226,7 @@ def _handle_events_sse_stream(handler, parsed):
         # up to the request handler (which would 500 a long-lived stream).
         return True
     finally:
-        _kanban_sse_close(conn)
+        _kanban_sse_close(held)
 
 
 def handle_kanban_get(handler, parsed) -> bool | None:
