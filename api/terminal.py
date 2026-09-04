@@ -427,7 +427,7 @@ def _enforce_terminal_cap(*, exclude_sid: str | None = None) -> None:
         victim_term = None
         with _LOCK:
             # Reuse/restart of an existing sid replaces in place — no growth.
-            if exclude_sid in _TERMINALS:
+            if exclude_sid in _TERMINALS or exclude_sid in _STARTING_TERMINALS:
                 return
             if len(_TERMINALS) + len(_STARTING_TERMINALS) < _MAX_TERMINALS:
                 return

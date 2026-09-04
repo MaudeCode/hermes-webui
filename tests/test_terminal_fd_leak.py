@@ -257,6 +257,17 @@ def test_cancelled_start_keeps_capacity_until_owner_cleans_up(monkeypatch, tmp_p
     assert "blocked-cap" not in terminal._STARTING_TERMINALS
 
 
+def test_duplicate_pending_start_does_not_evict_live_terminal(monkeypatch):
+    monkeypatch.setattr(terminal, "_MAX_TERMINALS", 2)
+    live = _make_registered_term(monkeypatch, "live", alive=True)
+    with terminal._LOCK:
+        terminal._STARTING_TERMINALS["pending"] = terminal._StartReservation()
+
+    terminal._enforce_terminal_cap(exclude_sid="pending")
+
+    assert terminal._TERMINALS["live"] is live
+
+
 def test_reader_start_failure_rolls_back_published_terminal(monkeypatch, tmp_path):
     class BrokenThread:
         def start(self):
