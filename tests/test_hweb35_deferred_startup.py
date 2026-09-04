@@ -198,3 +198,22 @@ def test_server_still_serves_when_background_recovery_raises(boot_server):
 
     status, _headers, body = boot.get("/api/sessions", timeout=15)
     assert status == 200, f"server must keep serving after recovery raised, got {status}: {body}"
+
+
+def test_gate_fails_open_when_no_deferred_startup_was_armed():
+    """No recovery pass in flight means nothing to wait for.
+
+    A process that never calls start_deferred_startup() — a test driving Handler
+    directly, an embedder calling into the routes — must not stall every /api/
+    request for the full readiness bound before 503ing.
+    """
+    from urllib.parse import urlparse
+
+    from api import startup
+
+    assert startup.STARTUP_READY.is_set(), (
+        "readiness must default to set so an unarmed process serves immediately"
+    )
+    started = time.monotonic()
+    assert startup.await_startup_ready(None, urlparse("/api/sessions")) is True
+    assert time.monotonic() - started < 1, "unarmed gate must not wait on the readiness bound"

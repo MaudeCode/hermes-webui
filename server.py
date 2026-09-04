@@ -114,7 +114,7 @@ from api.helpers import (
 from api.http_server import HTTPWorkerBudgetMixin, REQUEST_WORKER_OVERFLOW_RESPONSE, bind_without_reverse_dns
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers
-from api.startup import await_startup_ready, fix_credential_permissions, run_deferred_startup
+from api.startup import await_startup_ready, fix_credential_permissions, start_deferred_startup
 from api.updates import WEBUI_VERSION
 from api.crash_visibility import install_crash_visibility
 
@@ -606,11 +606,7 @@ def main() -> None:
 
     # The socket is bound; recovery, dependency repair and watcher startup run
     # behind it now (HWEB-35).
-    threading.Thread(
-        target=run_deferred_startup,
-        name="webui-deferred-startup",
-        daemon=True,
-    ).start()
+    start_deferred_startup()
 
     # ctl.sh stops the WebUI with SIGTERM. Python's default SIGTERM handler
     # terminates the process WITHOUT unwinding the try/finally around

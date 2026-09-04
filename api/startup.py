@@ -8,7 +8,13 @@ from pathlib import Path
 # the UI shell immediately instead of hiding behind a full session scan.
 # Requests that read recovered session state wait on this event instead of
 # racing it.
+#
+# Starts SET, and only start_deferred_startup() clears it. A process that never
+# arms a deferred startup — a test driving Handler directly, an embedder calling
+# into the routes — has no recovery pass to wait for, so the gate must fail open
+# for it rather than stall every /api/ request for the full readiness bound.
 STARTUP_READY = threading.Event()
+STARTUP_READY.set()
 STARTUP_WAIT_SECONDS = 10.0
 # Session recovery is the only phase the readiness event gates; dependency
 # repair, the watcher and plugins run after it and never hold a request.
@@ -159,6 +165,23 @@ def await_startup_ready(handler, parsed) -> bool:
         extra_headers={'Retry-After': '5'},
     )
     return False
+
+
+def start_deferred_startup() -> threading.Thread:
+    """Arm the readiness gate and run the deferred startup work on a thread.
+
+    Call this once, after the listening socket is bound. Arming here — rather
+    than at import — keeps the gate closed only while a recovery pass is
+    genuinely in flight.
+    """
+    STARTUP_READY.clear()
+    thread = threading.Thread(
+        target=run_deferred_startup,
+        name="webui-deferred-startup",
+        daemon=True,
+    )
+    thread.start()
+    return thread
 
 
 def run_deferred_startup() -> None:
