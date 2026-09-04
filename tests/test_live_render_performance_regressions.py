@@ -48,6 +48,20 @@ function extractFunc(name){
 """
 
 
+def _function_body_ui(name: str) -> str:
+    start = UI_JS.index(f"function {name}(")
+    depth = 0
+    brace = UI_JS.index("{", UI_JS.index(")", start))
+    for i in range(brace, len(UI_JS)):
+        if UI_JS[i] == "{":
+            depth += 1
+        elif UI_JS[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return UI_JS[start:i + 1]
+    raise AssertionError(f"{name} body did not close")
+
+
 @pytest.mark.skipif(NODE is None, reason="node is required for DOM-executed live-render tests")
 def test_compact_worklog_reconcile_preserves_unchanged_rows_without_clearing_list():
     """A new live event must not tear down every earlier Compact Worklog row."""
@@ -452,3 +466,226 @@ def test_returning_session_boot_does_not_animate_transient_empty_logo():
     assert 'html[data-session-boot="1"] .empty-state{display:none}' in css
     assert "function showConversationEmptyState()" in ui
     assert "delete document.documentElement.dataset.sessionBoot" in ui
+
+
+MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+_MESSAGES_SRC_JS = f"const src=require('fs').readFileSync({json.dumps(str(ROOT / 'static' / 'messages.js'))},'utf8');"
+
+
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for DOM-executed live-render tests")
+def test_compact_echo_suffix_strip_is_linear_on_a_long_interim_message():
+    """A 30k-char interim message with a reasoning echo must not scan quadratically."""
+    script = f"""
+{_MESSAGES_SRC_JS}
+{_EXTRACT_FUNC_JS}
+eval(extractFunc('_compactVisibleEchoText'));
+eval(extractFunc('_stripCompactEchoSuffix'));
+const _ECHO_WHITESPACE_RE=/\\s/;
+// The pre-HWEB-36 implementation, kept here as the behavioural oracle.
+function naive(value, suffix){{
+  const raw=String(value||'');
+  const candidate=_compactVisibleEchoText(suffix);
+  if(!raw||!candidate) return {{text:raw,removed:false}};
+  const windowSize=Math.max(String(suffix||'').length*3,4096);
+  const offset=Math.max(0,raw.length-windowSize);
+  const tail=raw.slice(offset);
+  for(let idx=0;idx<=tail.length;idx+=1){{
+    if(_compactVisibleEchoText(tail.slice(idx))===candidate){{
+      return {{text:raw.slice(0,offset+idx).trimEnd(),removed:true}};
+    }}
+  }}
+  return {{text:raw,removed:false}};
+}}
+const shortEcho='the model restated this visible sentence';
+const cases=[
+  ['', shortEcho],
+  ['nothing to strip here', shortEcho],
+  ['prefix text\\n\\n'+shortEcho, shortEcho],
+  ['prefix text\\n\\n'+shortEcho.replace(/ /g,'\\n'), shortEcho],
+  ['prefix '+shortEcho+' trailing', shortEcho],
+  [shortEcho, shortEcho],
+  ['x'.repeat(5000)+'  '+shortEcho+'  ', shortEcho],
+  ['x'.repeat(30000), shortEcho],
+  ['x'.repeat(30000)+'\\n'+shortEcho, shortEcho],
+];
+const mismatches=[];
+for(const [value,suffix] of cases){{
+  const a=_stripCompactEchoSuffix(value,suffix);
+  const b=naive(value,suffix);
+  if(a.removed!==b.removed||a.text!==b.text) mismatches.push({{value:value.slice(0,40),a,b}});
+}}
+// `windowSize` is max(suffix.length*3, 4096), so only a long visible echo
+// forces the 30k tail the quadratic scan choked on. A short echo pins the
+// window at the 4096 floor and would let the old implementation pass.
+const echo='visible echoed sentence '.repeat(500);
+const windowSize=Math.max(echo.length*3,4096);
+const filler='word '.repeat(8000);
+const long=filler+'\\n\\n'+echo;
+const started=Date.now();
+let result=null;
+// Four calls: what one interim_assistant event with a reasoning_echo makes.
+for(let i=0;i<4;i+=1) result=_stripCompactEchoSuffix(long,echo);
+const elapsedMs=Date.now()-started;
+process.stdout.write(JSON.stringify({{
+  mismatches,
+  windowSize,
+  tailLength:Math.min(long.length,windowSize),
+  removed:result.removed,
+  textOk:result.text===filler.trimEnd(),
+  elapsedMs,
+}}));
+"""
+    result = _run_node(script)
+    assert result["mismatches"] == []
+    # The window must actually reach 30k, or this is not a regression gate.
+    assert result["windowSize"] >= 30000, result
+    assert result["tailLength"] >= 30000, result
+    assert result["removed"] is True
+    assert result["textOk"] is True
+    # The quadratic scan needs ~450M character copies per call at this window
+    # size and takes seconds; it cannot pass this bound.
+    assert result["elapsedMs"] < 250, result
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for DOM-executed live-render tests")
+def test_post_tool_segments_use_the_incremental_xml_tool_call_stripper():
+    """Segments after the first must not re-scan their whole text every frame."""
+    assert "_stripXmlToolCalls(assistantText.slice(segmentStart))" not in MESSAGES_JS, (
+        "live render paths must go through _stripXmlToolCallsForSegment()"
+    )
+    script = f"""
+{_MESSAGES_SRC_JS}
+{_EXTRACT_FUNC_JS}
+eval(extractFunc('_createIncrementalXmlToolCallStripper'));
+eval(extractFunc('_stripXmlToolCallsForSegment'));
+global._segmentXmlStripper=null;
+global._segmentXmlStripperStart=-1;
+let batchCalls=0;
+global._stripXmlToolCalls=s=>{{batchCalls++;return String(s).replace(/<function_calls>[\\s\\S]*?<\\/function_calls>/g,'').trim();}};
+global.segmentStart=100;
+global.assistantText='p'.repeat(100)+'answer';
+const frames=[];
+for(let i=0;i<200;i+=1){{
+  assistantText+=' token'+i;
+  frames.push(_stripXmlToolCallsForSegment());
+}}
+const cleanCalls=batchCalls;
+const cleanTail=frames[frames.length-1];
+// A tool-call marker arriving mid-segment still has to be stripped.
+assistantText+='<function_calls>{{"name":"read"}}</function_calls>';
+const stripped=_stripXmlToolCallsForSegment();
+const markerCalls=batchCalls-cleanCalls;
+// A new segment gets a fresh stripper, so the previous segment's latched
+// marker state cannot force batch scans on it.
+segmentStart=assistantText.length;
+assistantText+='second segment prose';
+const nextSegment=_stripXmlToolCallsForSegment();
+process.stdout.write(JSON.stringify({{
+  cleanCalls,
+  markerCalls,
+  nextSegmentCalls:batchCalls-cleanCalls-markerCalls,
+  cleanTailOk:cleanTail.endsWith('token199'),
+  strippedOk:stripped.indexOf('function_calls')===-1&&stripped.startsWith('answer'),
+  nextSegment,
+}}));
+"""
+    result = _run_node(script)
+    assert result["cleanCalls"] == 0, result
+    assert result["markerCalls"] == 1, result
+    assert result["nextSegmentCalls"] == 0, result
+    assert result["cleanTailOk"] is True
+    assert result["strippedOk"] is True
+    assert result["nextSegment"] == "second segment prose"
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for DOM-executed live-render tests")
+def test_live_anchor_scene_skips_cleanup_sweeps_until_the_turn_changes():
+    """Unchanged frames skip the whole-turn sweeps; a new child re-runs them."""
+    script = f"""
+const fs=require('fs');
+const src=fs.readFileSync({json.dumps(str(ROOT / 'static' / 'ui.js'))},'utf8');
+{_EXTRACT_FUNC_JS}
+let sweeps=0;
+const removals=[];
+const hidden=[];
+const makeRow=(name,attrs)=>({{
+  name,
+  attributes:attrs||{{}},
+  classList:{{add(){{}}}},
+  getAttribute(k){{return this.attributes[k]||null;}},
+  setAttribute(k,v){{this.attributes[k]=String(v);}},
+  remove(){{removals.push(this.name);}},
+  set hidden(v){{hidden.push(this.name);}},
+}});
+const group={{
+  contains:()=>false,
+  getAttribute:name=>name==='data-activity-disclosure-key'?'live:stream-1':'',
+}};
+let foreignRows=[makeRow('foreign-scene-row')];
+let liveSegments=[makeRow('segment-1')];
+const blocks={{
+  _children:[{{}},{{}}],
+  get childElementCount(){{return this._children.length;}},
+  querySelectorAll(selector){{
+    sweeps++;
+    if(selector.includes('[data-anchor-scene-owner="1"]')) return foreignRows.slice();
+    if(selector.includes('.live-worklog')) return [];
+    if(selector.includes('[data-live-assistant="1"]')) return liveSegments.slice();
+    return [];
+  }},
+}};
+const turn={{dataset:{{sessionId:'sid-1'}},setAttribute(){{}}}};
+global.window={{}};
+global.S={{session:{{session_id:'sid-1'}},activeStreamId:'stream-1'}};
+global.chatActivityMode=()=> 'compact_worklog';
+global.isSimplifiedToolCalling=()=>true;
+global.$=id=>id==='liveAssistantTurn'?turn:id==='emptyState'?{{style:{{}}}}:null;
+global._anchorSceneRowsForRendering=scene=>scene.activity_rows;
+global._liveAnchorRowWindow=rows=>({{rows,hiddenCount:0,total:rows.length}});
+global._buildLiveAnchorWindowEdges=()=>({{beforeNode:null,afterNode:null}});
+global._assistantTurnBlocks=()=>blocks;
+global._captureWorklogDetailDisclosureState=()=>null;
+global._captureMessageScrollSnapshot=()=>({{pinned:true}});
+global._prepareLiveAnchorScrollRebuildGuard=()=>({{readerAwayFromBottom:false,release:null}});
+global._anchorSceneWorklogGroup=()=>group;
+global._renderAnchorSceneRowsIntoWorklog=()=>true;
+global._restoreWorklogDetailDisclosureState=()=>{{}};
+global._startActivityElapsedTimer=()=>{{}};
+global._dedupeLiveProcessedWorklogAnchors=()=>group;
+global._readActivityDisclosureState=()=>null;
+global._applyLiveActivityDisclosureIntent=()=>{{}};
+global._moveLiveRunStatusToTurnEnd=()=>{{}};
+global._restoreLiveAnchorScrollSnapshotAfterRebuild=()=>{{}};
+global._liveAnchorSceneSweepGenerations=new WeakMap();
+eval(extractFunc('renderLiveAnchorActivityScene'));
+const scene={{activity_rows:[{{row_id:'x',role:'thinking',text:'work'}}]}};
+const render=()=>renderLiveAnchorActivityScene('stream-1',scene,{{sessionId:'sid-1'}});
+
+render();
+const first={{sweeps,removals:removals.slice(),hidden:hidden.slice()}};
+// Nothing about the turn changed: the sweeps must not run again.
+render();
+render();
+const cached={{sweeps}};
+// A new live assistant segment lands as a new direct child of `blocks`, which
+// bumps the generation and must re-run every sweep on the new nodes.
+foreignRows=[makeRow('foreign-scene-row-2')];
+liveSegments=[makeRow('segment-1'),makeRow('segment-2')];
+blocks._children.push({{}});
+render();
+const afterChange={{sweeps,removals:removals.slice(),hidden:hidden.slice()}};
+process.stdout.write(JSON.stringify({{first,cached,afterChange}}));
+"""
+    result = _run_node(script)
+    # Frame 1 runs all three sweeps and cleans up.
+    assert result["first"]["sweeps"] == 3, result
+    assert result["first"]["removals"] == ["foreign-scene-row"], result
+    assert result["first"]["hidden"] == ["segment-1"], result
+    # Frames 2 and 3 change nothing, so no sweep runs at all.
+    assert result["cached"]["sweeps"] == 3, result
+    # A new direct child invalidates the generation and the sweeps run again.
+    assert result["afterChange"]["sweeps"] == 6, result
+    assert result["afterChange"]["removals"] == ["foreign-scene-row", "foreign-scene-row-2"], result
+    assert result["afterChange"]["hidden"] == ["segment-1", "segment-1", "segment-2"], result

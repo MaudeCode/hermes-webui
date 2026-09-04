@@ -14400,6 +14400,7 @@ if(typeof window!=='undefined'){
   window._updateLiveAnchorReasoningRowForFallback=_updateLiveAnchorReasoningRowForFallback;
   window._updateLiveAnchorProseRowForPatch=_updateLiveAnchorProseRowForPatch;
 }
+const _liveAnchorSceneSweepGenerations=typeof WeakMap==='function'?new WeakMap():null;
 function renderLiveAnchorActivityScene(streamId, scene, opts){
   opts=opts||{};
   const requestedMode=opts.mode;
@@ -14462,21 +14463,33 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   });
   if(!group){ if(scrollRebuildGuard.release) scrollRebuildGuard.release(); return false; }
   const ownedByCurrentGroup=el=>!!(el&&(el===group||(group.contains&&group.contains(el))));
-  // Remove competing/legacy activity surfaces, but keep this stream's owned
-  // group and rows mounted so the keyed reconciler below can update only the
-  // changed row. Stale owned rows are removed by that reconciler.
-  blocks.querySelectorAll('[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>{
-    if(!ownedByCurrentGroup(el)) el.remove();
-  });
-  blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-card-row[data-live-tid]:not(.transparent-event-row),.agent-activity-thinking[data-live-thinking="1"],.interim-collapse-toggle').forEach(el=>{
-    const ownedAnchorRow=ownedByCurrentGroup(el)&&el!==group&&el.getAttribute&&el.getAttribute('data-anchor-scene-row')==='1';
-    if(el!==group&&!ownedAnchorRow) el.remove();
-  });
-  blocks.querySelectorAll('[data-live-assistant="1"]').forEach(el=>{
-    el.classList.add('assistant-segment-worklog-source');
-    el.setAttribute('aria-hidden','true');
-    el.hidden=true;
-  });
+  // The three cleanup sweeps below each walk the whole turn subtree, and the
+  // keyed reconciler only ever mutates inside `group`. Competing surfaces can
+  // only arrive as new direct children of `blocks`, so key the sweeps on
+  // (group, direct child count) and skip them while that generation is
+  // unchanged. The count is a conservative signal: any add or remove
+  // re-runs the sweeps. (HWEB-36)
+  const sweepCache=(typeof _liveAnchorSceneSweepGenerations!=='undefined'&&_liveAnchorSceneSweepGenerations
+    &&typeof blocks.childElementCount==='number')?_liveAnchorSceneSweepGenerations:null;
+  const sweepGeneration=sweepCache?blocks.childElementCount:null;
+  if(!sweepCache||sweepCache.get(group)!==sweepGeneration){
+    if(sweepCache) sweepCache.set(group,sweepGeneration);
+    // Remove competing/legacy activity surfaces, but keep this stream's owned
+    // group and rows mounted so the keyed reconciler below can update only the
+    // changed row. Stale owned rows are removed by that reconciler.
+    blocks.querySelectorAll('[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>{
+      if(!ownedByCurrentGroup(el)) el.remove();
+    });
+    blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-card-row[data-live-tid]:not(.transparent-event-row),.agent-activity-thinking[data-live-thinking="1"],.interim-collapse-toggle').forEach(el=>{
+      const ownedAnchorRow=ownedByCurrentGroup(el)&&el!==group&&el.getAttribute&&el.getAttribute('data-anchor-scene-row')==='1';
+      if(el!==group&&!ownedAnchorRow) el.remove();
+    });
+    blocks.querySelectorAll('[data-live-assistant="1"]').forEach(el=>{
+      el.classList.add('assistant-segment-worklog-source');
+      el.setAttribute('aria-hidden','true');
+      el.hidden=true;
+    });
+  }
   const windowEdges=typeof _buildLiveAnchorWindowEdges==='function'
     ? _buildLiveAnchorWindowEdges(rowWindow,turn)
     : {beforeNode:null,afterNode:null};

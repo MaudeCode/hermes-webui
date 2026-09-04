@@ -4672,6 +4672,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     },null,renderOutcome);
     return renderOutcome.rendered?_findAnchorActivityEventByLocalId(localId,'reasoning'):null;
   }
+  const _ECHO_WHITESPACE_RE=/\s/;
   function _compactVisibleEchoText(value){
     return String(value||'').replace(/\s+/g,'');
   }
@@ -4682,12 +4683,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const windowSize=Math.max(String(suffix||'').length*3,4096);
     const offset=Math.max(0,raw.length-windowSize);
     const tail=raw.slice(offset);
-    for(let idx=0;idx<=tail.length;idx+=1){
-      if(_compactVisibleEchoText(tail.slice(idx))===candidate){
-        return {text:raw.slice(0,offset+idx).trimEnd(),removed:true};
-      }
+    // Compact the tail once and keep an index map back into it, instead of
+    // re-slicing + re-compacting the remaining tail at every position. The old
+    // per-index scan cost O(n^2) character copies, which froze the tab on long
+    // interim reasoning messages. (HWEB-36)
+    let compact='';
+    const sourceIndex=[];
+    for(let i=0;i<tail.length;i+=1){
+      const ch=tail[i];
+      if(_ECHO_WHITESPACE_RE.test(ch)) continue;
+      compact+=ch;
+      sourceIndex.push(i);
     }
-    return {text:raw,removed:false};
+    if(!compact.endsWith(candidate)) return {text:raw,removed:false};
+    // First index whose compaction is exactly `candidate` sits just past the
+    // last kept character before the match, matching the old first-match scan.
+    const start=compact.length-candidate.length;
+    const idx=start>0?sourceIndex[start-1]+1:0;
+    return {text:raw.slice(0,offset+idx).trimEnd(),removed:true};
   }
   function _stripAnchorReasoningEcho(visible){
     const events=_anchorActivityEvents();
@@ -4996,6 +5009,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     };
   }
   const _stripXmlToolCallsStream=_createIncrementalXmlToolCallStripper();
+  // Segments after the first used to re-scan their whole accumulated text with
+  // the batch stripper on every frame. Give each segment its own incremental
+  // stripper so per-frame cost tracks the appended delta. (HWEB-36)
+  let _segmentXmlStripper=null;
+  let _segmentXmlStripperStart=-1;
+  function _stripXmlToolCallsForSegment(){
+    if(_segmentXmlStripperStart!==segmentStart){
+      _segmentXmlStripper=_createIncrementalXmlToolCallStripper();
+      _segmentXmlStripperStart=segmentStart;
+    }
+    return _segmentXmlStripper(assistantText.slice(segmentStart));
+  }
   function _streamDisplay(){
     return _parseInlineThinkingStream(_stripXmlToolCallsStream(assistantText), liveReasoningText, {streaming:true}).content;
   }
@@ -5849,7 +5874,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const parsed=_parseStreamState();
     return segmentStart===0
       ? parsed.displayText
-      : _stripXmlToolCalls(assistantText.slice(segmentStart));
+      : _stripXmlToolCallsForSegment();
   }
   function _drainStreamFadeBeforeDone(onDone){
     const drainStartedAt=performance.now();
@@ -5895,7 +5920,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(_renderPending) _cancelAnimationFramePendingStreamRender();
     const displayText=segmentStart===0
       ? _parseStreamState().displayText
-      : _stripXmlToolCalls(assistantText.slice(segmentStart));
+      : _stripXmlToolCallsForSegment();
     if(_smdParser){
       _smdWrite(displayText);
     } else if(window.smd){
@@ -6249,7 +6274,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _renderLiveThinking(parsed);
       const displayText = segmentStart===0
         ? parsed.displayText                          // first segment: uses think-tag stripping
-        : _stripXmlToolCalls(assistantText.slice(segmentStart));
+        : _stripXmlToolCallsForSegment();
       let anchorProcessText=displayText;
       if(assistantBody){
         if(_shouldUseLiveProseFade()){
@@ -6275,7 +6300,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             // parsed.displayText and users see unformatted markdown until done.
             const fallbackText = segmentStart===0
               ? parsed.displayText
-              : _stripXmlToolCalls(assistantText.slice(segmentStart));
+              : _stripXmlToolCallsForSegment();
             assistantBody.innerHTML = renderMd ? renderMd(fallbackText) : esc(fallbackText);
           }
         }
@@ -6469,7 +6494,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!tc) return;
       const pendingDisplayTextBeforeTool=segmentStart===0
         ? (_parseStreamState().displayText||'')
-        : _stripXmlToolCalls(assistantText.slice(segmentStart));
+        : _stripXmlToolCallsForSegment();
       if(String(pendingDisplayTextBeforeTool||'').trim()) _upsertAnchorProcessProse(pendingDisplayTextBeforeTool,{sealed:true});
       _applyToAnchor('tool',{...d,...tc},e);
 
@@ -6483,7 +6508,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const oldRow=$('toolRunningRow');if(oldRow)oldRow.remove();
       const pendingDisplayText=segmentStart===0
         ? (_parseStreamState().displayText||'')
-        : _stripXmlToolCalls(assistantText.slice(segmentStart));
+        : _stripXmlToolCallsForSegment();
       if((assistantRow&&assistantBody)||String(pendingDisplayText||'').trim()){
         ensureAssistantRow(true);
       }
@@ -6507,7 +6532,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       tc.is_error=!!d.is_error;
       const pendingDisplayTextBeforeComplete=segmentStart===0
         ? (_parseStreamState().displayText||'')
-        : _stripXmlToolCalls(assistantText.slice(segmentStart));
+        : _stripXmlToolCallsForSegment();
       if(String(pendingDisplayTextBeforeComplete||'').trim()) _upsertAnchorProcessProse(pendingDisplayTextBeforeComplete,{sealed:true});
       _applyToAnchor('tool_complete',{...d,...tc,is_error:!!d.is_error},e);
       if(typeof noteWorkspaceMutationsFromToolCall==='function') noteWorkspaceMutationsFromToolCall(tc);
@@ -6518,7 +6543,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(tc._createdByComplete){
         const pendingDisplayText=segmentStart===0
           ? (_parseStreamState().displayText||'')
-          : _stripXmlToolCalls(assistantText.slice(segmentStart));
+          : _stripXmlToolCallsForSegment();
         if((assistantRow&&assistantBody)||String(pendingDisplayText||'').trim()){
           ensureAssistantRow(true);
           _flushPendingSegmentRender({force:true});
