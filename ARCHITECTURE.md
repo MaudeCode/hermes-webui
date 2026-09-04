@@ -153,19 +153,22 @@ Tests NEVER talk to the production server (port 8787).
 The test state dir is wiped before each test session and deleted after.
 See: <repo>/tests/conftest.py
 
-Per-request environment variables (set by chat handler, restored after):
+Per-turn runtime values (bound through context-local Agent/WebUI state):
 
     TERMINAL_CWD         Set to session.workspace before running agent.
                          The terminal tool reads this to default cwd.
     HERMES_EXEC_ASK      Set to "1" to enable approval gate for dangerous commands.
     HERMES_SESSION_KEY   Set to session_id. The approval tool keys pending entries
                          by this value, enabling per-session approval state.
-    HERMES_HOME          Set to the active profile's directory before running agent.
-                         Saved and restored around each agent run.
+    HERMES_HOME          Bound through the Agent's context-local home override.
+    Provider secrets    Bound through the Agent's context-local secret scope.
 
-WARNING: These env vars are process-global. Two concurrent chat requests will clobber
-each other. This is safe only for single-user, single-concurrent-request use.
-See Architecture Phase B for the fix.
+Chat and detached profile work do not mutate these names in process-global
+`os.environ`. Runtime values are passed through WebUI thread-local state and the
+Agent's context-local home, secret, terminal, and session APIs. If the installed
+Hermes Agent lacks those isolation capabilities, Agent chat fails closed
+with an upgrade error instead of serializing the whole turn behind a process-wide
+environment lock.
 
 ---
 
@@ -837,7 +840,7 @@ restriction from the UI yet (see ROADMAP.md Wave 4 for the plan).
 | B12 | Low      | Preview panel display:none to flex layout jump       | FIXED Sprint 4   | visibility/opacity transition replaces display:none toggle |
 | B13 | Low      | No CORS headers                                      | Open             | Phase H |
 | B14 | Low      | No keyboard shortcut for new chat                    | FIXED Sprint 3   | Cmd/Ctrl+K triggers newSession() from anywhere |
-| TD1 | Critical | Env vars are process-global (concurrent request bug) | PARTIAL Sprint 5 | Thread-local _set_thread_env() added. Per-session lock from Sprint 4. Process-level env still written as fallback. Full fix needs terminal tool to read thread-local. |
+| TD1 | Critical | Env vars are process-global (concurrent request bug) | FIXED HWEB-47 | Agent turns and detached profile work use context-local home, secret, terminal, and session state; unsupported legacy runtimes fail closed. |
 | TD2 | High     | SESSIONS cache: no eviction, locking missing         | FIXED Sprint 5   | OrderedDict + LRU cap 100 + move_to_end on access. LOCK from Sprint 1. Complete. |
 | TD3 | High     | No test coverage                                     | PARTIAL Sprint 1 | 19 HTTP integration tests added; unit tests pending Phase A split |
 | TD4 | Medium   | All code in one file (HTML/CSS/JS/Python mingled)    | FIXED Sprint 5   | JS extracted to static/app.js in Sprint 5 (Sprint 9: app.js deleted, replaced by 6 modules). Phase A complete. |
@@ -882,34 +885,17 @@ Route extraction to api/routes.py completed in Sprint 11. server.py remains a
 thin shell relative to the rest of the app: Handler class with headers,
 structured logging, dispatch to routes, TLS wrapping, and main().
 
-### Phase B: Thread-Safe Request Context (Priority: Critical, Effort: Medium)
+### Phase B: Thread-Safe Request Context -- COMPLETE
 
-Replace process-global env vars with thread-local or explicit parameter passing.
+Agent turns use thread-local or explicit context for workspace, approval/session
+identity, profile home, credentials, terminal state, and skill paths. The WebUI
+does not keep a process-wide environment or skill-module lock across Agent, LLM,
+provider, tool, compression, or title work. Legacy Agent builds that still need
+process-global profile state are rejected before turns start.
 
-Root cause: TERMINAL_CWD, HERMES_EXEC_ASK, HERMES_SESSION_KEY are set via os.environ
-in _run_agent_streaming(). Two concurrent sessions clobber each other.
-
-Fix options (in order of preference):
-
-Option 1 (best): Check if AIAgent constructor accepts a context dict. Pass workspace,
-exec_ask, and session_key directly. Zero env var usage in server code.
-
-Option 2: Use threading.local():
-    _ctx = threading.local()
-    # In _run_agent_streaming:
-    _ctx.workspace = str(workspace)
-    _ctx.session_key = session_id
-    # In tools that read env vars: check _ctx first, fall back to os.environ
-
-Option 3 (interim, safe for single-user): Wrap the env var block in a per-session lock:
-    SESSION_AGENT_LOCKS = {}  # session_id -> Lock
-    # Only one agent run per session at a time
-    with SESSION_AGENT_LOCKS.setdefault(session_id, threading.Lock()):
-        os.environ[...] = ...
-        result = agent.run_conversation(...)
-
-Phase B also includes: review all other os.environ reads/writes in the codebase for
-similar thread-safety issues.
+The implementation combines WebUI thread-local configuration with Agent-owned
+context variables. Process-global environment writes that remain elsewhere are
+bounded configuration mutations and are not held across request or Agent work.
 
 ### Phase C: Session Store Improvements -- COMPLETE
 

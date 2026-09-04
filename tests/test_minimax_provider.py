@@ -10,6 +10,7 @@ Covers:
 import os
 import pytest
 import api.config as config
+import api.profiles as profiles
 
 
 def _force_env_fallback(monkeypatch):
@@ -179,22 +180,20 @@ def test_minimax_cn_api_key_in_env_scan_tuple():
     )
 
 
-def test_minimax_detected_from_os_environ(monkeypatch):
-    """Setting MINIMAX_API_KEY in os.environ triggers minimax provider detection."""
+def test_minimax_detected_from_os_environ(monkeypatch, tmp_path):
+    """A startup MINIMAX_API_KEY triggers root-profile provider detection."""
+    _force_env_fallback(monkeypatch)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _name: tmp_path)
     monkeypatch.setenv('MINIMAX_API_KEY', 'test-key-from-env')
-    old_cfg = dict(config.cfg)
-    # Clear model config so the env-var fallback path is exercised
-    config.cfg['model'] = {}
-    try:
-        result = config.get_available_models()
-        provider_names = [g['provider'] for g in result['groups']]
-        assert 'MiniMax' in provider_names, (
-            f"MiniMax not detected when MINIMAX_API_KEY is set in os.environ. "
-            f"Active provider groups: {provider_names}"
-        )
-    finally:
-        config.cfg.clear()
-        config.cfg.update(old_cfg)
+    monkeypatch.setitem(profiles._INITIAL_PROCESS_ENV, 'MINIMAX_API_KEY', 'test-key-from-env')
+
+    result = _run_available_models_with_cfg(monkeypatch, tmp_path, {'model': {}})
+    provider_names = [g['provider'] for g in result['groups']]
+    assert 'MiniMax' in provider_names, (
+        f"MiniMax not detected when MINIMAX_API_KEY is set in the startup env. "
+        f"Active provider groups: {provider_names}"
+    )
 
 
 def test_minimax_cn_detected_from_os_environ(monkeypatch, tmp_path):
@@ -202,6 +201,8 @@ def test_minimax_cn_detected_from_os_environ(monkeypatch, tmp_path):
     _force_env_fallback(monkeypatch)
     monkeypatch.delenv('MINIMAX_API_KEY', raising=False)
     monkeypatch.setenv('MINIMAX_CN_API_KEY', 'test-cn-key-from-env')
+    monkeypatch.delitem(profiles._INITIAL_PROCESS_ENV, 'MINIMAX_API_KEY', raising=False)
+    monkeypatch.setitem(profiles._INITIAL_PROCESS_ENV, 'MINIMAX_CN_API_KEY', 'test-cn-key-from-env')
 
     result = _run_available_models_with_cfg(monkeypatch, tmp_path, {'model': {}})
     groups = {g['provider_id']: g for g in result['groups']}

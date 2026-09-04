@@ -684,12 +684,12 @@ def test_manual_compress_worker_uses_session_profile_env(monkeypatch, tmp_path, 
 
     routes._run_manual_compression_job(sid, {"session_id": sid})
     assert EnvAssertingAgent.seen_env == {
-        "HERMES_HOME": str(profile_home),
-        "HERMES_TEST_PROFILE_ENV": "work-runtime",
+        "HERMES_HOME": "default-home",
+        "HERMES_TEST_PROFILE_ENV": None,
         "THREAD_HERMES_HOME": str(profile_home),
         "THREAD_HERMES_TEST_PROFILE_ENV": "work-runtime",
-        "SKILL_MODULE_HOME": profile_home,
-        "SKILL_MODULE_DIR": profile_home / "skills",
+        "SKILL_MODULE_HOME": "default-home",
+        "SKILL_MODULE_DIR": "default-home/skills",
     }
     assert str(fake_skill_module.HERMES_HOME) == "default-home"
     assert str(fake_skill_module.SKILLS_DIR) == "default-home/skills"

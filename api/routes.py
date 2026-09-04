@@ -31,7 +31,7 @@ import http.client
 import socket as _socket
 from collections import defaultdict, deque, OrderedDict
 from pathlib import Path
-from contextlib import closing, nullcontext
+from contextlib import ExitStack, closing, nullcontext
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
@@ -2917,6 +2917,8 @@ def _get_cached_session_list_payload(
     return payload
 
 from api.config import (
+    _HERMES_FOUND,
+    _thread_local_env_value,
     STATE_DIR,
     SESSION_DIR,
     DEFAULT_WORKSPACE,
@@ -7369,7 +7371,7 @@ def _custom_provider_api_key_for_context(entry: dict, provider: str) -> str:
         api_key_text = str(raw_api_key).strip()
         if api_key_text.startswith("${") and api_key_text.endswith("}") and len(api_key_text) > 3:
             env_name = api_key_text[2:-1]
-            resolved = os.getenv(env_name, "").strip()
+            resolved = _thread_local_env_value(env_name).strip()
             if resolved:
                 return resolved
             logger.debug(
@@ -7382,7 +7384,7 @@ def _custom_provider_api_key_for_context(entry: dict, provider: str) -> str:
 
     key_env = str(entry.get("key_env") or "").strip()
     if key_env:
-        resolved = os.getenv(key_env, "").strip()
+        resolved = _thread_local_env_value(key_env).strip()
         if resolved:
             return resolved
 
@@ -7409,14 +7411,14 @@ def _context_length_config_api_key_for_provider(
             and api_key_text.endswith("}")
             and len(api_key_text) > 3
         ):
-            resolved = os.getenv(api_key_text[2:-1], "").strip()
+            resolved = _thread_local_env_value(api_key_text[2:-1]).strip()
             if resolved:
                 return resolved
         elif api_key_text:
             return api_key_text
         key_env = str(raw_key_env or "").strip()
         if key_env:
-            resolved = os.getenv(key_env, "").strip()
+            resolved = _thread_local_env_value(key_env).strip()
             if resolved:
                 return resolved
         return ""
@@ -22719,15 +22721,17 @@ def _handle_live_models(handler, parsed):
                 return _ids
 
             def _custom_provider_api_key(_cp):
+                from api.config import _thread_local_env_value
+
                 _raw = _cp.get("api_key")
                 if _raw is not None:
                     _key = str(_raw).strip()
                     if _key.startswith("${") and _key.endswith("}") and len(_key) > 3:
-                        _key = os.getenv(_key[2:-1], "").strip()
+                        _key = _thread_local_env_value(_key[2:-1]).strip()
                     if _key:
                         return _key
                 _env = str(_cp.get("key_env") or "").strip()
-                return os.getenv(_env, "").strip() if _env else ""
+                return _thread_local_env_value(_env).strip() if _env else ""
 
             # For 'custom' and 'custom:*' providers, provider_model_ids()
             # returns [] because they aren't real hermes_cli endpoints.
@@ -25884,16 +25888,77 @@ def _handle_chat_sync(handler, body):
         )[:2]
         s.model = model
         s.model_provider = model_provider
-    from api.streaming import _ENV_LOCK
+    with ExitStack() as runtime_scope:
+        from api import profiles as profiles_api
+        from api.config import _set_thread_env, _thread_ctx
+        from api.streaming import (
+            _prewarm_skill_tool_modules,
+            _reset_turn_session_identity,
+            _set_turn_session_identity,
+        )
 
-    with _ENV_LOCK:
-        old_cwd = os.environ.get("TERMINAL_CWD")
-        os.environ["TERMINAL_CWD"] = str(workspace)
-        old_exec_ask = os.environ.get("HERMES_EXEC_ASK")
-        old_session_key = os.environ.get("HERMES_SESSION_KEY")
-        os.environ["HERMES_EXEC_ASK"] = "1"
-        os.environ["HERMES_SESSION_KEY"] = s.session_id
-    try:
+        profile_home = profiles_api.get_hermes_home_for_profile(
+            getattr(s, "profile", None)
+        )
+        runtime_scope.enter_context(
+            profiles_api.profile_env_for_background_worker(
+                s, "synchronous chat", logger_override=logger
+            )
+        )
+        previous_thread_env = getattr(_thread_ctx, "env", {}).copy()
+        turn_env = dict(previous_thread_env)
+        turn_env.update({
+            "TERMINAL_CWD": str(workspace),
+            "HERMES_EXEC_ASK": "1",
+            "HERMES_SESSION_KEY": s.session_id,
+            "HERMES_SESSION_ID": s.session_id,
+            "HERMES_SESSION_PLATFORM": "webui",
+            "HERMES_SESSION_CHAT_ID": s.session_id,
+        })
+        _set_thread_env(**turn_env)
+        runtime_scope.callback(_set_thread_env, **previous_thread_env)
+        turn_identity = _set_turn_session_identity(s.session_id)
+        runtime_scope.callback(_reset_turn_session_identity, turn_identity)
+
+        try:
+            from agent.runtime_cwd import _SESSION_CWD, set_session_cwd
+
+            runtime_cwd_token = set_session_cwd(str(workspace))
+            runtime_scope.callback(_SESSION_CWD.reset, runtime_cwd_token)
+        except ImportError as exc:
+            if _HERMES_FOUND:
+                raise RuntimeError(
+                    "Cannot safely start synchronous chat: the installed Hermes Agent "
+                    "lacks context-local terminal working directories."
+                ) from exc
+
+        terminal_runtime_env = profiles_api.filter_runtime_env_for_gateway_parity(
+            profiles_api.get_profile_runtime_env(profile_home)
+        )
+        try:
+            from tools import terminal_scope
+
+            terminal_policy = terminal_scope.build_profile_terminal_scope(profile_home)
+            terminal_token = terminal_scope.set_terminal_scope(terminal_policy)
+            runtime_scope.callback(terminal_scope.reset_terminal_scope, terminal_token)
+        except ImportError as exc:
+            if _HERMES_FOUND and any(
+                key.startswith("TERMINAL_") and key != "TERMINAL_CWD"
+                for key in terminal_runtime_env
+            ):
+                raise RuntimeError(
+                    "Cannot safely start synchronous chat: the installed Hermes Agent "
+                    "lacks context-local terminal policy."
+                ) from exc
+
+        _prewarm_skill_tool_modules()
+        if _HERMES_FOUND and not profiles_api._skill_modules_support_profile_home(
+            profile_home
+        ):
+            raise RuntimeError(
+                "Cannot safely start synchronous chat: the installed Hermes Agent "
+                "requires process-global skill state."
+            )
         AIAgent = require_ai_agent_class()
 
         with CHAT_LOCK:
@@ -25992,20 +26057,6 @@ def _handle_chat_sync(handler, body):
                 task_id=s.session_id,
                 persist_user_message=msg,
             )
-    finally:
-        with _ENV_LOCK:
-            if old_cwd is None:
-                os.environ.pop("TERMINAL_CWD", None)
-            else:
-                os.environ["TERMINAL_CWD"] = old_cwd
-            if old_exec_ask is None:
-                os.environ.pop("HERMES_EXEC_ASK", None)
-            else:
-                os.environ["HERMES_EXEC_ASK"] = old_exec_ask
-            if old_session_key is None:
-                os.environ.pop("HERMES_SESSION_KEY", None)
-            else:
-                os.environ["HERMES_SESSION_KEY"] = old_session_key
     with _get_session_agent_lock(s.session_id):
         _result_messages = result.get("messages") or _previous_context_messages
         _next_context_messages = _restore_reasoning_metadata(
@@ -26083,12 +26134,10 @@ def _selected_profile_snapshot_updates(
     try:
         from api.profiles import profile_env_for_background_worker
         from cron.jobs import _compute_provider_model_snapshots
-    except Exception:
-        logger.warning(
-            "Selected-profile cron snapshot repair unavailable; saving ambient snapshots",
-            exc_info=True,
-        )
-        return {}
+    except Exception as exc:
+        raise RuntimeError(
+            "Selected-profile cron snapshot support is unavailable"
+        ) from exc
 
     try:
         with _CRON_CREATE_SNAPSHOT_LOCK:
@@ -26103,13 +26152,10 @@ def _selected_profile_snapshot_updates(
                     base_url=None,
                     no_agent=False,
                 )
-    except Exception:
-        logger.warning(
-            "Selected-profile cron snapshot repair failed for %s; saving ambient snapshots",
-            selected_profile,
-            exc_info=True,
-        )
-        return {}
+    except Exception as exc:
+        raise RuntimeError(
+            f"Cannot safely resolve cron snapshots for profile {selected_profile!r}"
+        ) from exc
 
     updates = {}
     if provider is None:
@@ -26131,15 +26177,6 @@ def _handle_cron_create(handler, body):
         toast_notifications = body.get("toast_notifications") is not False
         requested_model = body.get("model") or None
         requested_provider = body.get("provider") or None
-        job = create_job(
-            prompt=body["prompt"],
-            schedule=body["schedule"],
-            name=body.get("name") or None,
-            deliver=body.get("deliver") or "local",
-            skills=body.get("skills") or [],
-            model=requested_model,
-            provider=requested_provider,
-        )
         post_create_updates = {}
         if profile is not None:
             post_create_updates["profile"] = profile
@@ -26152,6 +26189,15 @@ def _handle_cron_create(handler, body):
             )
         if not toast_notifications:
             post_create_updates["toast_notifications"] = False
+        job = create_job(
+            prompt=body["prompt"],
+            schedule=body["schedule"],
+            name=body.get("name") or None,
+            deliver=body.get("deliver") or "local",
+            skills=body.get("skills") or [],
+            model=requested_model,
+            provider=requested_provider,
+        )
         if post_create_updates:
             job = update_job(job["id"], post_create_updates) or job
         return j(handler, {"ok": True, "job": _cron_job_for_api(job)})
@@ -28212,7 +28258,11 @@ def _run_manual_compression_job(sid, body):
         if session is not None:
             from api import profiles as profiles_api
 
-            with profiles_api.profile_env_for_background_worker(session, "manual compression", logger_override=logger):
+            with profiles_api.profile_env_for_background_worker(
+                session,
+                "manual compression",
+                logger_override=logger,
+            ):
                 _handle_session_compress(memory_handler, body)
         else:
             _handle_session_compress(memory_handler, body)

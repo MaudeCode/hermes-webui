@@ -1,13 +1,12 @@
 """Regression test for issue #1968 — non-default profile MCP servers never load.
 
 The bug: `discover_mcp_tools()` was called at the top of `_run_agent_streaming`
-before the `HERMES_HOME` env mutation that stamps the per-session profile.
+before the profile-home context was installed.
 Result: `_load_mcp_config()` always read the default profile's
 `~/.hermes/config.yaml`, never the non-default profile's MCP servers.
 
-The fix moves the call past the `_ENV_LOCK` env-mutation block so
-`discover_mcp_tools()` runs with the correct `HERMES_HOME` for the session's
-profile.
+The fix runs discovery after the context-local Hermes-home override is installed,
+without any process-global environment lock.
 
 This is a static check (source ordering) rather than a runtime test, because
 mocking the entire agent stack to reach the call site would be brittle and
@@ -28,36 +27,25 @@ def _line_of(pattern: str) -> int:
     raise AssertionError(f"pattern not found in api/streaming.py: {pattern!r}")
 
 
-def test_discover_mcp_tools_called_after_hermes_home_mutation():
+def test_discover_mcp_tools_called_after_hermes_home_override():
     """The fix for #1968: `discover_mcp_tools()` must execute AFTER the
-    `HERMES_HOME = _profile_home` assignment, otherwise non-default profile
+    context-local home override, otherwise non-default profile
     MCP servers are never discovered.
     """
-    home_set_line = _line_of(r"os\.environ\['HERMES_HOME'\]\s*=\s*_profile_home")
+    home_set_line = _line_of(r"_set_streaming_hermes_home_override\(_profile_home\)")
     discover_call_line = _line_of(r"discover_mcp_tools\(\)\s*$")
     assert discover_call_line > home_set_line, (
         f"discover_mcp_tools() at line {discover_call_line} must be AFTER the "
-        f"HERMES_HOME mutation at line {home_set_line} (issue #1968). "
+        f"home override at line {home_set_line} (issue #1968). "
         "Otherwise non-default profile MCP servers never load."
     )
 
 
-def test_discover_mcp_tools_called_after_env_lock_release():
-    """`discover_mcp_tools()` should run AFTER the `_ENV_LOCK` block releases —
-    discovery itself can take up to 120s (per `_run_on_mcp_loop` timeout in
-    hermes-agent), and holding the env lock across that would serialize all
-    concurrent sessions through MCP discovery.
-
-    Lexical check: the discover call must come after the `# Lock released` marker
-    that follows the `with _ENV_LOCK:` block.
-    """
-    lock_release_marker = _line_of(r"# Lock released — agent runs without holding it")
-    discover_call_line = _line_of(r"discover_mcp_tools\(\)\s*$")
-    assert discover_call_line > lock_release_marker, (
-        f"discover_mcp_tools() at line {discover_call_line} should run AFTER "
-        f"the _ENV_LOCK release at line {lock_release_marker}, not inside the "
-        "lock block (which would serialize MCP discovery across sessions)."
-    )
+def test_streaming_has_no_process_env_lock_scope():
+    """Agent and MCP work must not run under the process environment lock."""
+    start = STREAMING_PY.index("def _run_agent_streaming(")
+    body = STREAMING_PY[start:]
+    assert "with _ENV_LOCK:" not in body
 
 
 def test_discover_mcp_tools_only_called_once_in_streaming():

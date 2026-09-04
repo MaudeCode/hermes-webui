@@ -346,6 +346,12 @@ def _clear_anthropic_env_values(hermes_home: Path) -> None:
     except Exception as exc:
         logger.warning("Failed to clear Anthropic env values: %s", exc)
     _clear_process_anthropic_env_values()
+    try:
+        from api.profiles import retire_startup_env_keys_for_home
+
+        retire_startup_env_keys_for_home(hermes_home, _ANTHROPIC_ENV_KEYS)
+    except Exception:
+        logger.debug("Failed to retire cleared Anthropic startup env values", exc_info=True)
 
 
 def _link_anthropic_credentials(hermes_home: Path) -> None:
