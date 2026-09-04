@@ -779,6 +779,76 @@ def test_gateway_success_save_and_projection_failures_emit_terminal_errors(tmp_p
     assert projection_saved.active_stream_id is None
 
 
+def test_gateway_writeback_timeout_retains_pending_turn(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(streaming, "_CHAT_LOCK_WAIT_SECONDS", 0.02)
+    monkeypatch.setattr(
+        streaming,
+        "_load_webui_prefill_context",
+        lambda cfg: {
+            "status": "not_configured",
+            "source": "none",
+            "label": "",
+            "message_count": 0,
+            "messages": [],
+        },
+    )
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"answer"}}]}\n\n'
+            yield b"data: [DONE]\n\n"
+
+    monkeypatch.setattr(
+        gateway_chat.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: FakeResponse(),
+    )
+    session = new_session()
+    stream_id = "stream-gateway-writeback-timeout"
+    session.active_stream_id = stream_id
+    session.pending_user_message = "Keep this pending prompt"
+    session.pending_started_at = 456
+    session.save()
+    events = []
+    channel = MagicMock()
+    channel.put_nowait = lambda item: events.append(item)
+    STREAMS[stream_id] = channel
+    lock = gateway_chat._get_session_agent_lock(session.session_id)
+    lock.acquire()
+    try:
+        gateway_chat._run_gateway_chat_streaming(
+            session.session_id,
+            session.pending_user_message,
+            "test-model",
+            str(tmp_path),
+            stream_id,
+            [],
+        )
+    finally:
+        lock.release()
+
+    errors = [item[1] for item in events if item[0] == "apperror"]
+    assert errors[-1]["type"] == "chat_writeback_timeout"
+    saved = models.Session.load(session.session_id)
+    assert saved.active_stream_id == stream_id
+    assert saved.pending_user_message == "Keep this pending prompt"
+
+
 def test_gateway_chat_worker_persists_reasoning_and_tool_state_on_terminal_error(tmp_path, monkeypatch):
     from unittest.mock import MagicMock
 

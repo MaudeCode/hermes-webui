@@ -1233,6 +1233,7 @@ def _run_gateway_chat_streaming(
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
 
     success_writeback_committed = False
+    terminal_writeback_committed = False
     runs_api_pending_marked = True
     reasoning_titles: list[str] = []
     explicit_reasoning_titles: list[str] = []
@@ -1459,6 +1460,9 @@ def _run_gateway_chat_streaming(
                     str(exc),
                     regeneration=regeneration,
                 )
+                terminal_writeback_committed = bool(
+                    error_payload and error_payload.get("terminal_session_persisted")
+                )
                 if error_payload is None:
                     return
                 put_gateway_event("apperror", error_payload)
@@ -1663,6 +1667,9 @@ def _run_gateway_chat_streaming(
                 terminal_error,
                 regeneration=regeneration,
             )
+            terminal_writeback_committed = bool(
+                error_payload and error_payload.get("terminal_session_persisted")
+            )
             if error_payload is None:
                 return
             put_gateway_event("apperror", error_payload)
@@ -1683,6 +1690,9 @@ def _run_gateway_chat_streaming(
                 empty_payload["message"],
                 error_payload_override=empty_payload,
                 regeneration=regeneration,
+            )
+            terminal_writeback_committed = bool(
+                error_payload and error_payload.get("terminal_session_persisted")
             )
             if error_payload is not None:
                 put_gateway_event("apperror", error_payload)
@@ -1868,6 +1878,7 @@ def _run_gateway_chat_streaming(
                 _restore_cancelled_success_writeback()
                 return
             success_writeback_committed = True
+            terminal_writeback_committed = True
         try:
             from api.goals import evaluate_goal_after_turn, has_active_goal
             from api.profiles import get_hermes_home_for_profile
@@ -1941,6 +1952,9 @@ def _run_gateway_chat_streaming(
             error_payload_override=http_payload,
             regeneration=regeneration,
         )
+        terminal_writeback_committed = bool(
+            error_payload and error_payload.get("terminal_session_persisted")
+        )
         if error_payload is not None:
             put_gateway_event("apperror", error_payload)
     except Exception as exc:
@@ -1977,6 +1991,9 @@ def _run_gateway_chat_streaming(
             error_payload = dict(gateway_payload)
             error_payload["session_id"] = session_id
             error_payload["terminal_session_persisted"] = bool(success_writeback_committed)
+        terminal_writeback_committed = bool(
+            error_payload.get("terminal_session_persisted")
+        )
         if error_payload is not None:
             put_gateway_event("apperror", error_payload)
     finally:
@@ -1993,7 +2010,7 @@ def _run_gateway_chat_streaming(
                 retire_gateway_pending_mirror(session_id, run_id=mapped_run_id)
             except Exception:
                 logger.debug("Failed to retire gateway pending mirrors during teardown", exc_info=True)
-        if s is not None:
+        if s is not None and terminal_writeback_committed:
             try:
                 from api.streaming import _try_acquire_worker_session_lock
 
