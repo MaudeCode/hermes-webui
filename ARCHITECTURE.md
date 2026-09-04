@@ -64,7 +64,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       profiles.py          Profile state management, hermes_cli wrapper
       onboarding.py        First-run onboarding status, real provider config writes, OAuth linking, readiness detection
       routes.py            All GET + POST route handlers (if/elif dispatch, no decorators)
-      startup.py           Startup helpers: auto_install_agent_deps()
+      startup.py           Startup helpers: auto_install_agent_deps(), deferred startup behind the bind
       state_sync.py        /insights sync — message_count to the agent's state.db
       streaming.py         SSE engine, run_agent, cancel, compression, HERMES_HOME save/restore
       updates.py           Self-update check and release notes
@@ -823,6 +823,31 @@ Return value:
       'completed': True/False,    Whether the conversation completed normally
       ...other fields
     }
+
+---
+
+## 7b. Startup Order and the Readiness Gate
+
+`server.py main()` binds the listening socket before any scan-shaped work runs, so
+a restart answers `/health` promptly instead of hiding behind a full session scan
+(worst case previously: a pip install with a 120s timeout). After the bind it calls
+`api.startup.start_deferred_startup()`, which arms a readiness gate and runs, on a
+background thread and in this order:
+
+1. `recover_all_sessions_on_startup()` — then releases the readiness gate, on
+   success *or* failure, so later stages can never hold a request.
+2. `verify_hermes_imports()`, and `auto_install_agent_deps()` only if an agent
+   import actually failed.
+3. Gateway watcher, `bg_task_complete` drain thread, SessionChannel reaper,
+   plugins, and the Talaria relay publisher.
+
+While the gate is closed, every `/api/` request waits on it for up to
+`STARTUP_WAIT_SECONDS` (10s) and then returns **503 with `Retry-After: 5`** and a
+body naming the phase — clients should retry rather than treat it as fatal.
+`/health`, the UI shell, static assets, `/api/health/restart` and `/api/csp-report`
+never wait. The gate defaults to *open*, and only `start_deferred_startup()` closes
+it, so a process that serves requests without running `main()` has nothing to wait
+for.
 
 ---
 
