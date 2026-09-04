@@ -76,7 +76,7 @@ class TestOfflineSoftRecovery:
         assert "_hideOfflineBanner()" in body, (
             "_recoverFromOfflineSoftly must hide the offline banner"
         )
-        assert "startGatewaySSE" in body, (
+        assert "reconnectSidebarSSE" in body, (
             "_recoverFromOfflineSoftly must restart the gateway SSE "
             "(background/bfcache kills the connection)"
         )

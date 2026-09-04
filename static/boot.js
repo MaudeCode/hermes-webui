@@ -3919,8 +3919,8 @@ window.addEventListener('pageshow', async (event) => {
   if (typeof renderSessionListFromCache === 'function') {
     try { renderSessionListFromCache(); } catch (_) {}
   }
-  // Restart the gateway SSE watcher — the persisted connection is dead after bfcache
-  if (typeof startGatewaySSE === 'function') try { startGatewaySSE(); } catch (_) {}
+  // Restart the sidebar SSE (session-list + gateway) — the persisted connection is dead after bfcache
+  if (typeof reconnectSidebarSSE === 'function') try { reconnectSidebarSSE(); } catch (_) {}
   // Re-sync sidebar collapse state from localStorage. bfcache restored the
   // frozen DOM but another tab may have toggled the sidebar in the meantime.
   if (typeof _isSidebarCollapsed === 'function' && typeof toggleSidebar === 'function') {

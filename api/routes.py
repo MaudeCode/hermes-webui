@@ -15535,7 +15535,7 @@ def handle_get(handler, parsed) -> bool:
         return _handle_gateway_sse_stream(handler, parsed)
 
     if parsed.path == '/api/sessions/events':
-        return _handle_session_events_stream(handler)
+        return _handle_session_events_stream(handler, parsed)
 
     session_events_session_id = _session_events_path_session_id(parsed.path)
     if session_events_session_id is not None:
@@ -20803,8 +20803,38 @@ def _handle_gateway_sse_stream(handler, parsed):
     return True
 
 
-def _handle_session_events_stream(handler):
-    """SSE endpoint for lightweight session-list invalidation events."""
+# HWEB-33: how long the merged sidebar stream blocks on the session-events
+# queue before draining the gateway queue. Both producers hand out their own
+# Queue with incompatible overflow policies (session events coalesce at
+# maxsize=1, the watcher drops slow consumers at maxsize=10), so they cannot
+# share one queue and be waited on with a single blocking get.
+# ponytail: 250ms alternating drain instead of a real fan-in; the watcher polls
+# on a multi-second cadence so the added latency is invisible. Swap for a
+# selector/fan-in thread only if a sub-100ms sidebar feed is ever needed.
+_MERGED_SIDEBAR_SSE_DRAIN_SECONDS = 0.25
+
+
+def _handle_session_events_stream(handler, parsed):
+    """SSE endpoint for lightweight session-list invalidation events.
+
+    With ``?gateway=1`` this one connection also carries the gateway watcher's
+    frames that ``/api/sessions/gateway/stream`` serves on its own socket
+    (HWEB-33), so a tab spends one of the browser's six same-origin HTTP/1.1
+    sockets on the sidebar instead of two. Event names and payloads are
+    unchanged; every frame gains a ``stream`` discriminator (``"sessions"`` or
+    ``"gateway"``) so the client routes it to the handler that already owned
+    that endpoint. ``/api/sessions/gateway/stream`` stays for clients that
+    subscribe to it directly.
+    """
+    want_gateway = _query_flag(parsed, 'gateway')
+    watcher = None
+    gateway_status = None
+    if want_gateway:
+        from api.gateway_watcher import get_watcher
+
+        watcher = get_watcher()
+        gateway_status, _gateway_http_status = _gateway_sse_probe_payload(load_settings(), watcher)
+
     # #3103: see _handle_gateway_sse_stream — `Connection: close` causes
     # EventSource reconnect storms in browsers on long-lived SSE.
     if not start_sse_response(handler):
@@ -20812,19 +20842,62 @@ def _handle_session_events_stream(handler):
     _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
     q = subscribe_session_events()
+    gateway_q = watcher.subscribe() if (want_gateway and gateway_status['ok']) else None
     try:
+        if want_gateway:
+            # The session-events half stays healthy even when the gateway half
+            # cannot attach, so an unusable gateway never surfaces as an SSE
+            # error. Say so explicitly — this frame is the client's cue to start
+            # the same 30s poll fallback the standalone probe triggers.
+            _sse(handler, 'gateway_status', gateway_status)
+        if gateway_q is not None:
+            from api.models import get_cli_sessions
+
+            _sse(handler, 'sessions_changed', {
+                'type': 'sessions_changed',
+                'sessions': get_cli_sessions(),
+                'stream': 'gateway',
+            })
+        last_write = time.monotonic()
         while True:
+            while gateway_q is not None:
+                try:
+                    event_data = gateway_q.get_nowait()
+                except queue.Empty:
+                    break
+                if event_data is None:
+                    # Watcher is stopping — usually because another client's
+                    # profile switch called restart_watcher_for_profile(), which
+                    # starts a REPLACEMENT watcher this connection is not
+                    # subscribed to. End the response so the browser's automatic
+                    # EventSource reconnect resubscribes both halves against the
+                    # live registry, exactly as the standalone gateway stream did
+                    # before the merge. Downgrading to polling instead would
+                    # strand this tab on the 30s fallback until an unrelated
+                    # focus/panel event happened to reconnect it.
+                    return True
+                _sse(handler, event_data.get('type', 'sessions_changed'), dict(event_data, stream='gateway'))
+                last_write = time.monotonic()
             try:
-                event_data = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
+                event_data = q.get(
+                    timeout=_MERGED_SIDEBAR_SSE_DRAIN_SECONDS if gateway_q is not None
+                    else _SSE_HEARTBEAT_INTERVAL_SECONDS
+                )
             except queue.Empty:
+                if time.monotonic() - last_write < _SSE_HEARTBEAT_INTERVAL_SECONDS:
+                    continue
                 handler.wfile.write(b': keepalive\n\n')
                 handler.wfile.flush()
+                last_write = time.monotonic()
                 continue
-            _sse(handler, event_data.get('type', 'sessions_changed'), event_data)
+            _sse(handler, event_data.get('type', 'sessions_changed'), dict(event_data, stream='sessions'))
+            last_write = time.monotonic()
     except _CLIENT_DISCONNECT_ERRORS:
         pass
     finally:
         unsubscribe_session_events(q)
+        if gateway_q is not None:
+            watcher.unsubscribe(gateway_q)
     return True
 
 

@@ -130,7 +130,8 @@ def test_session_list_external_refresh_uses_sse_invalidation_not_polling():
     assert "_sessionEventsNeedsRefreshOnOpen = false" in SESSIONS_JS
     assert "void refreshSessionList(reason, {force:true})" in SESSIONS_JS
     assert "function ensureSessionEventsSSE()" in SESSIONS_JS
-    assert "new EventSource('api/sessions/events')" in SESSIONS_JS
+    # HWEB-33: the URL now carries an optional ?gateway=1 for the merged feed.
+    assert "new EventSource('api/sessions/events' + (wantGateway ? '?gateway=1' : ''))" in SESSIONS_JS
     assert "addEventListener('sessions_changed'" in SESSIONS_JS
     assert "function _scheduleSessionEventsRefresh(reason, opts={})" in SESSIONS_JS
     assert "let _sessionEventsRefreshPendingRequest = null;" in SESSIONS_JS
@@ -153,7 +154,9 @@ def test_session_list_external_refresh_uses_sse_invalidation_not_polling():
     assert "_sessionListExternalRefreshMs" not in SESSIONS_JS
     assert "addEventListener('sessions_changed', (ev) => {" in ensure_fn
     assert "const activeProfile = S.activeProfile || 'default';" in ensure_fn
-    assert "const payload = typeof ev?.data === 'string' ? JSON.parse(ev.data) : {};" in ensure_fn
+    # HWEB-33: parsed once at the top of the listener so gateway frames can be
+    # routed out before the session-events logic runs.
+    assert "payload = typeof ev?.data === 'string' ? JSON.parse(ev.data) : {};" in ensure_fn
     assert "const eventProfile = payload && typeof payload.profile === 'string' ? payload.profile : '';" in ensure_fn
     assert "if (!_sessionEventProfilesMatch(eventProfile, activeProfile)) {" in ensure_fn
     assert "function _sessionEventTargetsActiveSession(payload)" in SESSIONS_JS

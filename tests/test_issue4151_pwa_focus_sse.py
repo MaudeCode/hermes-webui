@@ -47,7 +47,12 @@ def test_backgrounded_predicate_uses_hasfocus_not_only_hidden():
 
 
 def test_focus_hook_closes_both_global_sidebar_streams():
-    """The blur path closes the session-events AND gateway streams."""
+    """The blur path closes the session-events AND gateway feeds.
+
+    HWEB-33 merged them onto one socket, so `_closeSessionEventsSSE()` now takes
+    both down and `ensureSessionEventsSSE()` brings both back; `stopGatewaySSE()`
+    is still called so the poll fallback and warning state are reset.
+    """
     assert "function _installSidebarSseFocusHook()" in SESSIONS_JS
     start = SESSIONS_JS.find("function _installSidebarSseFocusHook()")
     block = SESSIONS_JS[start:start + 1700]
@@ -60,7 +65,6 @@ def test_focus_hook_closes_both_global_sidebar_streams():
     # Focus listener reopens both and refreshes the list.
     assert "window.addEventListener('focus'" in block
     assert "ensureSessionEventsSSE()" in block
-    assert "startGatewaySSE()" in block
     assert "_refreshSessionListAfterSidebarResume('focus')" in block
 
 
@@ -83,29 +87,30 @@ def test_blur_close_is_debounced_and_rechecks_focus_at_fire_time():
 def test_focus_reopen_does_not_thrash_the_gateway_stream():
     """The focus handler must NOT unconditionally restart the gateway stream.
 
-    startGatewaySSE() begins with an unconditional stopGatewaySSE() (it is NOT
-    idempotent, unlike ensureSessionEventsSSE()'s `if(_sessionEventsSSE) return`).
     On a transient blur shorter than the 1s debounce, the blur-close timer is
-    cleared and the gateway stream is never torn down — so an unconditional
-    startGatewaySSE() on the following focus would drop+reconnect the live gateway,
-    cancel its poll fallback, and reset probe/warning state on every window switch
-    (the exact thrash the debounce exists to prevent, in the multi-window scenario
-    #4151 targets). The reopen must therefore be guarded on the gateway actually
-    being closed. (greptile P1.)
+    cleared and the stream is never torn down — so an unconditional reopen on the
+    following focus would drop+reconnect the live gateway, cancel its poll
+    fallback, and reset warning state on every window switch (the exact thrash
+    the debounce exists to prevent, in the multi-window scenario #4151 targets).
+
+    HWEB-33 makes this structural rather than guarded: the gateway feed rides
+    the sidebar stream, so the focus path only calls ensureSessionEventsSSE(),
+    which is idempotent (`if(_sessionEventsSSE) return`). A forced reconnect
+    exists as a separate verb and must NOT be what focus calls. (greptile P1.)
     """
     start = SESSIONS_JS.find("function _installSidebarSseFocusHook()")
     block = SESSIONS_JS[start:start + 1700]
     focus_idx = block.find("window.addEventListener('focus'")
     assert focus_idx != -1
     focus_body = block[focus_idx:]
-    # The gateway reopen is guarded on the stream being closed (mirrors the
-    # session-events idempotency), not called unconditionally.
-    assert "if(!_gatewaySSE) startGatewaySSE()" in focus_body, (
-        "focus handler must guard startGatewaySSE() on `!_gatewaySSE` so a "
-        "transient blur+focus does not drop+reconnect a still-open gateway stream"
+    assert "ensureSessionEventsSSE();" in focus_body, (
+        "focus handler must reopen the sidebar stream through the idempotent "
+        "ensureSessionEventsSSE(), so a transient blur+focus does not "
+        "drop+reconnect a still-open stream"
     )
-    # And it must NOT call startGatewaySSE() bare (unguarded) on focus.
-    assert "\n    startGatewaySSE();" not in focus_body
+    # The non-idempotent verbs must not run on focus.
+    assert "startGatewaySSE()" not in focus_body
+    assert "reconnectSidebarSSE()" not in focus_body
 
 
 def test_session_events_open_guard_uses_backgrounded_predicate():

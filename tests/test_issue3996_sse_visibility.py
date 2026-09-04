@@ -25,15 +25,27 @@ SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 
 
 def test_gateway_sse_has_visibility_hook():
-    """startGatewaySSE installs a visibilitychange hook that closes on hide."""
-    assert "_hermesGatewaySSEVisibilityHook" in SESSIONS_JS
-    # Closes on hide, and skips opening while hidden to save pool slots.
-    assert "stopGatewaySSE()" in SESSIONS_JS
-    start_idx = SESSIONS_JS.find("function startGatewaySSE()")
+    """The gateway feed is closed on hide and not opened while hidden.
+
+    HWEB-33 merged it onto the sidebar session-events stream, so it no longer
+    owns a socket or a hook of its own — ensureSessionEventsSSE()'s hook is now
+    the single owner of that behaviour for both feeds, and startGatewaySSE()
+    self-gates on the same _sidebarSseBackgrounded() rule.
+    """
+    assert "_hermesSessionEventsVisibilityHook" in SESSIONS_JS
+    start_idx = SESSIONS_JS.find("function ensureSessionEventsSSE()")
     assert start_idx != -1
     block = SESSIONS_JS[start_idx:start_idx + 1200]
     assert "visibilitychange" in block
     assert "document.hidden" in block
+
+    start_idx = SESSIONS_JS.find("function startGatewaySSE(){")
+    assert start_idx != -1
+    assert "if(_sidebarSseBackgrounded()) return;" in SESSIONS_JS[start_idx:start_idx + 500]
+    # The forced reconnect verb honours the same predicate.
+    start_idx = SESSIONS_JS.find("function reconnectSidebarSSE(){")
+    assert start_idx != -1
+    assert "if(_sidebarSseBackgrounded()) return;" in SESSIONS_JS[start_idx:start_idx + 300]
 
 
 def test_session_stream_has_visibility_hook():

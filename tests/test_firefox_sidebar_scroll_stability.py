@@ -56,7 +56,9 @@ def test_deferred_payloads_keep_generation_stale_response_guard():
 def test_only_background_refreshes_defer_while_sidebar_is_interacting():
     streaming_poll_block = _block("function startStreamingPoll", "function stopStreamingPoll")
     gateway_poll_block = _block("function startGatewayPollFallback", "function stopGatewayPollFallback")
-    gateway_sse_block = _block("function startGatewaySSE", "function stopGatewaySSE")
+    # HWEB-33: the gateway frame handler is now a named function on the merged
+    # sidebar stream rather than an inline listener inside startGatewaySSE.
+    gateway_sse_block = _block("function _handleGatewaySessionsChanged", "function _applyGatewayStatus")
 
     assert "renderSessionList({deferWhileInteracting:true})" in streaming_poll_block
     assert "renderSessionList({deferWhileInteracting:true})" in gateway_poll_block

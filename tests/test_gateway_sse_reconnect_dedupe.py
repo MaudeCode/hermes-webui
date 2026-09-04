@@ -33,10 +33,12 @@ def test_gateway_watcher_remains_hash_only():
 def test_gateway_sse_dedupes_reconnect_snapshot_before_refresh():
     """Reconnect initial snapshots should not force a sidebar refetch."""
     src = _read(SESSIONS_JS)
+    # HWEB-33: the frames arrive on the merged sidebar stream now; the handler
+    # that dedupes them is the same one, lifted into a named function.
     handler = _block(
         src,
-        "_gatewaySSE.addEventListener('sessions_changed'",
-        "_gatewaySSE.onerror",
+        "function _handleGatewaySessionsChanged(data){",
+        "function _applyGatewayStatus",
     )
 
     assert "function _gatewaySessionSnapshotKey" in src
@@ -45,12 +47,23 @@ def test_gateway_sse_dedupes_reconnect_snapshot_before_refresh():
     assert "renderSessionList({deferWhileInteracting:true}); // re-fetch and re-render" in handler
 
 
-def test_gateway_probe_reattaches_sse_after_profile_switch_restart():
-    """A healthy probe must revive the EventSource when the watcher restarted."""
-    src = _read(SESSIONS_JS)
-    probe = _block(src, "async function probeGatewaySSEStatus()", "\n\nfunction startGatewaySSE")
+def test_gateway_sse_reattaches_after_profile_switch_restart():
+    """A profile switch must rebind the gateway feed to the new watcher.
 
-    assert "if(!_gatewaySSE && typeof EventSource!=='undefined' && !(document&&document.hidden)) startGatewaySSE();" in probe
+    The watcher registry is profile-keyed (#3629), so an already-attached
+    gateway half is still subscribed to the previous profile's watcher. Before
+    HWEB-33 the standalone probe revived a closed EventSource; now the merged
+    sidebar stream is reconnected explicitly, because nothing about the
+    subscription flag changed and the ordinary open path is idempotent.
+    """
+    src = _read(SESSIONS_JS)
+    block = _block(src, "function reconnectSidebarSSE(){", "\n\nlet _searchDebounceTimer")
+
+    assert "_closeSessionEventsSSE();" in block
+    assert "ensureSessionEventsSSE();" in block
+
+    panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    assert "reconnectSidebarSSE()" in panels
 
 
 def test_gateway_snapshot_key_matches_backend_hash_fields():
