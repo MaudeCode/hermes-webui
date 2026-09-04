@@ -84,6 +84,18 @@ def test_streaming_process_env_fallback_requires_safe_terminal_context(
     ) is True
 
 
+def test_streaming_accepts_terminal_config_with_context_local_policy():
+    assert streaming._streaming_requires_process_env_fallback(
+        home_override_installed=True,
+        skill_modules_dynamic=True,
+        profile_is_named=True,
+        secret_scope_installed=True,
+        terminal_context_installed=True,
+        terminal_process_env_required=True,
+        terminal_scope_installed=True,
+    ) is False
+
+
 def _make_state_db(home, prefix):
     home.mkdir(parents=True)
     db = home / "state.db"

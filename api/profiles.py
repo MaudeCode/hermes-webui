@@ -1142,6 +1142,17 @@ def _profile_secret_thread_env(profile: str, profile_home_path: Path) -> dict[st
     }
 
 
+def retire_startup_env_keys_for_home(profile_home_path: Path, names) -> None:
+    """Retire explicitly cleared credentials from their startup-owner baseline."""
+    home = Path(profile_home_path).expanduser()
+    startup_homes = {Path(_DEFAULT_HERMES_HOME).expanduser()}
+    if _INITIAL_HERMES_HOME:
+        startup_homes.add(Path(_INITIAL_HERMES_HOME).expanduser())
+    if home in startup_homes:
+        for name in names:
+            _INITIAL_PROCESS_ENV.pop(str(name), None)
+
+
 _secret_scope_available = None
 
 

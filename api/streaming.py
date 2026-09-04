@@ -2883,13 +2883,14 @@ def _streaming_requires_process_env_fallback(
     secret_scope_installed: bool,
     terminal_context_installed: bool = True,
     terminal_process_env_required: bool = False,
+    terminal_scope_installed: bool = False,
 ) -> bool:
     """Return whether a turn still needs process-global profile state."""
     return not (
         home_override_installed
         and skill_modules_dynamic
         and terminal_context_installed
-        and not terminal_process_env_required
+        and (not terminal_process_env_required or terminal_scope_installed)
         and (not profile_is_named or secret_scope_installed)
     )
 
@@ -9563,6 +9564,9 @@ def _run_agent_streaming(
     _streaming_runtime_cwd_var = None
     _streaming_runtime_cwd_token = None
     _streaming_terminal_context_installed = False
+    _streaming_terminal_scope_mod = None
+    _streaming_terminal_scope_token = None
+    _streaming_terminal_scope_installed = False
     _streaming_get_session_cwd = None
     _streaming_record_session_cwd = None
     # Initialised here (before any code that may raise) so the outer `finally`
@@ -9767,6 +9771,23 @@ def _run_agent_streaming(
         except Exception:
             _streaming_runtime_cwd_var = None
             _streaming_runtime_cwd_token = None
+        try:
+            from tools import terminal_scope as _streaming_terminal_scope_mod
+
+            _streaming_terminal_policy = (
+                _streaming_terminal_scope_mod.build_profile_terminal_scope(
+                    _profile_home_path
+                )
+            )
+            _streaming_terminal_scope_token = (
+                _streaming_terminal_scope_mod.set_terminal_scope(
+                    _streaming_terminal_policy
+                )
+            )
+            _streaming_terminal_scope_installed = True
+        except ImportError:
+            _streaming_terminal_scope_mod = None
+            _streaming_terminal_scope_token = None
         _streaming_previous_block_process_env_fallback = bool(
             getattr(_thread_ctx, "block_process_env_fallback", False)
         )
@@ -9828,6 +9849,7 @@ def _run_agent_streaming(
                 key.startswith("TERMINAL_") and key != "TERMINAL_CWD"
                 for key in _safe_profile_runtime_env
             ),
+            terminal_scope_installed=_streaming_terminal_scope_installed,
         ):
             raise RuntimeError(
                 "Cannot safely start Agent chat: the installed Hermes Agent "
@@ -13410,6 +13432,17 @@ def _run_agent_streaming(
             try:
                 _streaming_secret_scope_mod.reset_secret_scope(
                     _streaming_secret_scope_token
+                )
+            except Exception:
+                pass
+        if (
+            _streaming_terminal_scope_installed
+            and _streaming_terminal_scope_mod is not None
+            and _streaming_terminal_scope_token is not None
+        ):
+            try:
+                _streaming_terminal_scope_mod.reset_terminal_scope(
+                    _streaming_terminal_scope_token
                 )
             except Exception:
                 pass
