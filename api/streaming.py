@@ -9533,6 +9533,16 @@ def _run_agent_streaming(
     _success_writeback_committed = False
     s = None
 
+    def _terminal_writeback_lock(stage: str):
+        if _agent_lock is None:
+            return contextlib.nullcontext(True)
+        return _try_acquire_worker_session_lock(
+            stream_id,
+            _agent_lock,
+            stage,
+            timeout_phase="finalization_blocked",
+        )
+
     def _persist_terminal_steering_scene(*, terminal_state, turn_duration=None):
         if ephemeral or s is None:
             return
@@ -13192,8 +13202,11 @@ def _run_agent_streaming(
                     _checkpoint_stop.set()
                 if _ckpt_thread is not None:
                     _ckpt_thread.join(timeout=15)
-                _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
-                with _lock_ctx:
+                with _terminal_writeback_lock("exception_cancel") as acquired:
+                    if not acquired:
+                        _admission_lock_timed_out = True
+                        _emit_worker_writeback_timeout(session_id, put)
+                        return
                     _pause_recorded = False
                     if (
                         not ephemeral
@@ -13364,8 +13377,13 @@ def _run_agent_streaming(
                                     _checkpoint_stop.set()
                                 if _ckpt_thread is not None:
                                     _ckpt_thread.join(timeout=15)
-                                _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
-                                with _lock_ctx:
+                                with _terminal_writeback_lock(
+                                    "credential_self_heal_writeback"
+                                ) as acquired:
+                                    if not acquired:
+                                        _admission_lock_timed_out = True
+                                        _emit_worker_writeback_timeout(session_id, put)
+                                        return
                                     if not ephemeral and not _stream_writeback_is_current(s, stream_id):
                                         logger.info(
                                             "Skipping stale stream self-heal writeback for session %s stream %s; active_stream_id=%s",
@@ -13464,8 +13482,11 @@ def _run_agent_streaming(
             # Persist the error so it survives page reload.
             # _error=True ensures _sanitize_messages_for_api excludes it from subsequent
             # API calls so the LLM never sees its own error as prior context on the next turn.
-            _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
-            with _lock_ctx:
+            with _terminal_writeback_lock("exception_writeback") as acquired:
+                if not acquired:
+                    _admission_lock_timed_out = True
+                    _emit_worker_writeback_timeout(session_id, put)
+                    return
                 if not ephemeral and not _stream_writeback_is_current(s, stream_id):
                     if _turn_pending_source == 'process_wakeup':
                         # #6623 re-gate: merge the pause into the CURRENT

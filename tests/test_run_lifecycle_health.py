@@ -281,6 +281,31 @@ def test_worker_writeback_lock_timeout_emits_terminal_error(monkeypatch):
     assert events[0][1]["outcome_unknown"] is True
 
 
+def test_gateway_error_writeback_timeout_is_terminal(monkeypatch):
+    import threading
+    from api import config, gateway_chat, streaming
+
+    lock = threading.Lock()
+    lock.acquire()
+    config.register_active_run("gateway-timeout", session_id="private")
+    monkeypatch.setattr(streaming, "_CHAT_LOCK_WAIT_SECONDS", 0.02)
+    monkeypatch.setattr(gateway_chat, "_get_session_agent_lock", lambda _sid: lock)
+    try:
+        payload = gateway_chat._settle_gateway_terminal_error(
+            "private", "gateway-timeout", "/tmp", "model", "provider", "failed"
+        )
+        with config.ACTIVE_RUNS_LOCK:
+            assert config.ACTIVE_RUNS["gateway-timeout"]["phase"] == "finalization_blocked"
+    finally:
+        lock.release()
+        config.unregister_active_run("gateway-timeout")
+        config.LAST_CHAT_ADMISSION_TIMEOUT_AT = None
+
+    assert payload["type"] == "chat_writeback_timeout"
+    assert payload["retryable"] is False
+    assert payload["outcome_unknown"] is True
+
+
 def test_health_only_admission_waiter_never_blocks_worker_start():
     from api import background_process, config, routes
 

@@ -3045,7 +3045,7 @@ def _cancelled_run_is_stale(run_entry) -> bool:
         return False
 
 
-def _clear_stale_stream_state(session) -> bool:
+def _clear_stale_stream_state(session, *, lock_held: bool = False) -> bool:
     """Clear persisted streaming flags when the in-memory stream no longer exists.
 
     A server restart or worker crash can leave active_stream_id/pending_* in the
@@ -3172,7 +3172,12 @@ def _clear_stale_stream_state(session) -> bool:
     # active_stream_id under it. A concurrent chat_start may have already
     # registered a new stream after our STREAMS_LOCK check above; in that
     # case we must NOT clobber its session.active_stream_id.
-    with _get_session_agent_lock(session.session_id):
+    lock_context = (
+        nullcontext()
+        if lock_held
+        else _get_session_agent_lock(session.session_id)
+    )
+    with lock_context:
         try:
             authoritative_session = get_session(session.session_id)
         except KeyError:
@@ -24570,7 +24575,16 @@ def _start_chat_stream_for_session(
                         "active_stream_id": locked_stream_id,
                         "_status": 409,
                     }
-                needs_stale_cleanup = True
+                diag.stage("stale_stream_cleanup") if diag else None
+                cleared = _clear_stale_stream_state(s, lock_held=True)
+                if not cleared and getattr(s, "active_stream_id", None):
+                    diag.stage("response_write") if diag else None
+                    return {
+                        "error": "session already has an active stream",
+                        "active_stream_id": getattr(s, "active_stream_id", None),
+                        "_status": 409,
+                    }
+                continue
             else:
                 blocking_run_stream_id = _active_run_stream_for_session(s.session_id)
                 if blocking_run_stream_id:
@@ -24580,7 +24594,6 @@ def _start_chat_stream_for_session(
                         "active_stream_id": blocking_run_stream_id,
                         "_status": 409,
                     }
-                needs_stale_cleanup = False
                 if regeneration is not None:
                     return _start_regeneration_stream_locked(
                         s,
@@ -24619,16 +24632,6 @@ def _start_chat_stream_for_session(
                 if s.session_id in PENDING_BG_TASK_COMPLETIONS:
                     PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
                 break
-        if needs_stale_cleanup:
-            diag.stage("stale_stream_cleanup") if diag else None
-            cleared = _clear_stale_stream_state(s)
-            if not cleared and getattr(s, "active_stream_id", None):
-                diag.stage("response_write") if diag else None
-                return {
-                    "error": "session already has an active stream",
-                    "active_stream_id": getattr(s, "active_stream_id", None),
-                    "_status": 409,
-                }
     if was_hidden_empty_session:
         publish_session_list_changed(
             "session_new",

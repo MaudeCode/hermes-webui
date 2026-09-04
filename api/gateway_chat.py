@@ -1035,9 +1035,17 @@ def _settle_gateway_terminal_error(
         _session_payload_with_terminal_window,
         _snapshot_and_append_partial_on_error,
         _terminal_turn_duration,
+        _try_acquire_worker_session_lock,
     )
 
-    with _get_session_agent_lock(session_id):
+    with _try_acquire_worker_session_lock(
+        stream_id,
+        _get_session_agent_lock(session_id),
+        "gateway_error_writeback",
+        timeout_phase="finalization_blocked",
+    ) as acquired:
+        if not acquired:
+            return _gateway_writeback_timeout_payload(session_id)
         session = get_session(session_id)
         if not _stream_writeback_is_current(session, stream_id):
             return None
@@ -1125,6 +1133,17 @@ def _settle_gateway_terminal_error(
         if terminal_session_persisted:
             error_payload["terminal_session_persisted_session_id"] = settled_session_id
         return error_payload
+
+
+def _gateway_writeback_timeout_payload(session_id: str) -> dict:
+    from api.routes import _chat_writeback_timeout_response
+
+    payload = _chat_writeback_timeout_response()
+    payload.pop("_status", None)
+    payload["type"] = payload["code"]
+    payload["session_id"] = session_id
+    payload["terminal_session_persisted"] = False
+    return payload
 
 
 def _stream_writeback_is_current(session: Any, stream_id: str) -> bool:
@@ -1668,7 +1687,19 @@ def _run_gateway_chat_streaming(
             if error_payload is not None:
                 put_gateway_event("apperror", error_payload)
             return
-        with _get_session_agent_lock(session_id):
+        from api.streaming import _try_acquire_worker_session_lock
+
+        with _try_acquire_worker_session_lock(
+            stream_id,
+            _get_session_agent_lock(session_id),
+            "gateway_success_writeback",
+            timeout_phase="finalization_blocked",
+        ) as acquired:
+            if not acquired:
+                put_gateway_event(
+                    "apperror", _gateway_writeback_timeout_payload(session_id)
+                )
+                return
             s = get_session(session_id)
             if not _stream_writeback_is_current(s, stream_id):
                 return
@@ -1964,8 +1995,21 @@ def _run_gateway_chat_streaming(
                 logger.debug("Failed to retire gateway pending mirrors during teardown", exc_info=True)
         if s is not None:
             try:
-                with _get_session_agent_lock(session_id):
-                    _clear_gateway_pending_state(get_session(session_id), stream_id)
+                from api.streaming import _try_acquire_worker_session_lock
+
+                with _try_acquire_worker_session_lock(
+                    stream_id,
+                    _get_session_agent_lock(session_id),
+                    "gateway_teardown",
+                    timeout_phase="finalization_blocked",
+                ) as acquired:
+                    if acquired:
+                        _clear_gateway_pending_state(get_session(session_id), stream_id)
+                    else:
+                        logger.warning(
+                            "Gateway teardown skipped because session %s remained busy",
+                            session_id,
+                        )
             except Exception:
                 logger.debug("Failed to clear gateway stream state", exc_info=True)
             _cleanup_gateway_pending_mirror(session_id)
