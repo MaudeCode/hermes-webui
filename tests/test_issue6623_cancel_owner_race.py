@@ -134,7 +134,9 @@ def test_issue6623_owner_must_be_captured_before_stream_pop(tmp_path, monkeypatc
     assert config.STREAM_SESSION_OWNERS.get(stream_id) is None
 
 
-def test_early_cancel_lock_timeout_still_emits_terminal_event(tmp_path, monkeypatch):
+def test_early_cancel_lock_timeout_signals_late_worker_and_reports_unknown(
+    tmp_path, monkeypatch
+):
     sid = "sess_early_cancel_timeout"
     stream_id = "stream_early_cancel_timeout"
     session = Session(session_id=sid, messages=[])
@@ -146,20 +148,35 @@ def test_early_cancel_lock_timeout_still_emits_terminal_event(tmp_path, monkeypa
     config.STREAMS[stream_id] = event_queue
     config.register_stream_owner(stream_id, sid)
     config.CANCEL_FLAGS[stream_id] = threading.Event()
-    blocked_lock = threading.Lock()
-    blocked_lock.acquire()
+    late_flag = threading.Event()
+
+    class LateWorkerLock:
+        def acquire(self, timeout=None):
+            config.CANCEL_FLAGS[stream_id] = late_flag
+            config.register_active_run(stream_id, session_id=sid, phase="starting")
+            return False
+
+        def release(self):
+            pytest.fail("an unacquired lock must not be released")
+
     monkeypatch.setattr(streaming, "_CHAT_LOCK_WAIT_SECONDS", 0.02)
-    monkeypatch.setattr(streaming, "_get_session_agent_lock", lambda _sid: blocked_lock)
+    monkeypatch.setattr(
+        streaming, "_get_session_agent_lock", lambda _sid: LateWorkerLock()
+    )
     try:
         assert streaming.cancel_stream(stream_id) is True
     finally:
-        blocked_lock.release()
+        config.unregister_active_run(stream_id)
 
     event, payload = event_queue.get(timeout=1)
-    assert event == "cancel"
+    assert late_flag.is_set() is True
+    assert event == "apperror"
+    assert payload["type"] == "cancel_writeback_timeout"
+    assert payload["outcome_unknown"] is True
     assert payload["session_id"] == sid
-    assert session.pending_started_at is None
-    assert config.LAST_CHAT_ADMISSION_TIMEOUT_AT is not None
+    assert session.pending_started_at is not None
+    assert config.LAST_CHAT_FINALIZATION_TIMEOUT_AT is not None
+    config.LAST_CHAT_FINALIZATION_TIMEOUT_AT = None
 
 
 def test_mature_cancel_lock_timeout_emits_unknown_terminal_error(

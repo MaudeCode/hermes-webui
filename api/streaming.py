@@ -9336,6 +9336,8 @@ def _run_agent_streaming(
             _automatic_wakeup_limit_reason[0] or default_message
         )
     with STREAMS_LOCK:
+        if stream_id not in STREAMS:
+            cancel_event.set()
         CANCEL_FLAGS[stream_id] = cancel_event
         STREAM_PARTIAL_TEXT[stream_id] = []  # chunked partial text accumulator (#893)
         STREAM_REASONING_TEXT[stream_id] = []  # chunked reasoning accumulator (#1361 §A)
@@ -14500,7 +14502,28 @@ def cancel_stream(stream_id: str) -> bool:
             _CHAT_LOCK_WAIT_SECONDS,
         ) as acquired:
             if not acquired:
-                if active_run_entry:
+                with streams_lock:
+                    late_flag = cancel_flags.get(stream_id)
+                    late_agent = agent_instances.get(stream_id)
+                if late_flag is not None:
+                    late_flag.set()
+                if late_agent is not None:
+                    try:
+                        late_agent.interrupt("Cancelled by user")
+                    except Exception:
+                        logger.debug(
+                            "Failed to interrupt late-published agent for %s",
+                            stream_id,
+                            exc_info=True,
+                        )
+                try:
+                    with _live_config.ACTIVE_RUNS_LOCK:
+                        late_active_run = bool(
+                            (_live_config.ACTIVE_RUNS or {}).get(stream_id)
+                        )
+                except Exception:
+                    late_active_run = False
+                if active_run_entry or late_active_run:
                     note_chat_finalization_timeout()
                 else:
                     note_chat_admission_timeout()
@@ -14511,41 +14534,27 @@ def cancel_stream(stream_id: str) -> bool:
                     lock_wait_started_at=cancel_lock_wait_started_at,
                     lock_wait_seconds=_CHAT_LOCK_WAIT_SECONDS,
                 )
-                if active_run_entry:
-                    if q is None:
-                        return False
-                    try:
-                        q.put_nowait((
-                            "apperror",
-                            {
-                                "type": "cancel_writeback_timeout",
-                                "message": (
-                                    "Cancellation was requested, but its persisted "
-                                    "outcome is unknown. Refresh before retrying."
-                                ),
-                                "session_id": _cancel_session_id,
-                                "retryable": False,
-                                "outcome_unknown": True,
-                            },
-                        ))
-                    except Exception:
-                        logger.debug(
-                            "Failed to emit blocked mature cancel for %s", stream_id
-                        )
-                        return False
-                else:
-                    try:
-                        stale_session = get_session(_cancel_session_id)
-                        _mark_chat_admission_timeout_stale(stale_session, stream_id)
-                    except Exception:
-                        pass
-                    if q is not None:
-                        try:
-                            payload = _cancel_event_payload("Cancelled by user")
-                            payload["session_id"] = _cancel_session_id
-                            q.put_nowait(("cancel", payload))
-                        except Exception:
-                            logger.debug("Failed to settle blocked early cancel for %s", stream_id)
+                if q is None:
+                    return False
+                try:
+                    q.put_nowait((
+                        "apperror",
+                        {
+                            "type": "cancel_writeback_timeout",
+                            "message": (
+                                "Cancellation was requested, but its persisted "
+                                "outcome is unknown. Refresh before retrying."
+                            ),
+                            "session_id": _cancel_session_id,
+                            "retryable": False,
+                            "outcome_unknown": True,
+                        },
+                    ))
+                except Exception:
+                    logger.debug(
+                        "Failed to emit blocked cancel for %s", stream_id
+                    )
+                    return False
                 return True
             try:
                 _cs = get_session(_cancel_session_id)
