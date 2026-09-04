@@ -849,6 +849,37 @@ def test_gateway_writeback_timeout_retains_pending_turn(tmp_path, monkeypatch):
     assert saved.pending_user_message == "Keep this pending prompt"
 
 
+def test_gateway_terminal_cancel_durably_clears_pending_turn(tmp_path, monkeypatch):
+    from api import config
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    session = new_session()
+    stream_id = "stream-gateway-terminal-cancel"
+    session.active_stream_id = stream_id
+    session.pending_user_message = "Cancelled prompt"
+    session.pending_started_at = time.time()
+    session.save()
+    config.register_session_writeback_owner(session.session_id, stream_id)
+    try:
+        assert gateway_chat._settle_gateway_terminal_cancel(
+            session.session_id, stream_id
+        ) is True
+    finally:
+        config.clear_session_writeback_owner_if_owned(session.session_id, stream_id)
+
+    saved = models.Session.load(session.session_id)
+    assert saved.active_stream_id is None
+    assert saved.pending_user_message is None
+    assert any(
+        row.get("role") == "user" and row.get("content") == "Cancelled prompt"
+        for row in saved.messages
+    )
+
+
 def test_gateway_chat_worker_persists_reasoning_and_tool_state_on_terminal_error(tmp_path, monkeypatch):
     from unittest.mock import MagicMock
 

@@ -1146,6 +1146,27 @@ def _gateway_writeback_timeout_payload(session_id: str) -> dict:
     return payload
 
 
+def _settle_gateway_terminal_cancel(session_id: str, stream_id: str) -> bool:
+    from api.streaming import (
+        _finalize_cancelled_turn,
+        _try_acquire_worker_session_lock,
+    )
+
+    with _try_acquire_worker_session_lock(
+        stream_id,
+        _get_session_agent_lock(session_id),
+        "gateway_cancel_writeback",
+        timeout_phase="finalization_blocked",
+    ) as acquired:
+        if not acquired:
+            return False
+        return _finalize_cancelled_turn(
+            get_session(session_id),
+            ephemeral=False,
+            stream_id=stream_id,
+        )
+
+
 def _stream_writeback_is_current(session: Any, stream_id: str) -> bool:
     return bool(stream_id and getattr(session, "active_stream_id", None) == stream_id)
 
@@ -1468,6 +1489,9 @@ def _run_gateway_chat_streaming(
                 put_gateway_event("apperror", error_payload)
                 return
             if final_text is None:
+                terminal_writeback_committed = _settle_gateway_terminal_cancel(
+                    session_id, stream_id
+                )
                 return
             if final_text:
                 final_chunks = [final_text]
