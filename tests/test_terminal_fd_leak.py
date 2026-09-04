@@ -335,6 +335,12 @@ def test_close_all_waits_for_pending_start_cleanup(monkeypatch, tmp_path):
     assert "shutdown-pending" not in terminal._STARTING_TERMINALS
 
 
+def test_shutdown_wait_covers_full_pending_start_cleanup_path():
+    # Replacement teardown (2.5s) + spawn wait (5s) + cancellation teardown
+    # (2.5s), with room for scheduling overhead.
+    assert terminal._TERMINAL_SHUTDOWN_WAIT_SECONDS >= 11.0
+
+
 # ── F1: writes/resizes are serialized against close (no fd-reuse injection) ───
 
 def test_write_after_close_raises_and_never_touches_fd(monkeypatch):

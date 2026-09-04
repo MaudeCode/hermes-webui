@@ -169,6 +169,7 @@ _TERMINAL_SHUTTING_DOWN = False
 # cap evicts the least-recently-active terminal to make room. Generous enough
 # that real interactive use never trips it.
 _MAX_TERMINALS = 32
+_TERMINAL_SHUTDOWN_WAIT_SECONDS = 12.0
 _spawn_queue: queue.Queue = queue.Queue()
 _spawn_supervisor_started = False
 _spawn_supervisor_lock = threading.Lock()
@@ -818,7 +819,7 @@ def close_all_terminals() -> None:
             reservation.cancelled = True
     for session_id in session_ids:
         close_terminal(session_id)
-    deadline = time.monotonic() + 6.0
+    deadline = time.monotonic() + _TERMINAL_SHUTDOWN_WAIT_SECONDS
     for reservation in pending:
         reservation.done.wait(max(0.0, deadline - time.monotonic()))
 
