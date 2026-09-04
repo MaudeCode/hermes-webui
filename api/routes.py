@@ -11237,6 +11237,7 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     _approval_sse_unsubscribe,
     _approval_sse_notify_locked,
     _approval_sse_notify,
+    _dispatch_approval_sse,
     _GATEWAY_AGENT_IDENTITY_V1,
     _GATEWAY_MIRROR_FLAG,
     _GATEWAY_MIRROR_TOKEN,
@@ -27389,6 +27390,7 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
     gateway_keys = []
     local_gateway_approval_id = ""
     gateway_head_matches_target = False
+    notification = None
     with _lock:
         reconcile_gateway_pending_mirror_locked(sid)
         queue = _pending.get(sid)
@@ -27494,9 +27496,14 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
         # would be parked indefinitely from the user's perspective).
         if not local_gateway_approval_id:
             if isinstance(_pending.get(sid), list) and _pending[sid]:
-                _approval_sse_notify_locked(sid, _pending[sid][0], len(_pending[sid]))
+                notification = _approval_sse_notify_locked(
+                    sid, _pending[sid][0], len(_pending[sid])
+                )
             else:
-                _approval_sse_notify_locked(sid, None, 0)
+                notification = _approval_sse_notify_locked(sid, None, 0)
+
+    if notification is not None:
+        _dispatch_approval_sse(notification)
 
     # Collect keys from both _pending and _gateway_queues
     keys_from_pending = pending.get("pattern_keys") or [pending.get("pattern_key", "")] if pending else []

@@ -48,10 +48,8 @@ class TestClarifySSEBackendCode:
 
     def test_resolve_clarify_calls_notify(self):
         src = _read(_CLARIFY)
-        # Count occurrences — resolve should notify on both branches
-        assert src.count("_clarify_sse_notify(") >= 2, (
-            "resolve_clarify should call _clarify_sse_notify for both queue-has-more and empty cases"
-        )
+        assert src.count("_clarify_sse_snapshot_locked(") >= 4
+        assert "_dispatch_clarify_sse(notification)" in src
 
 
 class TestClarifySSERoutesCode:

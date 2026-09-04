@@ -9617,14 +9617,8 @@ def update_active_run(stream_id: str, **metadata) -> None:
             logger.debug("Failed to publish active-run update", exc_info=True)
 
 
-def unregister_active_run(stream_id: str) -> None:
-    """Remove a worker from the active-run registry and record idle start."""
-    if not stream_id:
-        return
-    global LAST_RUN_FINISHED_AT
-    with ACTIVE_RUNS_LOCK:
-        entry = ACTIVE_RUNS.pop(stream_id, None)
-        LAST_RUN_FINISHED_AT = time.time()
+def publish_active_run_finished(stream_id: str, entry) -> None:
+    """Publish side effects after an active-run row is atomically retired."""
     unregister_stream_owner(stream_id)
     try:
         from api.session_events import publish_session_list_changed
@@ -9635,6 +9629,17 @@ def unregister_active_run(stream_id: str) -> None:
         )
     except Exception:
         logger.debug("Failed to publish active-run finish", exc_info=True)
+
+
+def unregister_active_run(stream_id: str) -> None:
+    """Remove a worker from the active-run registry and record idle start."""
+    if not stream_id:
+        return
+    global LAST_RUN_FINISHED_AT
+    with ACTIVE_RUNS_LOCK:
+        entry = ACTIVE_RUNS.pop(stream_id, None)
+        LAST_RUN_FINISHED_AT = time.time()
+    publish_active_run_finished(stream_id, entry)
 
 # Agent cache: reuse AIAgent across messages in the same WebUI session so that
 # _user_turn_count survives between turns.  This mirrors the gateway's

@@ -7,8 +7,16 @@ import threading
 import time
 from unittest.mock import Mock
 
-from api.streaming import _try_acquire_chat_lock, cancel_stream
-from api.config import AGENT_INSTANCES, STREAMS, CANCEL_FLAGS, ACTIVE_RUNS, SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
+from api.streaming import _publish_agent_instance, _try_acquire_chat_lock, cancel_stream
+from api.config import (
+    ACTIVE_RUNS,
+    AGENT_INSTANCES,
+    CANCEL_FLAGS,
+    SESSION_AGENT_CACHE,
+    SESSION_AGENT_CACHE_LOCK,
+    STREAMS,
+    STREAMS_LOCK,
+)
 
 
 class TestCancelInterrupt:
@@ -91,6 +99,38 @@ class TestCancelInterrupt:
         assert stream_id not in CANCEL_FLAGS, \
             "cancel_stream() should eagerly pop CANCEL_FLAGS even without an agent"
         # Agent will check this flag (it holds a reference to the event object)
+
+    def test_cancel_during_agent_publish_has_no_stream_session_lock_inversion(self):
+        stream_id = "cancel-during-agent-publish"
+        cancel_flag = threading.Event()
+        cancel_flag.set()
+        CANCEL_FLAGS[stream_id] = cancel_flag
+        agent = Mock()
+        session_lock = threading.Lock()
+        session_lock.acquire()
+        published = threading.Event()
+        finished = threading.Event()
+
+        def initialization_path():
+            if _publish_agent_instance(stream_id, agent):
+                published.set()
+                with session_lock:
+                    finished.set()
+
+        worker = threading.Thread(target=initialization_path)
+        worker.start()
+        assert published.wait(1)
+
+        # Historical code still held STREAMS_LOCK while waiting for the
+        # session lock. The inverse interleaving could never acquire this lock.
+        assert STREAMS_LOCK.acquire(timeout=0.2)
+        STREAMS_LOCK.release()
+        session_lock.release()
+        worker.join(1)
+
+        assert finished.is_set()
+        assert worker.is_alive() is False
+        assert AGENT_INSTANCES[stream_id] is agent
 
     def test_cancel_nonexistent_stream(self):
         """Test cancel for a stream that doesn't exist"""
