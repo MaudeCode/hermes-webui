@@ -241,6 +241,27 @@ def test_worker_startup_lock_timeout_is_bounded_and_retained(monkeypatch):
         config.LAST_CHAT_ADMISSION_TIMEOUT_AT = None
 
 
+def test_checkpoint_lock_wait_is_bounded_and_stop_aware(monkeypatch):
+    import threading
+    from api import streaming
+
+    lock = threading.Lock()
+    lock.acquire()
+    stop_event = threading.Event()
+    stop_event.set()
+    monkeypatch.setattr(streaming, "_CHAT_LOCK_WAIT_SECONDS", 0.02)
+    started = time.monotonic()
+    try:
+        with streaming._try_acquire_checkpoint_session_lock(
+            lock, stop_event
+        ) as acquired:
+            assert acquired is False
+    finally:
+        lock.release()
+
+    assert time.monotonic() - started < 0.2
+
+
 def test_post_execution_writeback_timeout_is_not_retryable():
     from api.routes import _chat_writeback_timeout_response
 

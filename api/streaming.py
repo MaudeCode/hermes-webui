@@ -9056,6 +9056,12 @@ def _mark_chat_admission_timeout_stale(session, stream_id: str) -> bool:
 
 
 @contextlib.contextmanager
+def _try_acquire_checkpoint_session_lock(lock, stop_event):
+    with _try_acquire_chat_lock(lock, _CHAT_LOCK_WAIT_SECONDS) as acquired:
+        yield acquired and not stop_event.is_set()
+
+
+@contextlib.contextmanager
 def _try_acquire_worker_session_lock(
     stream_id: str, lock, stage: str, *, timeout_phase: str = "admission_blocked"
 ):
@@ -11461,7 +11467,13 @@ def _run_agent_streaming(
                     try:
                         cur = _checkpoint_activity[0]
                         if cur > last_saved_activity:
-                            with _agent_lock:
+                            with _try_acquire_checkpoint_session_lock(
+                                _agent_lock, _checkpoint_stop
+                            ) as acquired:
+                                if not acquired:
+                                    if _checkpoint_stop.is_set():
+                                        return
+                                    continue
                                 fingerprint = _streaming_checkpoint_fingerprint(s)
                                 # A completed tool call is the trigger, but not
                                 # proof that anything the checkpoint persists
