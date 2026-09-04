@@ -23953,6 +23953,7 @@ def _bounded_chat_admission_lock(session_id: str, lock, timeout=None):
         started_at=started_at,
         phase="waiting_for_session_lock",
         lock_wait_started_at=started_at,
+        attachable=False,
     )
     registered = True
     try:

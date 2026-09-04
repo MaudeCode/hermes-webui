@@ -9519,8 +9519,10 @@ def active_run_is_attachable(run_entry) -> bool:
     """
     return not (
         isinstance(run_entry, dict)
-        and str(run_entry.get("phase") or "").strip()
-        in {"cancelling", "waiting_for_session_lock", "admission_blocked"}
+        and (
+            run_entry.get("attachable") is False
+            or str(run_entry.get("phase") or "").strip() == "cancelling"
+        )
     )
 
 

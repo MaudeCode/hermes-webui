@@ -174,7 +174,8 @@ def test_attachability_predicate_edges():
     assert cfg.active_run_is_attachable({"phase": "running"}) is True
     assert cfg.active_run_is_attachable({"phase": "cancelling"}) is False
     assert cfg.active_run_is_attachable({"phase": " cancelling "}) is False
-    assert cfg.active_run_is_attachable({"phase": "waiting_for_session_lock"}) is False
-    assert cfg.active_run_is_attachable({"phase": "admission_blocked"}) is False
+    assert cfg.active_run_is_attachable({"phase": "waiting_for_session_lock"}) is True
+    assert cfg.active_run_is_attachable({"phase": "admission_blocked"}) is True
+    assert cfg.active_run_is_attachable({"phase": "waiting_for_session_lock", "attachable": False}) is False
     assert cfg.active_run_is_attachable({}) is True
     assert cfg.active_run_is_attachable(object()) is True
