@@ -887,7 +887,10 @@ def close_all_terminals() -> None:
         reservation.done.wait(max(0.0, deadline - time.monotonic()))
         spawn_done = reservation.spawn_done
         if spawn_done is not None:
-            spawn_done.wait(max(0.0, deadline - time.monotonic()))
+            # Once the supervisor has admitted Popen, only it can safely close
+            # the transferred PTY descriptor and reap a late child. Do not let
+            # interpreter teardown cut that ownership handoff short.
+            spawn_done.wait()
 
 
 atexit.register(close_all_terminals)
