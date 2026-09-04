@@ -1136,9 +1136,14 @@ def _profile_secret_thread_env(profile: str, profile_home_path: Path) -> dict[st
         and Path(profile_home_path).expanduser() == Path(_INITIAL_HERMES_HOME).expanduser()
     )
     source = _INITIAL_PROCESS_ENV if owns_startup_env else {}
+    names = _profile_secret_env_names(profile_home_path) | {
+        "HERMES_MODEL",
+        "OPENAI_MODEL",
+        "LLM_MODEL",
+    }
     return {
         name: source.get(name, "")
-        for name in _profile_secret_env_names(profile_home_path)
+        for name in names
     }
 
 

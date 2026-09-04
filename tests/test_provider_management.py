@@ -368,6 +368,12 @@ class TestSetProviderKey:
         """Removing a key should delete the env var from .env."""
         _install_fake_hermes_cli(monkeypatch)
         monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+        monkeypatch.setitem(
+            profiles._INITIAL_PROCESS_ENV,
+            "ANTHROPIC_API_KEY",
+            "sk-ant-test-key-12345678",
+        )
 
         old_cfg = dict(config.cfg)
         old_mtime = config._cfg_mtime
@@ -391,6 +397,7 @@ class TestSetProviderKey:
             env_path = tmp_path / ".env"
             content = env_path.read_text() if env_path.exists() else ""
             assert "ANTHROPIC_API_KEY" not in content
+            assert "ANTHROPIC_API_KEY" not in profiles._INITIAL_PROCESS_ENV
         finally:
             config.cfg.clear()
             config.cfg.update(old_cfg)

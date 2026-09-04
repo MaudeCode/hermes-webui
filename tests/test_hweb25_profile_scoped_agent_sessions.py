@@ -678,9 +678,9 @@ def test_named_profile_secret_overlay_blanks_startup_root_credentials(
         profiles._INITIAL_PROCESS_ENV, "OPENAI_API_KEY", "root-startup-key"
     )
 
-    assert profiles._profile_secret_thread_env("member", profile_home) == {
-        "OPENAI_API_KEY": ""
-    }
+    assert profiles._profile_secret_thread_env("member", profile_home)[
+        "OPENAI_API_KEY"
+    ] == ""
 
 
 def test_isolated_profile_owns_its_startup_credentials(monkeypatch, tmp_path):
@@ -695,9 +695,9 @@ def test_isolated_profile_owns_its_startup_credentials(monkeypatch, tmp_path):
         profiles._INITIAL_PROCESS_ENV, "OPENAI_API_KEY", "deployment-key"
     )
 
-    assert profiles._profile_secret_thread_env("member", profile_home) == {
-        "OPENAI_API_KEY": "deployment-key"
-    }
+    assert profiles._profile_secret_thread_env("member", profile_home)[
+        "OPENAI_API_KEY"
+    ] == "deployment-key"
 
 
 def test_effective_model_override_uses_profile_thread_env(monkeypatch):
@@ -709,6 +709,19 @@ def test_effective_model_override_uses_profile_thread_env(monkeypatch):
         assert config.get_effective_default_model({"model": {}}) == "profile-model"
     finally:
         config._clear_thread_env()
+
+
+def test_root_profile_projects_startup_model_override(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        profiles, "_profile_secret_env_names", lambda _home: set()
+    )
+    monkeypatch.setitem(
+        profiles._INITIAL_PROCESS_ENV, "HERMES_MODEL", "deployment-model"
+    )
+
+    assert profiles._profile_secret_thread_env("default", tmp_path)[
+        "HERMES_MODEL"
+    ] == "deployment-model"
 
 
 def test_default_readonly_request_pins_root_home(monkeypatch, tmp_path):

@@ -784,12 +784,21 @@ def test_handle_chat_sync_writeback_dedupes_full_context_replay(tmp_path, monkey
         *native_result,
         {"role": "assistant", "content": "short answer"},
     ]
+    runtime_seen = {}
+    monkeypatch.setenv("TERMINAL_CWD", "process-cwd")
+    monkeypatch.setenv("HERMES_SESSION_KEY", "process-session")
 
     class FakeAgent:
         def __init__(self, **_kwargs):
             pass
 
         def run_conversation(self, **_kwargs):
+            runtime_seen["thread_cwd"] = config._thread_local_env_value("TERMINAL_CWD")
+            runtime_seen["thread_session"] = config._thread_local_env_value(
+                "HERMES_SESSION_KEY"
+            )
+            runtime_seen["process_cwd"] = config.os.environ["TERMINAL_CWD"]
+            runtime_seen["process_session"] = config.os.environ["HERMES_SESSION_KEY"]
             return {
                 "messages": replayed_result,
                 "final_response": "short answer",
@@ -805,6 +814,12 @@ def test_handle_chat_sync_writeback_dedupes_full_context_replay(tmp_path, monkey
     )
 
     assert handler.status == 200
+    assert runtime_seen == {
+        "thread_cwd": str(tmp_path),
+        "thread_session": session.session_id,
+        "process_cwd": "process-cwd",
+        "process_session": "process-session",
+    }
     reloaded = Session.load(session.session_id)
     assert reloaded is not None
 

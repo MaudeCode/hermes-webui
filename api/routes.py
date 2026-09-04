@@ -31,7 +31,7 @@ import http.client
 import socket as _socket
 from collections import defaultdict, deque, OrderedDict
 from pathlib import Path
-from contextlib import closing, nullcontext
+from contextlib import ExitStack, closing, nullcontext
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
@@ -2917,6 +2917,7 @@ def _get_cached_session_list_payload(
     return payload
 
 from api.config import (
+    _HERMES_FOUND,
     STATE_DIR,
     SESSION_DIR,
     DEFAULT_WORKSPACE,
@@ -25885,16 +25886,77 @@ def _handle_chat_sync(handler, body):
         )[:2]
         s.model = model
         s.model_provider = model_provider
-    from api.streaming import _ENV_LOCK
+    with ExitStack() as runtime_scope:
+        from api import profiles as profiles_api
+        from api.config import _set_thread_env, _thread_ctx
+        from api.streaming import (
+            _prewarm_skill_tool_modules,
+            _reset_turn_session_identity,
+            _set_turn_session_identity,
+        )
 
-    with _ENV_LOCK:
-        old_cwd = os.environ.get("TERMINAL_CWD")
-        os.environ["TERMINAL_CWD"] = str(workspace)
-        old_exec_ask = os.environ.get("HERMES_EXEC_ASK")
-        old_session_key = os.environ.get("HERMES_SESSION_KEY")
-        os.environ["HERMES_EXEC_ASK"] = "1"
-        os.environ["HERMES_SESSION_KEY"] = s.session_id
-    try:
+        profile_home = profiles_api.get_hermes_home_for_profile(
+            getattr(s, "profile", None)
+        )
+        runtime_scope.enter_context(
+            profiles_api.profile_env_for_background_worker(
+                s, "synchronous chat", logger_override=logger
+            )
+        )
+        previous_thread_env = getattr(_thread_ctx, "env", {}).copy()
+        turn_env = dict(previous_thread_env)
+        turn_env.update({
+            "TERMINAL_CWD": str(workspace),
+            "HERMES_EXEC_ASK": "1",
+            "HERMES_SESSION_KEY": s.session_id,
+            "HERMES_SESSION_ID": s.session_id,
+            "HERMES_SESSION_PLATFORM": "webui",
+            "HERMES_SESSION_CHAT_ID": s.session_id,
+        })
+        _set_thread_env(**turn_env)
+        runtime_scope.callback(_set_thread_env, **previous_thread_env)
+        turn_identity = _set_turn_session_identity(s.session_id)
+        runtime_scope.callback(_reset_turn_session_identity, turn_identity)
+
+        try:
+            from agent.runtime_cwd import _SESSION_CWD, set_session_cwd
+
+            runtime_cwd_token = set_session_cwd(str(workspace))
+            runtime_scope.callback(_SESSION_CWD.reset, runtime_cwd_token)
+        except ImportError:
+            if _HERMES_FOUND:
+                raise RuntimeError(
+                    "Cannot safely start synchronous chat: the installed Hermes Agent "
+                    "lacks context-local terminal working directories."
+                )
+
+        terminal_runtime_env = profiles_api.filter_runtime_env_for_gateway_parity(
+            profiles_api.get_profile_runtime_env(profile_home)
+        )
+        try:
+            from tools import terminal_scope
+
+            terminal_policy = terminal_scope.build_profile_terminal_scope(profile_home)
+            terminal_token = terminal_scope.set_terminal_scope(terminal_policy)
+            runtime_scope.callback(terminal_scope.reset_terminal_scope, terminal_token)
+        except ImportError:
+            if _HERMES_FOUND and any(
+                key.startswith("TERMINAL_") and key != "TERMINAL_CWD"
+                for key in terminal_runtime_env
+            ):
+                raise RuntimeError(
+                    "Cannot safely start synchronous chat: the installed Hermes Agent "
+                    "lacks context-local terminal policy."
+                )
+
+        _prewarm_skill_tool_modules()
+        if _HERMES_FOUND and not profiles_api._skill_modules_support_profile_home(
+            profile_home
+        ):
+            raise RuntimeError(
+                "Cannot safely start synchronous chat: the installed Hermes Agent "
+                "requires process-global skill state."
+            )
         AIAgent = require_ai_agent_class()
 
         with CHAT_LOCK:
@@ -25993,20 +26055,6 @@ def _handle_chat_sync(handler, body):
                 task_id=s.session_id,
                 persist_user_message=msg,
             )
-    finally:
-        with _ENV_LOCK:
-            if old_cwd is None:
-                os.environ.pop("TERMINAL_CWD", None)
-            else:
-                os.environ["TERMINAL_CWD"] = old_cwd
-            if old_exec_ask is None:
-                os.environ.pop("HERMES_EXEC_ASK", None)
-            else:
-                os.environ["HERMES_EXEC_ASK"] = old_exec_ask
-            if old_session_key is None:
-                os.environ.pop("HERMES_SESSION_KEY", None)
-            else:
-                os.environ["HERMES_SESSION_KEY"] = old_session_key
     with _get_session_agent_lock(s.session_id):
         _result_messages = result.get("messages") or _previous_context_messages
         _next_context_messages = _restore_reasoning_metadata(
