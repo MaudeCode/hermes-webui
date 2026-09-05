@@ -13322,7 +13322,13 @@ function _anchorSceneRowsForRendering(scene, opts){
     if(row.role==='thinking') return `thinking:${row.local_id||row.row_id||out.length}`;
     if(row.role==='lifecycle'){
       const source=String(row.source_event_type||'');
-      if(source==='compressing'||source==='compressed') return 'lifecycle:compression';
+      if(source==='compressing'||source==='compressed'){
+        // Server-projected rows carry a per-pass number so two compaction passes
+        // in one turn keep their own rows; live rows have none and stay folded
+        // into the single running card the SSE handlers maintain.
+        const pass=row.compression_pass;
+        return pass==null?'lifecycle:compression':`lifecycle:compression:${pass}`;
+      }
       return `lifecycle:${source||row.local_id||row.row_id||out.length}`;
     }
     return `row:${row.row_id||out.length}`;

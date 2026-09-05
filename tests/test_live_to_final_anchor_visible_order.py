@@ -917,9 +917,12 @@ def test_settled_scene_keeps_user_visible_lifecycle_and_control_rows():
     rows = _function_body(UI_JS, "_anchorSceneRowsForRendering")
     node = _function_body(UI_JS, "_anchorSceneNodeForRow")
 
-    assert "return 'lifecycle:compression';" in rows
+    # Compression rows fold onto one another by a shared key, per pass: a live
+    # row without a pass number keeps the original single-card key.
+    assert "pass==null?'lifecycle:compression':`lifecycle:compression:${pass}`" in rows
     assert 'return "lifecycle:compression"' in ROUTES_PY
-    assert 'if key == "lifecycle:compression":' in ROUTES_PY
+    assert 'return f"lifecycle:compression:{compression_pass}"' in ROUTES_PY
+    assert 'if key.startswith("lifecycle:compression"):' in ROUTES_PY
     assert "return out.slice().sort" not in rows
     assert "source==='compressing'||source==='compressed'" in rows
     assert "(weight(a)-weight(b))" not in rows
