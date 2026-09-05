@@ -19193,14 +19193,26 @@ def _serve_static(handler, parsed):
     # SHELL_ASSETS list relies on the same convention. So a fingerprinted URL
     # is safe to cache aggressively: any redeploy changes the URL.
     #
-    # "unknown" is NOT a fingerprint. _detect_webui_version() falls back to it
-    # when neither git nor a generated version file is available (a copied
-    # source deployment), so every upgrade would emit the same `?v=unknown`
-    # URLs. Caching those for a year would strand clients on the old JS/CSS
-    # against a new backend with no way to bust it short of clearing browser
-    # data. Fail closed to the short revalidating TTL instead.
+    # Two version tokens are NOT fingerprints, and caching either for a year
+    # would strand clients on stale JS/CSS against a new backend with no way to
+    # bust it short of clearing browser data. Both fail closed to the short
+    # revalidating TTL:
+    #
+    #   * "unknown" — _detect_webui_version()'s last resort when neither git nor
+    #     a generated version file is available (a copied source deployment).
+    #     Every upgrade would emit the same `?v=unknown` URL.
+    #   * a digest-less "-dirty" suffix — _dirty_suffix() normally appends
+    #     `-dirty-<sha1(diff)[:8]>`, which IS content-derived and changes on
+    #     every working-tree edit, so it stays a valid fingerprint. It degrades
+    #     to a bare "-dirty" only when `git diff` fails or returns nothing, i.e.
+    #     exactly when we could not determine the content. "Unknown" is not
+    #     "unchanged", so do not promise immutability.
     version_values = parse_qs(parsed.query, keep_blank_values=True).get("v", [""])
-    has_fingerprint = version_values[0] not in ("", "unknown")
+    version_token = version_values[0]
+    has_fingerprint = (
+        version_token not in ("", "unknown")
+        and not version_token.endswith("-dirty")
+    )
     cache_control = (
         "public, max-age=31536000, immutable" if has_fingerprint
         else "public, max-age=300"

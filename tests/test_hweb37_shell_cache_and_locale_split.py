@@ -67,6 +67,21 @@ def test_versioned_shell_assets_are_served_immutable():
     assert "immutable" not in headers.get("Cache-Control", ""), (
         "?v=unknown is not a fingerprint and must not be cached immutable"
     )
+    # `_dirty_suffix()` degrades from `-dirty-<sha1(diff)[:8]>` to a bare
+    # `-dirty` exactly when `git diff` failed or came back empty — i.e. when the
+    # working-tree content could not be determined. Fail closed there.
+    headers, _ = _get("/static/boot.js?v=v1.2.3-dirty")
+    assert "immutable" not in headers.get("Cache-Control", ""), (
+        "a digest-less -dirty token does not identify content and must not be "
+        "cached immutable"
+    )
+    # ...but the digest form IS content-derived and changes on every edit, so it
+    # stays a real fingerprint. Downgrading it would de-optimize every dev
+    # checkout for no safety gain.
+    headers, _ = _get("/static/boot.js?v=v1.2.3-dirty-f09b1026")
+    assert "immutable" in headers.get("Cache-Control", ""), (
+        "-dirty-<digest> is content-derived and must stay immutable"
+    )
 
 
 # ── 2. i18n.js is served split: English core + one on-demand locale ──────────
