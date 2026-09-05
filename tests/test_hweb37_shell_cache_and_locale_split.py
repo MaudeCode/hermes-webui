@@ -59,6 +59,14 @@ def test_versioned_shell_assets_are_served_immutable():
     assert "immutable" not in headers.get("Cache-Control", ""), (
         "unversioned assets must stay revalidatable"
     )
+    # `unknown` is _detect_webui_version()'s last-resort fallback (a copied
+    # source deployment with no git and no generated version file). It repeats
+    # across upgrades, so it is not a fingerprint: caching it immutable would
+    # strand clients on stale JS with no way to bust it.
+    headers, _ = _get("/static/boot.js?v=unknown")
+    assert "immutable" not in headers.get("Cache-Control", ""), (
+        "?v=unknown is not a fingerprint and must not be cached immutable"
+    )
 
 
 # ── 2. i18n.js is served split: English core + one on-demand locale ──────────
@@ -201,7 +209,8 @@ def _new_page(browser):
     page = browser.new_page(viewport={"width": 1280, "height": 800})
     page.goto(BASE + "/", wait_until="domcontentloaded")
     page.wait_for_function(
-        "() => typeof setLocale === 'function' && typeof applyLocaleToDOM === 'function'",
+        "() => typeof setLocale === 'function' && typeof applyLocaleToDOM === 'function'"
+        " && typeof api === 'function'",
         timeout=15000,
     )
     return page
@@ -210,6 +219,13 @@ def _new_page(browser):
 _RESOURCES = """() => performance.getEntriesByType('resource')
     .filter(e => e.initiatorType === 'script' || e.initiatorType === 'link')
     .map(e => ({name: e.name, transferSize: e.transferSize}))"""
+
+# Persist a language the way the settings panel does — server setting *and*
+# localStorage — via the page's own api() helper so CSRF is handled for us.
+_SET_LANGUAGE = """async (lang) => {
+    await api('/api/settings', {method: 'POST', body: JSON.stringify({language: lang})});
+    localStorage.setItem('hermes-lang', lang);
+}"""
 
 
 def test_second_load_serves_the_shell_without_network_fetches():
@@ -262,9 +278,11 @@ def test_page_load_transfers_at_most_two_locale_bundles():
         browser = playwright.chromium.launch(headless=True, args=_BROWSER_ARGS)
         try:
             page = _new_page(browser)
-            # Persist a non-English locale, then reload: the shell should emit
-            # exactly the English core plus that one locale.
-            page.evaluate("() => localStorage.setItem('hermes-lang', 'de')")
+            # Model a real German user: the settings panel persists the choice
+            # both server-side and in localStorage, and boot.js gives the server
+            # value precedence. Setting only localStorage would be overwritten
+            # back to English the moment settings load.
+            page.evaluate(_SET_LANGUAGE, "de")
             page.goto(BASE + "/", wait_until="load")
             page.wait_for_function(
                 "() => typeof t === 'function' && t('copy') === 'Kopieren'",
@@ -291,6 +309,12 @@ def test_page_load_transfers_at_most_two_locale_bundles():
             # And the German strings are live on first paint, not after a repaint.
             assert page.evaluate("() => document.documentElement.lang") == "de-DE"
         finally:
+            # The test server is session-scoped, so hand the language setting
+            # back before any sibling test reads it.
+            try:
+                page.evaluate(_SET_LANGUAGE, "en")
+            except Exception:
+                pass
             browser.close()
 
 
