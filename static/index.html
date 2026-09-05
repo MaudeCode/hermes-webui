@@ -1782,6 +1782,15 @@
 </div>
 <div class="toast" id="toast"></div>
 <script src="static/i18n.js?v=__WEBUI_VERSION__" defer></script>
+<!-- HWEB-37: i18n.js above is served as the English core plus a metadata stub per
+     locale. Emit the persisted locale's strings as a parser-inserted deferred
+     script here so it executes right after the core and before boot.js — the
+     page is localized on first paint, with no flash of English and no transfer
+     of the 13 locales this client will not use. document.write is required for
+     the ordering guarantee (a dynamically inserted script is not ordered against
+     parser-inserted defer scripts); the same technique sets <base> at the top of
+     this file. `&amp;` is mandatory: a bare `&lang=` parses as the &lang; entity. -->
+<script>(function(){try{var l=localStorage.getItem('hermes-lang');if(!l||!/^[A-Za-z][A-Za-z0-9-]{0,14}$/.test(l)||l.toLowerCase()==='en')return;window.__HERMES_I18N_PRELOAD__=l;document.write('<script src="static/i18n.js?v=__WEBUI_VERSION__&amp;lang='+encodeURIComponent(l)+'" defer><\/script>');}catch(e){}})()</script>
 <script src="static/icons.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/assistant_turn_anchors.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/ui.js?v=__WEBUI_VERSION__" defer></script>

@@ -19292,15 +19292,31 @@ def _serve_static(handler, parsed):
     st = static_file.stat()
     sig = (st.st_size, st.st_mtime_ns)
     cache_key = str(static_file)
+    # i18n.js is authored as one file holding every locale but served split:
+    # the English core, or one on-demand locale bundle (HWEB-37). The variant is
+    # part of the cache key and the ETag so the two never alias each other.
+    variant = None
+    if static_file.name == "i18n.js" and static_file.parent == static_root:
+        from api import i18n_assets
+
+        variant = i18n_assets.resolve_variant(
+            static_file, parse_qs(parsed.query).get("lang", [""])[0]
+        )
+        cache_key = f"{cache_key}#{variant}"
     raw = gz = etag = None
     with _STATIC_CACHE_LOCK:
         cached = _STATIC_CACHE.get(cache_key)
         if cached and cached[0] == sig:
             _, raw, gz, etag = cached
     if raw is None:
-        raw = static_file.read_bytes()
-        # Weak ETag: equality semantics, derived from filesystem identity.
-        etag = f'W/"{sig[0]:x}-{sig[1]:x}"'
+        raw = (
+            i18n_assets.render(static_file, variant, sig)
+            if variant is not None
+            else static_file.read_bytes()
+        )
+        # Weak ETag: equality semantics, derived from filesystem identity
+        # (plus the served variant, for the split i18n.js).
+        etag = f'W/"{sig[0]:x}-{sig[1]:x}{("-" + variant) if variant else ""}"'
         gz = (gzip.compress(raw, compresslevel=6)
               if ct in _COMPRESSIBLE_MIME and len(raw) > 1024
               else None)
@@ -19311,8 +19327,27 @@ def _serve_static(handler, parsed):
     # `/`/`/index.html`/`/session/` branch above), and static/sw.js's
     # SHELL_ASSETS list relies on the same convention. So a fingerprinted URL
     # is safe to cache aggressively: any redeploy changes the URL.
+    #
+    # Two version tokens are NOT fingerprints, and caching either for a year
+    # would strand clients on stale JS/CSS against a new backend with no way to
+    # bust it short of clearing browser data. Both fail closed to the short
+    # revalidating TTL:
+    #
+    #   * "unknown" — _detect_webui_version()'s last resort when neither git nor
+    #     a generated version file is available (a copied source deployment).
+    #     Every upgrade would emit the same `?v=unknown` URL.
+    #   * a digest-less "-dirty" suffix — _dirty_suffix() normally appends
+    #     `-dirty-<sha1(diff)[:8]>`, which IS content-derived and changes on
+    #     every working-tree edit, so it stays a valid fingerprint. It degrades
+    #     to a bare "-dirty" only when `git diff` fails or returns nothing, i.e.
+    #     exactly when we could not determine the content. "Unknown" is not
+    #     "unchanged", so do not promise immutability.
     version_values = parse_qs(parsed.query, keep_blank_values=True).get("v", [""])
-    has_fingerprint = bool(version_values[0])
+    version_token = version_values[0]
+    has_fingerprint = (
+        version_token not in ("", "unknown")
+        and not version_token.endswith("-dirty")
+    )
     cache_control = (
         "public, max-age=31536000, immutable" if has_fingerprint
         else "public, max-age=300"

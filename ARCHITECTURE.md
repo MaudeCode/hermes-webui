@@ -81,7 +81,9 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       commands.js          Slash command registry, parser, autocomplete dropdown
       boot.js              Event wiring, mobile nav, voice input, theme/skin boot, bfcache handler
       onboarding.js        First-run wizard overlay, provider setup flow
-      i18n.js              Localization catalog (en, es, de, zh, zh-Hant, ru, …)
+      i18n.js              Localization catalog (en, es, de, zh, zh-Hant, ru, …).
+                           Authored as one file; served split by api/i18n_assets.py
+                           as an English core plus one `?lang=` bundle per client.
       login.js             Login page + open-redirect guard
       icons.js             Lucide icon path registry
       sw.js                Service worker: offline shell cache, version-pinned assets

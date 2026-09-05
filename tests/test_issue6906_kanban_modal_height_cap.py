@@ -18,8 +18,10 @@ def _open_modal(page, modal_id, locale):
         timeout=10000,
     )
     page.evaluate(
-        """([lang, id]) => {
-            setLocale(lang);
+        # await: a locale the page was not served with is fetched on demand
+        # (HWEB-37), so the strings are not live until setLocale() settles.
+        """async ([lang, id]) => {
+            await setLocale(lang);
             if (id === 'kanbanTaskModal') openKanbanCreate();
             else openKanbanCreateBoard();
             applyLocaleToDOM();
