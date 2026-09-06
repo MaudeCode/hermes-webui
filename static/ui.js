@@ -1352,40 +1352,52 @@ function _clearUserRowIntrinsicHeightCache(){
 // every ORDINARY rerender — stream settle, refreshSession, a handoff rebuild —
 // builds fresh nodes and cannot read the state off the old row. Own it here.
 //
-// Keyed by session_id AND the message's content identity, deliberately NOT by
-// position: this is reader intent, not a measurement, so its correctness must
-// not depend on a cache-invalidation hook firing at the right moment, nor on a
-// numeric index staying attached to the same message.
+// Keyed by session_id AND the message's CONTENT, deliberately not by position
+// and deliberately not by timestamp. Three things this must survive, each of
+// which broke a previous version of this store:
 //
-// A positional key fails twice over. The neighbouring height cache is keyed by
-// index alone and released whenever the virtual-height cache is dropped — which
-// happens on ordinary transcript churn, not just session changes — so borrowing
-// that lifecycle erased the state on the exact settle rerender it exists to
-// survive. And an index is not identity: Clear conversation, undo, or an
-// edit/truncate shrinks the transcript without changing session_id, so a later
-// message can inherit a freed index and render itself expanded.
+//  1. Ordinary rerenders. The neighbouring height cache is keyed by index and
+//     released whenever the virtual-height cache is dropped — which happens on
+//     ordinary transcript churn, not just session changes — so borrowing that
+//     lifecycle erased the state on the exact settle rerender it must survive.
+//  2. Index reuse. Clear conversation, undo and edit/truncate shrink the
+//     transcript without changing session_id, so a later message can inherit a
+//     freed index and render itself expanded.
+//  3. The optimistic → settled swap. A just-sent message carries a client
+//     `Date.now()` `_ts` (messages.js), while the settled message that replaces
+//     it on completion carries the server's timestamp; `_ts` is not in
+//     `_EPHEMERAL_TURN_FIELDS`, so it is not carried forward. Any ts-bearing
+//     key therefore changes under the reader precisely when a freshly sent
+//     prompt settles — collapsing the message they just opened.
 //
-// _messageViewportAnchorKeyForMessage() is the codebase's existing stable
-// message identity (role + timestamp + attachment count + the first 160
-// normalized characters, so it stays bounded) and is already stamped on every
-// user row as data-message-anchor-key. Reuse it rather than minting a parallel
-// one. The session-change release below is hygiene, not correctness.
+// So this cannot reuse `_messageViewportAnchorKeyForMessage()` verbatim: that
+// key embeds the timestamp, and the anchor system copes only because its
+// COMPARISON is tolerant (`!anchorTs || !candidateTs || equal`), which a plain
+// string key has no way to express. Role + attachment count + the first 160
+// normalized characters of the displayed text is stable across all three.
+// Two identical prompts in one session share a key, which merely means they
+// open together. The session-change release below is hygiene, not correctness.
 const _userMsgExpandedByKey=Object.create(null);
-function _userMessageExpandKey(messageAnchorKey){
-  const anchor=String(messageAnchorKey||'');
-  if(!anchor) return '';
+function _userMessageExpandIdentity(rawText, attachmentCount){
+  const norm=String(rawText==null?'':rawText).replace(/\s+/g,' ').trim().slice(0,160);
+  if(!norm) return '';
+  return 'u|'+(Number(attachmentCount)||0)+'|'+_safeEncodeURIComponent(norm);
+}
+function _userMessageExpandKey(identity){
+  const id=String(identity||'');
+  if(!id) return '';
   const sid=String((typeof S!=='undefined'&&S.session&&S.session.session_id)||'');
-  return sid?sid+':'+anchor:'';
+  return sid?sid+':'+id:'';
 }
 function _clearUserMessageExpandState(){
   for(const k in _userMsgExpandedByKey) delete _userMsgExpandedByKey[k];
 }
-function _userMessageIsExpanded(messageAnchorKey){
-  const k=_userMessageExpandKey(messageAnchorKey);
+function _userMessageIsExpanded(identity){
+  const k=_userMessageExpandKey(identity);
   return !!k&&_userMsgExpandedByKey[k]===true;
 }
-function _setUserMessageExpanded(messageAnchorKey, expanded){
-  const k=_userMessageExpandKey(messageAnchorKey);
+function _setUserMessageExpanded(identity, expanded){
+  const k=_userMessageExpandKey(identity);
   if(!k) return;
   if(expanded) _userMsgExpandedByKey[k]=true;
   else delete _userMsgExpandedByKey[k];
@@ -9162,7 +9174,7 @@ function toggleMessageExpand(btn){
   const expanded=row.dataset.msgExpanded==='1';
   const key=expanded?'show_full_message':'show_less_message';
   if(expanded) delete row.dataset.msgExpanded; else row.dataset.msgExpanded='1';
-  _setUserMessageExpanded(row.dataset.messageAnchorKey, !expanded);
+  _setUserMessageExpanded(row.dataset.msgExpandKey, !expanded);
   btn.setAttribute('aria-expanded',expanded?'false':'true');
   btn.setAttribute('data-i18n',key);
   btn.textContent=t(key);
@@ -18329,9 +18341,11 @@ function renderMessages(options){
       // that extract it without these helpers (they stub every collaborator by name).
       const sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
       const messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
+      const expandIdentity=typeof _userMessageExpandIdentity==='function'
+        ? _userMessageExpandIdentity(newRawText, (m.attachments&&m.attachments.length)||0) : '';
       const collapsible=typeof _userMessageNeedsCollapse==='function'&&_userMessageNeedsCollapse(newRawText);
       const wasExpanded=collapsible&&typeof _userMessageIsExpanded==='function'
-        &&_userMessageIsExpanded(messageAnchorKey);
+        &&_userMessageIsExpanded(expandIdentity);
       const userBodyHtml=typeof _userMessageBodyHtml==='function'
         ? _userMessageBodyHtml(bodyHtml,newRawText,rawIdx,wasExpanded)
         : `<div class="msg-body">${bodyHtml}</div>`;
@@ -18342,6 +18356,7 @@ function renderMessages(options){
         row.dataset.msgIdx=rawIdx;
         row.dataset.sessionMsgIdx=sessionMsgIdx;
         row.dataset.messageAnchorKey=messageAnchorKey;
+        row.dataset.msgExpandKey=expandIdentity;
         row.dataset.role='user';
         delete row.dataset.editing;
         if(row.dataset.rawText!==newRawText||row.innerHTML!==nextRowHtml){
@@ -18355,6 +18370,7 @@ function renderMessages(options){
         row.dataset.msgIdx=rawIdx;
         row.dataset.sessionMsgIdx=sessionMsgIdx;
         row.dataset.messageAnchorKey=messageAnchorKey;
+        row.dataset.msgExpandKey=expandIdentity;
         row.dataset.role='user';
         row.dataset.rawText=newRawText;
         row.innerHTML=nextRowHtml;
@@ -18365,7 +18381,7 @@ function renderMessages(options){
       if(wasExpanded) row.dataset.msgExpanded='1';
       else{
         delete row.dataset.msgExpanded;
-        if(!collapsible&&typeof _setUserMessageExpanded==='function') _setUserMessageExpanded(messageAnchorKey,false);
+        if(!collapsible&&typeof _setUserMessageExpanded==='function') _setUserMessageExpanded(expandIdentity,false);
       }
       // Reserve this user row's real off-screen height up front so a wipe-and-rebuild
       // does not collapse scrollHeight to the flat 96px estimate (the collapse that

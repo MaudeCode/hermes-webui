@@ -40,8 +40,8 @@ _SETUP_JS = """
     row.dataset.role = 'user';
     row.dataset.msgIdx = String(rawIdx);
     row.dataset.sessionMsgIdx = String(rawIdx);
-    // Stable content identity, the way renderMessages stamps it.
-    row.dataset.messageAnchorKey = 'anchor-' + rawIdx;
+    // Content identity, stamped the way renderMessages stamps it.
+    row.dataset.msgExpandKey = window._userMessageExpandIdentity(text, 0);
     row.dataset.rawText = text;
     // Render through the shipped user-message renderer so line breaks, markdown
     // and escaping match production exactly.
@@ -60,7 +60,9 @@ _SETUP_JS = """
     && typeof window._setUserMessageExpanded === 'function'
     && typeof window._clearUserMessageExpandState === 'function'
     && typeof window._clearMessageVirtualHeightCache === 'function'
-    && typeof window.clearMessageRenderCache === 'function';
+    && typeof window.clearMessageRenderCache === 'function'
+    && typeof window._userMessageExpandIdentity === 'function'
+    && typeof window._messageViewportAnchorKeyForMessage === 'function';
 }
 """
 
@@ -122,7 +124,7 @@ _TOGGLE_JS = """
     aria: btn.getAttribute('aria-expanded'),
     label: btn.textContent.trim(),
     rowExpanded: row.dataset.msgExpanded || '',
-    stored: window._userMessageIsExpanded('anchor-9100'),
+    stored: window._userMessageIsExpanded(window._userMessageExpandIdentity(text, 0)),
     i18nKey: btn.getAttribute('data-i18n'),
   };
   btn.click();
@@ -133,7 +135,7 @@ _TOGGLE_JS = """
     aria: btn.getAttribute('aria-expanded'),
     label: btn.textContent.trim(),
     rowExpanded: row.dataset.msgExpanded || '',
-    stored: window._userMessageIsExpanded('anchor-9100'),
+    stored: window._userMessageIsExpanded(window._userMessageExpandIdentity(text, 0)),
     i18nKey: btn.getAttribute('data-i18n'),
   };
   return { before, expanded, collapsed };
@@ -295,8 +297,8 @@ _RERENDER_JS = """
   const rebuilt = document.createElement('div');
   rebuilt.className = 'msg-row';
   rebuilt.dataset.role = 'user';
-  rebuilt.dataset.messageAnchorKey = 'anchor-7001';
-  const expanded = window._userMessageIsExpanded('anchor-7001');
+  rebuilt.dataset.msgExpandKey = window._userMessageExpandIdentity(text, 0);
+  const expanded = window._userMessageIsExpanded(window._userMessageExpandIdentity(text, 0));
   rebuilt.innerHTML = window._userMessageBodyHtml(
     window._getCachedRender(text, true), text, 7001, expanded);
   if (expanded) rebuilt.dataset.msgExpanded = '1';
@@ -314,20 +316,21 @@ _RERENDER_JS = """
   // cache (which ordinary transcript churn does on a stream settle, not only a
   // session switch) must NOT take reader intent with it.
   window._clearMessageVirtualHeightCache();
-  const afterHeightCacheDrop = window._userMessageIsExpanded('anchor-7001');
+  const afterHeightCacheDrop = window._userMessageIsExpanded(window._userMessageExpandIdentity(text, 0));
   window.clearMessageRenderCache();
-  const afterRenderCacheDrop = window._userMessageIsExpanded('anchor-7001');
+  const afterRenderCacheDrop = window._userMessageIsExpanded(window._userMessageExpandIdentity(text, 0));
 
   // Index reuse: Clear conversation / undo / edit-truncate shrinks the
   // transcript without changing session_id, so a LATER message can land on the
   // freed session index. Identity is the message, not its position, so a
   // different message must never inherit the expanded state.
-  const reusedIndexDifferentMessage = window._userMessageIsExpanded('anchor-9999');
+  const reusedIndexDifferentMessage = window._userMessageIsExpanded(
+    window._userMessageExpandIdentity('an entirely different message', 0));
 
   // Another session must never read this session's entry, even unreleased.
   const ownSession = S.session.session_id;
   S.session = Object.assign({}, S.session, {session_id: 'other-session'});
-  const otherSession = window._userMessageIsExpanded('anchor-7001');
+  const otherSession = window._userMessageIsExpanded(window._userMessageExpandIdentity(text, 0));
   S.session = Object.assign({}, S.session, {session_id: ownSession});
 
   // A session switch still releases it.
@@ -335,7 +338,7 @@ _RERENDER_JS = """
   return {
     afterToggle, rebuiltState, afterHeightCacheDrop, afterRenderCacheDrop,
     reusedIndexDifferentMessage, otherSession,
-    afterClear: window._userMessageIsExpanded('anchor-7001'),
+    afterClear: window._userMessageIsExpanded(window._userMessageExpandIdentity(text, 0)),
   };
 }
 """
@@ -454,3 +457,63 @@ def test_locale_change_retranslates_an_already_rendered_control():
     assert r["before"] == r["original"], r
     assert r["after"] == "HWEB3_TRANSLATED", r
     assert r["restored"] == r["original"], r
+
+
+_SETTLE_JS = r"""
+(text) => {
+  // The optimistic -> settled swap. A just-sent message carries a client
+  // Date.now() _ts; the settled message that replaces it on completion carries
+  // the server's own timestamp, and _ts is not in _EPHEMERAL_TURN_FIELDS so it
+  // is never carried forward. Any timestamp-bearing key therefore changes under
+  // the reader exactly when a freshly sent prompt settles.
+  const optimistic = {role: 'user', content: text, _ts: 1757000000.123};
+  const settled = {role: 'user', content: text, _ts: 1757000002.987};
+
+  // Why the viewport anchor key could not be reused verbatim: it embeds ts.
+  const anchorOptimistic = window._messageViewportAnchorKeyForMessage(optimistic);
+  const anchorSettled = window._messageViewportAnchorKeyForMessage(settled);
+
+  // The disclosure identity is derived from displayed content only.
+  const idOptimistic = window._userMessageExpandIdentity(text, 0);
+  const idSettled = window._userMessageExpandIdentity(text, 0);
+  window._setUserMessageExpanded(idOptimistic, true);
+
+  // Demonstrate the previous design's failure directly, in the same store:
+  // keying by the viewport anchor key loses the state across the swap.
+  window._setUserMessageExpanded(anchorOptimistic, true);
+  const anchorKeyedSurvives = window._userMessageIsExpanded(anchorSettled);
+
+  return {
+    anchorKeyedSurvives,
+    anchorKeysDiffer: anchorOptimistic !== anchorSettled,
+    identitiesMatch: idOptimistic === idSettled,
+    survivesSettle: window._userMessageIsExpanded(idSettled),
+    attachmentsDistinguish:
+      window._userMessageExpandIdentity(text, 0)
+        !== window._userMessageExpandIdentity(text, 2),
+    blankIsNotAKey: window._userMessageExpandIdentity('   ', 0) === '',
+  };
+}
+"""
+
+
+def test_expansion_survives_the_optimistic_to_settled_swap():
+    """Expanding a long prompt while its response streams must not collapse when
+    the turn settles and the server's copy replaces the optimistic message."""
+    playwright, browser, page = _page(1440)
+    try:
+        r = page.evaluate(_SETTLE_JS, _601)
+    finally:
+        browser.close()
+        playwright.stop()
+
+    # Pins the reason the viewport anchor key was unsuitable as a store key:
+    # it embeds the timestamp, so the previous design loses the state here.
+    assert r["anchorKeysDiffer"] is True, r
+    assert r["anchorKeyedSurvives"] is False, r
+    assert r["identitiesMatch"] is True, r
+    assert r["survivesSettle"] is True, r
+    # Same text with different attachments is a different message.
+    assert r["attachmentsDistinguish"] is True, r
+    # An empty identity is never a usable key.
+    assert r["blankIsNotAKey"] is True, r
