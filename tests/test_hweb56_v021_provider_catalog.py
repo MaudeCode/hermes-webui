@@ -1108,3 +1108,74 @@ def test_provider_card_reports_capped_rows_with_full_total(monkeypatch, tmp_path
 
     assert len(entry["models"]) == 1
     assert entry["models_total"] == 300
+
+
+def test_configured_models_in_the_overflow_bucket_are_not_re_added(monkeypatch, tmp_path):
+    """A configured model the picker parked in `extra_models` is still "seen".
+
+    `published_catalog_models()` returns only the visible rows, so deduping
+    against them alone let an allowlist larger than the cap append every hidden
+    entry back — re-flooding the card the cap exists to protect. This is the
+    case the first overflow test missed by using an allowlist that fitted
+    entirely in the visible bucket.
+    """
+    import api.profiles as profiles
+
+    visible = [{"id": f"acct/m{i}", "label": f"M{i}"} for i in range(25)]
+    hidden_ids = [f"acct/x{i}" for i in range(40)]
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(providers, "_PROVIDER_DISPLAY", {"router": "Ramp Router"})
+    monkeypatch.setattr(providers, "_PROVIDER_MODELS", {"router": []})
+    monkeypatch.setattr(providers, "_OAUTH_PROVIDERS", frozenset())
+    monkeypatch.setattr(providers, "plugin_model_provider_ids", lambda: set())
+    monkeypatch.setattr(providers, "is_plugin_model_provider", lambda _pid: False)
+    monkeypatch.setattr(providers, "_provider_has_key", lambda _pid, **_kw: True)
+    monkeypatch.setattr(providers, "published_catalog_is_available", lambda: True)
+    monkeypatch.setattr(providers, "published_catalog_models", lambda _pid: list(visible))
+    monkeypatch.setattr(providers, "published_catalog_model_total", lambda _pid: 65)
+    monkeypatch.setattr(
+        providers,
+        "_endpoint_advertised_model_ids",
+        lambda _pid: frozenset([m["id"] for m in visible] + hidden_ids),
+    )
+    monkeypatch.setattr(
+        providers,
+        "get_config",
+        lambda: {
+            "model": {},
+            "providers": {"router": {"models": [m["id"] for m in visible] + hidden_ids}},
+        },
+    )
+
+    entry = next(p for p in providers.get_providers()["providers"] if p["id"] == "router")
+
+    assert len(entry["models"]) == 25, "overflow entries were appended back as visible rows"
+    assert entry["models_total"] == 65
+
+
+def test_configured_model_outside_the_catalog_still_survives_the_wider_dedupe(monkeypatch, tmp_path):
+    """Widening the seen-set must not start swallowing genuinely new entries."""
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(providers, "_PROVIDER_DISPLAY", {"router": "Ramp Router"})
+    monkeypatch.setattr(providers, "_PROVIDER_MODELS", {"router": []})
+    monkeypatch.setattr(providers, "_OAUTH_PROVIDERS", frozenset())
+    monkeypatch.setattr(providers, "plugin_model_provider_ids", lambda: set())
+    monkeypatch.setattr(providers, "is_plugin_model_provider", lambda _pid: False)
+    monkeypatch.setattr(providers, "_provider_has_key", lambda _pid, **_kw: True)
+    monkeypatch.setattr(providers, "published_catalog_is_available", lambda: True)
+    monkeypatch.setattr(
+        providers, "published_catalog_models", lambda _pid: [{"id": "acct/a", "label": "A"}]
+    )
+    monkeypatch.setattr(providers, "published_catalog_model_total", lambda _pid: 1)
+    monkeypatch.setattr(providers, "_endpoint_advertised_model_ids", lambda _pid: frozenset({"acct/a"}))
+    monkeypatch.setattr(
+        providers,
+        "get_config",
+        lambda: {"model": {}, "providers": {"router": {"models": ["acct/a", "acct/brand-new"]}}},
+    )
+
+    entry = next(p for p in providers.get_providers()["providers"] if p["id"] == "router")
+    assert {m["id"] for m in entry["models"]} == {"acct/a", "acct/brand-new"}

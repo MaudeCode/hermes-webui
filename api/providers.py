@@ -42,6 +42,7 @@ from api.config import (
     _coerce_provider_cost_budget,
     _configured_model_ids,
     _custom_provider_slug_from_name,
+    _endpoint_advertised_model_ids,
     _get_label_for_model,
     _models_from_live_provider_ids,
     _pool_entry_payloads,
@@ -3784,28 +3785,43 @@ def get_providers() -> dict[str, Any]:
                 # not the active one (`@router:acct/only`), so an exact-id
                 # comparison would miss the match and append the raw id back —
                 # the very double-count this dedupe exists to prevent.
+                #
+                # `models` alone is not the right set to compare against: it
+                # holds only the rows the picker deemed VISIBLE, so a configured
+                # model parked in the overflow bucket looked unseen and was
+                # appended, re-flooding the card the cap exists to protect.
+                # `_endpoint_advertised_model_ids()` unions both buckets and is
+                # already profile-validated and memoised.
                 _seen_ids = {
                     _unqualified_model_id(m.get("id"))
                     for m in models
                     if isinstance(m, dict) and m.get("id")
                 }
+                try:
+                    _advertised = _endpoint_advertised_model_ids(pid)
+                except Exception:
+                    _advertised = None
+                if _advertised:
+                    _seen_ids.update(_unqualified_model_id(mid) for mid in _advertised)
                 _cfg_ids = (
                     list(cfg_models.keys())
                     if isinstance(cfg_models, dict)
                     else list(cfg_models) if isinstance(cfg_models, list) else []
                 )
-                models = models + [
+                _added = [
                     {"id": k, "label": k}
                     for k in _cfg_ids
                     if _unqualified_model_id(k) not in _seen_ids
                 ]
-                # Recompute models_total when config.yaml contributes additional
-                # entries on top of the live/static catalog. For non-Nous
-                # providers models_total still equals len(models); for Nous
-                # we keep the live count (which already includes any models
-                # surfaced in the curated featured slice).
+                models = models + _added
+                # Count what config CONTRIBUTED rather than re-deriving from
+                # len(models). Once the visible rows are capped, `models` is a
+                # subset of the catalog, so recomputing here reported the capped
+                # figure as the whole total and the "+N more" affordance
+                # under-counted. For Nous we keep the live count, which already
+                # includes anything in its curated featured slice.
                 if pid != "nous":
-                    models_total = len(models)
+                    models_total = (models_total or 0) + len(_added)
 
         is_self_hosted = pid in _SELF_HOSTED_PROVIDER_IDS
         try:
