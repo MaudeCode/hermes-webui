@@ -1491,6 +1491,73 @@ def _cron_output_content_window(text: str, limit: int = _CRON_OUTPUT_CONTENT_LIM
 
 
 
+def _cron_monitor_storage(monitor) -> dict:
+    """Split the single UI ``monitor`` string into the agent's stored pair.
+
+    ``cron.jobs`` stores ``monitor_script``/``monitor_url`` separately but the
+    agent's own ``cronjob`` tool advertises one ``monitor`` field whose shape
+    picks the transport. The WebUI mirrors that interface merge so a form value
+    lands in the same place as an agent-created job. Setting one source clears
+    the other, so switching transports never trips the mutual-exclusion
+    invariant; ``''`` clears both.
+    """
+    value = str(monitor or "").strip()
+    if not value:
+        return {"monitor_script": "", "monitor_url": ""}
+    if value.lower().startswith(("http://", "https://")):
+        return {"monitor_script": "", "monitor_url": value}
+    return {"monitor_script": value, "monitor_url": ""}
+
+
+def _cron_continuity_refs(context_from, continuity: bool) -> list:
+    """Fold the UI ``continuity`` flag into a ``context_from`` reference list.
+
+    ``continuity`` is sugar for ``context_from`` containing ``"self"`` (the
+    agent's ``_apply_continuity``): true adds it, false removes it, and every
+    other reference is preserved untouched.
+    """
+    if isinstance(context_from, str):
+        refs = [context_from.strip()] if context_from.strip() else []
+    else:
+        refs = [str(ref).strip() for ref in (context_from or []) if str(ref).strip()]
+    has_self = any(ref.lower() == "self" for ref in refs)
+    if continuity and not has_self:
+        refs.append("self")
+    elif not continuity and has_self:
+        refs = [ref for ref in refs if ref.lower() != "self"]
+    return refs
+
+
+# Per-job cron fields the WebUI forwards verbatim to cron.jobs. ``monitor`` and
+# ``continuity`` are deliberately absent: they are interface sugar translated by
+# _cron_job_field_updates into the keys the store actually persists.
+_CRON_PASSTHROUGH_JOB_FIELDS = ("script", "no_agent", "context_from", "reasoning_effort")
+
+
+def _cron_job_field_updates(body: dict, current_context_from=None) -> dict:
+    """Translate the WebUI cron form's job fields into cron.jobs kwargs.
+
+    A key absent from ``body`` is absent from the result so agent-side defaults
+    still apply and older agent builds never see an unknown kwarg. Clearing is
+    explicit and follows the agent's documented semantics: ``monitor: ''`` and
+    ``script: ''`` clear, ``context_from: []`` clears, ``continuity: false``
+    drops the self-reference.
+
+    ``current_context_from`` supplies the job's stored references so a
+    continuity-only update does not silently drop unrelated chained jobs.
+    """
+    updates = {}
+    for key in _CRON_PASSTHROUGH_JOB_FIELDS:
+        if key in body:
+            updates[key] = body[key]
+    if "monitor" in body:
+        updates.update(_cron_monitor_storage(body["monitor"]))
+    if "continuity" in body:
+        refs = updates["context_from"] if "context_from" in updates else current_context_from
+        updates["context_from"] = _cron_continuity_refs(refs, bool(body["continuity"]))
+    return updates
+
+
 def _cron_job_for_api(job: dict) -> dict:
     """Return a cron job payload with optional UI settings normalized.
 
@@ -1501,10 +1568,19 @@ def _cron_job_for_api(job: dict) -> dict:
     ``toast_notifications`` is a WebUI preference for completion toasts. Legacy
     jobs default to enabled so existing behavior is preserved unless a job is
     explicitly muted.
+
+    ``monitor`` and ``continuity`` are projected back from the stored
+    ``monitor_script``/``monitor_url`` pair and the ``context_from`` list so the
+    form reads back exactly the shape it writes. The stored keys are left in
+    place alongside them.
     """
     payload = dict(job or {})
     payload.setdefault("profile", None)
     payload["toast_notifications"] = payload.get("toast_notifications") is not False
+    payload["monitor"] = payload.get("monitor_url") or payload.get("monitor_script") or ""
+    payload["continuity"] = any(
+        str(ref).strip().lower() == "self" for ref in (payload.get("context_from") or [])
+    )
     return payload
 
 
@@ -26932,6 +27008,12 @@ def _handle_cron_create(handler, body):
             )
         if not toast_notifications:
             post_create_updates["toast_notifications"] = False
+        create_kwargs = _cron_job_field_updates(body)
+        # ``repeat`` is create-only: the store keeps it as a
+        # {"times", "completed"} dict afterwards, so an update carrying a bare
+        # integer would clobber the run counter.
+        if body.get("repeat") is not None:
+            create_kwargs["repeat"] = body["repeat"]
         job = create_job(
             prompt=body["prompt"],
             schedule=body["schedule"],
@@ -26940,6 +27022,7 @@ def _handle_cron_create(handler, body):
             skills=body.get("skills") or [],
             model=requested_model,
             provider=requested_provider,
+            **create_kwargs,
         )
         if post_create_updates:
             job = update_job(job["id"], post_create_updates) or job
@@ -26979,11 +27062,22 @@ def _handle_cron_update(handler, body):
                 updates[k] = _normalize_cron_profile_value(v)
             elif k in ("model", "provider"):
                 updates[k] = v if v else None
+            elif k in ("monitor", "continuity", "repeat"):
+                continue  # translated below, or create-only (repeat)
             elif v is not None:
                 updates[k] = v
+        current_context_from = None
+        if "continuity" in body and "context_from" not in body:
+            from cron.jobs import get_job
+
+            current_context_from = (get_job(body["job_id"]) or {}).get("context_from")
+        updates.update(_cron_job_field_updates(body, current_context_from))
     except ValueError as e:
         return bad(handler, str(e))
-    job = update_job(body["job_id"], updates)
+    try:
+        job = update_job(body["job_id"], updates)
+    except ValueError as e:
+        return bad(handler, str(e))
     if not job:
         return bad(handler, "Job not found", 404)
     return j(handler, {"ok": True, "job": _cron_job_for_api(job)})

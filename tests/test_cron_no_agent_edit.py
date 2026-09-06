@@ -45,13 +45,12 @@ def test_open_cron_edit_plumbs_no_agent_and_script_to_form():
     assert "script: job.script || ''" in body
 
 
-def test_no_agent_form_hides_prompt_and_shows_readonly_script_path():
+def test_no_agent_form_hides_prompt_and_shows_script_path():
     body = _function_body("_renderCronForm")
     assert "no_agent" in body and "script" in body
     assert "const isNoAgent = !!no_agent;" in body
     assert "const promptBlock = isNoAgent ? '' :" in body
     assert 'id="cronFormScript"' in body
-    assert "readonly autocomplete=\"off\"" in body
     assert "cron_script_path_hint" in body
     assert "const skillsBlock = isNoAgent ? '' :" in body
     assert "if (!isNoAgent) _renderCronSkillTags();" in body
@@ -59,7 +58,7 @@ def test_no_agent_form_hides_prompt_and_shows_readonly_script_path():
 
 def test_save_cron_form_keeps_agent_prompt_required_but_skips_no_agent_edits():
     body = _function_body("saveCronForm")
-    assert "const isNoAgent = !!(_cronPreFormDetail && _cronPreFormDetail.no_agent);" in body
+    assert "noAgentEl ? !!noAgentEl.checked : !!(_cronPreFormDetail && _cronPreFormDetail.no_agent)" in body
     assert "if(!isNoAgent && !prompt)" in body
     assert "cron_prompt_required" in body
     assert "if (!isNoAgent) updates.prompt = prompt;" in body

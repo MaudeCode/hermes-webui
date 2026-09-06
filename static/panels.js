@@ -1550,6 +1550,10 @@ function duplicateCurrentCron(){
     toast_notifications: job.toast_notifications !== false,
     no_agent: !!job.no_agent,
     script: job.script || '',
+    monitor: job.monitor || '',
+    continuity: !!job.continuity,
+    context_from: Array.isArray(job.context_from) ? job.context_from : [],
+    reasoning_effort: job.reasoning_effort || '',
     model: job.model || '',
     provider: job.provider || '',
     isEdit: false,
@@ -1611,6 +1615,10 @@ function openCronEdit(job){
     toast_notifications: job.toast_notifications !== false,
     no_agent: !!job.no_agent,
     script: job.script || '',
+    monitor: job.monitor || '',
+    continuity: !!job.continuity,
+    context_from: Array.isArray(job.context_from) ? job.context_from : [],
+    reasoning_effort: job.reasoning_effort || '',
     model: job.model || '',
     provider: job.provider || '',
     isEdit: true,
@@ -1623,7 +1631,111 @@ function openCronEdit(job){
   loadCronProfiles().then(()=>_refreshCronProfileSelect(job.profile || '')).catch(()=>{});
 }
 
-function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notifications=true, no_agent=false, script='', model='', provider='', isEdit }){
+// Canonical Hermes reasoning levels; cron.jobs validates the same grammar and
+// rejects anything else, so this list must stay in step with it.
+const CRON_REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+
+// The per-job knobs from the agent's cronjob schema. They are grouped under a
+// collapsed <details> so the common create path (name/schedule/prompt/deliver)
+// stays as short as it is today — a visible control costs attention on every
+// visit, and these are set once for a minority of jobs.
+function _cronFormAdvancedHtml({ isNoAgent, scriptRow, monitor, continuity, context_from, reasoning_effort, repeat, isEdit, editingId }){
+  // Open whenever it holds something, so a re-render never hides a set field.
+  const isOpen = !!(isNoAgent || monitor || continuity || reasoning_effort || repeat || (Array.isArray(context_from) && context_from.length));
+  const selected = (Array.isArray(context_from) ? context_from : [])
+    .map(id => String(id).trim())
+    .filter(id => id && id.toLowerCase() !== 'self');
+  const chainable = (_cronList || []).filter(job => job && job.id && job.id !== editingId);
+  const chainOptions = chainable.map(job =>
+    `<option value="${esc(job.id)}"${selected.includes(job.id) ? ' selected' : ''}>${esc(job.name || job.id)}</option>`
+  ).join('');
+  const effortOptions = [`<option value="">${esc(t('cron_reasoning_effort_default') || 'Default (follow config)')}</option>`]
+    .concat(CRON_REASONING_EFFORTS.map(level =>
+      `<option value="${level}"${level === reasoning_effort ? ' selected' : ''}>${esc(level)}</option>`
+    )).join('');
+  return `
+        <details class="detail-form-advanced cron-form-advanced"${isOpen ? ' open' : ''}>
+          <summary>${esc(t('cron_advanced_label') || 'Advanced')}</summary>
+          ${isNoAgent ? '' : scriptRow}
+          <div class="detail-form-row">
+            <label for="cronFormNoAgent">${esc(t('cron_no_agent_label') || 'Script-only job')}</label>
+            <label class="detail-form-check" for="cronFormNoAgent">
+              <input type="checkbox" id="cronFormNoAgent" ${isNoAgent ? 'checked' : ''} onchange="_onCronFormNoAgentToggle()">
+              <span>${esc(t('cron_no_agent_hint') || 'Run the script and deliver its stdout verbatim, with no LLM. Requires a script path.')}</span>
+            </label>
+          </div>
+          <div class="detail-form-row">
+            <label for="cronFormMonitor">${esc(t('cron_monitor_label') || 'Monitor source')}</label>
+            <input type="text" id="cronFormMonitor" value="${esc(monitor || '')}" autocomplete="off" placeholder="${esc(t('cron_monitor_placeholder') || 'https://example.com/status  —  or  —  check-feed.sh')}">
+            <div class="detail-form-hint">${esc(isNoAgent ? (t('cron_monitor_no_agent_hint') || 'Unavailable on script-only jobs: a monitor exists to wake or suppress the agent.') : (t('cron_monitor_hint') || 'Optional http(s) URL or script path checked each tick. Identical output skips the run; changed output wakes the agent with a diff.'))}</div>
+          </div>
+          <div class="detail-form-row">
+            <label for="cronFormContinuity">${esc(t('cron_continuity_label') || 'Continuity')}</label>
+            <label class="detail-form-check" for="cronFormContinuity">
+              <input type="checkbox" id="cronFormContinuity" ${continuity ? 'checked' : ''}${isNoAgent ? ' disabled' : ''}>
+              <span>${esc(t('cron_continuity_hint') || "Each run sees this job's own previous output, so it can dedupe and continue where it left off.")}</span>
+            </label>
+          </div>
+          <div class="detail-form-row">
+            <label for="cronFormContextFrom">${esc(t('cron_context_from_label') || 'Context from jobs')}</label>
+            ${chainOptions
+              ? `<select id="cronFormContextFrom" multiple size="${Math.min(chainable.length, 5)}"${isNoAgent ? ' disabled' : ''}>${chainOptions}</select>`
+              : `<select id="cronFormContextFrom" multiple size="1" disabled></select>`}
+            <div class="detail-form-hint">${esc(chainOptions ? (t('cron_context_from_hint') || "Inject those jobs' most recent output as context each run (job A collects, job B processes).") : (t('cron_context_from_empty_hint') || 'No other scheduled jobs to chain from yet.'))}</div>
+          </div>
+          <div class="detail-form-row">
+            <label for="cronFormReasoningEffort">${esc(t('cron_reasoning_effort_label') || 'Reasoning effort')}</label>
+            <select id="cronFormReasoningEffort"${isNoAgent ? ' disabled' : ''}>${effortOptions}</select>
+            <div class="detail-form-hint">${esc(isNoAgent ? (t('cron_reasoning_effort_no_agent_hint') || 'Unused on script-only jobs: there is no LLM call to configure.') : (t('cron_reasoning_effort_hint') || 'Pin this job to one reasoning level, overriding the global and per-model settings at run time.'))}</div>
+          </div>
+          ${isEdit ? '' : `
+          <div class="detail-form-row">
+            <label for="cronFormRepeat">${esc(t('cron_repeat_label') || 'Repeat count')}</label>
+            <input type="number" id="cronFormRepeat" min="1" step="1" value="${esc(String(repeat || ''))}" autocomplete="off" placeholder="${esc(t('cron_repeat_placeholder') || 'Leave blank for the default')}">
+            <div class="detail-form-hint">${esc(t('cron_repeat_hint') || 'How many times to run before the job retires. Blank keeps the default: once for a one-shot, forever for a recurring schedule. Set at creation only.')}</div>
+          </div>`}
+        </details>`;
+}
+
+// Snapshot of everything the cron form currently holds, in _renderCronForm's
+// argument shape. One reader for the fields, shared by the no_agent re-render
+// and by saveCronForm, so the two can never disagree about what was entered.
+function _cronFormValues({ isEdit }){
+  const val = (id) => { const el = $(id); return el ? el.value : ''; };
+  const checked = (id) => { const el = $(id); return !!(el && el.checked); };
+  const ctxEl = $('cronFormContextFrom');
+  const modelEl = $('cronFormModel');
+  return {
+    name: val('cronFormName').trim(),
+    schedule: val('cronFormSchedule').trim(),
+    prompt: val('cronFormPrompt'),
+    deliver: val('cronFormDeliver') || 'local',
+    profile: val('cronFormProfile'),
+    toast_notifications: $('cronFormToastNotifications') ? checked('cronFormToastNotifications') : true,
+    no_agent: checked('cronFormNoAgent'),
+    script: val('cronFormScript').trim(),
+    monitor: val('cronFormMonitor').trim(),
+    continuity: checked('cronFormContinuity'),
+    context_from: ctxEl ? Array.from(ctxEl.selectedOptions || []).map(o => o.value) : [],
+    reasoning_effort: val('cronFormReasoningEffort'),
+    repeat: val('cronFormRepeat').trim(),
+    model: modelEl ? modelEl.value : '',
+    provider: (modelEl && modelEl.selectedOptions && modelEl.selectedOptions[0]
+      ? (modelEl.selectedOptions[0].dataset.provider
+         || (modelEl.selectedOptions[0].parentElement && modelEl.selectedOptions[0].parentElement.dataset.provider)
+         || '')
+      : ''),
+    isEdit,
+  };
+}
+
+// no_agent reshapes the form (prompt/skills vs script), so re-render it with
+// whatever the user has typed so far rather than trying to patch the DOM.
+function _onCronFormNoAgentToggle(){
+  _renderCronForm(_cronFormValues({ isEdit: !!_editingCronId }));
+}
+
+function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notifications=true, no_agent=false, script='', monitor='', continuity=false, context_from=[], reasoning_effort='', repeat='', model='', provider='', isEdit }){
   const title = $('taskDetailTitle');
   const body = $('taskDetailBody');
   const empty = $('taskDetailEmpty');
@@ -1636,12 +1748,16 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
           <label for="cronFormPrompt">${esc(t('cron_prompt_label') || 'Prompt')}</label>
           <textarea id="cronFormPrompt" rows="6" placeholder="${esc(t('cron_prompt_placeholder') || 'Must be self-contained')}" required>${esc(prompt || '')}</textarea>
         </div>`;
-  const scriptBlock = isNoAgent ? `
+  const scriptRow = `
         <div class="detail-form-row">
           <label for="cronFormScript">${esc(t('cron_script_path_label') || 'Script path')}</label>
-          <input type="text" id="cronFormScript" value="${esc(script || '')}" readonly autocomplete="off">
-          <div class="detail-form-hint">${esc(t('cron_script_path_hint') || 'Resolved under ~/.hermes/scripts/ unless an absolute path. Edit the script file on the server to change behavior.')}</div>
-        </div>` : '';
+          <input type="text" id="cronFormScript" value="${esc(script || '')}" autocomplete="off" placeholder="${esc(t('cron_script_path_placeholder') || 'check-feed.sh')}">
+          <div class="detail-form-hint">${esc(isNoAgent ? (t('cron_script_path_hint') || 'Resolved under ~/.hermes/scripts/ unless an absolute path. Its stdout IS the job output.') : (t('cron_script_context_hint') || 'Optional. Runs each tick; its stdout is injected into the prompt as context. Resolved under ~/.hermes/scripts/ unless an absolute path.'))}</div>
+        </div>`;
+  // A script job's script IS the job, so it sits with the primary fields;
+  // for an agent job it is optional prompt context and lives under Advanced.
+  const scriptBlock = isNoAgent ? scriptRow : '';
+  const advancedBlock = _cronFormAdvancedHtml({ isNoAgent, scriptRow, monitor, continuity, context_from, reasoning_effort, repeat, isEdit, editingId: _editingCronId });
   const skillsBlock = isNoAgent ? '' : `
         <div class="detail-form-row">
           <label for="cronFormSkillSearch">${esc(t('cron_skills_label') || 'Skills')}</label>
@@ -1733,6 +1849,7 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
           </label>
         </div>
         ${skillsBlock}
+        ${advancedBlock}
         <div id="cronFormError" class="detail-form-error" style="display:none"></div>
       </form>
     </div>`;
@@ -1923,7 +2040,8 @@ async function saveCronForm(){
   const toastEl=$('cronFormToastNotifications');
   const errEl=$('cronFormError');
   if(!schEl||!errEl) return;
-  const isNoAgent = !!(_cronPreFormDetail && _cronPreFormDetail.no_agent);
+  const noAgentEl=$('cronFormNoAgent');
+  const isNoAgent = noAgentEl ? !!noAgentEl.checked : !!(_cronPreFormDetail && _cronPreFormDetail.no_agent);
   if(!isNoAgent && !promptEl) return;
   const name=(nameEl?nameEl.value:'').trim();
   const schedule=schEl.value.trim();
@@ -1931,9 +2049,29 @@ async function saveCronForm(){
   const deliver=delivEl?delivEl.value:'local';
   const profile=profileEl?profileEl.value:'';
   const toastNotifications=toastEl?!!toastEl.checked:true;
+  const scriptEl=$('cronFormScript');
+  const script=scriptEl?scriptEl.value.trim():'';
+  // `monitor` is one string the server splits into monitor_url/monitor_script;
+  // a boolean here would be silently wrong against the agent's schema.
+  const monitorEl=$('cronFormMonitor');
+  const monitor=monitorEl?String(monitorEl.value).trim():'';
+  // continuity/context_from/reasoning_effort are merely inert on a script-only
+  // job, not rejected, so they are read as-is rather than force-cleared.
+  const continuityEl=$('cronFormContinuity');
+  const continuity=!!(continuityEl && continuityEl.checked);
+  const ctxEl=$('cronFormContextFrom');
+  const contextFrom=ctxEl?Array.from(ctxEl.selectedOptions||[]).map(o=>o.value).filter(Boolean):[];
+  const effortEl=$('cronFormReasoningEffort');
+  const reasoningEffort=effortEl?effortEl.value:'';
+  const repeatEl=$('cronFormRepeat');
+  const repeatRaw=repeatEl?repeatEl.value.trim():'';
   errEl.style.display='none';
   if(!schedule){errEl.textContent=t('cron_schedule_required_example');errEl.style.display='';return;}
   if(!isNoAgent && !prompt){errEl.textContent=t('cron_prompt_required');errEl.style.display='';return;}
+  if(isNoAgent && !script){errEl.textContent=t('cron_no_agent_script_required')||'A script-only job needs a script path.';errEl.style.display='';return;}
+  // The agent rejects a monitor on a no_agent job; never submit both set.
+  if(isNoAgent && monitor){errEl.textContent=t('cron_monitor_no_agent_conflict')||'A monitor cannot be combined with a script-only job.';errEl.style.display='';return;}
+  if(repeatRaw && !(Number(repeatRaw)>=1)){errEl.textContent=t('cron_repeat_invalid')||'Repeat count must be 1 or more.';errEl.style.display='';return;}
   try{
     const modelEl = $('cronFormModel');
     const modelLoaded = !!(modelEl && modelEl.dataset.loaded === '1');
@@ -1943,6 +2081,16 @@ async function saveCronForm(){
       if (!isNoAgent) updates.prompt = prompt;
       if (name) updates.name = name;
       if (deliver) updates.deliver = deliver;
+      // Always sent on edit so the agent's documented clearing semantics are
+      // reachable: '' clears script/monitor, [] clears context_from, false
+      // turns continuity off. `repeat` is create-only (the store keeps it as a
+      // {times, completed} record once the job exists).
+      updates.script = script;
+      updates.no_agent = isNoAgent;
+      updates.monitor = monitor;
+      updates.continuity = continuity;
+      updates.context_from = contextFrom;
+      updates.reasoning_effort = reasoningEffort;
       if (modelEl) {
         if (selectedModel && modelLoaded) {
           const modelState = (typeof _modelStateForSelect === 'function')
@@ -1970,6 +2118,15 @@ async function saveCronForm(){
     if(_cronIsDuplicate) body.enabled=false;
     if(name)body.name=name;
     if(_cronSelectedSkills.length)body.skills=_cronSelectedSkills;
+    // Omitted when unset so a job created without these fields sends exactly
+    // the body it sends today and agent-side defaults still apply.
+    if(script)body.script=script;
+    if(isNoAgent)body.no_agent=true;
+    if(monitor)body.monitor=monitor;
+    if(continuity)body.continuity=true;
+    if(contextFrom.length)body.context_from=contextFrom;
+    if(reasoningEffort)body.reasoning_effort=reasoningEffort;
+    if(repeatRaw)body.repeat=Number(repeatRaw);
     if (modelEl && modelLoaded) {
       if (selectedModel) {
         const modelState = (typeof _modelStateForSelect === 'function')
