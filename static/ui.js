@@ -1370,6 +1370,98 @@ const _userRowIntrinsicHeightBySessionIdx=Object.create(null);
 function _clearUserRowIntrinsicHeightCache(){
   for(const k in _userRowIntrinsicHeightBySessionIdx) delete _userRowIntrinsicHeightBySessionIdx[k];
 }
+// HWEB-3: which long user messages the reader has opened. renderMessages only
+// recycles DOM rows inside the virtual-scroll path (_msgNodeRecycleEnabled), so
+// every ORDINARY rerender — stream settle, refreshSession, a handoff rebuild —
+// builds fresh nodes and cannot read the state off the old row. Own it here.
+//
+// Keyed by session_id AND the message's CONTENT, deliberately not by position
+// and deliberately not by timestamp. Three things this must survive, each of
+// which broke a previous version of this store:
+//
+//  1. Ordinary rerenders. The neighbouring height cache is keyed by index and
+//     released whenever the virtual-height cache is dropped — which happens on
+//     ordinary transcript churn, not just session changes — so borrowing that
+//     lifecycle erased the state on the exact settle rerender it must survive.
+//  2. Index reuse. Clear conversation, undo and edit/truncate shrink the
+//     transcript without changing session_id, so a later message can inherit a
+//     freed index and render itself expanded.
+//  3. The optimistic → settled swap. A just-sent message carries a client
+//     `Date.now()` `_ts` (messages.js), while the settled message that replaces
+//     it on completion carries the server's timestamp; `_ts` is not in
+//     `_EPHEMERAL_TURN_FIELDS`, so it is not carried forward. Any ts-bearing
+//     key therefore changes under the reader precisely when a freshly sent
+//     prompt settles — collapsing the message they just opened.
+//
+// So this cannot reuse `_messageViewportAnchorKeyForMessage()` verbatim: that
+// key embeds the timestamp, and the anchor system copes only because its
+// COMPARISON is tolerant (`!anchorTs || !candidateTs || equal`), which a plain
+// string key has no way to express. Role + attachment count + the first 160
+// normalized characters of the displayed text is stable across all three.
+// Two identical prompts in one session share a key, which merely means they
+// open together. The session-change release below is hygiene, not correctness.
+//
+// Lifetime: this store has NO cache-tied release, deliberately. The state has
+// two representations — this map, and the same state serialized as
+// data-msg-expanded / aria-expanded inside `_sessionHtmlCache`'s transcript
+// HTML. The invariant that matters is one-directional: the store must never be
+// emptied while cached markup encoding it survives, because the cache fast path
+// reinstalls that markup verbatim and the reader gets an expanded transcript
+// the store denies. Clearing the store on session switch broke exactly that.
+// Clearing it alongside the HTML cache would fix that case but break the other
+// direction, since `clearMessageRenderCache()` fires on ordinary preference
+// changes (render mode, TPS, user markdown) — churn this state is required to
+// survive. Keeping it is consistent both ways: if the cached HTML is dropped,
+// the next render rebuilds from this store and agrees; if it is served, this
+// store still agrees. Identity keys are session-scoped and content-derived, so
+// nothing leaks across sessions or into a reused index. Bounded by eviction
+// below rather than by a lifecycle hook.
+const USER_MSG_EXPANDED_MAX=200;
+const _userMsgExpandedByKey=Object.create(null);
+// Hashes the EXACT displayed text — complete, and not whitespace-normalized.
+// Both halves of that are load-bearing, and each was learned the hard way:
+//
+//   * Not a prefix. #6999 already burned this repo once, where a length+head+
+//     tail clip "made same-length middle-only edits produce identical
+//     signatures — a deterministic stale-cache collision".
+//   * Not whitespace-normalized. `_userMessageNeedsCollapse()` counts raw
+//     newlines, so an 8-line prompt is short while the same text plus one blank
+//     line is collapsible — yet `\s+`-normalizing maps both to one key.
+//
+// A collision here is worse than shared state: the `!collapsible` cleanup in
+// renderMessages DELETES the entry, so the short twin silently collapses the
+// long message the reader had open. Length rides alongside the digest so a
+// short message can never share an identity with a long one whatever the hash
+// does. (`_compressionMessageAnchorKey` normalizes because its comparison is
+// deliberately fuzzy; an exact-equality key needs the opposite.)
+function _userMessageExpandIdentity(rawText, attachmentCount){
+  const text=String(rawText==null?'':rawText);
+  if(!text.trim()) return '';
+  return 'u|'+(Number(attachmentCount)||0)+'|'+text.length+'|'+_worklogDetailHashKey(text);
+}
+function _userMessageExpandKey(identity){
+  const id=String(identity||'');
+  if(!id) return '';
+  const sid=String((typeof S!=='undefined'&&S.session&&S.session.session_id)||'');
+  return sid?sid+':'+id:'';
+}
+function _clearUserMessageExpandState(){
+  for(const k in _userMsgExpandedByKey) delete _userMsgExpandedByKey[k];
+}
+function _userMessageIsExpanded(identity){
+  const k=_userMessageExpandKey(identity);
+  return !!k&&_userMsgExpandedByKey[k]===true;
+}
+function _setUserMessageExpanded(identity, expanded){
+  const k=_userMessageExpandKey(identity);
+  if(!k) return;
+  if(!expanded){ delete _userMsgExpandedByKey[k]; return; }
+  // Re-insert so the key moves to the back of the eviction order on re-open.
+  delete _userMsgExpandedByKey[k];
+  _userMsgExpandedByKey[k]=true;
+  const keys=Object.keys(_userMsgExpandedByKey);
+  for(let i=0;i<keys.length-USER_MSG_EXPANDED_MAX;i++) delete _userMsgExpandedByKey[keys[i]];
+}
 function _rememberUserRowIntrinsicHeight(sessionMsgIdx, height){
   const key=Number(sessionMsgIdx);
   if(!Number.isFinite(key)||!(height>0)) return;
@@ -9235,6 +9327,85 @@ function copyStatusSessionId(btn){
     btn.classList.add('copied');
     setTimeout(()=>{btn.innerHTML=orig;btn.classList.remove('copied');},1500);
   }).catch(()=>showToast(t('copy_failed')));
+}
+// ── HWEB-3: progressive disclosure for long user messages ──
+// A pasted prompt or log dump otherwise dominates the transcript. Anything past
+// 600 characters OR 8 lines renders clipped to the collapsed height with a quiet
+// fade and a keyboard-accessible disclosure button. The line budget mirrors
+// --msg-collapse-lines in style.css — change both together.
+const USER_MSG_COLLAPSE_CHARS=600;
+const USER_MSG_COLLAPSE_LINES=8;
+function _userMessageNeedsCollapse(text){
+  const s=String(text==null?'':text);
+  if(s.length>USER_MSG_COLLAPSE_CHARS) return true;
+  let lines=1;
+  for(let i=0;i<s.length;i++){
+    if(s.charCodeAt(i)===10&&++lines>USER_MSG_COLLAPSE_LINES) return true;
+  }
+  return false;
+}
+// The clip wrapper — not .msg-body — carries the fade, so the bubble's own
+// background/border stay solid in every skin instead of fading to the page.
+// The button carries data-i18n so applyLocaleToDOM() re-translates an already
+// rendered control when the reader changes Language, instead of it keeping the
+// previous language until the transcript happens to rerender.
+function _userMessageBodyHtml(bodyHtml, rawText, rawIdx, expanded){
+  if(!_userMessageNeedsCollapse(rawText)) return `<div class="msg-body">${bodyHtml}</div>`;
+  const clipId=`msgClip${rawIdx}`;
+  const key=expanded?'show_less_message':'show_full_message';
+  return `<div class="msg-body"><div class="msg-clip" id="${clipId}">${bodyHtml}</div></div>`
+    +`<button type="button" class="msg-expand-btn" aria-expanded="${expanded?'true':'false'}"`
+    +` aria-controls="${clipId}" data-i18n="${key}"`
+    +` onclick="toggleMessageExpand(this)">${esc(t(key))}</button>`;
+}
+function toggleMessageExpand(btn){
+  const row=btn&&btn.closest?btn.closest('.msg-row'):null;
+  if(!row) return;
+  const expanded=row.dataset.msgExpanded==='1';
+  const key=expanded?'show_full_message':'show_less_message';
+  if(expanded) delete row.dataset.msgExpanded; else row.dataset.msgExpanded='1';
+  _setUserMessageExpanded(row.dataset.msgExpandKey, !expanded);
+  btn.setAttribute('aria-expanded',expanded?'false':'true');
+  btn.setAttribute('data-i18n',key);
+  btn.textContent=t(key);
+  // Drop this session's cached transcript HTML: it was serialized with the old
+  // disclosure state, and the cache fast path in renderMessages reinstalls it
+  // verbatim when the reader navigates away and back — reopening a message they
+  // just collapsed. Same invalidation the transparent-reveal disclosure does.
+  try{
+    const sid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||'';
+    if(sid&&typeof _sessionHtmlCache!=='undefined'&&_sessionHtmlCache&&typeof _sessionHtmlCache.delete==='function'){
+      _sessionHtmlCache.delete(sid);
+    }
+  }catch(_){ }
+  // Deliberately no scrollTop write: the bubble grows and shrinks downward, so
+  // the row's top edge — and the reader's scroll offset — never move. Any
+  // "helpful" re-anchor here is exactly the viewport jump this must not cause.
+}
+// Clipping is visual only: a link or button below the eighth line stays in the
+// tab order, so a keyboard reader could focus a control inside the hidden
+// overflow. Open the message when focus actually lands past the visible
+// preview, which keeps the focused control on screen and the announced
+// aria-expanded honest. Focus inside the visible preview changes nothing.
+if(typeof document!=='undefined'){
+  document.addEventListener('focusin',(e)=>{
+    const target=e.target;
+    if(!target||!target.closest) return;
+    const clip=target.closest('.msg-clip');
+    if(!clip) return;
+    const row=clip.closest('.msg-row');
+    if(!row||row.dataset.msgExpanded==='1') return;
+    // The browser scrolls a clipped box internally to reveal the focus target
+    // BEFORE focusin fires, so a plain "is it visible now?" test always says
+    // yes. A non-zero scrollTop is the reliable tell that it had to do that;
+    // keep the rect test for browsers that leave the box unscrolled.
+    const r=target.getBoundingClientRect();
+    const c=clip.getBoundingClientRect();
+    if(clip.scrollTop<=0&&r.bottom<=c.bottom+1&&r.top>=c.top-1) return;
+    clip.scrollTop=0;
+    const btn=row.querySelector('.msg-expand-btn');
+    if(btn) toggleMessageExpand(btn);
+  });
 }
 function copyMsg(btn){
   const row=btn.closest('[data-raw-text]');
@@ -18362,13 +18533,30 @@ function renderMessages(options){
       let row=_msgNodeRecycleEnabled?_recycleStash.get(rawIdx):null;
       if(row&&(!row.classList.contains('msg-row')||row.classList.contains('assistant-turn'))) row=null;
       const newRawText=String(displayContent).trim();
-      const nextRowHtml=`${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`;
+      // HWEB-3: read the disclosure state from its owning store (NOT from the
+      // recycled row — rows are only recycled inside the virtual-scroll path, so
+      // an ordinary rerender has no old row to read) and bake it into the markup,
+      // so a stream settle or refresh never re-collapses what the reader opened.
+      // The typeof guards keep renderMessages runnable in the node test harnesses
+      // that extract it without these helpers (they stub every collaborator by name).
+      const sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
+      const messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
+      const expandIdentity=typeof _userMessageExpandIdentity==='function'
+        ? _userMessageExpandIdentity(newRawText, (m.attachments&&m.attachments.length)||0) : '';
+      const collapsible=typeof _userMessageNeedsCollapse==='function'&&_userMessageNeedsCollapse(newRawText);
+      const wasExpanded=collapsible&&typeof _userMessageIsExpanded==='function'
+        &&_userMessageIsExpanded(expandIdentity);
+      const userBodyHtml=typeof _userMessageBodyHtml==='function'
+        ? _userMessageBodyHtml(bodyHtml,newRawText,rawIdx,wasExpanded)
+        : `<div class="msg-body">${bodyHtml}</div>`;
+      const nextRowHtml=`${filesHtml}${userBodyHtml}${footHtml}`;
       if(row){
         row.className='msg-row';
         row.id=_userMessageDomId(rawIdx);
         row.dataset.msgIdx=rawIdx;
-        row.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
-        row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
+        row.dataset.sessionMsgIdx=sessionMsgIdx;
+        row.dataset.messageAnchorKey=messageAnchorKey;
+        row.dataset.msgExpandKey=expandIdentity;
         row.dataset.role='user';
         delete row.dataset.editing;
         if(row.dataset.rawText!==newRawText||row.innerHTML!==nextRowHtml){
@@ -18380,11 +18568,20 @@ function renderMessages(options){
         row.className='msg-row';
         row.id=_userMessageDomId(rawIdx);
         row.dataset.msgIdx=rawIdx;
-        row.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
-        row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
+        row.dataset.sessionMsgIdx=sessionMsgIdx;
+        row.dataset.messageAnchorKey=messageAnchorKey;
+        row.dataset.msgExpandKey=expandIdentity;
         row.dataset.role='user';
         row.dataset.rawText=newRawText;
         row.innerHTML=nextRowHtml;
+      }
+      // Keep the row attribute (the CSS hook) and the store in agreement, and
+      // drop a stale flag when an edit made the text short enough that no
+      // control renders at all.
+      if(wasExpanded) row.dataset.msgExpanded='1';
+      else{
+        delete row.dataset.msgExpanded;
+        if(!collapsible&&typeof _setUserMessageExpanded==='function') _setUserMessageExpanded(expandIdentity,false);
       }
       // Reserve this user row's real off-screen height up front so a wipe-and-rebuild
       // does not collapse scrollHeight to the flat 96px estimate (the collapse that

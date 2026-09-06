@@ -6094,9 +6094,12 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
 @media (max-width:700px){.compression-recovery-card{flex-direction:column;align-items:stretch;margin-left:0;}.compression-recovery-action{width:100%;}}
 .assistant-segment-anchor { display: none; }
 
-/* ── Classic conversation layout: user right, half-width; assistant left ── */
-.msg-row[data-role="user"] { align-self: flex-end; max-width: 60%; }
-@media (max-width: 900px) { .msg-row[data-role="user"] { max-width: 78%; } }
+/* ── Classic conversation layout: user right, assistant left ── */
+/* HWEB-3: 80% of the shared reading column, not 60% — a normal question still
+   reads compact and right-aligned, but a paragraph stops wrapping three times
+   more than the answer beside it. Long prompts are handled by the collapse
+   below, not by squeezing the column. */
+.msg-row[data-role="user"] { align-self: flex-end; max-width: 80%; }
 @media (max-width: 600px) { .msg-row[data-role="user"] { max-width: 90%; } }
 /* Hide the entire "empty tool-anchor" assistant row (content='' with
    tool_calls). renderMessages keeps it in the DOM so tool cards can anchor
@@ -6167,6 +6170,44 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
   background: var(--user-selection-bg);
   color: var(--user-selection-text);
 }
+/* ── HWEB-3: long user messages collapse behind a disclosure ──
+   The clip wrapper is what gets masked, so the bubble's own background/border
+   stay solid in every skin (several skins repaint .msg-body with !important).
+   --msg-collapse-lines mirrors USER_MSG_COLLAPSE_LINES in ui.js. */
+.msg-row[data-role="user"] .msg-clip {
+  --msg-collapse-lines: 8;
+  max-height: calc(var(--msg-collapse-lines) * var(--message-body-line-height) * 1em);
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 2.5em), transparent);
+  mask-image: linear-gradient(180deg, #000 calc(100% - 2.5em), transparent);
+}
+.msg-row[data-role="user"][data-msg-expanded="1"] .msg-clip {
+  max-height: none;
+  overflow: visible;
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+.msg-expand-btn {
+  display: block;
+  margin-left: auto; /* the bubble is right-aligned; the control follows it */
+  margin-top: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--border2);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.msg-expand-btn:hover { color: var(--text); border-color: var(--accent-bg-strong); background: var(--hover-bg); }
+.msg-expand-btn:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+/* Editing swaps the bubble for a textarea — the disclosure has nothing to open. */
+.msg-row[data-editing="1"] .msg-expand-btn { display: none; }
+/* Meet the 44px mobile touch-target minimum under the mobile breakpoint. */
+@media (max-width: 700px) { .msg-expand-btn { min-height: 44px; padding: 8px 14px; } }
 .msg-row[data-role="user"] .msg-body code { color: var(--user-bubble-text); background: rgba(0,0,0,.1); }
 .msg-row[data-role="user"] .msg-body a { color: var(--user-bubble-text); text-decoration: underline; }
 .msg-row[data-role="user"] .msg-files { padding-left: 0; margin-left: 0; justify-content: flex-end; }
