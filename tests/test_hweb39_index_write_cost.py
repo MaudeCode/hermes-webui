@@ -8,6 +8,7 @@ Covers the three properties the index write path has to keep:
 
 import json
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -46,10 +47,12 @@ def index_store(tmp_path, monkeypatch):
     models._PARSED_INDEX_CACHE.clear()
 
     # The coalescing gate is module-global; leave it clean for the next test.
-    models._INDEX_PENDING_UPDATES.clear()
+    models._INDEX_PENDING_ROWS.clear()
+    monkeypatch.setattr(models, "_INDEX_PENDING_BATCH", None)
     monkeypatch.setattr(models, "_INDEX_FLUSH_IN_PROGRESS", False)
     yield SimpleNamespace(path=index_path, rows=rows)
-    models._INDEX_PENDING_UPDATES.clear()
+    models._INDEX_PENDING_ROWS.clear()
+    models._INDEX_PENDING_BATCH = None
     models._INDEX_FLUSH_IN_PROGRESS = False
     models._PARSED_INDEX_CACHE.clear()
 
@@ -78,13 +81,26 @@ def test_concurrent_saves_coalesce_into_fewer_index_rewrites(index_store, monkey
     flusher.start()
     assert first_replace_entered.wait(timeout=10), "flusher never reached the rewrite"
 
-    # Savers 1..7 land while that rewrite is in flight.
-    for i in range(1, savers):
-        models._queue_session_index_update([_session(f"sid-{i}", 9000 + i)])
+    # Savers 1..7 land while that rewrite is in flight. Each blocks until the
+    # rewrite carrying its own row finishes, so they have to run on threads.
+    waiters = [
+        threading.Thread(
+            target=models._queue_session_index_update,
+            args=([_session(f"sid-{i}", 9000 + i)],),
+        )
+        for i in range(1, savers)
+    ]
+    for waiter in waiters:
+        waiter.start()
+    deadline = time.monotonic() + 10
+    while len(models._INDEX_PENDING_ROWS) < savers - 1:
+        assert time.monotonic() < deadline, "waiters never queued their rows"
+        time.sleep(0.01)
 
     release_first_replace.set()
-    flusher.join(timeout=10)
-    assert not flusher.is_alive()
+    for thread in [flusher, *waiters]:
+        thread.join(timeout=10)
+        assert not thread.is_alive()
 
     assert len(rewrites) < savers, f"{savers} concurrent saves cost {len(rewrites)} rewrites"
 
@@ -128,3 +144,104 @@ def test_interrupted_index_write_leaves_the_previous_index_intact(
     assert after == before
     assert json.loads(after) == index_store.rows
     assert not list(index_store.path.parent.glob("_index*.tmp.*"))
+
+
+def test_queued_row_is_snapshotted_at_the_moment_of_the_save(index_store, monkeypatch):
+    """A row must reflect the state its sidecar write saw, not a later mutation.
+
+    A saver that queues behind an in-flight rewrite hands over its row while its
+    own streaming thread keeps mutating the session. If the queue held the live
+    object, the index would persist metadata that was never in the sidecar.
+    """
+    first_replace_entered = threading.Event()
+    release_first_replace = threading.Event()
+    real_replace = models._safe_replace
+    calls = []
+
+    def gated_replace(src, dst):
+        calls.append(str(dst))
+        if len(calls) == 1:
+            first_replace_entered.set()
+            assert release_first_replace.wait(timeout=10), "gate never released"
+        real_replace(src, dst)
+
+    monkeypatch.setattr(models, "_safe_replace", gated_replace)
+
+    # A mutable stand-in for a session still being written by its own thread.
+    live = {"session_id": "sid-7", "title": "at-save-time", "updated_at": 7, "message_count": 1}
+    mutating_session = SimpleNamespace(session_id="sid-7", compact=lambda: dict(live))
+
+    flusher = threading.Thread(
+        target=models._queue_session_index_update,
+        args=([_session("sid-0", 9000)],),
+    )
+    flusher.start()
+    assert first_replace_entered.wait(timeout=10), "flusher never reached the rewrite"
+
+    waiter = threading.Thread(
+        target=models._queue_session_index_update,
+        args=([mutating_session],),
+    )
+    waiter.start()
+    deadline = time.monotonic() + 10
+    while "sid-7" not in models._INDEX_PENDING_ROWS:
+        assert time.monotonic() < deadline, "waiter never queued its row"
+        time.sleep(0.01)
+
+    # The session moves on after the save that queued it.
+    live["title"] = "mutated-after-save"
+    live["updated_at"] = 99999
+
+    release_first_replace.set()
+    for thread in (flusher, waiter):
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+    persisted = {row["session_id"]: row for row in json.loads(index_store.path.read_bytes())}
+    assert persisted["sid-7"]["title"] == "at-save-time"
+    assert persisted["sid-7"]["updated_at"] == 7
+
+
+def test_a_saver_queued_behind_a_failing_rewrite_observes_the_failure(index_store, monkeypatch):
+    """A queued saver must never report success for a rewrite that never landed."""
+    first_replace_entered = threading.Event()
+    release_first_replace = threading.Event()
+    calls = []
+
+    def failing_replace(src, dst):
+        calls.append(str(dst))
+        if len(calls) == 1:
+            first_replace_entered.set()
+            assert release_first_replace.wait(timeout=10), "gate never released"
+        raise OSError("simulated index write failure")
+
+    monkeypatch.setattr(models, "_safe_replace", failing_replace)
+
+    errors = {}
+
+    def save(key, session):
+        try:
+            models._queue_session_index_update([session])
+        except BaseException as exc:  # noqa: BLE001 - recorded for the assertion
+            errors[key] = exc
+
+    flusher = threading.Thread(target=save, args=("flusher", _session("sid-0", 9000)))
+    flusher.start()
+    assert first_replace_entered.wait(timeout=10), "flusher never reached the rewrite"
+
+    waiter = threading.Thread(target=save, args=("waiter", _session("sid-1", 9001)))
+    waiter.start()
+    deadline = time.monotonic() + 10
+    while "sid-1" not in models._INDEX_PENDING_ROWS:
+        assert time.monotonic() < deadline, "waiter never queued its row"
+        time.sleep(0.01)
+
+    release_first_replace.set()
+    for thread in (flusher, waiter):
+        thread.join(timeout=10)
+        assert not thread.is_alive(), "a failed rewrite stranded a queued saver"
+
+    assert isinstance(errors.get("flusher"), OSError)
+    assert isinstance(errors.get("waiter"), OSError)
+    # The gate must not stay latched after a failure, or every later save hangs.
+    assert models._INDEX_FLUSH_IN_PROGRESS is False
