@@ -60,6 +60,7 @@ from api.plugin_providers import (
     effective_provider_env_var,
     is_plugin_model_provider,
     plugin_model_provider_ids,
+    plugin_model_provider_profiles,
 )
 
 logger = logging.getLogger(__name__)
@@ -1384,6 +1385,12 @@ def _provider_has_key(provider_id: str, config_data: dict | None = None) -> bool
     return False
 
 
+def _is_catalog_card_id(name: object) -> bool:
+    """True when *name* is a provider the WebUI renders a card for in its own right."""
+    slug = str(name or "").strip().lower()
+    return bool(slug) and (slug in _PROVIDER_DISPLAY or slug in _PROVIDER_MODELS)
+
+
 def _provider_identity(name: object) -> str:
     """Fold *name* to one comparable identity for credential lookups.
 
@@ -1416,8 +1423,17 @@ def _config_provider_cfg_for(providers_cfg: object, provider_id: str) -> dict:
     if not canonical:
         return {}
     for key, value in providers_cfg.items():
-        if isinstance(value, dict) and _provider_identity(key) == canonical:
-            return value
+        if not isinstance(value, dict) or _provider_identity(key) != canonical:
+            continue
+        # Only a key that is NOT a card in its own right may be claimed as an
+        # alias. `qwen` and `alibaba` share an identity but are both real cards
+        # (qwen is the OpenRouter model-id prefix), as are `google` and
+        # `gemini` — so `providers.qwen` belongs to the qwen card alone, and
+        # claiming it for alibaba too would mark two cards configured from one
+        # key. `ramp` is not a card, so it still resolves to router.
+        if _is_catalog_card_id(key) and key.strip().lower() != provider_id.strip().lower():
+            continue
+        return value
     return {}
 
 
@@ -3691,9 +3707,19 @@ def get_providers() -> dict[str, Any]:
                 if published:
                     models = published
                     models_total = len(models)
-                # No `published` entry means the picker published no group for
-                # this provider — there is nothing live to show, so the static
-                # list stands. The warm above already did the one rebuild.
+                elif not models and is_plugin_model_provider(pid):
+                    # A plugin provider has no `_PROVIDER_MODELS` fallback, and
+                    # the picker publishes no group for one that is not
+                    # authenticated yet — so without this the card reads "0
+                    # models" for an installed plugin. Its profile carries a
+                    # curated `fallback_models` for exactly this cold state;
+                    # read it directly, the way config.py's static catalog
+                    # builder does. No probe, no network.
+                    profile = plugin_model_provider_profiles().get(pid)
+                    fallback = getattr(profile, "fallback_models", ()) or () if profile else ()
+                    if fallback:
+                        models = [{"id": str(mid), "label": str(mid)} for mid in fallback]
+                        models_total = len(models)
             except Exception:
                 logger.debug(
                     "Failed to resolve published catalog for %s", pid, exc_info=True

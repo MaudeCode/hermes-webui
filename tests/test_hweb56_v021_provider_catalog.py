@@ -771,3 +771,84 @@ def test_published_catalog_is_available_matches_the_fingerprint(monkeypatch):
 
     monkeypatch.setattr(config, "_models_cache_provenance", None)
     assert config.published_catalog_is_available() is False
+
+
+@pytest.mark.parametrize(
+    "block,card,expected",
+    [
+        # `qwen` and `alibaba` share an identity but are BOTH real cards (qwen is
+        # the OpenRouter model-id prefix), so one key must not configure both.
+        ("qwen", "qwen", True),
+        ("qwen", "alibaba", False),
+        ("alibaba", "alibaba", True),
+        ("alibaba", "qwen", False),
+        ("google", "google", True),
+        ("google", "gemini", False),
+        # `ramp` is not a card of its own, so it still feeds the router card.
+        ("ramp", "router", True),
+        ("actual-computer", "actual", True),
+    ],
+)
+def test_alias_block_only_claims_a_card_when_it_is_not_one_itself(block, card, expected):
+    """An alias block feeds the canonical card only when the alias isn't a card.
+
+    Folding on identity alone marked two cards configured from a single
+    `providers.qwen.api_key`.
+    """
+    assert (
+        providers._provider_has_key(card, config_data={"providers": {block: {"api_key": "sk"}}})
+        is expected
+    )
+
+
+def test_unauthenticated_plugin_card_still_lists_its_fallback_models(monkeypatch, tmp_path):
+    """An installed plugin must not read "0 models" before it is authenticated.
+
+    The picker publishes no group for an unauthenticated plugin and a plugin has
+    no `_PROVIDER_MODELS` entry, so its profile's curated `fallback_models` is
+    the only cold source — read directly, with no probe.
+    """
+    import api.profiles as profiles
+
+    class _Profile:
+        fallback_models = ("vendor/model-a", "vendor/model-b")
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(providers, "_PROVIDER_DISPLAY", {})
+    monkeypatch.setattr(providers, "_PROVIDER_MODELS", {})
+    monkeypatch.setattr(providers, "_OAUTH_PROVIDERS", frozenset())
+    monkeypatch.setattr(providers, "plugin_model_provider_ids", lambda: {"yandex"})
+    monkeypatch.setattr(providers, "is_plugin_model_provider", lambda pid: pid == "yandex")
+    monkeypatch.setattr(providers, "plugin_model_provider_profiles", lambda: {"yandex": _Profile()})
+    monkeypatch.setattr(providers, "get_config", lambda: {"model": {}, "providers": {}})
+    monkeypatch.setattr(providers, "_provider_has_key", lambda _pid, **_kw: False)
+    monkeypatch.setattr(providers, "published_catalog_is_available", lambda: True)
+    monkeypatch.setattr(providers, "published_catalog_models", lambda _pid: None)
+
+    entry = next(p for p in providers.get_providers()["providers"] if p["id"] == "yandex")
+
+    assert {m["id"] for m in entry["models"]} == {"vendor/model-a", "vendor/model-b"}
+    assert entry["models_total"] == 2
+
+
+def test_published_catalog_still_wins_over_the_plugin_fallback(monkeypatch, tmp_path):
+    """Once the picker publishes a group, it is authoritative over fallback_models."""
+    import api.profiles as profiles
+
+    class _Profile:
+        fallback_models = ("stale/fallback",)
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(providers, "_PROVIDER_DISPLAY", {})
+    monkeypatch.setattr(providers, "_PROVIDER_MODELS", {})
+    monkeypatch.setattr(providers, "_OAUTH_PROVIDERS", frozenset())
+    monkeypatch.setattr(providers, "plugin_model_provider_ids", lambda: {"yandex"})
+    monkeypatch.setattr(providers, "is_plugin_model_provider", lambda pid: pid == "yandex")
+    monkeypatch.setattr(providers, "plugin_model_provider_profiles", lambda: {"yandex": _Profile()})
+    monkeypatch.setattr(providers, "get_config", lambda: {"model": {}, "providers": {}})
+    monkeypatch.setattr(providers, "_provider_has_key", lambda _pid, **_kw: True)
+    monkeypatch.setattr(providers, "published_catalog_is_available", lambda: True)
+    monkeypatch.setattr(providers, "published_catalog_models", lambda _pid: [{"id": "live/real", "label": "L"}])
+
+    entry = next(p for p in providers.get_providers()["providers"] if p["id"] == "yandex")
+    assert [m["id"] for m in entry["models"]] == ["live/real"]
