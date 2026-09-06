@@ -329,3 +329,117 @@ def test_repeated_historical_prose_is_not_claimed_by_an_unrelated_row():
     assert _recover_dead_run_journal(session, stream_id) is True
     assert _visible(session) == [repeated]
     assert len([m for m in session.messages if m.get("type") == "interrupted"]) == 1
+
+
+def test_nonterminal_journal_prefix_stays_eligible_for_the_tail():
+    """A journal with no terminal event is a prefix, not a settled run.
+
+    Recovering its visible prefix must not produce a final-looking marker: the
+    tail can still become visible on a delayed-visibility filesystem, and the
+    marker is the only thing that keeps the stream id reachable afterwards.
+    """
+    session_id = "hweb13_prefix"
+    stream_id = "hweb13_stream_prefix"
+    session = _dead_session(session_id, stream_id)
+    append_run_event(session_id, stream_id, "interim_assistant", {"text": "First half of the answer."})
+
+    assert _recover_dead_run_journal(session, stream_id) is True
+    assert _visible(session) == ["First half of the answer."]
+    marker = session.messages[-1]
+    assert marker["_pending_journal_recovery"] is True
+    assert marker["_journal_retry_stream_id"] == stream_id
+    assert models._session_has_pending_journal_retry(session) is True
+
+    # The tail lands later; the armed marker is what lets it in.
+    append_run_event(session_id, stream_id, "interim_assistant", {"text": "Second half of the answer."})
+    append_run_event(session_id, stream_id, "done", {})
+    assert models._retry_journal_recovery_in_place(session) is True
+    assert _visible(session) == [
+        "First half of the answer.",
+        "Second half of the answer.",
+    ]
+    assert "_pending_journal_recovery" not in session.messages[-1]
+
+
+def test_terminal_journal_marker_is_final():
+    """A run with a terminal event is settled — no retry hook, no churn."""
+    session_id = "hweb13_terminal_marker"
+    stream_id = "hweb13_stream_terminal_marker"
+    session = _dead_session(session_id, stream_id)
+    append_run_event(session_id, stream_id, "interim_assistant", {"text": "All of the answer."})
+    append_run_event(session_id, stream_id, "cancel", {})
+
+    assert _recover_dead_run_journal(session, stream_id) is True
+    marker = session.messages[-1]
+    assert marker["type"] == "interrupted"
+    assert "_pending_journal_recovery" not in marker
+    assert models._session_has_pending_journal_retry(session) is False
+
+
+def test_recovery_never_reads_an_unbounded_journal(monkeypatch):
+    """Recovery runs on session APIs under the per-session lock.
+
+    A run journal has no size cap, so every recovery reader must go through the
+    bounded window rather than parsing the whole file.
+    """
+    import api.run_journal as run_journal
+
+    session_id = "hweb13_bounded"
+    stream_id = "hweb13_stream_bounded"
+    session = _dead_session(session_id, stream_id)
+    _journal_a_full_turn(session_id, stream_id)
+
+    # The unbounded reader is what stalls the endpoint — nothing on the recovery
+    # path may reach it, including the pending-turn repair path's readers.
+    def _forbidden(*_args, **_kwargs):
+        raise AssertionError("recovery must not call the unbounded read_run_events()")
+
+    monkeypatch.setattr(run_journal, "read_run_events", _forbidden)
+
+    windows = []
+    real_tail = run_journal.read_run_event_tail
+
+    def _record(sid, rid, **kwargs):
+        windows.append((kwargs.get("max_bytes"), kwargs.get("max_rows")))
+        return real_tail(sid, rid, **kwargs)
+
+    monkeypatch.setattr(run_journal, "read_run_event_tail", _record)
+
+    assert _recover_dead_run_journal(session, stream_id) is True
+    assert _visible(session) == [
+        "The clear path never reads the journal.",
+        "So the prose is dropped on refresh.",
+    ]
+    assert windows, "recovery did not go through the bounded reader"
+    assert all(
+        limit == (models._RECOVERY_JOURNAL_MAX_BYTES, models._RECOVERY_JOURNAL_MAX_ROWS)
+        for limit in windows
+    )
+
+
+def test_pending_turn_repair_is_bounded_too(monkeypatch):
+    """The pre-existing pending path shares the same readers and the same cap."""
+    import api.run_journal as run_journal
+
+    session_id = "hweb13_bounded_pending"
+    stream_id = "hweb13_stream_bounded_pending"
+    session = _dead_session(session_id, stream_id)
+    session.pending_user_message = "Trace the regression again"
+    session.pending_started_at = time.time() - 300
+    session.save()
+    _journal_a_full_turn(session_id, stream_id)
+
+    def _forbidden(*_args, **_kwargs):
+        raise AssertionError("recovery must not call the unbounded read_run_events()")
+
+    monkeypatch.setattr(run_journal, "read_run_events", _forbidden)
+
+    assert models._apply_core_sync_or_error_marker(
+        session,
+        models.SESSION_DIR / "missing-core.json",
+        stream_id_for_recheck=stream_id,
+    ) is True
+    assert _visible(session) == [
+        "The clear path never reads the journal.",
+        "So the prose is dropped on refresh.",
+    ]

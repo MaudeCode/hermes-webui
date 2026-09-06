@@ -2593,12 +2593,48 @@ def _journal_tool_already_present(
     return False
 
 
+# Read-side recovery runs on ordinary session APIs — `/api/session`,
+# `/api/session/status`, chat start, the sidebar reconciler — and does so while
+# the per-session lock is held. `read_run_events()` parses the whole file
+# (`_read_jsonl` calls `path.read_text()`), and a run journal has no size cap, so
+# a long run could stall those endpoints or blow memory. Every recovery reader
+# goes through the bounded-window reader instead, using the same mechanism the
+# live-snapshot path already uses.
+#
+# Bytes are the real bound; the row cap only exists so a pathological journal of
+# tiny rows cannot defeat it. The window is deliberately generous — a run that
+# overflows it gets its oldest events clipped, which costs some early prose but
+# never the authoritative terminal event (the window is a tail).
+_RECOVERY_JOURNAL_MAX_BYTES = 8 * 1024 * 1024
+_RECOVERY_JOURNAL_MAX_ROWS = 65536
+
+
+def _read_run_journal_for_recovery(session_id: str, stream_id: str) -> dict:
+    """Bounded journal read shared by every read-side recovery helper."""
+    from api.run_journal import read_run_event_tail
+
+    journal = read_run_event_tail(
+        session_id,
+        stream_id,
+        max_bytes=_RECOVERY_JOURNAL_MAX_BYTES,
+        max_rows=_RECOVERY_JOURNAL_MAX_ROWS,
+    )
+    if journal.get('truncated'):
+        logger.warning(
+            "Session %s: run journal for stream %s exceeded the %d-byte recovery "
+            "window; recovering the most recent events only",
+            session_id,
+            stream_id,
+            _RECOVERY_JOURNAL_MAX_BYTES,
+        )
+    return journal
+
+
 def _run_journal_has_visible_output(session, stream_id: str | None) -> bool:
     if not stream_id:
         return False
     try:
-        from api.run_journal import read_run_events
-        journal = read_run_events(session.session_id, stream_id)
+        journal = _read_run_journal_for_recovery(session.session_id, stream_id)
     except Exception:
         return False
     for event in journal.get('events') or []:
@@ -2645,11 +2681,9 @@ def _run_journal_terminal_state(session, stream_id: str | None) -> str | None:
     if not stream_id:
         return None
     try:
-        from api.run_journal import (
-            read_run_events,
-            select_authoritative_terminal_event,
-        )
-        journal = read_run_events(session.session_id, stream_id)
+        from api.run_journal import select_authoritative_terminal_event
+
+        journal = _read_run_journal_for_recovery(session.session_id, stream_id)
         terminal = select_authoritative_terminal_event(journal.get('events') or [])
     except Exception:
         return None
@@ -2671,11 +2705,9 @@ def _recoverable_unsaved_gateway_terminal_error(
     if not stream_id:
         return None
     try:
-        from api.run_journal import (
-            read_run_events,
-            select_authoritative_terminal_event,
-        )
-        journal = read_run_events(session.session_id, stream_id)
+        from api.run_journal import select_authoritative_terminal_event
+
+        journal = _read_run_journal_for_recovery(session.session_id, stream_id)
     except Exception:
         logger.debug(
             "Session %s: failed to read terminal error journal for stream %s",
@@ -2844,7 +2876,7 @@ def _recover_journaled_output_and_terminal_error(
 def _journal_is_still_arriving(session, stream_id: str | None) -> bool:
     """Return True for journals that may become visible on a later read.
 
-    `read_run_events()` deliberately collapses missing files and empty files
+    The journal readers deliberately collapse missing files and empty files
     into an empty event list, so the lazy retry path needs a small filesystem
     visibility check to avoid burning all retry attempts while WSL2 / network
     filesystems are still surfacing the journal.  Non-empty journals are treated
@@ -2892,8 +2924,7 @@ def _append_journaled_partial_output(
         return False
 
     try:
-        from api.run_journal import read_run_events
-        journal = read_run_events(session.session_id, stream_id)
+        journal = _read_run_journal_for_recovery(session.session_id, stream_id)
     except Exception:
         logger.debug(
             "Session %s: failed to read run journal for stream %s",
@@ -3226,15 +3257,14 @@ def _build_recovery_marker_with_retry_hook(
             recovered_output=False,
             pending_started_at=pending_started_at,
         )
-    marker = _interrupted_recovery_marker(
-        pending_retry=True,
-        stream_id=stream_id,
-        pending_started_at=pending_started_at,
+    return _arm_journal_retry(
+        _interrupted_recovery_marker(
+            pending_retry=True,
+            stream_id=stream_id,
+            pending_started_at=pending_started_at,
+        ),
+        stream_id,
     )
-    marker['_journal_retry_stream_id'] = str(stream_id)
-    marker['_journal_retry_attempts'] = 0
-    marker['_journal_retry_first_seen_ts'] = int(time.time())
-    return marker
 
 
 def _session_has_pending_journal_retry(session) -> bool:
@@ -3253,6 +3283,15 @@ def _session_has_pending_journal_retry(session) -> bool:
             # retry above this point.
             return False
     return False
+
+
+def _arm_journal_retry(marker: dict, stream_id: str) -> dict:
+    """Stamp the lazy-retry hook onto ``marker``. Inverse of `_strip_journal_retry_meta`."""
+    marker['_pending_journal_recovery'] = True
+    marker['_journal_retry_stream_id'] = str(stream_id)
+    marker['_journal_retry_attempts'] = 0
+    marker['_journal_retry_first_seen_ts'] = int(time.time())
+    return marker
 
 
 def _strip_journal_retry_meta(marker: dict) -> None:
@@ -3529,16 +3568,21 @@ def _recover_dead_run_journal(session, stream_id: str | None) -> bool:
                 session.messages.append(marker)
                 return True
             return False
-        if (
-            not terminal_error_recovered
-            and _run_journal_terminal_state(session, stream_id) != 'completed'
-        ):
+        terminal_state = _run_journal_terminal_state(session, stream_id)
+        if not terminal_error_recovered and terminal_state != 'completed':
             marker = _interrupted_recovery_marker(
                 recovered_output=True,
                 stream_id=stream_id,
                 pending_started_at=getattr(session, 'pending_started_at', None),
             )
             marker['_recovered_stream_id'] = stream_id
+            if terminal_state is None:
+                # No terminal event owns this run, so what we just read is a
+                # prefix rather than a settled journal — a delayed-visibility
+                # filesystem can still surface the tail. Arm the lazy-retry hook
+                # so a later read picks that tail up; without it this marker
+                # would look final and the remainder would be lost for good.
+                _arm_journal_retry(marker, stream_id)
             session.messages.append(marker)
         logger.info(
             "Session %s: recovered dead run journal for stream %s without pending state",
