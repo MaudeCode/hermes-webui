@@ -1640,9 +1640,9 @@ const CRON_REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhi
 // collapsed <details> so the common create path (name/schedule/prompt/deliver)
 // stays as short as it is today — a visible control costs attention on every
 // visit, and these are set once for a minority of jobs.
-function _cronFormAdvancedHtml({ isNoAgent, scriptRow, monitor, continuity, context_from, reasoning_effort, repeat, isEdit, editingId }){
+function _cronFormAdvancedHtml({ isNoAgent, scriptRow, script, monitor, continuity, context_from, reasoning_effort, repeat, isEdit, editingId }){
   // Open whenever it holds something, so a re-render never hides a set field.
-  const isOpen = !!(isNoAgent || monitor || continuity || reasoning_effort || repeat || (Array.isArray(context_from) && context_from.length));
+  const isOpen = !!(isNoAgent || script || monitor || continuity || reasoning_effort || repeat || (Array.isArray(context_from) && context_from.length));
   const selected = (Array.isArray(context_from) ? context_from : [])
     .map(id => String(id).trim())
     .filter(id => id && id.toLowerCase() !== 'self');
@@ -1707,11 +1707,17 @@ function _cronFormValues({ isEdit }){
   const checked = (id) => { const el = $(id); return !!(el && el.checked); };
   const ctxEl = $('cronFormContextFrom');
   const modelEl = $('cronFormModel');
+  // Both selects are filled by an async fetch and show a placeholder until it
+  // lands; reading them early would snapshot a cleared override.
+  const modelLoaded = !!(modelEl && modelEl.dataset.loaded === '1');
+  const delivEl = $('cronFormDeliver');
+  const delivLoaded = !!(delivEl && !delivEl.querySelector('option[value=""][disabled]'));
+  const selectedOpt = modelLoaded && modelEl.selectedOptions ? modelEl.selectedOptions[0] : null;
   return {
     name: val('cronFormName').trim(),
     schedule: val('cronFormSchedule').trim(),
     prompt: val('cronFormPrompt', 'prompt'),
-    deliver: val('cronFormDeliver') || 'local',
+    deliver: (delivLoaded ? delivEl.value : last.deliver) || 'local',
     profile: val('cronFormProfile'),
     toast_notifications: $('cronFormToastNotifications') ? checked('cronFormToastNotifications') : true,
     no_agent: checked('cronFormNoAgent'),
@@ -1721,12 +1727,14 @@ function _cronFormValues({ isEdit }){
     context_from: ctxEl ? Array.from(ctxEl.selectedOptions || []).map(o => o.value) : [],
     reasoning_effort: val('cronFormReasoningEffort'),
     repeat: val('cronFormRepeat').trim(),
-    model: modelEl ? modelEl.value : '',
-    provider: (modelEl && modelEl.selectedOptions && modelEl.selectedOptions[0]
-      ? (modelEl.selectedOptions[0].dataset.provider
-         || (modelEl.selectedOptions[0].parentElement && modelEl.selectedOptions[0].parentElement.dataset.provider)
-         || '')
-      : ''),
+    model: modelLoaded ? modelEl.value : (last.model || ''),
+    provider: modelLoaded
+      ? (selectedOpt
+          ? (selectedOpt.dataset.provider
+             || (selectedOpt.parentElement && selectedOpt.parentElement.dataset.provider)
+             || '')
+          : '')
+      : (last.provider || ''),
     isEdit,
   };
 }
@@ -1740,7 +1748,7 @@ function _onCronFormNoAgentToggle(){
 let _cronFormRendered = null; // last args _renderCronForm was called with
 
 function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notifications=true, no_agent=false, script='', monitor='', continuity=false, context_from=[], reasoning_effort='', repeat='', model='', provider='', isEdit }){
-  _cronFormRendered = { prompt, script, monitor };
+  _cronFormRendered = { prompt, script, monitor, deliver, model, provider };
   const title = $('taskDetailTitle');
   const body = $('taskDetailBody');
   const empty = $('taskDetailEmpty');
@@ -1762,7 +1770,7 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
   // A script job's script IS the job, so it sits with the primary fields;
   // for an agent job it is optional prompt context and lives under Advanced.
   const scriptBlock = isNoAgent ? scriptRow : '';
-  const advancedBlock = _cronFormAdvancedHtml({ isNoAgent, scriptRow, monitor, continuity, context_from, reasoning_effort, repeat, isEdit, editingId: _editingCronId });
+  const advancedBlock = _cronFormAdvancedHtml({ isNoAgent, scriptRow, script, monitor, continuity, context_from, reasoning_effort, repeat, isEdit, editingId: _editingCronId });
   const skillsBlock = isNoAgent ? '' : `
         <div class="detail-form-row">
           <label for="cronFormSkillSearch">${esc(t('cron_skills_label') || 'Skills')}</label>

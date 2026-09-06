@@ -358,7 +358,7 @@ def test_mode_toggle_falls_back_to_the_last_rendered_prompt():
     # The script-only re-render drops the prompt textarea; a DOM-only snapshot
     # would read '' and eat the user's prompt on the way back (Codex P2).
     assert "let _cronFormRendered = null;" in PANELS_JS
-    assert "_cronFormRendered = { prompt, script, monitor };" in PANELS_JS
+    assert "_cronFormRendered = { prompt, script, monitor" in PANELS_JS
     assert "const last = _cronFormRendered || {};" in PANELS_JS
     assert "prompt: val('cronFormPrompt', 'prompt')," in PANELS_JS
 
@@ -373,6 +373,23 @@ def test_duplicate_carries_a_finite_repeat_limit_into_the_create_form():
     # The store keeps repeat as {times, completed}; only `times` is the limit
     # the user set, and an unlimited job has times == null (Codex round 2).
     assert "repeat: (job.repeat && job.repeat.times != null) ? job.repeat.times : ''," in PANELS_JS
+
+
+def test_mode_toggle_preserves_selects_that_have_not_loaded_yet():
+    # The model and delivery selects are filled by an async fetch and show a
+    # placeholder until it lands. A toggle inside that window must not snapshot
+    # a cleared model override or a defaulted 'local' target (Codex round 3).
+    assert "_cronFormRendered = { prompt, script, monitor, deliver, model, provider };" in PANELS_JS
+    assert "const modelLoaded = !!(modelEl && modelEl.dataset.loaded === '1');" in PANELS_JS
+    assert "const delivLoaded = !!(delivEl && !delivEl.querySelector('option[value=\"\"][disabled]'));" in PANELS_JS
+    assert "deliver: (delivLoaded ? delivEl.value : last.deliver) || 'local'," in PANELS_JS
+    assert "model: modelLoaded ? modelEl.value : (last.model || '')," in PANELS_JS
+
+
+def test_advanced_section_opens_for_a_configured_script():
+    # A script is an advanced value too, so an agent job carrying one must not
+    # open with the section collapsed and the script hidden (Codex round 3).
+    assert "const isOpen = !!(isNoAgent || script || monitor || continuity" in PANELS_JS
 
 
 def test_reasoning_effort_options_match_the_canonical_levels():
