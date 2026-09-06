@@ -334,7 +334,7 @@ _RERENDER_JS = """
   const otherSession = window._userMessageIsExpanded(window._userMessageExpandIdentity(text, 0));
   S.session = Object.assign({}, S.session, {session_id: ownSession});
 
-  // A session switch still releases it.
+  // Explicit release is still available for tests/teardown.
   window._clearUserMessageExpandState();
   return {
     afterToggle, rebuiltState, afterHeightCacheDrop, afterRenderCacheDrop,
@@ -369,7 +369,7 @@ def test_expansion_survives_a_rebuild_and_is_released_on_session_switch():
     assert r["reusedIndexDifferentMessage"] is False, r
     # Full-identity keys: another session cannot read this session's entry.
     assert r["otherSession"] is False, r
-    # And a session switch still releases it.
+    # An explicit release still empties it.
     assert r["afterClear"] is False, r
 
 
@@ -653,3 +653,71 @@ def test_toggling_invalidates_the_cached_transcript_html():
     assert r["cachedAfterExpand"] is False, r
     # Both directions: collapsing must invalidate too, not just expanding.
     assert r["cachedAfterCollapse"] is False, r
+
+
+_LIFETIME_JS = r"""
+(text) => {
+  const inner = document.getElementById('msgInner');
+  inner.innerHTML = '';
+  const row = window.__hweb3Row(text, 7400);
+  inner.appendChild(row);
+  const sid = S.session.session_id;
+  const identity = window._userMessageExpandIdentity(text, 0);
+
+  row.querySelector('.msg-expand-btn').click();          // reader opens it
+  // A settle render then re-caches the transcript, now carrying expanded markup.
+  _sessionHtmlCache.set(sid, {html: '<!--expanded-->', msgCount: 1,
+    renderWindowKey: 'k', signature: 's'});
+
+  // A session switch must NOT drop the store while that markup survives: the
+  // fast path would reinstall an expanded transcript the store denies.
+  window._resetMessageRenderWindow('some-other-session');
+  const storeAfterSwitch = window._userMessageIsExpanded(identity);
+  const htmlAfterSwitch = _sessionHtmlCache.has(sid);
+
+  // The other direction: a preference change drops the cached HTML. The store
+  // must survive, so the rebuild reproduces what the reader had open.
+  window.clearMessageRenderCache();
+  const storeAfterPrefChange = window._userMessageIsExpanded(identity);
+  const htmlAfterPrefChange = _sessionHtmlCache.has(sid);
+
+  // Bounded without a lifecycle hook: opening more than the cap evicts oldest.
+  let evictedOldest = null;
+  for (let i = 0; i < 205; i++) {
+    window._setUserMessageExpanded(window._userMessageExpandIdentity('filler ' + i, 0), true);
+  }
+  evictedOldest = window._userMessageIsExpanded(window._userMessageExpandIdentity('filler 0', 0));
+  const newestKept = window._userMessageIsExpanded(window._userMessageExpandIdentity('filler 204', 0));
+
+  window._clearUserMessageExpandState();
+  return {
+    storeAfterSwitch, htmlAfterSwitch,
+    storeAfterPrefChange, htmlAfterPrefChange,
+    evictedOldest, newestKept,
+  };
+}
+"""
+
+
+def test_disclosure_store_is_never_emptied_behind_surviving_cached_html():
+    """The state exists twice -- in the store and serialized into cached HTML.
+    Emptying the store while that markup survives lets the cache fast path serve
+    an expanded transcript the store denies, so no cache lifecycle releases it."""
+    playwright, browser, page = _page(1440)
+    try:
+        r = page.evaluate(_LIFETIME_JS, _601)
+    finally:
+        browser.close()
+        playwright.stop()
+
+    # A session switch drops neither, so the cached expanded markup and the
+    # store still agree when the reader navigates back.
+    assert r["storeAfterSwitch"] is True, r
+    assert r["htmlAfterSwitch"] is True, r
+    # A preference change drops the HTML but keeps the state, so the rebuild
+    # reproduces what the reader had open rather than contradicting it.
+    assert r["htmlAfterPrefChange"] is False, r
+    assert r["storeAfterPrefChange"] is True, r
+    # Bounded by eviction rather than by a lifecycle hook.
+    assert r["evictedOldest"] is False, r
+    assert r["newestKept"] is True, r

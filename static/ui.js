@@ -616,9 +616,6 @@ function _clearMessageVirtualHeightCache(){
 function _resetMessageRenderWindow(sid){
   _messageRenderWindowSid=sid||null;
   _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
-  // Only an actual session change releases reader intent. This is the one
-  // caller of this function, gated on `sid !== _messageRenderWindowSid`.
-  if(typeof _clearUserMessageExpandState==='function') _clearUserMessageExpandState();
   _cancelMessageVirtualizedRender();
   _clearRenderCache();
   clearVisibleMessageRowCache();
@@ -1377,6 +1374,23 @@ function _clearUserRowIntrinsicHeightCache(){
 // normalized characters of the displayed text is stable across all three.
 // Two identical prompts in one session share a key, which merely means they
 // open together. The session-change release below is hygiene, not correctness.
+//
+// Lifetime: this store has NO cache-tied release, deliberately. The state has
+// two representations — this map, and the same state serialized as
+// data-msg-expanded / aria-expanded inside `_sessionHtmlCache`'s transcript
+// HTML. The invariant that matters is one-directional: the store must never be
+// emptied while cached markup encoding it survives, because the cache fast path
+// reinstalls that markup verbatim and the reader gets an expanded transcript
+// the store denies. Clearing the store on session switch broke exactly that.
+// Clearing it alongside the HTML cache would fix that case but break the other
+// direction, since `clearMessageRenderCache()` fires on ordinary preference
+// changes (render mode, TPS, user markdown) — churn this state is required to
+// survive. Keeping it is consistent both ways: if the cached HTML is dropped,
+// the next render rebuilds from this store and agrees; if it is served, this
+// store still agrees. Identity keys are session-scoped and content-derived, so
+// nothing leaks across sessions or into a reused index. Bounded by eviction
+// below rather than by a lifecycle hook.
+const USER_MSG_EXPANDED_MAX=200;
 const _userMsgExpandedByKey=Object.create(null);
 // Hashes the EXACT displayed text — complete, and not whitespace-normalized.
 // Both halves of that are load-bearing, and each was learned the hard way:
@@ -1415,8 +1429,12 @@ function _userMessageIsExpanded(identity){
 function _setUserMessageExpanded(identity, expanded){
   const k=_userMessageExpandKey(identity);
   if(!k) return;
-  if(expanded) _userMsgExpandedByKey[k]=true;
-  else delete _userMsgExpandedByKey[k];
+  if(!expanded){ delete _userMsgExpandedByKey[k]; return; }
+  // Re-insert so the key moves to the back of the eviction order on re-open.
+  delete _userMsgExpandedByKey[k];
+  _userMsgExpandedByKey[k]=true;
+  const keys=Object.keys(_userMsgExpandedByKey);
+  for(let i=0;i<keys.length-USER_MSG_EXPANDED_MAX;i++) delete _userMsgExpandedByKey[keys[i]];
 }
 function _rememberUserRowIntrinsicHeight(sessionMsgIdx, height){
   const key=Number(sessionMsgIdx);
