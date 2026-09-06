@@ -147,7 +147,7 @@ _FUNCTIONS = [
     ("_updateMutationAllowed", "function"),
     ("_renderUpdateCapability", "function"),
     ("_syncUpdateCapability", "async function"),
-    ("_noteUpdateForbidden", "function"),
+    ("_noteUpdateForbidden", "async function"),
     ("_i18nUpdateText", "function"),
     ("_isUpdateApplyNetworkError", "function"),
     ("_formatUpdateApplyExceptionMessage", "function"),
@@ -326,7 +326,9 @@ def test_permission_lost_between_banner_and_click_blocks_apply():
 
 @pytest.mark.parametrize("action, path", [("apply", "/api/updates/apply"), ("force", "/api/updates/force"), ("clearLock", "/api/updates/clear_lock")])
 def test_stale_capability_then_403_disables_and_explains(action, path):
-    out = _run(["banner", "settle", action], updates=[{"httpStatus": 403, "message": "Owner session required"}])
+    # banner -> true, pre-mutation recheck -> true, post-403 re-read -> false
+    auth = [{"can_manage_server": True}, {"can_manage_server": True}, {"can_manage_server": False}]
+    out = _run(["banner", "settle", action], auth=auth, updates=[{"httpStatus": 403, "message": "Owner session required"}])
     assert _mutations(out) == [path]
     assert out["waitCalls"] == 0
     assert out["canManage"] is False
@@ -341,3 +343,16 @@ def test_non_403_failure_reset_reenables_only_for_owner():
     assert out["canManage"] is True
     assert out["applyDisabled"] is False
     assert out["inFlight"] is False
+
+
+@pytest.mark.parametrize("action", ["apply", "force", "clearLock"])
+def test_403_from_another_gate_does_not_lock_out_a_still_owner(action):
+    """A CSRF/origin 403 must not be mistaken for loss of owner permission."""
+    out = _run(["banner", "settle", action], updates=[{"httpStatus": 403, "message": "CSRF token mismatch"}])
+    assert out["canManage"] is True
+    assert out["applyDisabled"] is False
+    assert out["forceDisabled"] is False
+    assert out["clearLockDisabled"] is False
+    assert out["noteDisplay"] == "none"
+    assert "CSRF token mismatch" in out["errorText"]
+    assert out["inFlight"] is False and out["lockInFlight"] is False

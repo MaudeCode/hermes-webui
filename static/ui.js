@@ -10916,8 +10916,10 @@ async function _syncUpdateCapability(){
   _renderUpdateCapability();
   return _updateMutationAllowed();
 }
-function _noteUpdateForbidden(error){
-  if(error&&error.status===403) window._updateCanManage=false;
+async function _noteUpdateForbidden(error){
+  // A 403 can also come from the CSRF gate, so re-read the authoritative
+  // capability instead of assuming the session lost owner permission.
+  if(error&&error.status===403) await _syncUpdateCapability();
 }
 function _i18nUpdateText(key, fallback){
   if(typeof t==='function'){
@@ -11003,7 +11005,7 @@ async function applyUpdates(){
     sessionStorage.removeItem('hermes-update-dismissed');
     _waitForServerThenReload({baselineServerIdentity});
   }catch(e){
-    _noteUpdateForbidden(e);
+    await _noteUpdateForbidden(e);
     const msg=_formatUpdateApplyExceptionMessage(e);
     if(errEl){errEl.textContent=msg;errEl.style.display='block';}
     else showToast(msg);
@@ -11068,7 +11070,7 @@ async function applyClearUpdateLock(btn){
       else showToast(msg);
     }
   }catch(e){
-    _noteUpdateForbidden(e);
+    await _noteUpdateForbidden(e);
     const msg='Lock-check request failed: '+((e&&e.message)||String(e));
     const errEl=$('updateError');
     if(errEl){errEl.textContent=msg;errEl.style.display='block';}
@@ -11205,7 +11207,7 @@ async function forceUpdate(btn){
     sessionStorage.removeItem('hermes-update-dismissed');
     _waitForServerThenReload({baselineServerIdentity});
   }catch(e){
-    _noteUpdateForbidden(e);
+    await _noteUpdateForbidden(e);
     if(errEl){errEl.textContent='Force update failed: '+e.message;errEl.style.display='block';}
     btn.textContent='Force update';
     _renderUpdateCapability();
