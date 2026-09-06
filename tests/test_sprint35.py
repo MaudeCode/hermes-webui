@@ -42,15 +42,16 @@ def test_panel_max_is_not_500():
 
 # ── 2. Responsive messages-inner ─────────────────────────────────────────────
 
-def test_messages_inner_has_responsive_breakpoints():
-    """style.css must have @media breakpoints for .messages-inner."""
+def test_messages_inner_uses_the_one_shared_column_token():
+    """HWEB-2 superseded the 1400px/1800px widening breakpoints: the transcript
+    and the composer share one `--msg-max` column at every desktop width, and
+    `data-chat-width="full"` is the only opt-out."""
     css = read("static/style.css")
-    assert "min-width:1400px" in css or "min-width: 1400px" in css, (
-        "Missing @media(min-width:1400px) breakpoint for .messages-inner"
-    )
-    assert "min-width:1800px" in css or "min-width: 1800px" in css, (
-        "Missing @media(min-width:1800px) breakpoint for .messages-inner"
-    )
+    assert ".messages-inner { max-width: var(--msg-max); }" in css
+    assert "@media (min-width: 1400px) { .messages-inner" not in css
+    assert "@media(min-width:1400px){.messages-inner" not in css
+    assert "@media (min-width: 1800px) { .messages-inner" not in css
+    assert "@media(min-width:1800px){.messages-inner" not in css
 
 
 def test_messages_inner_no_hardcoded_800px():
@@ -66,15 +67,12 @@ def test_messages_inner_no_hardcoded_800px():
             )
 
 
-def test_messages_inner_breakpoint_values():
-    """The breakpoints should expand max-width at 1400px and 1800px."""
+def test_composer_shares_the_transcript_column():
+    """HWEB-2: the composer no longer carries its own clamp/1600px cap — it is
+    the same column as the transcript."""
     css = read("static/style.css")
-    assert "max-width:1100px" in css or "max-width: 1100px" in css, (
-        "Expected max-width:1100px at 1400px breakpoint"
-    )
-    assert "max-width:1200px" in css or "max-width: 1200px" in css, (
-        "Expected max-width:1200px at 1800px breakpoint"
-    )
+    assert ".composer-box{max-width:var(--msg-max);" in css
+    assert "clamp(780px,60vw,1100px)" not in css
 
 
 # ── 3–6. Breadcrumb navigation ───────────────────────────────────────────────

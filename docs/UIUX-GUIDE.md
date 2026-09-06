@@ -174,11 +174,18 @@ For UI changes, verify the relevant states:
 Controls should remain usable at touch sizes, and mobile navigation should not
 steal chat height unnecessarily.
 
-The transcript and composer default to a compact reading column on desktop.
-Users who prefer to use the entire center pane can enable **Use full-width chat**
-under Settings → Appearance. New transcript-width rules should honor the shared
-`--msg-max` token and the `data-chat-width="full"` root mode so prose, worklogs,
-tool rows, status cards, and the composer remain aligned.
+The transcript and composer default to a compact reading column on desktop:
+one `--msg-max` token, 768px (48rem at the CSS-default root size), used by every
+chat surface. Users who prefer to use the entire center pane can enable **Use
+full-width chat** under Settings → Appearance, which is the only override.
+
+The column's gutter lives on the containers — `.messages` and `.composer-wrap`
+— not on the surfaces inside them, so a new chat surface only needs
+`max-width:var(--msg-max);margin:0 auto` to line up with prose, worklogs, tool
+rows, status cards, approvals and the composer. Overlay affordances (the
+scroll/jump/outline buttons) use `--chat-col-inset` to ride the column's right
+edge instead of the pane's. Do not add a second width rule, a per-surface
+gutter, or a wide-viewport breakpoint.
 
 ## Themes and skins
 
