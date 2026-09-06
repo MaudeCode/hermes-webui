@@ -37,12 +37,18 @@ except ImportError:  # pragma: no cover - exercised only where fcntl is unavaila
 from api.config import (
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
+    _canonicalise_provider_id,
+    _resolve_provider_alias,
     _coerce_provider_cost_budget,
     _configured_model_ids,
     _custom_provider_slug_from_name,
+    _endpoint_advertised_model_ids,
     _get_label_for_model,
     _models_from_live_provider_ids,
     _pool_entry_payloads,
+    published_catalog_is_available,
+    published_catalog_model_total,
+    published_catalog_models,
     _read_live_provider_model_ids,
     _read_visible_codex_cache_model_ids,
     _save_yaml_config_file,
@@ -56,6 +62,7 @@ from api.plugin_providers import (
     effective_provider_env_var,
     is_plugin_model_provider,
     plugin_model_provider_ids,
+    plugin_model_provider_profiles,
 )
 
 logger = logging.getLogger(__name__)
@@ -770,6 +777,16 @@ _PROVIDER_ENV_VAR: dict[str, str] = {
     # flip to "no key" after upgrading.
     "lmstudio": "LM_API_KEY",
     "nvidia": "NVIDIA_API_KEY",
+    # Hermes Agent v0.21.0 providers.  Canonical slug → the agent's primary
+    # API-key env var (hermes_cli/auth.py registry rows and the
+    # plugins/model-providers/<slug>/ profiles' first non-URL `env_vars` entry).
+    "commandcode": "COMMANDCODE_API_KEY",
+    "tencent-tokenplan": "TOKENPLAN_API_KEY",
+    "tencent-tokenhub": "TOKENHUB_API_KEY",
+    "nebius-token-factory": "NEBIUS_API_KEY",
+    "router": "RAMP_ROUTER_API_KEY",
+    "actual": "ACTUAL_API_KEY",
+    "meta-ai": "MODEL_API_KEY",
 }
 
 # Read-only legacy env-var aliases.  When `_provider_has_key(pid)` looks up its
@@ -1062,11 +1079,23 @@ def _providers_cache_key(cfg: Any) -> tuple[Any, ...]:
         home_key = str(home.resolve())
     except OSError:
         home_key = str(home)
+    # Cards render the picker's published catalog, so that catalog is an input.
+    # Without it, a warm whose rebuild overran `_LIVE_REBUILD_BUDGET_SECONDS`
+    # returns the static fallback, this cache pins that answer for its full TTL,
+    # and Settings keeps showing it for up to 30s after the live catalog lands.
+    # Keying on provenance retires the stale entry the moment it publishes.
+    try:
+        from api.config import published_catalog_generation
+
+        catalog_generation = published_catalog_generation()
+    except Exception:
+        catalog_generation = None
     return (
         home_key,
         _providers_file_mtime_ns(home / ".env"),
         _providers_file_mtime_ns(home / "config.yaml"),
         _providers_config_fingerprint(cfg),
+        catalog_generation,
     )
 
 
@@ -1347,14 +1376,15 @@ def _provider_has_key(provider_id: str, config_data: dict | None = None) -> bool
     # "configured" when the active provider had a top-level api_key.
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict) and str(model_cfg.get("api_key") or "").strip():
-        active_provider = model_cfg.get("provider")
-        if active_provider and str(active_provider).strip().lower() == provider_id.lower():
+        # Alias-tolerant: `model.provider: ramp` names the `router` card, and
+        # routing already accepts it, so credential detection must agree.
+        if _config_provider_is(model_cfg.get("provider"), provider_id):
             if _provider_value_counts_as_api_key(provider_id, model_cfg.get("api_key")):
                 return True
     # Check providers.<id>.api_key
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
-        provider_cfg = providers_cfg.get(provider_id, {})
+        provider_cfg = _config_provider_cfg_for(providers_cfg, provider_id)
         if isinstance(provider_cfg, dict) and str(provider_cfg.get("api_key") or "").strip():
             if _provider_value_counts_as_api_key(provider_id, provider_cfg.get("api_key")):
                 return True
@@ -1367,6 +1397,92 @@ def _provider_has_key(provider_id: str, config_data: dict | None = None) -> bool
                     if _provider_value_counts_as_api_key(provider_id, cp.get("api_key")):
                         return True
     return False
+
+
+def _unqualified_model_id(model_id: object) -> str:
+    """Strip a picker routing hint (``@provider:``) from *model_id*.
+
+    `_apply_provider_prefix()` qualifies a row when its provider is not the
+    active one, so the same configured model appears as ``acct/only`` or
+    ``@router:acct/only`` depending on unrelated state. Anything comparing a
+    published row against config has to compare the underlying id.
+    """
+    raw = str(model_id or "").strip()
+    if raw.startswith("@") and ":" in raw:
+        return raw.split(":", 1)[1]
+    return raw
+
+
+def _is_catalog_card_id(name: object) -> bool:
+    """True when *name* is a provider the WebUI renders a card for in its own right."""
+    slug = str(name or "").strip().lower()
+    return bool(slug) and (slug in _PROVIDER_DISPLAY or slug in _PROVIDER_MODELS)
+
+
+def _provider_identity(name: object) -> str:
+    """Fold *name* to one comparable identity for credential lookups.
+
+    `_canonicalise_provider_id()` alone is not enough: it deliberately preserves
+    ``x-ai`` rather than folding it to the agent's ``xai`` target, because the
+    WebUI indexes its cards by ``x-ai``. That is right for picking a card and
+    wrong for asking "do these two names mean the same provider?", which is all
+    this is used for — the result is never used as a card id.
+    """
+    slug = _canonicalise_provider_id(name)
+    if not slug:
+        return ""
+    return _resolve_provider_alias(slug) or slug
+
+
+def _config_provider_cfg_for(providers_cfg: object, provider_id: str) -> dict:
+    """Return ``providers.<id>`` for *provider_id*, matching aliases too.
+
+    Users write the provider name they see on the vendor's site (``z-ai``,
+    ``ramp``, ``actual-computer``); the WebUI keys its cards by canonical slug.
+    An exact-key lookup therefore misses an aliased block and reports a
+    configured provider as unconfigured.
+    """
+    if not isinstance(providers_cfg, dict):
+        return {}
+    exact = providers_cfg.get(provider_id)
+    if isinstance(exact, dict):
+        return exact
+    canonical = _provider_identity(provider_id)
+    if not canonical:
+        return {}
+    for key, value in providers_cfg.items():
+        if not isinstance(value, dict) or _provider_identity(key) != canonical:
+            continue
+        # Only a key that is NOT a card in its own right may be claimed as an
+        # alias. `qwen` and `alibaba` share an identity but are both real cards
+        # (qwen is the OpenRouter model-id prefix), as are `google` and
+        # `gemini` — so `providers.qwen` belongs to the qwen card alone, and
+        # claiming it for alibaba too would mark two cards configured from one
+        # key. `ramp` is not a card, so it still resolves to router.
+        if _is_catalog_card_id(key) and key.strip().lower() != provider_id.strip().lower():
+            continue
+        return value
+    return {}
+
+
+def _config_provider_is(active_provider: object, provider_id: str) -> bool:
+    """True when ``model.provider`` names *provider_id*, alias or not."""
+    active = str(active_provider or "").strip().lower()
+    if not active:
+        return False
+    target = provider_id.strip().lower()
+    if active == target:
+        return True
+    # Same standalone-card guard as `_config_provider_cfg_for()`. Without it an
+    # identity-only match is symmetric across cards that merely SHARE an
+    # identity: `model.provider: google` matched the gemini card too, so both
+    # showed configured and — far worse — removing the Gemini key deleted the
+    # active Google `model.api_key`. A name that is a card in its own right
+    # names only that card.
+    if _is_catalog_card_id(active):
+        return False
+    identity = _provider_identity(active)
+    return bool(identity) and identity == _provider_identity(target)
 
 
 def _get_provider_api_key(provider_id: str, credential_id: str | None = None) -> str | None:
@@ -1404,14 +1520,17 @@ def _get_provider_api_key(provider_id: str, credential_id: str | None = None) ->
     cfg = get_config()
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict):
-        active_provider = str(model_cfg.get("provider") or "").strip().lower()
         model_key = str(model_cfg.get("api_key") or "").strip()
-        if model_key and active_provider == provider_id and _provider_value_counts_as_api_key(provider_id, model_key):
+        if (
+            model_key
+            and _config_provider_is(model_cfg.get("provider"), provider_id)
+            and _provider_value_counts_as_api_key(provider_id, model_key)
+        ):
             return model_key
 
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
-        provider_cfg = providers_cfg.get(provider_id, {})
+        provider_cfg = _config_provider_cfg_for(providers_cfg, provider_id)
         if isinstance(provider_cfg, dict):
             provider_key = str(provider_cfg.get("api_key") or "").strip()
             if _provider_value_counts_as_api_key(provider_id, provider_key):
@@ -3343,6 +3462,44 @@ def get_provider_cost_history(provider_id: str | None = None, days: int = 7) -> 
 # SECTION: Public API
 
 
+def _warm_published_catalog() -> None:
+    """Publish the picker catalog once so provider cards can read it.
+
+    Deliberately NOT a probe pool of our own. `get_available_models()` already
+    owns a bounded, profile-scoped rebuild for exactly this — the
+    ``models-catalog-rebuild`` worker with `_LIVE_REBUILD_BUDGET_SECONDS` and
+    `profile_scope_for_detached_worker()`. Reusing it means one shared build
+    instead of a probe per provider, the profile binding is handled where it is
+    already proven, and what the card shows is by construction what
+    /api/models will show rather than a second opinion assembled here.
+    """
+    try:
+        from api.config import get_available_models
+
+        get_available_models()
+    except Exception:
+        logger.debug("Cold catalog warm failed; cards fall back to static", exc_info=True)
+
+
+# Providers whose model list is NOT a plain live-then-static lookup. Each is
+# resolved by its own branch inside get_providers() before the generic pass, or
+# must not be probed at all — running the generic lookup over them would undo
+# that work.
+_BESPOKE_CATALOG_PROVIDERS = frozenset({
+    # Merges the local Codex CLI cache on top of the live catalog (#1807).
+    "openai-codex",
+    # Renders a featured subset while reporting the full live count (#1567).
+    "nous",
+    # Already resolved live above.
+    "xai-oauth",
+    "lmstudio",
+    # The public catalog advertises models the Go tier cannot serve, so the
+    # picker deliberately skips its live probe — mirror that here or the
+    # Settings card reinstates exactly the entries #5311 removed.
+    "opencode-go",
+})
+
+
 def get_providers() -> dict[str, Any]:
     """Return a list of all known providers with their configuration status.
 
@@ -3361,6 +3518,18 @@ def get_providers() -> dict[str, Any]:
 
     # Also detect providers from config.yaml providers section
     cfg = get_config()
+    # Cards render the picker's published catalog. If nothing is published for
+    # this profile yet (startup, or just after profile invalidation), warm it
+    # once rather than letting every card fall back to its committed snapshot
+    # and then 30s-cache that stale answer.
+    #
+    # This MUST happen before the cache key is computed: the key includes the
+    # catalog generation, and warming publishes a new one. Keyed first, every
+    # call would invalidate the entry the previous call just stored and the TTL
+    # cache would never hit.
+    if not published_catalog_is_available():
+        _warm_published_catalog()
+
     cache_key = _providers_cache_key(cfg)
     cached = _get_cached_providers(cache_key)
     if cached is not None:
@@ -3369,7 +3538,15 @@ def get_providers() -> dict[str, Any]:
     providers = []
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
-        known_ids.update(providers_cfg.keys())
+        # Fold an aliased block onto the card it configures. `providers.ramp`
+        # names the `router` card, and since credential lookups resolve aliases
+        # the raw key would otherwise render a SECOND card for the same
+        # provider — one configurable, one not. A key that resolves to no known
+        # card is a user-defined provider and keeps its own card, so this only
+        # collapses genuine aliases.
+        for _cfg_key in providers_cfg:
+            _identity = _provider_identity(_cfg_key)
+            known_ids.add(_identity if _identity in known_ids else _cfg_key)
 
     # Add OAuth providers even if not in _PROVIDER_DISPLAY
     known_ids.update(_OAUTH_PROVIDERS)
@@ -3558,37 +3735,93 @@ def get_providers() -> dict[str, Any]:
                     models_total = len(models)
             except Exception:
                 logger.debug("Failed to load LM Studio models from hermes_cli")
-        if is_plugin_model_provider(pid):
+        # Prefer the live catalog, exactly like the picker
+        # (_build_available_models_uncached asks hermes_cli first and treats
+        # _PROVIDER_MODELS as the offline fallback). Gating this on "is a plugin"
+        # or "has an empty static list" left every statically-catalogued provider
+        # reporting whatever snapshot happened to be committed, so the Settings
+        # card and /api/models disagreed about the same account whenever the two
+        # drifted. The static list stays the fallback: `if live_models` means a
+        # cold or failed probe still renders the curated set.
+        if pid not in _BESPOKE_CATALOG_PROVIDERS:
             try:
-                live_models = _models_from_live_provider_ids(
-                    pid,
-                    _read_live_provider_model_ids(pid),
-                )
-                if live_models:
-                    models = live_models
-                    models_total = len(models)
+                published = published_catalog_models(pid)
+                if published:
+                    models = published
+                    # The visible rows are capped; the count is not. Report the
+                    # whole catalog so the card's "+N more" affordance is honest
+                    # while the response stays scannable.
+                    models_total = published_catalog_model_total(pid) or len(models)
+                elif not models and is_plugin_model_provider(pid):
+                    # A plugin provider has no `_PROVIDER_MODELS` fallback, and
+                    # the picker publishes no group for one that is not
+                    # authenticated yet — so without this the card reads "0
+                    # models" for an installed plugin. Its profile carries a
+                    # curated `fallback_models` for exactly this cold state;
+                    # read it directly, the way config.py's static catalog
+                    # builder does. No probe, no network.
+                    profile = plugin_model_provider_profiles().get(pid)
+                    fallback = getattr(profile, "fallback_models", ()) or () if profile else ()
+                    if fallback:
+                        models = [{"id": str(mid), "label": str(mid)} for mid in fallback]
+                        models_total = len(models)
             except Exception:
                 logger.debug(
-                    "Failed to load plugin model-provider catalog for %s",
-                    pid,
-                    exc_info=True,
+                    "Failed to resolve published catalog for %s", pid, exc_info=True
                 )
-        # Also include models from config.yaml providers section
+        # Also include models from config.yaml providers section. Alias-aware to
+        # match the card fold above: `providers.ramp` no longer renders its own
+        # card, so its `models:` must reach the canonical router card or the
+        # user's configured choices vanish entirely.
         if isinstance(providers_cfg, dict):
-            provider_cfg = providers_cfg.get(pid, {})
+            provider_cfg = _config_provider_cfg_for(providers_cfg, pid)
             if isinstance(provider_cfg, dict) and "models" in provider_cfg:
                 cfg_models = provider_cfg["models"]
-                if isinstance(cfg_models, dict):
-                    models = models + [{"id": k, "label": k} for k in cfg_models.keys()]
-                elif isinstance(cfg_models, list):
-                    models = models + [{"id": k, "label": k} for k in cfg_models]
-                # Recompute models_total when config.yaml contributes additional
-                # entries on top of the live/static catalog. For non-Nous
-                # providers models_total still equals len(models); for Nous
-                # we keep the live count (which already includes any models
-                # surfaced in the curated featured slice).
+                # The picker builds a published group FROM this same allowlist,
+                # so appending it again double-counts: a one-model allowlist
+                # rendered two identical tags and reported "2 models" while the
+                # picker showed one. Merge only what is not already present.
+                # Published rows are routing-qualified when this provider is
+                # not the active one (`@router:acct/only`), so an exact-id
+                # comparison would miss the match and append the raw id back —
+                # the very double-count this dedupe exists to prevent.
+                #
+                # `models` alone is not the right set to compare against: it
+                # holds only the rows the picker deemed VISIBLE, so a configured
+                # model parked in the overflow bucket looked unseen and was
+                # appended, re-flooding the card the cap exists to protect.
+                # `_endpoint_advertised_model_ids()` unions both buckets and is
+                # already profile-validated and memoised.
+                _seen_ids = {
+                    _unqualified_model_id(m.get("id"))
+                    for m in models
+                    if isinstance(m, dict) and m.get("id")
+                }
+                try:
+                    _advertised = _endpoint_advertised_model_ids(pid)
+                except Exception:
+                    _advertised = None
+                if _advertised:
+                    _seen_ids.update(_unqualified_model_id(mid) for mid in _advertised)
+                _cfg_ids = (
+                    list(cfg_models.keys())
+                    if isinstance(cfg_models, dict)
+                    else list(cfg_models) if isinstance(cfg_models, list) else []
+                )
+                _added = [
+                    {"id": k, "label": k}
+                    for k in _cfg_ids
+                    if _unqualified_model_id(k) not in _seen_ids
+                ]
+                models = models + _added
+                # Count what config CONTRIBUTED rather than re-deriving from
+                # len(models). Once the visible rows are capped, `models` is a
+                # subset of the catalog, so recomputing here reported the capped
+                # figure as the whole total and the "+N more" affordance
+                # under-counted. For Nous we keep the live count, which already
+                # includes anything in its curated featured slice.
                 if pid != "nous":
-                    models_total = len(models)
+                    models_total = (models_total or 0) + len(_added)
 
         is_self_hosted = pid in _SELF_HOSTED_PROVIDER_IDS
         try:
@@ -3825,9 +4058,14 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
                 return
 
             # 1. Clean providers.<id>.api_key
+            # Alias-aware on both sides: `_provider_has_key()` accepts
+            # `providers.ramp` / `model.provider: ramp` for the router card, so
+            # Remove has to clear the same blocks. Comparing the literal id here
+            # deleted only the env var, returned ok, and left the YAML
+            # credential live — the provider stayed configured after reload.
             providers_cfg = cfg.get("providers") or {}
             if isinstance(providers_cfg, dict):
-                provider_cfg = providers_cfg.get(provider_id, {})
+                provider_cfg = _config_provider_cfg_for(providers_cfg, provider_id)
                 if isinstance(provider_cfg, dict) and provider_cfg.get("api_key"):
                     del provider_cfg["api_key"]
                     changed = True
@@ -3835,8 +4073,7 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
             # 2. Clean model.api_key — only if this provider is the active one
             model_cfg = cfg.get("model", {})
             if isinstance(model_cfg, dict) and model_cfg.get("api_key"):
-                active_provider = model_cfg.get("provider")
-                if active_provider and str(active_provider).strip().lower() == provider_id.lower():
+                if _config_provider_is(model_cfg.get("provider"), provider_id):
                     del model_cfg["api_key"]
                     changed = True
 

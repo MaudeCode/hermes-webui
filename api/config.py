@@ -1204,6 +1204,24 @@ _PROVIDER_DISPLAY = {
     "nvidia": "NVIDIA NIM",
     "xiaomi": "Xiaomi",
     "bedrock": "AWS Bedrock",
+    # Providers added by Hermes Agent v0.21.0 (v2026.8.31).  Keys are the
+    # agent-canonical slugs, NOT the marketing names — the agent keeps the two
+    # apart and only the slug resolves in `--provider` / the CLI picker.  Each
+    # slug below is read from the agent core, not guessed:
+    #   commandcode           plugins/model-providers/commandcode/__init__.py
+    #   tencent-tokenplan     hermes_cli/auth.py (alias: "tokenplan")
+    #   tencent-tokenhub      hermes_cli/auth.py (alias: "tencent")
+    #   nebius-token-factory  plugins/model-providers/nebius-token-factory/
+    #   router                plugins/model-providers/router/ (aliases: ramp-router, ramp)
+    #   actual                plugins/model-providers/actual/ (alias: actual-computer)
+    #   meta-ai               plugins/model-providers/meta-ai/ (aliases: meta, muse-spark)
+    "commandcode": "CommandCode",
+    "tencent-tokenplan": "Tencent TokenPlan",
+    "tencent-tokenhub": "Tencent TokenHub",
+    "nebius-token-factory": "Nebius Token Factory",
+    "router": "Ramp Router",
+    "actual": "Actual Computer",
+    "meta-ai": "Meta Model API",
 }
 
 # Provider alias → canonical slug.  Users configure providers using the
@@ -1256,6 +1274,38 @@ _PROVIDER_ALIASES = {
     "nemotron": "nvidia",
     "mimo": "xiaomi",
     "xiaomi-mimo": "xiaomi",
+    # v0.21.0 provider aliases, mirrored from the agent (plugin profiles'
+    # ``aliases=`` tuples and hermes_cli's own alias table). The docstring above
+    # is the reason these are duplicated here rather than left to the merge:
+    # this table has to stand alone when the agent tree is not importable, which
+    # is exactly the standalone deployment the static catalog above serves.
+    # Without them an aliased ``model.provider`` canonicalises to itself and
+    # misses `_PORTAL_PROVIDERS`, sending namespaced rows to OpenRouter.
+    # ``commandcode-anthropic`` is deliberately absent — it is a separate agent
+    # provider profile, not an alias of ``commandcode``.
+    "commandcode-chat": "commandcode",
+    "ramp-router": "router",
+    "ramp": "router",
+    "router.com": "router",
+    "actual-computer": "actual",
+    "actualcomputer": "actual",
+    "aci": "actual",
+    "nebius": "nebius-token-factory",
+    "nebius-tokenfactory": "nebius-token-factory",
+    "nebius-tf": "nebius-token-factory",
+    "token-factory": "nebius-token-factory",
+    "tokenfactory": "nebius-token-factory",
+    "meta": "meta-ai",
+    "muse": "meta-ai",
+    "muse-spark": "meta-ai",
+    "model-api": "meta-ai",
+    "msl": "meta-ai",
+    "tencent": "tencent-tokenhub",
+    "tokenhub": "tencent-tokenhub",
+    "tencent-cloud": "tencent-tokenhub",
+    "tencentmaas": "tencent-tokenhub",
+    "tokenplan": "tencent-tokenplan",
+    "tencent-lkeap": "tencent-tokenplan",
     # Legacy alias — earlier WebUI builds wrote ``provider: local`` for unknown
     # loopback endpoints, but ``local`` is not registered in
     # ``hermes_cli.auth.PROVIDER_REGISTRY``. Routing it through ``custom``
@@ -1914,6 +1964,70 @@ _PROVIDER_MODELS = {
         {"id": "global.anthropic.claude-sonnet-4-5-20250929-v1:0", "label": "Global Claude Sonnet 4.5"},
         {"id": "global.anthropic.claude-haiku-4-5-20251001-v1:0",  "label": "Global Anthropic Claude Haiku 4.5"},
     ],
+    # ── Hermes Agent v0.21.0 providers ───────────────────────────────────────
+    # Model IDs are copied from the agent's own curated lists, never invented:
+    # plugin profiles expose `fallback_models`, the Tencent lanes come from
+    # hermes_cli/models_catalog_static.py `_TENCENT_MODELS`.  These are cold
+    # fallbacks only — `_read_live_provider_model_ids()` asks the agent for the
+    # live catalog first and supersedes them.
+    #
+    # CommandCode — one key fronts 20+ vendor models (api.commandcode.ai).
+    "commandcode": [
+        {"id": "deepseek/deepseek-v4-pro",   "label": "DeepSeek V4 Pro"},
+        {"id": "deepseek/deepseek-v4-flash", "label": "DeepSeek V4 Flash"},
+        {"id": "Qwen/Qwen3.7-Max",           "label": "Qwen3.7 Max"},
+        {"id": "Qwen/Qwen3.6-Plus",          "label": "Qwen3.6 Plus"},
+        {"id": "moonshotai/Kimi-K2.6",       "label": "Kimi K2.6"},
+        {"id": "zai-org/GLM-5.1",            "label": "GLM-5.1"},
+        {"id": "MiniMaxAI/MiniMax-M2.7",     "label": "MiniMax M2.7"},
+        {"id": "stepfun/Step-3.5-Flash",     "label": "Step 3.5 Flash"},
+        {"id": "xiaomi/mimo-v2.5-pro",       "label": "MiMo V2.5 Pro"},
+        {"id": "google/gemini-3.5-flash",    "label": "Gemini 3.5 Flash"},
+        {"id": "gpt-5.5",                    "label": "GPT-5.5"},
+    ],
+    # Tencent TokenPlan (api.lkeap.cloud.tencent.com, Anthropic Messages) and
+    # Tencent TokenHub (tokenhub.tencentmaas.com) are two distinct agent
+    # providers serving the same Hy catalog on different wires.
+    "tencent-tokenplan": [
+        {"id": "hy4-preview", "label": "Hy4 Preview"},
+        {"id": "hy3",         "label": "Hy3"},
+        {"id": "hy3-preview", "label": "Hy3 Preview"},
+    ],
+    "tencent-tokenhub": [
+        {"id": "hy4-preview", "label": "Hy4 Preview"},
+        {"id": "hy3",         "label": "Hy3"},
+        {"id": "hy3-preview", "label": "Hy3 Preview"},
+    ],
+    # Nebius Token Factory — OpenAI-compatible inference (api.tokenfactory.nebius.com).
+    "nebius-token-factory": [
+        {"id": "Qwen/Qwen3.5-397B-A17B-fast",     "label": "Qwen3.5 397B A17B (fast)"},
+        {"id": "deepseek-ai/DeepSeek-V4-Pro",     "label": "DeepSeek V4 Pro"},
+        {"id": "zai-org/GLM-5.1",                 "label": "GLM-5.1"},
+        {"id": "moonshotai/Kimi-K2.5-fast",       "label": "Kimi K2.5 (fast)"},
+        {"id": "MiniMaxAI/MiniMax-M2.5-fast",     "label": "MiniMax M2.5 (fast)"},
+        {"id": "deepseek-ai/DeepSeek-V3.2-fast",  "label": "DeepSeek V3.2 (fast)"},
+        {"id": "NousResearch/Hermes-4-70B",       "label": "Hermes 4 70B"},
+        {"id": "openai/gpt-oss-120b-fast",        "label": "GPT-OSS 120B (fast)"},
+        {"id": "meta-llama/Llama-3.3-70B-Instruct", "label": "Llama 3.3 70B Instruct"},
+    ],
+    # Meta Model API — Muse Spark family (api.meta.ai, Responses wire).
+    "meta-ai": [
+        {"id": "muse-spark-1.2",             "label": "Muse Spark 1.2"},
+        {"id": "muse-spark-1.2-contributor", "label": "Muse Spark 1.2 Contributor"},
+    ],
+    # Ramp Router (router.com) and Actual Computer (api.actual.inc) publish NO
+    # static catalog in the agent — both are account/cluster scoped and the
+    # agent's own profiles ship empty `fallback_models`.  Inventing IDs here
+    # would render models the user cannot select, so the keys stay empty and
+    # `_read_live_provider_model_ids()` fills the group from the account's live
+    # `GET /v1/models`.  Membership here is still load-bearing: it is what lets
+    # the group builder consider them at all (before this entry they fell into
+    # the "unrecognized provider" branch and were dropped outright).  Until the
+    # live probe returns, the group carries zero models and the picker's
+    # zero-model filter (#1568) hides it — deliberate, and the same treatment
+    # every other empty group gets.
+    "router": [],
+    "actual": [],
 }
 
 
@@ -2282,6 +2396,31 @@ def _split_picker_overflow_models(
     return visible, extras
 
 
+# Providers that serve models from multiple upstream namespaces under their own
+# credentials, so a ``vendor/model`` id belongs to THEM rather than to the vendor
+# the prefix names.  Both the resolver (keep the full namespaced path, route
+# through this provider) and the picker (``_apply_provider_prefix``: qualify the
+# row with ``@provider:`` so a cross-provider selection cannot be misread as an
+# OpenRouter-style id) key off this set.  Adding an aggregator here without the
+# picker half leaves its rows resolving to ``openrouter``.
+_PORTAL_PROVIDERS = {
+    "nous",
+    "opencode-zen",
+    "opencode-go",
+    "nvidia",
+    "commandcode",
+    "nebius-token-factory",
+    # Live-only catalogs: Ramp Router routes across OpenAI/Anthropic/xAI and
+    # returns account-scoped ids like ``accounts/fireworks/models/kimi-k3``;
+    # Actual Computer serves your own cluster, which registers models under
+    # their full HuggingFace-style ``vendor/model`` name. Neither namespace
+    # belongs to the vendor it names, so the same qualification applies even
+    # though their static catalogs are empty.
+    "router",
+    "actual",
+}
+
+
 def _apply_provider_prefix(
     raw_models: list[dict],
     provider_id: str,
@@ -2290,16 +2429,31 @@ def _apply_provider_prefix(
     """Return *raw_models* with @provider: prefixes applied when needed.
 
     Prefixing is skipped when (a) the provider is already the active one, or
-    (b) a model id already starts with '@' or contains '/' (already routable).
+    (b) a model id already starts with '@', or (c) it contains '/' and the
+    namespace genuinely routes on its own.
+
+    Case (c) does NOT hold for a ``_PORTAL_PROVIDERS`` aggregator: it serves
+    ``deepseek/…`` / ``Qwen/…`` under its own key, and left bare those ids fall
+    through ``resolve_model_provider``'s OpenRouter default — the row then fails
+    outright when OpenRouter is unconfigured, or silently bills the wrong
+    account when it is. Qualify them so the picked provider stays authoritative.
     """
     _active = (active_provider or "").lower()
-    if not _active or provider_id == _active:
+    if provider_id == _active:
+        return list(raw_models)
+    # With no active provider (a fresh install whose ``model.provider`` is unset,
+    # or a key just added from Settings) nothing normally needs qualifying —
+    # there is no other provider for a row to be confused with. That reasoning
+    # does not hold for a portal provider: its namespaces name vendors it merely
+    # proxies, so a bare row is not left unrouted, it is actively misattributed
+    # to OpenRouter by resolve_model_provider's cross-provider branch.
+    if not _active and provider_id not in _PORTAL_PROVIDERS:
         return list(raw_models)
     result = []
     for m in raw_models:
         mid = m["id"]
         entry = dict(m)
-        if mid.startswith("@") or "/" in mid:
+        if mid.startswith("@") or ("/" in mid and provider_id not in _PORTAL_PROVIDERS):
             result.append(entry)
         else:
             entry["id"] = f"@{provider_id}:{mid}"
@@ -3031,8 +3185,16 @@ def resolve_model_provider(
         # fired in the prefix==config_provider case, causing HTTP 404 from the
         # portal which requires the full provider/model id (#2177; sibling of
         # #854 / #894 for Nous, where this guard was originally added).
-        _PORTAL_PROVIDERS = {"nous", "opencode-zen", "opencode-go", "nvidia"}
-        if config_provider in _PORTAL_PROVIDERS:
+        #
+        # Test the CANONICAL slug: `_PORTAL_PROVIDERS` is keyed canonically, but
+        # `config_provider` keeps whatever alias the user wrote
+        # (`_resolve_configured_provider_id(..., resolve_alias=False)`). Left
+        # raw, `provider: actual-computer` / `aci` / `commandcode-chat` missed
+        # this set and fell through to the cross-provider branch, which handed a
+        # recognized namespace to OpenRouter — the picker had already resolved
+        # the group canonically, so the two disagreed about the same identity.
+        # Same reasoning as the `_canon_config_provider` lookup above (#5511).
+        if (_canon_config_provider or config_provider) in _PORTAL_PROVIDERS:
             return _finalize(model_id, config_provider, config_base_url)
         # If prefix matches config provider exactly, strip it and use that provider directly.
         # e.g. config=anthropic, model=anthropic/claude-... → bare name to anthropic API
@@ -5180,6 +5342,7 @@ _advertised_model_ids_memo: tuple | None = None
 # provenance check introduces no lock-ordering edge (avoids the _cfg_lock ↔
 # _available_models_cache_lock deadlock) and never waits behind a catalog rebuild.
 _models_cache_provenance: tuple | None = None
+_models_cache_generation: int = 0
 
 
 def _sync_models_cache_provenance() -> None:
@@ -5193,11 +5356,128 @@ def _sync_models_cache_provenance() -> None:
     and this call sees the PREVIOUS consistent tuple (never a torn pair); once
     this runs, readers see the new consistent pair.
     """
-    global _models_cache_provenance
+    global _models_cache_provenance, _models_cache_generation
     snap = _available_models_cache
     _models_cache_provenance = (
         (snap, _available_models_cache_source_fingerprint) if snap is not None else None
     )
+    # Bumped on every publish AND invalidate so anything caching a catalog-derived
+    # view (the Settings provider cards) retires its entry the moment this moves.
+    _models_cache_generation += 1
+
+
+def published_catalog_generation() -> object | None:
+    """Opaque identity of the currently published catalog, or None when cold.
+
+    Callers that cache anything derived from the catalog key on this so their
+    entry retires the moment a new snapshot publishes — including the
+    out-of-band publication a rebuild that overran its budget performs later.
+    """
+    # A counter, not ``id(snapshot)``: this module already documents (on
+    # ``_advertised_model_ids_memo``) that a freed-then-reused id() can produce
+    # a false hit, and a cache key that silently collides is worse than no key.
+    return _models_cache_generation if _models_cache_provenance is not None else None
+
+
+def published_catalog_is_available() -> bool:
+    """True when a catalog snapshot for THIS profile is published and current.
+
+    Cheap and side-effect free — same provenance + fingerprint check
+    ``published_catalog_models`` performs, without naming a provider. Lets a
+    caller decide whether it needs to warm the catalog before reading cards.
+    """
+    provenance = _models_cache_provenance
+    if provenance is None:
+        return False
+    snapshot, published_fp = provenance
+    if not isinstance(snapshot, dict):
+        return False
+    try:
+        return published_fp == _models_cache_source_fingerprint()
+    except Exception:
+        return False
+
+
+def published_catalog_models(provider_id: str | None) -> list[dict] | None:
+    """Return the picker entries already published for *provider_id*, or None.
+
+    Reads ONLY the in-memory catalog snapshot the picker publishes — it never
+    builds, live-probes, or touches disk, so callers on a request path add no
+    latency. ``None`` means the catalog is cold or has no group for this
+    provider; callers must fall back to their own source rather than treat it
+    as "no models".
+
+    This exists so the Settings providers card can report exactly what the model
+    picker shows. Re-running `_read_live_provider_model_ids()` per provider
+    would agree too, but at the cost of a network probe per card on every cold
+    read — the published snapshot is the same answer for free.
+    """
+    provenance = _models_cache_provenance
+    if provenance is None:
+        return None
+    snapshot, published_fp = provenance
+    if not isinstance(snapshot, dict):
+        return None
+    pid = str(provider_id or "").strip().lower()
+    if not pid:
+        return None
+    # Profile-isolation fail-safe, identical to the one in
+    # ``_endpoint_advertised_model_ids``: this cache is a process global, so a
+    # concurrently-active profile may have published the snapshot we are about
+    # to read. The fingerprint's ``config_yaml`` axis is the profile-specific
+    # config path, so a match proves the snapshot belongs to the profile asking.
+    # Any mismatch returns None and the caller falls back to its own source —
+    # rendering one profile's account-specific models on another's Settings
+    # cards would be worse than showing the curated list.
+    try:
+        if published_fp != _models_cache_source_fingerprint():
+            return None
+    except Exception:
+        return None  # fingerprint unavailable → no trustworthy provenance
+    for group in snapshot.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        if str(group.get("provider_id") or "").strip().lower() != pid:
+            continue
+        entries = [m for m in (group.get("models") or []) if isinstance(m, dict) and m.get("id")]
+        return copy.deepcopy(entries) if entries else None
+    return None
+
+
+def published_catalog_model_total(provider_id: str | None) -> int | None:
+    """Total models the published group holds, including its overflow bucket.
+
+    Split from ``published_catalog_models`` on purpose. The picker caps how many
+    rows are *visible* (``_split_picker_overflow_models``) and parks the rest in
+    ``extra_models``; a caller rendering a tag per entry must honour that cap, or
+    a large catalog like OpenRouter's floods the Settings response and DOM with
+    the very rows the cap exists to withhold. The count, however, should reflect
+    the whole catalog — that is what the "+N more" affordance is derived from.
+    """
+    provenance = _models_cache_provenance
+    if provenance is None:
+        return None
+    snapshot, published_fp = provenance
+    if not isinstance(snapshot, dict):
+        return None
+    try:
+        if published_fp != _models_cache_source_fingerprint():
+            return None
+    except Exception:
+        return None
+    pid = str(provider_id or "").strip().lower()
+    if not pid:
+        return None
+    for group in snapshot.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        if str(group.get("provider_id") or "").strip().lower() != pid:
+            continue
+        visible = [m for m in (group.get("models") or []) if isinstance(m, dict) and m.get("id")]
+        extra = [m for m in (group.get("extra_models") or []) if isinstance(m, dict) and m.get("id")]
+        total = len(visible) + len(extra)
+        return total or None
+    return None
 
 
 def _endpoint_advertised_model_ids(provider_id: str | None) -> frozenset | None:
@@ -7201,29 +7481,53 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     logger.debug("Failed to parse hermes env file")
             all_env = {**env_keys}
             _anthropic_env_vars = _get_anthropic_fallback_env_vars()
-            for k in (
+            # `_PROVIDER_ENV_VAR` is the single source of truth for "which env
+            # var configures which provider" — Settings' key management and
+            # `_provider_has_key()` both consume it. This fallback used to carry
+            # its own hand-maintained copy of that list, so any provider added to
+            # the table but not to the copy would report "configured" on the
+            # Providers card while the picker silently omitted its group. Read
+            # the table directly instead, and the two can no longer drift.
+            # `_PROVIDER_ENV_VAR` deliberately excludes OAuth/token-flow
+            # providers, so this stays an API-key-only signal as before.
+            try:
+                from api.providers import (
+                    _PROVIDER_ENV_VAR as _key_env_vars,
+                    _PROVIDER_ENV_VAR_ALIASES as _key_env_var_aliases,
+                )
+            except Exception:
+                logger.debug("Provider env-var table unavailable for fallback detection")
+                _key_env_vars, _key_env_var_aliases = {}, {}
+
+            # Providers whose detection is not a plain "canonical var is set":
+            # they need a companion variable or map onto different slugs. Each
+            # keeps its bespoke check below.
+            _NON_TRIVIAL_KEY_PROVIDERS = frozenset({"anthropic", "openai", "lmstudio"})
+
+            def _provider_key_env_var_names(pid: str) -> tuple[str, ...]:
+                names = [_key_env_vars.get(pid) or ""]
+                names.extend(_key_env_var_aliases.get(pid) or ())
+                return tuple(n for n in names if n)
+
+            _candidate_env_vars = {
                 *_anthropic_env_vars,
-                "OPENAI_API_KEY",
-                "OPENROUTER_API_KEY",
-                "GOOGLE_API_KEY",
-                "GEMINI_API_KEY",
-                "GLM_API_KEY",
-                "KIMI_API_KEY",
-                "DEEPSEEK_API_KEY",
-                "XIAOMI_API_KEY",
-                "OPENCODE_ZEN_API_KEY",
-                "OPENCODE_GO_API_KEY",
-                "OPENCODE_API_KEY",
-                "MINIMAX_API_KEY",
-                "MINIMAX_CN_API_KEY",
-                "XAI_API_KEY",
-                "MISTRAL_API_KEY",
                 "AWS_ACCESS_KEY_ID",
                 "AWS_SECRET_ACCESS_KEY",
-            ):
+                "LM_BASE_URL",
+            }
+            for _pid in _key_env_vars:
+                _candidate_env_vars.update(_provider_key_env_var_names(_pid))
+            for k in sorted(_candidate_env_vars):
                 val = _thread_local_env_value(k).strip()
                 if val:
                     all_env[k] = val
+
+            for _pid in _key_env_vars:
+                if _pid in _NON_TRIVIAL_KEY_PROVIDERS:
+                    continue
+                if any(all_env.get(_var) for _var in _provider_key_env_var_names(_pid)):
+                    detected_providers.add(_canonicalise_provider_id(_pid) or _pid)
+
             if any(all_env.get(env_var) for env_var in _anthropic_env_vars):
                 detected_providers.add("anthropic")
             if all_env.get("OPENAI_API_KEY"):
@@ -7238,32 +7542,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 # picker without a manual config.yaml edit. Users without Codex OAuth will see
                 # picker entries but hit auth errors at inference time (#1189 known limitation).
                 detected_providers.add("openai-codex")
-            if all_env.get("OPENROUTER_API_KEY"):
-                detected_providers.add("openrouter")
-            if all_env.get("GOOGLE_API_KEY"):
-                detected_providers.add("google")
-            if all_env.get("GEMINI_API_KEY"):
-                detected_providers.add("gemini")
-            if all_env.get("GLM_API_KEY"):
-                detected_providers.add("zai")
-            if all_env.get("KIMI_API_KEY"):
-                detected_providers.add("kimi-coding")
-            if all_env.get("MINIMAX_API_KEY"):
-                detected_providers.add("minimax")
-            if all_env.get("MINIMAX_CN_API_KEY"):
-                detected_providers.add("minimax-cn")
-            if all_env.get("DEEPSEEK_API_KEY"):
-                detected_providers.add("deepseek")
-            if all_env.get("XIAOMI_API_KEY"):
-                detected_providers.add("xiaomi")
-            if all_env.get("XAI_API_KEY"):
-                detected_providers.add("x-ai")
-            if all_env.get("MISTRAL_API_KEY"):
-                detected_providers.add("mistralai")
-            if all_env.get("OPENCODE_ZEN_API_KEY") or all_env.get("OPENCODE_API_KEY"):
-                detected_providers.add("opencode-zen")
-            if all_env.get("OPENCODE_GO_API_KEY") or all_env.get("OPENCODE_API_KEY"):
-                detected_providers.add("opencode-go")
+            # Every remaining one-to-one mapping (openrouter, google, gemini,
+            # zai, kimi-coding, minimax*, deepseek, xiaomi, x-ai, mistralai,
+            # opencode-zen/go via their shared OPENCODE_API_KEY alias, …) is
+            # covered by the table-driven pass above.
             # AWS Bedrock uses IAM credentials rather than a single API key.
             # Detect when both access key and secret are available (#2720).
             if all_env.get("AWS_ACCESS_KEY_ID") and all_env.get("AWS_SECRET_ACCESS_KEY"):

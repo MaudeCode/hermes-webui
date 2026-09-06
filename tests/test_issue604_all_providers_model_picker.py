@@ -35,17 +35,29 @@ class TestProviderDetectionEnvVars:
     # Providers that exist but aren't in _PROVIDER_MODELS (use special handling)
     _SPECIAL_PROVIDERS = {"openrouter", "ollama-cloud", "custom", "ollama", "lmstudio", "local"}
 
+    # Env-var detection reads ``_PROVIDER_ENV_VAR`` rather than a hand-written
+    # list of ``detected_providers.add(...)`` branches, so these pin the mapping
+    # that decides the slug. Asserting the table rather than config.py's source
+    # text survives refactors of the detection loop while still catching the
+    # actual bug these guard against — the wrong provider slug.
+
     def test_xai_env_maps_to_xai_provider(self):
         """XAI_API_KEY should add 'x-ai' (not 'xai')."""
-        src = _src()
-        assert re.search(r'XAI_API_KEY.*?add\("x-ai"\)', src, re.DOTALL), \
+        from api.providers import _PROVIDER_ENV_VAR
+
+        assert _PROVIDER_ENV_VAR.get("x-ai") == "XAI_API_KEY", \
             "XAI_API_KEY must map to provider 'x-ai'"
+        assert "xai" not in _PROVIDER_ENV_VAR, \
+            "'xai' is not a WebUI provider slug — 'x-ai' is"
 
     def test_mistral_env_maps_to_mistralai_provider(self):
         """MISTRAL_API_KEY should add 'mistralai' (not 'mistral')."""
-        src = _src()
-        assert re.search(r'MISTRAL_API_KEY.*?add\("mistralai"\)', src, re.DOTALL), \
+        from api.providers import _PROVIDER_ENV_VAR
+
+        assert _PROVIDER_ENV_VAR.get("mistralai") == "MISTRAL_API_KEY", \
             "MISTRAL_API_KEY must map to provider 'mistralai'"
+        assert "mistral" not in _PROVIDER_ENV_VAR, \
+            "'mistral' is not a WebUI provider slug — 'mistralai' is"
 
     def test_all_provider_env_vars_map_to_known_providers(self):
         """Every detected_provider.add() call should reference a known provider."""
