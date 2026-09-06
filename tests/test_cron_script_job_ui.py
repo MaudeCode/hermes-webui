@@ -36,7 +36,7 @@ def test_cron_list_shows_script_badge():
 def test_cron_form_hides_prompt_for_script_jobs():
     assert "const isNoAgent = !!no_agent" in PANELS_JS
     assert "const promptBlock = isNoAgent ? '' :" in PANELS_JS
-    assert "const scriptBlock = isNoAgent ?" in PANELS_JS
+    assert "const scriptBlock = isNoAgent ? scriptRow : '';" in PANELS_JS
     assert 'id="cronFormScript"' in PANELS_JS
     assert "if(!isNoAgent && !prompt)" in PANELS_JS
 

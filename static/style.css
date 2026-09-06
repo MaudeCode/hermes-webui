@@ -6624,6 +6624,11 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .cron-once-warning{margin-top:2px;}
 .detail-form-row label.detail-form-check{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text);cursor:pointer;font-weight:400;}
 .detail-form-row label.detail-form-check input{accent-color:var(--accent,var(--link));}
+.detail-form-advanced{border-top:1px solid var(--border-subtle);padding-top:12px;}
+.detail-form-advanced > summary{font-size:12px;font-weight:500;color:var(--muted);cursor:pointer;list-style:revert;}
+.detail-form-advanced[open] > summary{margin-bottom:12px;}
+.detail-form-advanced .detail-form-row + .detail-form-row{margin-top:14px;}
+.detail-form-advanced select[multiple]{min-height:0;}
 .detail-form-error{font-size:12px;color:var(--error,#e05);padding:8px 10px;border:1px solid color-mix(in srgb,var(--error,#e05) 35%,transparent);background:color-mix(in srgb,var(--error,#e05) 8%,transparent);border-radius:8px;line-height:1.5;}
 :root.dark{--panel-head-primary-fg:var(--bg);}
 .panel-head-btn.primary{background:var(--accent,var(--link));color:var(--panel-head-primary-fg,#fff);border:none;}
