@@ -157,6 +157,13 @@ When adding a control, consider where users will find it on both wide desktop an
 mobile. If a setting or quota/control surface does not fit in the composer, route
 it through the appropriate Control Center panel instead of squeezing the footer.
 
+On phone widths the composer collapses to a single prompt-preview row while it is
+unfocused and idle, and expands on tap or focus (`cf-collapsed`, the third stage
+of the `_fitComposerFooter()` mechanism alongside `cf-icons`/`cf-burger`). A new
+footer control is therefore hidden until the composer is expanded — anything that
+must stay reachable while the user is reading belongs beside the primary action in
+`.composer-right`, or in an action-required surface that blocks the collapse.
+
 ## Responsive behavior
 
 Mobile is not an afterthought. The repository documents a responsive layout with

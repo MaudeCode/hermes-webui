@@ -3169,6 +3169,34 @@
     .composer-status{flex:0 1 auto;min-width:0;max-width:96px;font-size:10px;text-align:right;}
     .send-btn{width:44px;height:44px;}
     .ctx-indicator-wrap{display:none!important;}
+    /* HWEB-10: an unfocused idle composer collapses to one prompt-preview row.
+       `cf-collapsed` is a third stage of the SAME JS-toggled mechanism as
+       cf-icons/cf-burger (_fitComposerFooter owns all three), so the fit pass
+       and the collapse can never fight over the footer.
+       The textarea itself is the preview row — there is no duplicate preview
+       node, so the draft text and the caret survive a collapse -> expand round
+       trip for free. The footer keeps only .composer-right, which is where the
+       single primary action (send / stop / queue / steer) already lives, so
+       that action stays reachable while collapsed. No transition is declared:
+       the state change is instant, which is also the correct reduced-motion
+       behavior.
+       The collapsed footer overlays the textarea row instead of becoming a flex
+       item beside it: .composer-footer keeps container-type:inline-size (#6080
+       depends on that staying put), and inline-size containment makes an element
+       contribute nothing to its own intrinsic width — as a flex sibling it would
+       lay out at 0 and push .composer-right past the column edge. Anchoring it
+       with left:0;right:0 sizes it from the containing block instead of from its
+       contents, so containment is irrelevant. It passes taps through to the
+       textarea underneath; only .composer-right takes pointer events.
+       The row height is `auto`, not a fixed 44px: a textarea with rows="1"
+       intrinsically sizes to one line box, so the preview follows Appearance ->
+       Font size (14px..20px on #msg) instead of clipping the xlarge setting.
+       min-height keeps the 44px touch floor at the small end, and the
+       !important is for autoResize(), which writes an inline height. */
+    .composer-box:has(> .composer-footer.cf-collapsed) textarea#msg{height:auto!important;min-height:44px;padding:9px var(--cf-collapsed-pad,60px) 9px 14px;white-space:nowrap;overflow:hidden;}
+    .composer-footer.cf-collapsed{position:absolute;left:0;right:0;top:0;bottom:0;justify-content:flex-end;padding:0 8px 0 0!important;pointer-events:none;}
+    .composer-footer.cf-collapsed .composer-left{display:none;}
+    .composer-footer.cf-collapsed .composer-right{pointer-events:auto;}
     .ctx-indicator{width:44px;height:44px;}
     .ctx-tooltip{right:-4px;min-width:190px;max-width:220px;}
     .composer-terminal-panel{width:calc(100% - 20px);}

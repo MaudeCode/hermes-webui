@@ -7915,9 +7915,20 @@ function autoResize(){
   const _minHeightRaw=_isAppendOnly&&_fitsCurrentHeight?getComputedStyle(el).minHeight:'';
   const _minHeight=/^(?:\d+(?:\.\d+)?|\.\d+)px$/.test(_minHeightRaw)?parseFloat(_minHeightRaw):NaN;
   const _isAtMinimumHeight=Number.isFinite(_minHeight)&&el.offsetHeight<=Math.ceil(_minHeight)+1;
+  // HWEB-10: every programmatic composer-value write in the app routes through
+  // here (session draft restore, failed-send restore, slash commands, prefill,
+  // dictation), and none of them dispatch an `input` event — so this is the one
+  // chokepoint where the phone collapse stage can be kept in sync with the value
+  // it is deciding on. rAF-coalesced, so a burst costs one fit.
+  // HWEB-10: every programmatic composer-value write in the app routes through
+  // here (session draft restore, failed-send restore, slash commands, prefill,
+  // dictation), and none of them dispatch an `input` event — so this is the one
+  // chokepoint where the phone collapse stage can be kept in sync with the value
+  // it is deciding on. rAF-coalesced, so a burst costs one fit.
   if(_isAppendOnly&&_fitsCurrentHeight&&_isAtMinimumHeight){
     _composerLastResizeValue=_nextValue;
     updateSendBtn();
+    if(typeof _scheduleComposerFit==='function') _scheduleComposerFit();
     return;
   }
   const _prevComposerH=el.offsetHeight;
@@ -7953,6 +7964,7 @@ function autoResize(){
   // pinned (the helper no-ops for a scrolled-away reader). The #composerWrap
   // ResizeObserver is the safety net for growth paths that don't route here.
   if(el.offsetHeight>_prevComposerH && typeof _repinMessagesAfterComposerResize==='function') _repinMessagesAfterComposerResize();
+  if(typeof _scheduleComposerFit==='function') _scheduleComposerFit();
 }
 function scheduleComposerAutoResize(){
   if(typeof requestAnimationFrame!=='function'){autoResize();return;}
