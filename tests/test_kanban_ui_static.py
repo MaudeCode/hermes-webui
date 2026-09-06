@@ -1122,7 +1122,10 @@ def test_kanban_sse_falls_back_to_polling_on_repeated_failure():
     a flaky connection doesn't leave the user with stale data."""
     assert "_kanbanEventSourceFailures" in PANELS
     assert ">= 3" in PANELS  # the failure threshold
-    assert "setInterval(refreshKanbanEvents" in PANELS  # the fallback
+    # HWEB-38: the fallback interval moved into the shared startVisiblePoll
+    # driver, which owns the document.hidden gate for all three entry points.
+    assert "startVisiblePoll(refreshKanbanEvents, 30000)" in PANELS  # the fallback
+    assert "_kanbanStartFallbackPoll();" in PANELS
 
 
 def test_kanban_sse_torn_down_on_panel_switch():

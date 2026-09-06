@@ -2,7 +2,7 @@ let _currentPanel = 'chat';
 let _renamingAppTitlebar = false;  // guard against re-entrant rename
 let _kanbanBoard = null;
 let _kanbanLatestEventId = 0;
-let _kanbanPollTimer = null;
+let _kanbanPollStop = null;   // stop function from startVisiblePoll, not a timer id
 let _kanbanCurrentTaskId = null;
 let _kanbanLanesByProfile = true;
 // Multi-board state. _kanbanCurrentBoard is the slug of the active board
@@ -2894,19 +2894,26 @@ async function refreshKanbanEvents(){
   } catch(e) { /* polling should not spam toasts */ }
 }
 
+// All three fallback entry points share this: refreshKanbanEvents() checks only
+// _currentPanel, so a raw interval kept requesting /api/kanban/events from a
+// hidden tab parked on the Kanban panel.
+function _kanbanStartFallbackPoll(){
+  if (_kanbanPollStop) return;
+  _kanbanPollStop = startVisiblePoll(refreshKanbanEvents, 30000);
+}
+
 function _kanbanStartPolling(){
   // Prefer SSE for low-latency live updates. Fall back to polling on
   // browsers without EventSource or after repeated stream failures.
   if (typeof EventSource === 'undefined' || _kanbanEventSourceFailures >= 3) {
-    if (_kanbanPollTimer) return;
-    _kanbanPollTimer = setInterval(refreshKanbanEvents, 30000);
+    _kanbanStartFallbackPoll();
     return;
   }
   _kanbanStartEventStream();
 }
 
 function _kanbanStopPolling(){
-  if (_kanbanPollTimer) { clearInterval(_kanbanPollTimer); _kanbanPollTimer = null; }
+  if (_kanbanPollStop) { _kanbanPollStop(); _kanbanPollStop = null; }
   if (_kanbanEventSource) { try { if(_kanbanEventSource.readyState!==2)_kanbanEventSource.close(); } catch(_) {} _kanbanEventSource = null; }
 }
 
@@ -2921,9 +2928,7 @@ function _kanbanStartEventStream(){
     es = new EventSource(url);
   } catch(e) {
     _kanbanEventSourceFailures += 1;
-    if (_kanbanEventSourceFailures < 3 && !_kanbanPollTimer) {
-      _kanbanPollTimer = setInterval(refreshKanbanEvents, 30000);
-    }
+    if (_kanbanEventSourceFailures < 3) _kanbanStartFallbackPoll();
     return;
   }
   _kanbanEventSource = es;
@@ -2947,7 +2952,7 @@ function _kanbanStartEventStream(){
       // Give up on SSE for this session — fall back to HTTP polling.
       try { es.close(); } catch(_) {}
       _kanbanEventSource = null;
-      if (!_kanbanPollTimer) _kanbanPollTimer = setInterval(refreshKanbanEvents, 30000);
+      _kanbanStartFallbackPoll();
     }
     // EventSource auto-reconnects under the hood; nothing more to do here
     // until we hit the failure limit.

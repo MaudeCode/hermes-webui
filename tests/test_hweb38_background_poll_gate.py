@@ -8,6 +8,7 @@ the server for the whole turn (~600 requests over 10 minutes):
     static/panels.js    cron run watch      /api/crons/status       3000ms
     static/panels.js    logs auto-refresh   /api/logs               5000ms
     static/messages.js  background task     /api/background/status  3000ms
+    static/panels.js    kanban SSE fallback /api/kanban/events     30000ms
 
 They now run through the shared `startVisiblePoll` driver in `static/ui.js`,
 which skips the tick while hidden and fires exactly one catch-up tick when the
@@ -64,6 +65,11 @@ def test_every_previously_ungated_poller_uses_the_driver():
     # with no gate at all; it now runs on the same driver.
     assert "_bgPollTimers[parentSid]=startVisiblePoll(_poll,3000)" in MESSAGES_JS
     assert "if(tabIsVisibleForPolling()) _poll();" in MESSAGES_JS
+    # Kanban had three separate fallback setInterval sites; they now share one
+    # start helper so the gate cannot be reintroduced at just one of them.
+    assert "_kanbanPollStop = startVisiblePoll(refreshKanbanEvents, 30000)" in PANELS_JS
+    assert PANELS_JS.count("_kanbanStartFallbackPoll();") == 3  # 3 call sites
+    assert "setInterval(refreshKanbanEvents" not in PANELS_JS
 
 
 def test_slow_endpoints_cannot_stack_in_flight_requests():
@@ -213,6 +219,16 @@ _HARNESS = textwrap.dedent(
     global._formatElapsed = () => '0s';
     global._injectRunningIndicator = () => {};
 
+    // kanban
+    global._kanbanPollStop = null;
+    global._kanbanLatestEventId = 1;
+    global._kanbanEventSourceFailures = 3;
+    global._kanbanBoardQuery = () => '';
+    global.loadKanban = async () => {};
+    global.loadKanbanTask = async () => {};
+    global._kanbanCurrentTaskId = null;
+    global._kanbanEventSource = null;
+
     // background task
     global._bgPollTimers = {};
     global._bgPendingTasksByParent = {};
@@ -237,6 +253,10 @@ _HARNESS = textwrap.dedent(
     eval(extractFn(PAN, '_stopLogsAutoRefresh'));
     eval(extractFn(MSG, '_stopBackgroundPolling'));
     eval(extractFn(MSG, 'startBackgroundPolling'));
+    eval(extractFn(PAN, 'refreshKanbanEvents'));
+    eval(extractFn(PAN, '_kanbanStartFallbackPoll'));
+    eval(extractFn(PAN, '_kanbanStartPolling'));
+    eval(extractFn(PAN, '_kanbanStopPolling'));
 
     const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -315,6 +335,27 @@ _HARNESS = textwrap.dedent(
       out.bgTimersAfterAllDone = timers.size;
       bgResults = null;
 
+      // ── Kanban SSE fallback: hidden = silent, visible = one catch-up ─────
+      // Its own phase because refreshKanbanEvents() and the logs poller both
+      // read _currentPanel and want different values.
+      timers.clear();
+      (listeners.get('visibilitychange') || new Set()).clear();
+      _kanbanPollStop = null;
+      _currentPanel = 'kanban';
+      setHidden(true);
+      for (const k of Object.keys(fetches)) delete fetches[k];
+      _kanbanStartPolling();  // EventSource is undefined in node -> fallback path
+      for (let i = 0; i < 5; i++) { tickAll(); await flush(); }
+      out.kanbanHidden = fetches['/api/kanban/events'] || 0;
+      setHidden(false);
+      await flush();
+      out.kanbanOnVisible = fetches['/api/kanban/events'] || 0;
+      _kanbanStopPolling();
+      for (const k of Object.keys(fetches)) delete fetches[k];
+      setHidden(true); setHidden(false);
+      await flush();
+      out.kanbanAfterStop = fetches['/api/kanban/events'] || 0;
+
       console.log(JSON.stringify(out));
     })();
     """
@@ -391,6 +432,15 @@ def test_sibling_background_tasks_share_one_poller_and_all_results_land(driver):
     assert driver["bgMessages"] == 2, driver["bgMessages"]
     # Last task done → poller released.
     assert driver["bgTimersAfterAllDone"] == 0, driver["bgTimersAfterAllDone"]
+
+
+@requires_node
+def test_kanban_sse_fallback_is_gated_and_releasable(driver):
+    # refreshKanbanEvents() gates on _currentPanel but not document.hidden, so
+    # the raw 30s fallback intervals polled from a hidden tab parked on Kanban.
+    assert driver["kanbanHidden"] == 0, driver["kanbanHidden"]
+    assert driver["kanbanOnVisible"] == 1, driver["kanbanOnVisible"]
+    assert driver["kanbanAfterStop"] == 0, driver["kanbanAfterStop"]
 
 
 @requires_node
