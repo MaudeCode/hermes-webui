@@ -2279,10 +2279,35 @@ _PROVIDER_ENV_MAP: dict[str, str] = {
 
 
 def _resolve_env_var_for_provider(provider: Optional[str]) -> Optional[str]:
-    """Return the .env variable name for *provider*, or the generic fallback."""
+    """Return the .env variable name for *provider*, or the generic fallback.
+
+    The literal map above is consulted first — it carries slugs and spellings
+    this module owns (``github-copilot``, ``dashscope``, ``groq``). Anything it
+    does not know falls through to ``api.providers._PROVIDER_ENV_VAR``, the
+    canonical provider→key mapping the rest of the WebUI uses, including its
+    alias table so a profile created under ``ramp`` still writes the router key.
+
+    Without that fallback a provider curated into the catalog but absent from
+    this second copy silently stored its credential as the generic
+    ``HERMES_API_KEY``, and the agent does not read that as a substitute — the
+    profile was created successfully and then could not authenticate.
+    """
     if not provider:
         return None
-    return _PROVIDER_ENV_MAP.get(str(provider).strip().lower())
+    slug = str(provider).strip().lower()
+    mapped = _PROVIDER_ENV_MAP.get(slug)
+    if mapped:
+        return mapped
+    try:
+        from api.providers import _provider_env_var_for, _provider_identity
+
+        for candidate in (slug, _provider_identity(slug)):
+            resolved = _provider_env_var_for(candidate) if candidate else None
+            if resolved:
+                return resolved
+    except Exception:
+        logger.debug("Canonical provider env-var lookup failed for %s", slug, exc_info=True)
+    return None
 
 
 def _upsert_dotenv_line(env_path: Path, key: str, value: str) -> None:

@@ -1025,3 +1025,86 @@ def test_removing_one_card_key_cannot_delete_another_cards_active_key(monkeypatc
 )
 def test_unqualified_model_id_strips_only_the_routing_hint(raw, expected):
     assert providers._unqualified_model_id(raw) == expected
+
+
+@pytest.mark.parametrize("slug", sorted(NEW_PROVIDERS))
+def test_new_profile_writes_the_provider_specific_key(slug):
+    """Profile creation must not fall back to the generic HERMES_API_KEY.
+
+    `api/profiles.py` keeps its own provider→env-var map. A provider missing
+    from it stored the credential as `HERMES_API_KEY`, which the agent does not
+    read as a substitute — the profile was created and then could not
+    authenticate.
+    """
+    import api.profiles as profiles
+
+    assert profiles._resolve_env_var_for_provider(slug) == NEW_PROVIDERS[slug][1]
+
+
+@pytest.mark.parametrize("alias,canonical", sorted(PROVIDER_ALIASES.items()))
+def test_new_profile_resolves_provider_aliases_too(alias, canonical):
+    """A profile created under an alias must still write the canonical key."""
+    import api.profiles as profiles
+
+    expected = providers._PROVIDER_ENV_VAR.get(canonical)
+    if not expected:
+        pytest.skip(f"{canonical} has no API-key env var")
+    assert profiles._resolve_env_var_for_provider(alias) == expected
+
+
+def test_profiles_own_spellings_still_win():
+    """The module's literal map is consulted first for slugs it owns."""
+    import api.profiles as profiles
+
+    assert profiles._resolve_env_var_for_provider("github-copilot") == "COPILOT_GITHUB_TOKEN"
+    assert profiles._resolve_env_var_for_provider("dashscope") == "DASHSCOPE_API_KEY"
+    assert profiles._resolve_env_var_for_provider("totally-unknown") is None
+
+
+def test_published_catalog_respects_the_picker_overflow_cap(monkeypatch):
+    """Overflow rows must not be rendered as visible card tags.
+
+    `_split_picker_overflow_models()` withholds them on purpose; recombining
+    both buckets floods the Settings response and DOM for a large catalog.
+    """
+    snapshot = {
+        "groups": [
+            {
+                "provider_id": "openrouter",
+                "models": [{"id": f"v/m{i}", "label": f"M{i}"} for i in range(25)],
+                "extra_models": [{"id": f"v/x{i}", "label": f"X{i}"} for i in range(300)],
+            }
+        ]
+    }
+    monkeypatch.setattr(config, "_models_cache_provenance", (snapshot, {"config_yaml": "/a"}))
+    monkeypatch.setattr(config, "_models_cache_source_fingerprint", lambda: {"config_yaml": "/a"})
+
+    visible = config.published_catalog_models("openrouter")
+    assert len(visible) == 25, "overflow rows leaked into the visible card models"
+    assert all(m["id"].startswith("v/m") for m in visible)
+
+    # ...but the count still reflects the whole catalog for the "+N more" hint.
+    assert config.published_catalog_model_total("openrouter") == 325
+
+
+def test_provider_card_reports_capped_rows_with_full_total(monkeypatch, tmp_path):
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(providers, "_PROVIDER_DISPLAY", {"openrouter": "OpenRouter"})
+    monkeypatch.setattr(providers, "_PROVIDER_MODELS", {"openrouter": []})
+    monkeypatch.setattr(providers, "_OAUTH_PROVIDERS", frozenset())
+    monkeypatch.setattr(providers, "plugin_model_provider_ids", lambda: set())
+    monkeypatch.setattr(providers, "is_plugin_model_provider", lambda _pid: False)
+    monkeypatch.setattr(providers, "_provider_has_key", lambda _pid, **_kw: True)
+    monkeypatch.setattr(providers, "get_config", lambda: {"model": {}, "providers": {}})
+    monkeypatch.setattr(providers, "published_catalog_is_available", lambda: True)
+    monkeypatch.setattr(
+        providers, "published_catalog_models", lambda _pid: [{"id": "v/a", "label": "A"}]
+    )
+    monkeypatch.setattr(providers, "published_catalog_model_total", lambda _pid: 300)
+
+    entry = next(p for p in providers.get_providers()["providers"] if p["id"] == "openrouter")
+
+    assert len(entry["models"]) == 1
+    assert entry["models_total"] == 300

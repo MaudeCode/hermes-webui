@@ -5440,9 +5440,43 @@ def published_catalog_models(provider_id: str | None) -> list[dict] | None:
         if str(group.get("provider_id") or "").strip().lower() != pid:
             continue
         entries = [m for m in (group.get("models") or []) if isinstance(m, dict) and m.get("id")]
+        return copy.deepcopy(entries) if entries else None
+    return None
+
+
+def published_catalog_model_total(provider_id: str | None) -> int | None:
+    """Total models the published group holds, including its overflow bucket.
+
+    Split from ``published_catalog_models`` on purpose. The picker caps how many
+    rows are *visible* (``_split_picker_overflow_models``) and parks the rest in
+    ``extra_models``; a caller rendering a tag per entry must honour that cap, or
+    a large catalog like OpenRouter's floods the Settings response and DOM with
+    the very rows the cap exists to withhold. The count, however, should reflect
+    the whole catalog — that is what the "+N more" affordance is derived from.
+    """
+    provenance = _models_cache_provenance
+    if provenance is None:
+        return None
+    snapshot, published_fp = provenance
+    if not isinstance(snapshot, dict):
+        return None
+    try:
+        if published_fp != _models_cache_source_fingerprint():
+            return None
+    except Exception:
+        return None
+    pid = str(provider_id or "").strip().lower()
+    if not pid:
+        return None
+    for group in snapshot.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        if str(group.get("provider_id") or "").strip().lower() != pid:
+            continue
+        visible = [m for m in (group.get("models") or []) if isinstance(m, dict) and m.get("id")]
         extra = [m for m in (group.get("extra_models") or []) if isinstance(m, dict) and m.get("id")]
-        combined = entries + extra
-        return copy.deepcopy(combined) if combined else None
+        total = len(visible) + len(extra)
+        return total or None
     return None
 
 

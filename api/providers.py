@@ -46,6 +46,7 @@ from api.config import (
     _models_from_live_provider_ids,
     _pool_entry_payloads,
     published_catalog_is_available,
+    published_catalog_model_total,
     published_catalog_models,
     _read_live_provider_model_ids,
     _read_visible_codex_cache_model_ids,
@@ -3746,7 +3747,10 @@ def get_providers() -> dict[str, Any]:
                 published = published_catalog_models(pid)
                 if published:
                     models = published
-                    models_total = len(models)
+                    # The visible rows are capped; the count is not. Report the
+                    # whole catalog so the card's "+N more" affordance is honest
+                    # while the response stays scannable.
+                    models_total = published_catalog_model_total(pid) or len(models)
                 elif not models and is_plugin_model_provider(pid):
                     # A plugin provider has no `_PROVIDER_MODELS` fallback, and
                     # the picker publishes no group for one that is not
