@@ -10011,16 +10011,30 @@ function hideBackgroundBadge(taskId){
     badge.style.display=_bgActiveTasks.size?'':'none';
   }
 }
+// `_bgPollTimers[taskId]` holds the poller's stop function, not a timer id.
+function _stopBackgroundPolling(taskId){
+  const stop=_bgPollTimers[taskId];
+  delete _bgPollTimers[taskId];
+  if(typeof stop==='function') stop();
+}
 function startBackgroundPolling(parentSid, taskId, prompt){
   if(_bgPollTimers[taskId]) return;
+  // Was a self-rescheduling setTimeout chain with no visibility gate: a
+  // /background task left running behind a hidden tab kept hitting
+  // /api/background/status every 3s (~200 requests over 10 hidden minutes).
+  // The chain rescheduled itself sequentially, so it could not overlap; the
+  // interval-based driver can, hence the in-flight flag.
+  let inFlight=false;
   async function _poll(){
+    if(inFlight) return;
+    inFlight=true;
     try{
       const r=await api('/api/background/status?session_id='+encodeURIComponent(parentSid));
       if(r&&r.results){
         for(const res of r.results){
           if(res.task_id===taskId){
             hideBackgroundBadge(taskId);
-            delete _bgPollTimers[taskId];
+            _stopBackgroundPolling(taskId);
             const msg={role:'assistant',content:`**${t('bg_label')}** ${prompt.slice(0,80)}\n\n${res.answer||t('bg_no_answer')}`,'_background':true,_ts:Date.now()/1000};
             S.messages.push(msg);
             renderMessages({preserveScroll:true});
@@ -10030,9 +10044,13 @@ function startBackgroundPolling(parentSid, taskId, prompt){
         }
       }
     }catch(_){}
-    _bgPollTimers[taskId]=setTimeout(_poll,3000);
+    finally{ inFlight=false; }
   }
-  _poll();
+  // Store the stop function before the first tick: a task that has already
+  // finished stops the poller from inside that tick, and a stop that ran before
+  // the assignment would leave the interval running.
+  _bgPollTimers[taskId]=startVisiblePoll(_poll,3000);
+  if(tabIsVisibleForPolling()) _poll();
 }
 
 // ── Panel navigation (Chat / Tasks / Skills / Memory) ──

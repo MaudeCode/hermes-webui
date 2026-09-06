@@ -7,6 +7,7 @@ the server for the whole turn (~600 requests over 10 minutes):
     static/messages.js  clarify fallback    /api/clarify/pending    3000ms
     static/panels.js    cron run watch      /api/crons/status       3000ms
     static/panels.js    logs auto-refresh   /api/logs               5000ms
+    static/messages.js  background task     /api/background/status  3000ms
 
 They now run through the shared `startVisiblePoll` driver in `static/ui.js`,
 which skips the tick while hidden and fires exactly one catch-up tick when the
@@ -59,6 +60,10 @@ def test_every_previously_ungated_poller_uses_the_driver():
     assert MESSAGES_JS.count("if (tabIsVisibleForPolling()) _tick();") == 2
     assert "_cronWatchStop = startVisiblePoll(" in PANELS_JS
     assert "_logsAutoRefreshStop = startVisiblePoll(" in PANELS_JS
+    # The /background task poller was a self-rescheduling setTimeout chain
+    # with no gate at all; it now runs on the same driver.
+    assert "_bgPollTimers[taskId]=startVisiblePoll(_poll,3000)" in MESSAGES_JS
+    assert "if(tabIsVisibleForPolling()) _poll();" in MESSAGES_JS
 
 
 def test_slow_endpoints_cannot_stack_in_flight_requests():
@@ -67,6 +72,8 @@ def test_slow_endpoints_cannot_stack_in_flight_requests():
     assert "if (_logsAutoRefreshInFlight) return;" in PANELS_JS
     assert "if (_sessionStreamHiddenPollInFlight) return;" in MESSAGES_JS
     assert "finally(() => { _sessionStreamHiddenPollInFlight = false; })" in MESSAGES_JS
+    # The chain could not overlap; the interval-based driver can.
+    assert "if(inFlight) return;" in MESSAGES_JS
 
 
 def test_dashboard_status_interval_is_releasable():
@@ -198,6 +205,13 @@ _HARNESS = textwrap.dedent(
     global._formatElapsed = () => '0s';
     global._injectRunningIndicator = () => {};
 
+    // background task
+    global._bgPollTimers = {};
+    global.hideBackgroundBadge = () => {};
+    global.renderMessages = () => {};
+    global.showToast = () => {};
+    global.t = () => '';
+
     // logs
     global._logsAutoRefreshStop = null;
     global._logsAutoRefreshInFlight = false;
@@ -212,6 +226,8 @@ _HARNESS = textwrap.dedent(
     eval(extractFn(PAN, '_stopCronWatch'));
     eval(extractFn(PAN, '_startLogsAutoRefresh'));
     eval(extractFn(PAN, '_stopLogsAutoRefresh'));
+    eval(extractFn(MSG, '_stopBackgroundPolling'));
+    eval(extractFn(MSG, 'startBackgroundPolling'));
 
     const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -223,6 +239,7 @@ _HARNESS = textwrap.dedent(
       _startClarifyFallbackPoll('sid-1');
       _startCronWatch('job-1', 'key-1');
       _startLogsAutoRefresh();
+      startBackgroundPolling('sid-1', 'task-1', 'do a thing');
       for (let i = 0; i < 5; i++) { tickAll(); await flush(); }
       out.hidden = JSON.parse(JSON.stringify(fetches));
 
@@ -245,6 +262,7 @@ _HARNESS = textwrap.dedent(
       // ── Stopping a poller must also drop its visibilitychange listener ───
       _stopCronWatch();
       _stopLogsAutoRefresh();
+      _stopBackgroundPolling('task-1');
       for (const k of Object.keys(fetches)) delete fetches[k];
       setHidden(true); setHidden(false);
       await flush();
@@ -271,6 +289,7 @@ APPROVAL = "/api/approval/pending"
 CLARIFY = "/api/clarify/pending"
 CRONS = "/api/crons/status"
 LOGS = "/api/logs"
+BACKGROUND = "/api/background/status"
 
 
 def _run_driver():
@@ -308,6 +327,7 @@ def test_becoming_visible_fires_exactly_one_catch_up_per_poller(driver):
         CLARIFY: 1,
         CRONS: 1,
         LOGS: 1,
+        BACKGROUND: 1,
     }, driver["onVisible"]
 
 
