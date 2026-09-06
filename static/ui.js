@@ -63,6 +63,32 @@ function _renderOfflineBanner(){
   banner.hidden=false;
   banner.classList.add('visible');
 }
+// Shared "poll only while the tab is visible" driver. Every long-lived poller
+// wants the same three things: skip the tick while `document.hidden` so a
+// backgrounded tab issues zero requests, run one catch-up tick the moment the
+// tab is shown again so nothing is lost by having skipped, and release both the
+// interval and the listener on teardown. Returns the stop function — call that
+// instead of clearInterval, otherwise the visibilitychange listener leaks and
+// keeps ticking a poller its owner already stopped.
+// Callers that also want a tick at start must run it AFTER storing the returned
+// stop function — a first tick that decides to stop the poller would otherwise
+// be overwritten by the pending assignment and leak a live interval. Gate that
+// start tick on `tabIsVisibleForPolling()` so a poller started while hidden
+// waits for the catch-up instead of firing the one request the gate prevents.
+function tabIsVisibleForPolling(){
+  return typeof document==='undefined'||!document.hidden;
+}
+function startVisiblePoll(tick,ms){
+  // One gated wrapper serves both roles: interval tick and visibilitychange
+  // catch-up (an event going hidden-ward just returns).
+  const run=()=>{if(!tabIsVisibleForPolling())return;tick();};
+  const timer=setInterval(run,ms);
+  if(typeof document!=='undefined')document.addEventListener('visibilitychange',run);
+  return function stopVisiblePoll(){
+    clearInterval(timer);
+    if(typeof document!=='undefined')document.removeEventListener('visibilitychange',run);
+  };
+}
 function _startOfflineProbeTimer(){
   if(_offlineProbeTimer)return;
   _offlineProbeTimer=setInterval(()=>{checkOfflineRecoveryNow();},OFFLINE_RECHECK_MS);
@@ -1787,6 +1813,7 @@ async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
 
 const DASHBOARD_STATUS_TTL_MS=60000;
 let _dashboardStatusCache=null;
+let _dashboardStatusTimer=null;
 let _dashboardStatusFetchedAt=0;
 let _dashboardLastNonNeverMode='auto'; // Server-scoped dashboard config keeps this restore target session-global on purpose.
 let _dashboardSettingsLoadSeq=0;
@@ -2029,22 +2056,39 @@ function openHermesDashboard(event){
   window.open(url,'_blank','noopener,noreferrer');
   return false;
 }
+function _stopDashboardStatusPoll(){
+  if(_dashboardStatusTimer){clearInterval(_dashboardStatusTimer);_dashboardStatusTimer=null;}
+}
+// Named (not inline) so a restarted probe re-registering it is a no-op instead
+// of stacking a second catch-up fetch per visibilitychange.
+function _dashboardStatusVisibilityCatchup(){
+  if(!document.hidden) refreshDashboardStatus(true);
+}
 function _initDashboardLinkProbe(){
   loadDashboardSettings();
   refreshDashboardStatus(true);
-  setInterval(refreshDashboardStatus,DASHBOARD_STATUS_TTL_MS);
+  // Keep the handle so the interval can be released. Restarting the probe (a
+  // bfcache restore, a second boot path winning the race) must not stack a
+  // second interval on top of the first.
+  _stopDashboardStatusPoll();
+  _dashboardStatusTimer=setInterval(refreshDashboardStatus,DASHBOARD_STATUS_TTL_MS);
   // Catch up once when the tab becomes visible again, since the interval poll
   // was skipped while hidden and its cache is now stale.
   if(typeof document!=='undefined'&&typeof document.addEventListener==='function'){
-    document.addEventListener('visibilitychange',()=>{
-      if(!document.hidden) refreshDashboardStatus(true);
-    });
+    document.addEventListener('visibilitychange',_dashboardStatusVisibilityCatchup);
   }
 }
 if(document.readyState==='complete'){
   _initDashboardLinkProbe();
 }else{
   document.addEventListener('DOMContentLoaded',_initDashboardLinkProbe,{once:true});
+}
+if(typeof window!=='undefined'){
+  // Release the interval when the document is frozen or torn down. A bfcache
+  // restore (`pageshow` with persisted=true) reinstates it — a restored page
+  // that silently stopped polling would show a stale dashboard link forever.
+  window.addEventListener('pagehide',_stopDashboardStatusPoll);
+  window.addEventListener('pageshow',event=>{if(event&&event.persisted)_initDashboardLinkProbe();});
 }
 
 /* ── Image lightbox — click any .msg-media-img to enlarge ─────────────────── */

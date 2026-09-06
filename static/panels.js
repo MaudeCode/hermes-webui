@@ -34,7 +34,8 @@ let _currentProfileDetail = null; // full profile object
 let _profileMode = 'empty'; // 'empty' | 'read' | 'create'
 let _profilePreFormDetail = null;
 let _pendingSettingsTargetPanel = null; // destination selected while settings had unsaved changes
-let _logsAutoRefreshTimer = null;
+let _logsAutoRefreshStop = null;
+let _logsAutoRefreshInFlight = false;
 let _lastLogsLines = [];
 let _logsSeverityFilter = 'all';
 
@@ -2029,14 +2030,20 @@ function _formatCronRunUsageStrip(usage) {
 }
 
 // ── Cron run watch ────────────────────────────────────────────────────────────
-let _cronWatchInterval = null;
+let _cronWatchStop = null;
 let _cronWatchStart = null;
-let _cronWatchTimerInterval = null;
+let _cronWatchTimerStop = null;
+let _cronWatchInFlight = false;
 
 function _startCronWatch(jobId, detailKey) {
   _stopCronWatch();
   _cronWatchStart = Date.now();
-  _cronWatchInterval = setInterval(async () => {
+  // Visible-only + in-flight guarded: the watch only paints a running indicator
+  // nobody can see from a background tab, and a slow /api/crons/status would
+  // otherwise stack a new request every 3s on top of the one still open.
+  _cronWatchStop = startVisiblePoll(async () => {
+    if (_cronWatchInFlight) return;
+    _cronWatchInFlight = true;
     try {
       const data = await api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}`,{timeoutToast:false});
       if (!data.running) {
@@ -2052,9 +2059,11 @@ function _startCronWatch(jobId, detailKey) {
         if (el) el.querySelector('.cron-watch-elapsed').textContent = _formatElapsed(data.elapsed);
       }
     } catch(e) { /* ignore poll errors */ }
+    finally { _cronWatchInFlight = false; }
   }, 3000);
-  // Timer update every second
-  _cronWatchTimerInterval = setInterval(() => {
+  // Timer update every second — also visible-only; it repaints an indicator a
+  // hidden tab is not showing.
+  _cronWatchTimerStop = startVisiblePoll(() => {
     if (_cronDetailMatches(jobId, detailKey) && _cronWatchStart) {
       const el = $('cronRunningIndicator');
       if (el) el.querySelector('.cron-watch-elapsed').textContent = _formatElapsed((Date.now() - _cronWatchStart) / 1000);
@@ -2067,8 +2076,9 @@ function _startCronWatch(jobId, detailKey) {
 }
 
 function _stopCronWatch() {
-  if (_cronWatchInterval) { clearInterval(_cronWatchInterval); _cronWatchInterval = null; }
-  if (_cronWatchTimerInterval) { clearInterval(_cronWatchTimerInterval); _cronWatchTimerInterval = null; }
+  if (_cronWatchStop) { _cronWatchStop(); _cronWatchStop = null; }
+  if (_cronWatchTimerStop) { _cronWatchTimerStop(); _cronWatchTimerStop = null; }
+  _cronWatchInFlight = false;
   _cronWatchStart = null;
   const el = $('cronRunningIndicator');
   if (el) el.remove();
@@ -4476,20 +4486,27 @@ function _renderLogs(data) {
 }
 
 function _startLogsAutoRefresh() {
-  if (_logsAutoRefreshTimer) return;
-  _logsAutoRefreshTimer = setInterval(() => {
+  if (_logsAutoRefreshStop) return;
+  // Visible-only: the panel check alone does not stop a backgrounded tab from
+  // tailing the log file every 5s into a view nobody is reading. The catch-up
+  // tick reloads the tail the moment the tab is shown. The in-flight flag keeps
+  // a slow /api/logs (a large tail) from stacking overlapping reads.
+  _logsAutoRefreshStop = startVisiblePoll(() => {
     if (_currentPanel !== 'logs') { _stopLogsAutoRefresh(); return; }
     const toggle = $('logsAutoRefresh');
     if (toggle && !toggle.checked) return;
-    loadLogs(false);
+    if (_logsAutoRefreshInFlight) return;
+    _logsAutoRefreshInFlight = true;
+    Promise.resolve(loadLogs(false)).catch(() => {}).finally(() => { _logsAutoRefreshInFlight = false; });
   }, 5000);
 }
 
 function _stopLogsAutoRefresh() {
-  if (_logsAutoRefreshTimer) {
-    clearInterval(_logsAutoRefreshTimer);
-    _logsAutoRefreshTimer = null;
+  if (_logsAutoRefreshStop) {
+    _logsAutoRefreshStop();
+    _logsAutoRefreshStop = null;
   }
+  _logsAutoRefreshInFlight = false;
 }
 
 function _syncLogsAutoRefresh() {

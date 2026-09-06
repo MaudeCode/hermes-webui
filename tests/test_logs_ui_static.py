@@ -104,10 +104,12 @@ def test_logs_autorefresh_runs_only_while_logs_tab_is_visible_and_enabled():
     stop_fn = _function_body(PANELS, "_stopLogsAutoRefresh")
     assert "if (nextPanel === 'logs') await loadLogs();" in PANELS
     assert "_syncLogsAutoRefresh();" in PANELS
-    assert "_logsAutoRefreshTimer" in PANELS
-    assert "setInterval" in start_fn and "5000" in start_fn
+    assert "_logsAutoRefreshStop" in PANELS
+    # HWEB-38: the raw setInterval/clearInterval pair moved into the shared
+    # startVisiblePoll driver, which also owns the document.hidden gate.
+    assert "startVisiblePoll" in start_fn and "5000" in start_fn
     assert "_currentPanel !== 'logs'" in start_fn
-    assert "clearInterval" in stop_fn
+    assert "_logsAutoRefreshStop()" in stop_fn
 
 
 def test_logs_severity_coloring_prioritizes_explicit_log_level_before_message_text():
