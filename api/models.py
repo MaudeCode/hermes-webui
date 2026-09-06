@@ -2729,12 +2729,100 @@ def _journal_tool_already_present(
     return False
 
 
-def _run_journal_has_visible_output(session, stream_id: str | None) -> bool:
+# Read-side recovery runs on ordinary session APIs — `/api/session`,
+# `/api/session/status`, chat start, the sidebar reconciler — and does so while
+# the per-session lock is held. `read_run_events()` parses the whole file
+# (`_read_jsonl` calls `path.read_text()`), and a run journal has no size cap, so
+# a long run could stall those endpoints or blow memory. Every recovery reader
+# goes through the bounded-window reader instead, using the same mechanism the
+# live-snapshot path already uses.
+#
+# Bytes are the real bound; the row cap only exists so a pathological journal of
+# tiny rows cannot defeat it. The window is deliberately generous — a run that
+# overflows it gets its oldest events clipped, which costs some early prose but
+# never the authoritative terminal event (the window is a tail).
+_RECOVERY_JOURNAL_MAX_BYTES = 8 * 1024 * 1024
+_RECOVERY_JOURNAL_MAX_ROWS = 65536
+
+
+def _read_run_journal_for_recovery(session_id: str, stream_id: str) -> dict:
+    """Bounded journal read shared by every read-side recovery helper."""
+    from api.run_journal import _RUN_JOURNAL_TAIL_MAX_BYTES, read_run_event_tail
+
+    journal = read_run_event_tail(
+        session_id,
+        stream_id,
+        max_bytes=_RECOVERY_JOURNAL_MAX_BYTES,
+        max_rows=_RECOVERY_JOURNAL_MAX_ROWS,
+    )
+    if journal.get('truncated') and not journal.get('events'):
+        # The window landed inside a single row larger than itself, so trimming
+        # to the next newline consumed everything and a non-empty journal came
+        # back eventless. The realistic shape is an `apperror` row embedding a
+        # whole terminal session payload — exactly the row recovery most needs,
+        # and reporting it as "no events" would clear the stream id and lose the
+        # terminal error. Escalate once to the wider ceiling the settled-journal
+        # classifier already uses rather than going unbounded.
+        journal = read_run_event_tail(
+            session_id,
+            stream_id,
+            max_bytes=_RUN_JOURNAL_TAIL_MAX_BYTES,
+            max_rows=_RECOVERY_JOURNAL_MAX_ROWS,
+        )
+    if journal.get('truncated'):
+        logger.warning(
+            "Session %s: run journal for stream %s exceeded the %d-byte recovery "
+            "window; recovering the most recent events only",
+            session_id,
+            stream_id,
+            _RECOVERY_JOURNAL_MAX_BYTES,
+        )
+    return journal
+
+
+def _existing_recovered_tool_card(
+    session,
+    name: str,
+    preview: str,
+    *,
+    stream_id: str | None = None,
+) -> dict | None:
+    """Return the persisted tool card `_journal_tool_already_present` matched.
+
+    Same matching rules, so a later journal wave settles exactly the card an
+    earlier wave materialized. Only an unfinished card is returned — a settled
+    one needs nothing, and returning it could let a repeated tool of the same
+    name steal the completion.
+    """
+    candidate_name = str(name or '')
+    candidate_preview = _normalize_journal_recovery_text(preview)
+    candidate_stream = str(stream_id) if stream_id else None
+    for tool_call in reversed(session.tool_calls or []):
+        if not isinstance(tool_call, dict) or tool_call.get('done'):
+            continue
+        if str(tool_call.get('name') or '') != candidate_name:
+            continue
+        existing_preview = _normalize_journal_recovery_text(
+            tool_call.get('preview') or tool_call.get('snippet') or ''
+        )
+        if existing_preview != candidate_preview:
+            continue
+        if candidate_stream is not None:
+            existing_stream = tool_call.get('_recovered_stream_id')
+            if existing_stream and str(existing_stream) != candidate_stream:
+                continue
+        return tool_call
+    return None
+
+
+def _run_journal_has_visible_output(
+    session, stream_id: str | None, *, journal: dict | None = None,
+) -> bool:
     if not stream_id:
         return False
     try:
-        from api.run_journal import read_run_events
-        journal = read_run_events(session.session_id, stream_id)
+        if journal is None:
+            journal = _read_run_journal_for_recovery(session.session_id, stream_id)
     except Exception:
         return False
     for event in journal.get('events') or []:
@@ -2777,15 +2865,16 @@ def _run_journal_event_owns_run(
     )
 
 
-def _run_journal_terminal_state(session, stream_id: str | None) -> str | None:
+def _run_journal_terminal_state(
+    session, stream_id: str | None, *, journal: dict | None = None,
+) -> str | None:
     if not stream_id:
         return None
     try:
-        from api.run_journal import (
-            read_run_events,
-            select_authoritative_terminal_event,
-        )
-        journal = read_run_events(session.session_id, stream_id)
+        from api.run_journal import select_authoritative_terminal_event
+
+        if journal is None:
+            journal = _read_run_journal_for_recovery(session.session_id, stream_id)
         terminal = select_authoritative_terminal_event(journal.get('events') or [])
     except Exception:
         return None
@@ -2802,16 +2891,17 @@ def _run_journal_terminal_state(session, stream_id: str | None) -> str | None:
 def _recoverable_unsaved_gateway_terminal_error(
     session,
     stream_id: str | None,
+    *,
+    journal: dict | None = None,
 ) -> dict | None:
     """Return one validated current-turn terminal error from the run journal."""
     if not stream_id:
         return None
     try:
-        from api.run_journal import (
-            read_run_events,
-            select_authoritative_terminal_event,
-        )
-        journal = read_run_events(session.session_id, stream_id)
+        from api.run_journal import select_authoritative_terminal_event
+
+        if journal is None:
+            journal = _read_run_journal_for_recovery(session.session_id, stream_id)
     except Exception:
         logger.debug(
             "Session %s: failed to read terminal error journal for stream %s",
@@ -2911,10 +3001,12 @@ def _materialize_unsaved_gateway_terminal_error(
     session,
     stream_id: str | None,
     recovery: dict | None = None,
+    *,
+    journal: dict | None = None,
 ) -> bool:
     """Place the validated current-turn gateway error at the transcript tail."""
     recovery = recovery or _recoverable_unsaved_gateway_terminal_error(
-        session, stream_id,
+        session, stream_id, journal=journal,
     )
     if not isinstance(recovery, dict):
         return False
@@ -2962,17 +3054,20 @@ def _recover_journaled_output_and_terminal_error(
     *,
     dedupe_existing: bool = False,
     terminal_recovery: dict | None = None,
+    journal: dict | None = None,
 ) -> tuple[bool, bool]:
     """Recover readable activity first, then append its authoritative terminal error."""
     recovered_output = _append_journaled_partial_output(
         session,
         stream_id,
         dedupe_existing=dedupe_existing,
+        journal=journal,
     )
     terminal_error_recovered = _materialize_unsaved_gateway_terminal_error(
         session,
         stream_id,
         terminal_recovery,
+        journal=journal,
     )
     return recovered_output, terminal_error_recovered
 
@@ -2980,7 +3075,7 @@ def _recover_journaled_output_and_terminal_error(
 def _journal_is_still_arriving(session, stream_id: str | None) -> bool:
     """Return True for journals that may become visible on a later read.
 
-    `read_run_events()` deliberately collapses missing files and empty files
+    The journal readers deliberately collapse missing files and empty files
     into an empty event list, so the lazy retry path needs a small filesystem
     visibility check to avoid burning all retry attempts while WSL2 / network
     filesystems are still surfacing the journal.  Non-empty journals are treated
@@ -3015,6 +3110,7 @@ def _append_journaled_partial_output(
     stream_id: str | None,
     *,
     dedupe_existing: bool = False,
+    journal: dict | None = None,
 ) -> bool:
     """Recover already-emitted visible output from a dead stream journal.
 
@@ -3028,8 +3124,8 @@ def _append_journaled_partial_output(
         return False
 
     try:
-        from api.run_journal import read_run_events
-        journal = read_run_events(session.session_id, stream_id)
+        if journal is None:
+            journal = _read_run_journal_for_recovery(session.session_id, stream_id)
     except Exception:
         logger.debug(
             "Session %s: failed to read run journal for stream %s",
@@ -3049,6 +3145,9 @@ def _append_journaled_partial_output(
     assistant_started_at: float | None = None
     current_assistant_idx: int | None = None
     recovered_tool_calls: list[dict] = []
+    # Cards this pass may still settle: the newly recovered ones plus any
+    # already-persisted card a `tool_complete` in this journal wave owns.
+    completable_tool_calls: list[dict] = []
     initial_message_count = len(session.messages or [])
     claimed_existing_assistant_indexes: set[int] = set()
 
@@ -3264,9 +3363,20 @@ def _append_journaled_partial_output(
             if dedupe_existing and _journal_tool_already_present(
                 session, name, preview, stream_id=stream_id,
             ):
+                # A previous pass already materialized this card. Track the
+                # persisted dict so a `tool_complete` arriving in a later journal
+                # wave can still settle it; without this the card stays
+                # `done=False` forever and never gets its duration, error flag or
+                # final preview. It is deliberately not re-appended to
+                # session.tool_calls below — only `recovered_tool_calls` is.
+                existing_card = _existing_recovered_tool_card(
+                    session, name, preview, stream_id=stream_id,
+                )
+                if existing_card is not None:
+                    completable_tool_calls.append(existing_card)
                 current_assistant_idx = anchor_idx
                 continue
-            recovered_tool_calls.append({
+            new_card = {
                 'name': name,
                 'preview': preview,
                 'snippet': preview,
@@ -3276,13 +3386,15 @@ def _append_journaled_partial_output(
                 'done': False,
                 '_recovered_from_run_journal': True,
                 '_recovered_stream_id': stream_id,
-            })
+            }
+            recovered_tool_calls.append(new_card)
+            completable_tool_calls.append(new_card)
             appended_any = True
             current_assistant_idx = anchor_idx
             continue
         if event_name == 'tool_complete':
             name = str(payload.get('name') or '')
-            for tool_call in reversed(recovered_tool_calls):
+            for tool_call in reversed(completable_tool_calls):
                 if tool_call.get('done'):
                     continue
                 if not name or tool_call.get('name') == name:
@@ -3362,15 +3474,14 @@ def _build_recovery_marker_with_retry_hook(
             recovered_output=False,
             pending_started_at=pending_started_at,
         )
-    marker = _interrupted_recovery_marker(
-        pending_retry=True,
-        stream_id=stream_id,
-        pending_started_at=pending_started_at,
+    return _arm_journal_retry(
+        _interrupted_recovery_marker(
+            pending_retry=True,
+            stream_id=stream_id,
+            pending_started_at=pending_started_at,
+        ),
+        stream_id,
     )
-    marker['_journal_retry_stream_id'] = str(stream_id)
-    marker['_journal_retry_attempts'] = 0
-    marker['_journal_retry_first_seen_ts'] = int(time.time())
-    return marker
 
 
 def _session_has_pending_journal_retry(session) -> bool:
@@ -3389,6 +3500,15 @@ def _session_has_pending_journal_retry(session) -> bool:
             # retry above this point.
             return False
     return False
+
+
+def _arm_journal_retry(marker: dict, stream_id: str) -> dict:
+    """Stamp the lazy-retry hook onto ``marker``. Inverse of `_strip_journal_retry_meta`."""
+    marker['_pending_journal_recovery'] = True
+    marker['_journal_retry_stream_id'] = str(stream_id)
+    marker['_journal_retry_attempts'] = 0
+    marker['_journal_retry_first_seen_ts'] = int(time.time())
+    return marker
 
 
 def _strip_journal_retry_meta(marker: dict) -> None:
@@ -3589,6 +3709,177 @@ def _retry_journal_recovery_in_place(
         logger.exception(
             "_retry_journal_recovery_in_place failed for session %s",
             getattr(session, 'session_id', '?'),
+        )
+        return False
+
+
+def _stamp_marker_with_run_time(marker: dict, journal: dict | None) -> None:
+    """Date a recovery marker by the run it describes, not by when it was read."""
+    run_time = _journal_last_event_time(journal)
+    if run_time is not None:
+        marker['timestamp'] = run_time
+
+
+def _journal_last_event_time(journal: dict | None) -> int | None:
+    """Newest `created_at` in a journal snapshot, as an int timestamp.
+
+    Recovery markers are appended long after the run actually stopped. Stamping
+    them with `time.time()` would move an old conversation to the top of the
+    sidebar simply by being loaded: `Session.compact()` derives
+    `last_message_at` from the newest message timestamp and the session list
+    sorts on it, which defeats the caller's deliberate
+    `save(touch_updated_at=False)`.
+    """
+    newest = None
+    for event in (journal or {}).get('events') or []:
+        created_at = event.get('created_at') if isinstance(event, dict) else None
+        if isinstance(created_at, (int, float)) and not isinstance(created_at, bool):
+            if newest is None or created_at > newest:
+                newest = created_at
+    return int(newest) if newest is not None else None
+
+
+def _recover_dead_run_journal(session, stream_id: str | None) -> bool:
+    """Recover a dead run's journaled work when its pending state is already nil.
+
+    `_apply_core_sync_or_error_marker` is the pending-turn repair path: it bails
+    the moment `pending_user_message` is unset. A run whose pending state was
+    already cleared — lost worker bookkeeping, a partial earlier repair — would
+    otherwise have its `active_stream_id` dropped by `_clear_stale_stream_state`
+    with the journal never read, so every token, reasoning block and tool card
+    the worker already streamed vanishes on refresh.
+
+    Appends the journaled prose/reasoning/tools followed by one interruption
+    marker, unless the journal's authoritative terminal event says the run
+    actually finished or carries its own gateway error message.
+
+    Returns True when anything was recovered. Never raises.
+    """
+    if not stream_id:
+        return False
+    try:
+        if getattr(session, 'pre_compression_snapshot', False):
+            return False
+        if _has_compression_continuation(session):
+            return False
+        # One snapshot for every decision below. Reading the journal separately
+        # for replay, terminal-error extraction and terminal classification is a
+        # TOCTOU: on a delayed-visibility filesystem the file can advance between
+        # those reads, so replay sees a prefix while classification sees a later
+        # `done`. That combination suppresses the interruption marker and then
+        # clears the stream id, presenting a turn as successful while its tail is
+        # silently missing. It also collapses three or four reads into one.
+        journal = _read_run_journal_for_recovery(session.session_id, stream_id)
+        # Idempotency across repeated reads: the recovered rows themselves are
+        # deduped by `dedupe_existing`, but the marker has no content to match
+        # on, so it carries the stream id and gates a second pass.
+        for message in getattr(session, 'messages', None) or []:
+            if (
+                isinstance(message, dict)
+                and message.get('type') == 'interrupted'
+                and message.get('_recovered_stream_id') == stream_id
+            ):
+                return False
+        # A first pass for this run owns nothing in the transcript yet, so
+        # session-wide content dedupe could only mis-claim an unrelated
+        # historical row — `_find_existing_assistant_for_journal_content`
+        # matches from index 0 and there is no pending checkpoint here to bound
+        # the turn. An agent repeating an earlier answer would have its whole
+        # dead turn swallowed by that older row. Dedupe only against a run this
+        # path already partly recovered, which is the sole duplicate it can
+        # create; first passes follow `_apply_core_sync_or_error_marker` and
+        # append.
+        dedupe_existing = any(
+            isinstance(message, dict)
+            and message.get('_recovered_stream_id') == stream_id
+            for message in getattr(session, 'messages', None) or []
+        )
+        recovered_output, terminal_error_recovered = (
+            _recover_journaled_output_and_terminal_error(
+                session, stream_id, dedupe_existing=dedupe_existing,
+                journal=journal,
+            )
+        )
+        if not recovered_output and not terminal_error_recovered:
+            # Inconclusive is not conclusively empty. The journal may still be
+            # arriving (WSL2 9p / DrvFs page-cache loss, an un-fsynced tail), or
+            # it may hold visible output that this pass could not place. The
+            # caller clears `active_stream_id` next, and that is the only key
+            # back to the journal, so hand it to the existing lazy-retry hook
+            # instead of failing open and losing the run for good.
+            # Decided from the captured snapshot only. `_journal_is_still_arriving`
+            # takes its own fresh `latest_run_summary()`/`stat()` view, so a
+            # journal becoming visible between the two would let it report
+            # "settled" while the checks below still inspect the original empty
+            # snapshot — dropping the stream id without ever replaying the output
+            # that had just appeared. An empty snapshot is inconclusive by
+            # definition, so it fails closed and keeps the key.
+            if not (journal.get('events') or []) or _run_journal_has_visible_output(
+                session, stream_id, journal=journal,
+            ):
+                marker = _build_recovery_marker_with_retry_hook(
+                    recovered_output=False,
+                    stream_id=stream_id,
+                    pending_started_at=getattr(session, 'pending_started_at', None),
+                )
+                marker['_recovered_stream_id'] = stream_id
+                _stamp_marker_with_run_time(marker, journal)
+                session.messages.append(marker)
+                return True
+            # A journal that terminated in `cancel` or a generic error without
+            # any visible output still settles the turn — the run really did
+            # stop, and this is the last chance to say so before the caller
+            # clears the stream id. Returning silently here left a persisted
+            # user turn with no outcome at all and no way to recover one.
+            # `completed` is excluded: a run that finished normally is not an
+            # interruption, so an empty one needs no marker.
+            if _run_journal_terminal_state(
+                session, stream_id, journal=journal,
+            ) not in (None, 'completed'):
+                marker = _interrupted_recovery_marker(
+                    recovered_output=False,
+                    stream_id=stream_id,
+                    pending_started_at=getattr(session, 'pending_started_at', None),
+                )
+                marker['_recovered_stream_id'] = stream_id
+                _stamp_marker_with_run_time(marker, journal)
+                session.messages.append(marker)
+                return True
+            return False
+        terminal_state = _run_journal_terminal_state(
+            session, stream_id, journal=journal,
+        )
+        if not terminal_error_recovered and terminal_state != 'completed':
+            # Deliberately NOT armed for retry. Re-running recovery over a
+            # journal that has since grown replays it cumulatively: `token`
+            # events aggregate, so a second pass produces "Hello" where the
+            # first produced "Hel", the content deduper cannot match the two,
+            # and both rows land in `messages` AND `context_messages` — the
+            # next model turn then sees duplicated partial prose. Recovering a
+            # visible prefix once, exactly as the pending-turn path does, is the
+            # correct trade: the prefix is real output that would otherwise be
+            # lost, and one settled row beats two contradictory ones. Recovering
+            # a late-arriving tail needs incremental cursor-based replay rather
+            # than repeated whole-journal replays; that is tracked separately.
+            marker = _interrupted_recovery_marker(
+                recovered_output=True,
+                stream_id=stream_id,
+                pending_started_at=getattr(session, 'pending_started_at', None),
+            )
+            marker['_recovered_stream_id'] = stream_id
+            _stamp_marker_with_run_time(marker, journal)
+            session.messages.append(marker)
+        logger.info(
+            "Session %s: recovered dead run journal for stream %s without pending state",
+            getattr(session, 'session_id', '?'),
+            stream_id,
+        )
+        return True
+    except Exception:
+        logger.exception(
+            "_recover_dead_run_journal failed for session %s stream %s",
+            getattr(session, 'session_id', '?'),
+            stream_id,
         )
         return False
 
