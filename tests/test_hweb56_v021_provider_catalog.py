@@ -335,3 +335,81 @@ def test_env_var_removal_clears_every_name_that_grants_access():
     """
     for slug in NEW_PROVIDERS:
         assert slug not in providers._PROVIDER_ENV_VAR_ALIASES
+
+
+def _force_env_fallback(monkeypatch):
+    """Make `hermes_cli` unimportable so detection takes its env-var fallback."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name in ("hermes_cli.models", "hermes_cli.auth"):
+            raise ImportError(name)
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+
+def _fallback_groups(monkeypatch, tmp_path, env):
+    import api.profiles as profiles
+
+    _force_env_fallback(monkeypatch)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+        monkeypatch.setitem(profiles._INITIAL_PROCESS_ENV, name, value)
+    monkeypatch.setattr(config, "_models_cache_path", tmp_path / "models_cache.json")
+    monkeypatch.setattr(config, "_get_config_path", lambda: tmp_path / "missing-config.yaml")
+    monkeypatch.setattr(config, "_cfg_path", config._cfg_path, raising=False)
+    monkeypatch.setattr(config, "_available_models_cache", config._available_models_cache)
+    monkeypatch.setattr(config, "_models_cache_provenance", config._models_cache_provenance)
+    monkeypatch.setattr(config, "_advertised_model_ids_memo", config._advertised_model_ids_memo)
+    monkeypatch.setattr("api.profiles.get_active_hermes_home", lambda: tmp_path, raising=False)
+
+    old_cfg = dict(config.cfg)
+    old_mtime = config._cfg_mtime
+    config.cfg.clear()
+    config.cfg.update({"model": {}})
+    config._cfg_mtime = 0.0
+    config.invalidate_models_cache()
+    try:
+        return {g["provider_id"] for g in config.get_available_models()["groups"]}
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+        config._cfg_mtime = old_mtime
+        config.invalidate_models_cache()
+
+
+# Only the providers that ship a static catalog: router / actual render zero
+# models on this path (no live probe) and the zero-model filter drops them.
+_FALLBACK_DETECTABLE = [s for s in sorted(NEW_PROVIDERS) if s not in ("router", "actual")]
+
+
+@pytest.mark.parametrize("slug", _FALLBACK_DETECTABLE)
+def test_env_var_detection_reaches_the_no_hermes_cli_fallback(monkeypatch, tmp_path, slug):
+    """Settings and the picker must agree even when `hermes_cli` is unavailable.
+
+    This path used to scan a hand-maintained copy of the env-var list, so a
+    provider added to `_PROVIDER_ENV_VAR` but not to that copy reported
+    "configured" on the Providers card while its picker group was missing.
+    """
+    env_var = NEW_PROVIDERS[slug][1]
+    assert slug in _fallback_groups(monkeypatch, tmp_path, {env_var: "hweb56-test-key"})
+
+
+def test_fallback_detection_reads_the_canonical_key_table(monkeypatch, tmp_path):
+    """A provider in `_PROVIDER_ENV_VAR` is detectable without a bespoke branch."""
+    # nvidia was in the table but absent from the old hardcoded list.
+    assert "nvidia" in _fallback_groups(monkeypatch, tmp_path, {"NVIDIA_API_KEY": "k"})
+
+
+def test_fallback_detection_keeps_the_openai_slug_special_case(monkeypatch, tmp_path):
+    """`OPENAI_API_KEY` maps to openai-api/openai-codex, never a bare `openai`.
+
+    The agent registry has no bare `openai` provider (#3443), so the table-driven
+    pass must not add one just because `_PROVIDER_ENV_VAR` is keyed that way.
+    """
+    groups = _fallback_groups(monkeypatch, tmp_path, {"OPENAI_API_KEY": "k"})
+    assert "openai" not in groups
+    assert {"openai-api", "openai-codex"} <= groups

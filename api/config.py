@@ -7322,29 +7322,53 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     logger.debug("Failed to parse hermes env file")
             all_env = {**env_keys}
             _anthropic_env_vars = _get_anthropic_fallback_env_vars()
-            for k in (
+            # `_PROVIDER_ENV_VAR` is the single source of truth for "which env
+            # var configures which provider" — Settings' key management and
+            # `_provider_has_key()` both consume it. This fallback used to carry
+            # its own hand-maintained copy of that list, so any provider added to
+            # the table but not to the copy would report "configured" on the
+            # Providers card while the picker silently omitted its group. Read
+            # the table directly instead, and the two can no longer drift.
+            # `_PROVIDER_ENV_VAR` deliberately excludes OAuth/token-flow
+            # providers, so this stays an API-key-only signal as before.
+            try:
+                from api.providers import (
+                    _PROVIDER_ENV_VAR as _key_env_vars,
+                    _PROVIDER_ENV_VAR_ALIASES as _key_env_var_aliases,
+                )
+            except Exception:
+                logger.debug("Provider env-var table unavailable for fallback detection")
+                _key_env_vars, _key_env_var_aliases = {}, {}
+
+            # Providers whose detection is not a plain "canonical var is set":
+            # they need a companion variable or map onto different slugs. Each
+            # keeps its bespoke check below.
+            _NON_TRIVIAL_KEY_PROVIDERS = frozenset({"anthropic", "openai", "lmstudio"})
+
+            def _provider_key_env_var_names(pid: str) -> tuple[str, ...]:
+                names = [_key_env_vars.get(pid) or ""]
+                names.extend(_key_env_var_aliases.get(pid) or ())
+                return tuple(n for n in names if n)
+
+            _candidate_env_vars = {
                 *_anthropic_env_vars,
-                "OPENAI_API_KEY",
-                "OPENROUTER_API_KEY",
-                "GOOGLE_API_KEY",
-                "GEMINI_API_KEY",
-                "GLM_API_KEY",
-                "KIMI_API_KEY",
-                "DEEPSEEK_API_KEY",
-                "XIAOMI_API_KEY",
-                "OPENCODE_ZEN_API_KEY",
-                "OPENCODE_GO_API_KEY",
-                "OPENCODE_API_KEY",
-                "MINIMAX_API_KEY",
-                "MINIMAX_CN_API_KEY",
-                "XAI_API_KEY",
-                "MISTRAL_API_KEY",
                 "AWS_ACCESS_KEY_ID",
                 "AWS_SECRET_ACCESS_KEY",
-            ):
+                "LM_BASE_URL",
+            }
+            for _pid in _key_env_vars:
+                _candidate_env_vars.update(_provider_key_env_var_names(_pid))
+            for k in sorted(_candidate_env_vars):
                 val = _thread_local_env_value(k).strip()
                 if val:
                     all_env[k] = val
+
+            for _pid in _key_env_vars:
+                if _pid in _NON_TRIVIAL_KEY_PROVIDERS:
+                    continue
+                if any(all_env.get(_var) for _var in _provider_key_env_var_names(_pid)):
+                    detected_providers.add(_canonicalise_provider_id(_pid) or _pid)
+
             if any(all_env.get(env_var) for env_var in _anthropic_env_vars):
                 detected_providers.add("anthropic")
             if all_env.get("OPENAI_API_KEY"):
@@ -7359,32 +7383,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 # picker without a manual config.yaml edit. Users without Codex OAuth will see
                 # picker entries but hit auth errors at inference time (#1189 known limitation).
                 detected_providers.add("openai-codex")
-            if all_env.get("OPENROUTER_API_KEY"):
-                detected_providers.add("openrouter")
-            if all_env.get("GOOGLE_API_KEY"):
-                detected_providers.add("google")
-            if all_env.get("GEMINI_API_KEY"):
-                detected_providers.add("gemini")
-            if all_env.get("GLM_API_KEY"):
-                detected_providers.add("zai")
-            if all_env.get("KIMI_API_KEY"):
-                detected_providers.add("kimi-coding")
-            if all_env.get("MINIMAX_API_KEY"):
-                detected_providers.add("minimax")
-            if all_env.get("MINIMAX_CN_API_KEY"):
-                detected_providers.add("minimax-cn")
-            if all_env.get("DEEPSEEK_API_KEY"):
-                detected_providers.add("deepseek")
-            if all_env.get("XIAOMI_API_KEY"):
-                detected_providers.add("xiaomi")
-            if all_env.get("XAI_API_KEY"):
-                detected_providers.add("x-ai")
-            if all_env.get("MISTRAL_API_KEY"):
-                detected_providers.add("mistralai")
-            if all_env.get("OPENCODE_ZEN_API_KEY") or all_env.get("OPENCODE_API_KEY"):
-                detected_providers.add("opencode-zen")
-            if all_env.get("OPENCODE_GO_API_KEY") or all_env.get("OPENCODE_API_KEY"):
-                detected_providers.add("opencode-go")
+            # Every remaining one-to-one mapping (openrouter, google, gemini,
+            # zai, kimi-coding, minimax*, deepseek, xiaomi, x-ai, mistralai,
+            # opencode-zen/go via their shared OPENCODE_API_KEY alias, …) is
+            # covered by the table-driven pass above.
             # AWS Bedrock uses IAM credentials rather than a single API key.
             # Detect when both access key and secret are available (#2720).
             if all_env.get("AWS_ACCESS_KEY_ID") and all_env.get("AWS_SECRET_ACCESS_KEY"):

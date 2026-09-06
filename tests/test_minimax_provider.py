@@ -162,22 +162,27 @@ def test_minimax_cn_provider_models_match_hermes_agent_catalog():
 def test_minimax_api_key_in_env_scan_tuple():
     """MINIMAX_API_KEY must be included in the env var scan performed by
     get_available_models(), so users who export MINIMAX_API_KEY see the
-    MiniMax provider in the dropdown without editing ~/.hermes/.env."""
-    import inspect, ast, textwrap
-    src = inspect.getsource(config.get_available_models)
-    assert 'MINIMAX_API_KEY' in src, (
-        "MINIMAX_API_KEY not found in get_available_models() source — "
-        "it must be added to the env var scan tuple so os.environ is checked."
+    MiniMax provider in the dropdown without editing ~/.hermes/.env.
+
+    The scan is driven by ``_PROVIDER_ENV_VAR`` rather than a hand-maintained
+    literal tuple, so pin the mapping that puts MINIMAX_API_KEY in the scan.
+    Asserting the mapping instead of the function's source text keeps this
+    green across refactors while still failing if the key stops being scanned;
+    ``test_minimax_detected_from_os_environ`` below covers it end to end.
+    """
+    from api.providers import _PROVIDER_ENV_VAR
+
+    assert _PROVIDER_ENV_VAR.get('minimax') == 'MINIMAX_API_KEY', (
+        "MINIMAX_API_KEY must map to the minimax provider so the env scan "
+        "picks it up from os.environ."
     )
 
 
 def test_minimax_cn_api_key_in_env_scan_tuple():
     """MINIMAX_CN_API_KEY must also be scanned (mainland China API key variant)."""
-    import inspect
-    src = inspect.getsource(config.get_available_models)
-    assert 'MINIMAX_CN_API_KEY' in src, (
-        "MINIMAX_CN_API_KEY not found in get_available_models() source."
-    )
+    from api.providers import _PROVIDER_ENV_VAR
+
+    assert _PROVIDER_ENV_VAR.get('minimax-cn') == 'MINIMAX_CN_API_KEY'
 
 
 def test_minimax_detected_from_os_environ(monkeypatch, tmp_path):
