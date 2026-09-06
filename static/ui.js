@@ -5128,11 +5128,62 @@ let _composerFitMutationObserver=null;
 let _composerFitObservedFooter=null;
 let _composerFitResizeListenerBound=false;
 
+// Surfaces that must keep the phone composer expanded while they are showing.
+// [selector, requiredClass] — a required class is only used where the element
+// stays laid out and signals its open state with a class (.queue-card slides in
+// on `.visible`; .attach-tray is only populated on `.has-files`).
+const _COMPOSER_EXPAND_SURFACES=[
+  ['#reconnectBanner',''],['#offlineBanner',''],['#agentHealthBanner',''],
+  ['#approvalCard',''],['#clarifyCard',''],
+  ['#queueCard','visible'],['#attachTray','has-files'],
+  ['#micStatus',''],['#voiceModeBar',''],
+  // Composer popups that live outside .composer-footer: the workspace dropdown
+  // is `hidden`-toggled, and the model/profile dropdowns get reparented to the
+  // document root when they open.
+  ['#composerWsDropdown',''],['#composerModelDropdown','open'],['#profileDropdown','open']
+];
+
+function _composerSurfaceOpen(el,cls){
+  if(!el) return false;
+  if(cls) return el.classList.contains(cls);
+  return el.getClientRects().length>0;
+}
+
+// Collapse only an idle, unfocused phone composer that has nothing the user
+// still has to act on. Anything uncertain fails open (stays expanded).
+function _shouldCollapseComposer(){
+  if(typeof _isPhoneWidthViewport!=='function'||!_isPhoneWidthViewport()) return false;
+  const box=document.getElementById('composerBox');
+  if(!box) return false;
+  if(box.contains(document.activeElement)) return false;
+  const msg=document.getElementById('msg');
+  // A multi-line draft has content that a single preview row would hide.
+  if(msg&&(msg.disabled||String(msg.value||'').indexOf('\n')>=0)) return false;
+  const wrap=document.getElementById('composerWrap');
+  if(wrap&&wrap.classList.contains('drag-over')) return false;
+  // An open footer popup owns the interaction. iOS does not move focus to a
+  // tapped button, so focusout alone would otherwise collapse the config panel
+  // (and the button that closes it) out from under the tap that opened it.
+  if(document.querySelector('.composer-footer .open')) return false;
+  for(const pair of _COMPOSER_EXPAND_SURFACES){
+    if(_composerSurfaceOpen(document.querySelector(pair[0]),pair[1])) return false;
+  }
+  return true;
+}
+window._shouldCollapseComposer=_shouldCollapseComposer;
+
 function _fitComposerFooter(){
   const footer=document.querySelector('.composer-footer');
   if(!footer) return;
   const left=footer.querySelector('.composer-left');
   if(!left) return;
+  const wasCollapsed=footer.classList.contains('cf-collapsed');
+  const collapse=_shouldCollapseComposer();
+  footer.classList.toggle('cf-collapsed',collapse);
+  // Expanding restores the textarea's natural height: the collapsed rule pins
+  // it with !important, so autoResize() can only measure once that is gone.
+  if(wasCollapsed&&!collapse&&typeof autoResize==='function'){try{autoResize();}catch(_){ }}
+  if(collapse) return;
   if(!left.clientWidth) return;
   const overflows=function(){return left.scrollWidth>left.clientWidth+1;};
   footer.classList.remove('cf-icons','cf-burger');
@@ -5157,6 +5208,7 @@ function _initComposerFooterFit(){
   const footer=document.querySelector('.composer-footer');
   const left=footer&&footer.querySelector('.composer-left');
   if(!footer||!left) return;
+  _initComposerCollapse();
   _scheduleComposerFit();
   if(_composerFitObservedFooter===footer) return;
   if(_composerFitResizeObserver){try{_composerFitResizeObserver.disconnect();}catch(_){ }}
@@ -5186,10 +5238,44 @@ function _initComposerFooterFit(){
   }
   if(!_composerFitResizeListenerBound){
     window.addEventListener('resize',_scheduleComposerFit);
+    // Keyboard show/hide and PWA chrome changes resize only the visual
+    // viewport on phones; orientation changes come through 'resize' above.
+    if(window.visualViewport){
+      try{window.visualViewport.addEventListener('resize',_scheduleComposerFit);}catch(_){ }
+    }
     _composerFitResizeListenerBound=true;
   }
 }
 window._initComposerFooterFit=_initComposerFooterFit;
+
+// Collapse/expand triggers. Focus owns the state; the surface observer covers
+// the case where an approval, banner or attachment arrives while collapsed.
+function _initComposerCollapse(){
+  const box=document.getElementById('composerBox');
+  if(!box||box.dataset.collapseBound==='1') return;
+  box.dataset.collapseBound='1';
+  box.addEventListener('focusin',_scheduleComposerFit);
+  box.addEventListener('focusout',_scheduleComposerFit);
+  // The whole collapsed row is the tap target, not just the textarea glyphs.
+  box.addEventListener('click',function(e){
+    const footer=document.querySelector('.composer-footer');
+    if(!footer||!footer.classList.contains('cf-collapsed')) return;
+    if(e.target&&e.target.closest&&e.target.closest('button,a,input,select,textarea')) return;
+    const msg=document.getElementById('msg');
+    if(msg) msg.focus();
+  });
+  const msg=document.getElementById('msg');
+  if(msg) msg.addEventListener('input',_scheduleComposerFit);
+  if(window.MutationObserver){
+    try{
+      const surfaces=new MutationObserver(_scheduleComposerFit);
+      _COMPOSER_EXPAND_SURFACES.forEach(function(pair){
+        const el=document.querySelector(pair[0]);
+        if(el) surfaces.observe(el,{attributes:true,attributeFilter:['class','hidden','style']});
+      });
+    }catch(_){ }
+  }
+}
 
 if(document.readyState==='loading'){
   document.addEventListener('DOMContentLoaded',_initComposerFooterFit);
