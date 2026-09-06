@@ -99,6 +99,14 @@ def _phone_page(width: int = PHONE, height: int = 844, reduced_motion: str | Non
         page = context.new_page()
         page.goto(BASE, wait_until="domcontentloaded")
         page.wait_for_selector("#composerBox", timeout=15000)
+        # The onboarding wizard is a pointer-event-blocking modal, and whether it
+        # shows depends on the shared test server's settings at the moment of the
+        # run — so hide it in this page only (no /api/onboarding/complete POST,
+        # which would mutate that shared state for every other test).
+        page.evaluate(
+            "() => { const o = document.getElementById('onboardingOverlay');"
+            " if (o) o.style.display = 'none'; }"
+        )
         _settle(page)
         yield page
     finally:
@@ -397,3 +405,34 @@ def test_collapsed_draft_never_renders_under_the_right_side_indicators():
         assert geometry["rightWidth"] > 60, geometry
         assert geometry["textRight"] <= geometry["rightLeft"] + 1, geometry
         _assert_composer_controls_are_tappable(page, "collapsed+indicators")
+
+
+@pytest.mark.parametrize("size", ["small", "large", "xlarge"])
+def test_collapsed_row_follows_the_font_size_preference(size):
+    """Appearance -> Font size scales #msg from 14px to 20px; the row must follow."""
+    with _phone_page() as page:
+        page.evaluate("(size) => _applyFontSize(size)", size)
+        page.evaluate("() => { const m = document.getElementById('msg'); m.value = 'legible at any size'; if (typeof autoResize === 'function') autoResize(); m.blur(); }")
+        _settle(page)
+
+        measured = page.evaluate(
+            """() => {
+              const msg = document.getElementById('msg');
+              const cs = getComputedStyle(msg);
+              const r = msg.getBoundingClientRect();
+              return {
+                collapsed: document.querySelector('.composer-footer').classList.contains('cf-collapsed'),
+                fontSize: parseFloat(cs.fontSize),
+                lineBox: parseFloat(cs.lineHeight),
+                contentHeight: r.height - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom),
+                height: r.height,
+              };
+            }"""
+        )
+        assert measured["collapsed"], (size, measured)
+        # The single line has to fit in the content box — a fixed row height
+        # clipped the descenders off the largest setting.
+        assert measured["contentHeight"] >= measured["lineBox"] - 1, (size, measured)
+        # ...without ever dropping under the 44px touch floor.
+        assert measured["height"] >= 44, (size, measured)
+        _assert_composer_controls_are_tappable(page, f"collapsed@{size}")
