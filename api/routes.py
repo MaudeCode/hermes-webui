@@ -3357,6 +3357,12 @@ def _clear_stale_stream_state(session, *, lock_held: bool = False) -> bool:
             if getattr(session, "active_stream_id", None) != stream_id:
                 return False
         _materialize_pending_user_turn_before_error(session)
+        # The pending-turn repair above only runs while pending_user_message is
+        # still set. A dead run whose pending state was already cleared still
+        # owns a journal full of prose, reasoning and tool cards; read it before
+        # the stream id it is keyed by is dropped or replaced (HWEB-13).
+        from api.models import _recover_dead_run_journal
+        _recover_dead_run_journal(session, stream_id)
         session.active_stream_id = None
         if hasattr(session, "pending_user_message"):
             session.pending_user_message = None

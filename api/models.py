@@ -3457,6 +3457,72 @@ def _retry_journal_recovery_in_place(
         return False
 
 
+def _recover_dead_run_journal(session, stream_id: str | None) -> bool:
+    """Recover a dead run's journaled work when its pending state is already nil.
+
+    `_apply_core_sync_or_error_marker` is the pending-turn repair path: it bails
+    the moment `pending_user_message` is unset. A run whose pending state was
+    already cleared — lost worker bookkeeping, a partial earlier repair — would
+    otherwise have its `active_stream_id` dropped by `_clear_stale_stream_state`
+    with the journal never read, so every token, reasoning block and tool card
+    the worker already streamed vanishes on refresh.
+
+    Appends the journaled prose/reasoning/tools followed by one interruption
+    marker, unless the journal's authoritative terminal event says the run
+    actually finished or carries its own gateway error message.
+
+    Returns True when anything was recovered. Never raises.
+    """
+    if not stream_id:
+        return False
+    try:
+        if getattr(session, 'pre_compression_snapshot', False):
+            return False
+        if _has_compression_continuation(session):
+            return False
+        # Idempotency across repeated reads: the recovered rows themselves are
+        # deduped by `dedupe_existing`, but the marker has no content to match
+        # on, so it carries the stream id and gates a second pass.
+        for message in getattr(session, 'messages', None) or []:
+            if (
+                isinstance(message, dict)
+                and message.get('type') == 'interrupted'
+                and message.get('_recovered_stream_id') == stream_id
+            ):
+                return False
+        recovered_output, terminal_error_recovered = (
+            _recover_journaled_output_and_terminal_error(
+                session, stream_id, dedupe_existing=True,
+            )
+        )
+        if not recovered_output and not terminal_error_recovered:
+            return False
+        if (
+            not terminal_error_recovered
+            and _run_journal_terminal_state(session, stream_id) != 'completed'
+        ):
+            marker = _interrupted_recovery_marker(
+                recovered_output=True,
+                stream_id=stream_id,
+                pending_started_at=getattr(session, 'pending_started_at', None),
+            )
+            marker['_recovered_stream_id'] = stream_id
+            session.messages.append(marker)
+        logger.info(
+            "Session %s: recovered dead run journal for stream %s without pending state",
+            getattr(session, 'session_id', '?'),
+            stream_id,
+        )
+        return True
+    except Exception:
+        logger.exception(
+            "_recover_dead_run_journal failed for session %s stream %s",
+            getattr(session, 'session_id', '?'),
+            stream_id,
+        )
+        return False
+
+
 def _apply_core_sync_or_error_marker(
     session,
     core_path,
