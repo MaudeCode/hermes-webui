@@ -1378,18 +1378,26 @@ function _clearUserRowIntrinsicHeightCache(){
 // Two identical prompts in one session share a key, which merely means they
 // open together. The session-change release below is hygiene, not correctness.
 const _userMsgExpandedByKey=Object.create(null);
-// Hashes the COMPLETE normalized content, never a prefix. #6999 already burned
-// this repo once: a length+head+tail clip "made same-length middle-only edits
-// produce identical signatures — a deterministic stale-cache collision". The
-// same truncation here is worse than a shared key, because the `!collapsible`
-// cleanup in renderMessages DELETES the entry: a short message colliding with a
-// long one would silently collapse the long one the reader had open. Length is
-// carried alongside the digest so a short message can never share an identity
-// with a long one whatever the hash does.
+// Hashes the EXACT displayed text — complete, and not whitespace-normalized.
+// Both halves of that are load-bearing, and each was learned the hard way:
+//
+//   * Not a prefix. #6999 already burned this repo once, where a length+head+
+//     tail clip "made same-length middle-only edits produce identical
+//     signatures — a deterministic stale-cache collision".
+//   * Not whitespace-normalized. `_userMessageNeedsCollapse()` counts raw
+//     newlines, so an 8-line prompt is short while the same text plus one blank
+//     line is collapsible — yet `\s+`-normalizing maps both to one key.
+//
+// A collision here is worse than shared state: the `!collapsible` cleanup in
+// renderMessages DELETES the entry, so the short twin silently collapses the
+// long message the reader had open. Length rides alongside the digest so a
+// short message can never share an identity with a long one whatever the hash
+// does. (`_compressionMessageAnchorKey` normalizes because its comparison is
+// deliberately fuzzy; an exact-equality key needs the opposite.)
 function _userMessageExpandIdentity(rawText, attachmentCount){
-  const norm=String(rawText==null?'':rawText).replace(/\s+/g,' ').trim();
-  if(!norm) return '';
-  return 'u|'+(Number(attachmentCount)||0)+'|'+norm.length+'|'+_worklogDetailHashKey(norm);
+  const text=String(rawText==null?'':rawText);
+  if(!text.trim()) return '';
+  return 'u|'+(Number(attachmentCount)||0)+'|'+text.length+'|'+_worklogDetailHashKey(text);
 }
 function _userMessageExpandKey(identity){
   const id=String(identity||'');
@@ -9186,6 +9194,16 @@ function toggleMessageExpand(btn){
   btn.setAttribute('aria-expanded',expanded?'false':'true');
   btn.setAttribute('data-i18n',key);
   btn.textContent=t(key);
+  // Drop this session's cached transcript HTML: it was serialized with the old
+  // disclosure state, and the cache fast path in renderMessages reinstalls it
+  // verbatim when the reader navigates away and back — reopening a message they
+  // just collapsed. Same invalidation the transparent-reveal disclosure does.
+  try{
+    const sid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||'';
+    if(sid&&typeof _sessionHtmlCache!=='undefined'&&_sessionHtmlCache&&typeof _sessionHtmlCache.delete==='function'){
+      _sessionHtmlCache.delete(sid);
+    }
+  }catch(_){ }
   // Deliberately no scrollTop write: the bubble grows and shrinks downward, so
   // the row's top edge — and the reader's scroll offset — never move. Any
   // "helpful" re-anchor here is exactly the viewport jump this must not cause.

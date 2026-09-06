@@ -62,7 +62,8 @@ _SETUP_JS = """
     && typeof window._clearMessageVirtualHeightCache === 'function'
     && typeof window.clearMessageRenderCache === 'function'
     && typeof window._userMessageExpandIdentity === 'function'
-    && typeof window._messageViewportAnchorKeyForMessage === 'function';
+    && typeof window._messageViewportAnchorKeyForMessage === 'function'
+    && typeof _sessionHtmlCache === 'object';
 }
 """
 
@@ -567,3 +568,88 @@ def test_expansion_survives_the_optimistic_to_settled_swap():
     assert r["attachmentsDistinguish"] is True, r
     # An empty identity is never a usable key.
     assert r["blankIsNotAKey"] is True, r
+
+
+_WHITESPACE_JS = r"""
+() => {
+  const id = (t) => window._userMessageExpandIdentity(t, 0);
+  // _userMessageNeedsCollapse counts raw newlines, so these two differ in
+  // collapsibility -- but whitespace-normalizing maps them to one key.
+  const eightLines = Array.from({length: 8}, (_, i) => 'line ' + i).join('\n');
+  const nineLines = eightLines.replace('line 4', '\nline 4');
+  const shortIsCollapsible = window._userMessageNeedsCollapse(eightLines);
+  const longIsCollapsible = window._userMessageNeedsCollapse(nineLines);
+
+  window._setUserMessageExpanded(id(nineLines), true);
+  const beforeCleanup = window._userMessageIsExpanded(id(nineLines));
+  // The short twin's !collapsible cleanup, as renderMessages runs it.
+  window._setUserMessageExpanded(id(eightLines), false);
+
+  return {
+    shortIsCollapsible, longIsCollapsible,
+    identitiesDistinct: id(eightLines) !== id(nineLines),
+    beforeCleanup,
+    survivesShortTwinCleanup: window._userMessageIsExpanded(id(nineLines)),
+  };
+}
+"""
+
+
+def test_whitespace_only_difference_is_a_distinct_identity():
+    """An 8-line prompt and the same text plus a blank line are different
+    messages: one is collapsible and one is not, so they must not share a key."""
+    playwright, browser, page = _page(1440)
+    try:
+        r = page.evaluate(_WHITESPACE_JS)
+    finally:
+        browser.close()
+        playwright.stop()
+
+    # Precondition: they really do differ in collapsibility.
+    assert r["shortIsCollapsible"] is False, r
+    assert r["longIsCollapsible"] is True, r
+    assert r["identitiesDistinct"] is True, r
+    assert r["beforeCleanup"] is True, r
+    assert r["survivesShortTwinCleanup"] is True, r
+
+
+_HTML_CACHE_JS = r"""
+(text) => {
+  const inner = document.getElementById('msgInner');
+  inner.innerHTML = '';
+  const row = window.__hweb3Row(text, 7300);
+  inner.appendChild(row);
+  const sid = S.session.session_id;
+
+  // Stand in for a settled render having cached this transcript's HTML.
+  _sessionHtmlCache.set(sid, {html: '<!--stale-->', msgCount: 1,
+    renderWindowKey: 'k', signature: 's'});
+  const cachedBeforeToggle = _sessionHtmlCache.has(sid);
+
+  row.querySelector('.msg-expand-btn').click();
+  const cachedAfterExpand = _sessionHtmlCache.has(sid);
+
+  _sessionHtmlCache.set(sid, {html: '<!--stale2-->', msgCount: 1,
+    renderWindowKey: 'k', signature: 's'});
+  row.querySelector('.msg-expand-btn').click();
+  const cachedAfterCollapse = _sessionHtmlCache.has(sid);
+
+  return { cachedBeforeToggle, cachedAfterExpand, cachedAfterCollapse };
+}
+"""
+
+
+def test_toggling_invalidates_the_cached_transcript_html():
+    """The cache fast path reinstalls serialized HTML verbatim, so a toggle must
+    drop it or navigating away and back reopens what the reader collapsed."""
+    playwright, browser, page = _page(1440)
+    try:
+        r = page.evaluate(_HTML_CACHE_JS, _601)
+    finally:
+        browser.close()
+        playwright.stop()
+
+    assert r["cachedBeforeToggle"] is True, r
+    assert r["cachedAfterExpand"] is False, r
+    # Both directions: collapsing must invalidate too, not just expanding.
+    assert r["cachedAfterCollapse"] is False, r
