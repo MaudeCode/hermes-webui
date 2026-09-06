@@ -3498,22 +3498,7 @@ def _retry_journal_recovery_in_place(
             if recovered_output or terminal_error_recovered:
                 if not terminal_error_recovered:
                     msg['content'] = _INTERRUPTED_RECOVERED_WORDING
-                    # A dead-run marker (`_recovered_stream_id`, written by
-                    # `_recover_dead_run_journal`) stays armed until an
-                    # authoritative terminal event owns the run: its journal can
-                    # surface in several nonterminal waves, and disarming on the
-                    # first wave that yields anything makes every later wave —
-                    # including the terminal event and the prose arriving with it
-                    # — unreachable. Attempts and the first-seen timestamp are
-                    # deliberately left alone, so a journal that never terminates
-                    # still hits the existing give-up cap rather than retrying
-                    # forever. Pending-turn markers keep their established
-                    # finalize-on-first-success contract untouched.
-                    if (
-                        not msg.get('_recovered_stream_id')
-                        or _run_journal_terminal_state(session, stream_id) is not None
-                    ):
-                        _strip_journal_retry_meta(msg)
+                    _strip_journal_retry_meta(msg)
                 # The journaled rows were appended at the end of messages;
                 # move them above the marker before either retaining its
                 # interrupted wording or replacing it with a specific terminal
@@ -3647,22 +3632,42 @@ def _recover_dead_run_journal(session, stream_id: str | None) -> bool:
                 marker['_recovered_stream_id'] = stream_id
                 session.messages.append(marker)
                 return True
+            # A journal that terminated in `cancel` or a generic error without
+            # any visible output still settles the turn — the run really did
+            # stop, and this is the last chance to say so before the caller
+            # clears the stream id. Returning silently here left a persisted
+            # user turn with no outcome at all and no way to recover one.
+            # `completed` is excluded: a run that finished normally is not an
+            # interruption, so an empty one needs no marker.
+            if _run_journal_terminal_state(session, stream_id) not in (None, 'completed'):
+                marker = _interrupted_recovery_marker(
+                    recovered_output=False,
+                    stream_id=stream_id,
+                    pending_started_at=getattr(session, 'pending_started_at', None),
+                )
+                marker['_recovered_stream_id'] = stream_id
+                session.messages.append(marker)
+                return True
             return False
         terminal_state = _run_journal_terminal_state(session, stream_id)
         if not terminal_error_recovered and terminal_state != 'completed':
+            # Deliberately NOT armed for retry. Re-running recovery over a
+            # journal that has since grown replays it cumulatively: `token`
+            # events aggregate, so a second pass produces "Hello" where the
+            # first produced "Hel", the content deduper cannot match the two,
+            # and both rows land in `messages` AND `context_messages` — the
+            # next model turn then sees duplicated partial prose. Recovering a
+            # visible prefix once, exactly as the pending-turn path does, is the
+            # correct trade: the prefix is real output that would otherwise be
+            # lost, and one settled row beats two contradictory ones. Recovering
+            # a late-arriving tail needs incremental cursor-based replay rather
+            # than repeated whole-journal replays; that is tracked separately.
             marker = _interrupted_recovery_marker(
                 recovered_output=True,
                 stream_id=stream_id,
                 pending_started_at=getattr(session, 'pending_started_at', None),
             )
             marker['_recovered_stream_id'] = stream_id
-            if terminal_state is None:
-                # No terminal event owns this run, so what we just read is a
-                # prefix rather than a settled journal — a delayed-visibility
-                # filesystem can still surface the tail. Arm the lazy-retry hook
-                # so a later read picks that tail up; without it this marker
-                # would look final and the remainder would be lost for good.
-                _arm_journal_retry(marker, stream_id)
             session.messages.append(marker)
         logger.info(
             "Session %s: recovered dead run journal for stream %s without pending state",

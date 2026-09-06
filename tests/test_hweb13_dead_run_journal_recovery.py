@@ -331,34 +331,37 @@ def test_repeated_historical_prose_is_not_claimed_by_an_unrelated_row():
     assert len([m for m in session.messages if m.get("type") == "interrupted"]) == 1
 
 
-def test_nonterminal_journal_prefix_stays_eligible_for_the_tail():
-    """A journal with no terminal event is a prefix, not a settled run.
+def test_recovered_prefix_is_settled_once_not_replayed():
+    """Recovering a visible prefix must not arm a cumulative replay.
 
-    Recovering its visible prefix must not produce a final-looking marker: the
-    tail can still become visible on a delayed-visibility filesystem, and the
-    marker is the only thing that keeps the stream id reachable afterwards.
+    `token` events aggregate, so replaying a grown journal yields "Hello" where
+    the first pass yielded "Hel". The content deduper cannot match the two, so
+    both rows would land in `messages` and in `context_messages`, feeding the
+    next model turn duplicated partial prose.
     """
     session_id = "hweb13_prefix"
     stream_id = "hweb13_stream_prefix"
     session = _dead_session(session_id, stream_id)
-    append_run_event(session_id, stream_id, "interim_assistant", {"text": "First half of the answer."})
+    append_run_event(session_id, stream_id, "token", {"text": "Hel"})
 
     assert _recover_dead_run_journal(session, stream_id) is True
-    assert _visible(session) == ["First half of the answer."]
+    assert _visible(session) == ["Hel"]
     marker = session.messages[-1]
-    assert marker["_pending_journal_recovery"] is True
-    assert marker["_journal_retry_stream_id"] == stream_id
-    assert models._session_has_pending_journal_retry(session) is True
+    assert marker["type"] == "interrupted"
+    assert "_pending_journal_recovery" not in marker
+    assert models._session_has_pending_journal_retry(session) is False
 
-    # The tail lands later; the armed marker is what lets it in.
-    append_run_event(session_id, stream_id, "interim_assistant", {"text": "Second half of the answer."})
+    # The journal grows afterwards. No retry is armed, so nothing replays it and
+    # the transcript keeps exactly one assistant row for this run.
+    append_run_event(session_id, stream_id, "token", {"text": "lo world."})
     append_run_event(session_id, stream_id, "done", {})
-    assert models._retry_journal_recovery_in_place(session) is True
-    assert _visible(session) == [
-        "First half of the answer.",
-        "Second half of the answer.",
+    models._retry_journal_recovery_in_place(session)
+
+    assert _visible(session) == ["Hel"]
+    assistant_context = [
+        m for m in session.context_messages if m.get("role") == "assistant"
     ]
-    assert "_pending_journal_recovery" not in session.messages[-1]
+    assert len(assistant_context) == 1, "cumulative replay duplicated prose into context"
 
 
 def test_terminal_journal_marker_is_final():
@@ -445,42 +448,32 @@ def test_pending_turn_repair_is_bounded_too(monkeypatch):
     ]
 
 
-def test_retry_stays_armed_across_several_nonterminal_waves():
-    """A journal can surface in waves; only a terminal event finalizes it.
+def test_output_free_terminal_failure_still_records_an_outcome():
+    """A cancel/error journal with no visible output must still settle the turn.
 
-    Disarming on the first wave that yields output makes every later wave —
-    including the terminal event and the prose arriving with it — unreachable.
+    The run really did stop, and this is the last read before the stream id — the
+    only key back to the journal — is cleared, so returning silently would leave
+    a persisted user turn with no outcome and no way to recover one.
     """
-    session_id = "hweb13_waves"
-    stream_id = "hweb13_stream_waves"
+    session_id = "hweb13_silent_cancel"
+    stream_id = "hweb13_stream_silent_cancel"
     session = _dead_session(session_id, stream_id)
-    append_run_event(session_id, stream_id, "interim_assistant", {"text": "Wave one."})
+    append_run_event(session_id, stream_id, "cancel", {})
 
     assert _recover_dead_run_journal(session, stream_id) is True
-    assert session.messages[-1]["_pending_journal_recovery"] is True
-
-    # Second wave: still nonterminal, so the hook must survive this retry.
-    append_run_event(session_id, stream_id, "interim_assistant", {"text": "Wave two."})
-    assert models._retry_journal_recovery_in_place(session) is True
-    marker = next(m for m in session.messages if m.get("type") == "interrupted")
-    assert marker["_pending_journal_recovery"] is True, "hook disarmed on a nonterminal wave"
-
-    # Third wave carries the terminal event — now the marker may finalize.
-    append_run_event(session_id, stream_id, "interim_assistant", {"text": "Wave three."})
-    append_run_event(session_id, stream_id, "done", {})
-    assert models._retry_journal_recovery_in_place(session) is True
-    assert _visible(session) == ["Wave one.", "Wave two.", "Wave three."]
-    marker = next(m for m in session.messages if m.get("type") == "interrupted")
-    assert "_pending_journal_recovery" not in marker
-    assert models._session_has_pending_journal_retry(session) is False
+    marker = session.messages[-1]
+    assert marker["type"] == "interrupted"
+    assert marker["_error"] is True
+    assert marker["_recovered_stream_id"] == stream_id
 
 
 def test_late_tool_complete_settles_the_already_recovered_card():
-    """A `tool_complete` arriving in a later wave must settle the existing card.
+    """A `tool_complete` in a later replay must settle the existing card.
 
-    The first wave materializes the tool card; the retry dedupes it, so without
-    tracking the persisted dict the completion has nothing to apply to and the
-    card stays running forever.
+    Any armed retry re-runs `_append_journaled_partial_output` with
+    `dedupe_existing=True`. The dedupe skips the already-materialized card, so
+    without tracking the persisted dict the completion has nothing to apply to
+    and the card stays running forever.
     """
     session_id = "hweb13_late_tool"
     stream_id = "hweb13_stream_late_tool"
@@ -503,9 +496,9 @@ def test_late_tool_complete_settles_the_already_recovered_card():
         {"name": "terminal", "duration": 1.25, "is_error": False, "preview": "3 matches"},
     )
     append_run_event(session_id, stream_id, "done", {})
-    models._retry_journal_recovery_in_place(session)
+    models._append_journaled_partial_output(session, stream_id, dedupe_existing=True)
 
-    assert len(session.tool_calls) == 1, "the retry duplicated the tool card"
+    assert len(session.tool_calls) == 1, "the replay duplicated the tool card"
     card = session.tool_calls[0]
     assert card["done"] is True
     assert card["duration"] == 1.25
