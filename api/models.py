@@ -2611,7 +2611,7 @@ _RECOVERY_JOURNAL_MAX_ROWS = 65536
 
 def _read_run_journal_for_recovery(session_id: str, stream_id: str) -> dict:
     """Bounded journal read shared by every read-side recovery helper."""
-    from api.run_journal import read_run_event_tail
+    from api.run_journal import _RUN_JOURNAL_TAIL_MAX_BYTES, read_run_event_tail
 
     journal = read_run_event_tail(
         session_id,
@@ -2619,6 +2619,20 @@ def _read_run_journal_for_recovery(session_id: str, stream_id: str) -> dict:
         max_bytes=_RECOVERY_JOURNAL_MAX_BYTES,
         max_rows=_RECOVERY_JOURNAL_MAX_ROWS,
     )
+    if journal.get('truncated') and not journal.get('events'):
+        # The window landed inside a single row larger than itself, so trimming
+        # to the next newline consumed everything and a non-empty journal came
+        # back eventless. The realistic shape is an `apperror` row embedding a
+        # whole terminal session payload — exactly the row recovery most needs,
+        # and reporting it as "no events" would clear the stream id and lose the
+        # terminal error. Escalate once to the wider ceiling the settled-journal
+        # classifier already uses rather than going unbounded.
+        journal = read_run_event_tail(
+            session_id,
+            stream_id,
+            max_bytes=_RUN_JOURNAL_TAIL_MAX_BYTES,
+            max_rows=_RECOVERY_JOURNAL_MAX_ROWS,
+        )
     if journal.get('truncated'):
         logger.warning(
             "Session %s: run journal for stream %s exceeded the %d-byte recovery "
@@ -2628,6 +2642,41 @@ def _read_run_journal_for_recovery(session_id: str, stream_id: str) -> dict:
             _RECOVERY_JOURNAL_MAX_BYTES,
         )
     return journal
+
+
+def _existing_recovered_tool_card(
+    session,
+    name: str,
+    preview: str,
+    *,
+    stream_id: str | None = None,
+) -> dict | None:
+    """Return the persisted tool card `_journal_tool_already_present` matched.
+
+    Same matching rules, so a later journal wave settles exactly the card an
+    earlier wave materialized. Only an unfinished card is returned — a settled
+    one needs nothing, and returning it could let a repeated tool of the same
+    name steal the completion.
+    """
+    candidate_name = str(name or '')
+    candidate_preview = _normalize_journal_recovery_text(preview)
+    candidate_stream = str(stream_id) if stream_id else None
+    for tool_call in reversed(session.tool_calls or []):
+        if not isinstance(tool_call, dict) or tool_call.get('done'):
+            continue
+        if str(tool_call.get('name') or '') != candidate_name:
+            continue
+        existing_preview = _normalize_journal_recovery_text(
+            tool_call.get('preview') or tool_call.get('snippet') or ''
+        )
+        if existing_preview != candidate_preview:
+            continue
+        if candidate_stream is not None:
+            existing_stream = tool_call.get('_recovered_stream_id')
+            if existing_stream and str(existing_stream) != candidate_stream:
+                continue
+        return tool_call
+    return None
 
 
 def _run_journal_has_visible_output(session, stream_id: str | None) -> bool:
@@ -2944,6 +2993,9 @@ def _append_journaled_partial_output(
     assistant_started_at: float | None = None
     current_assistant_idx: int | None = None
     recovered_tool_calls: list[dict] = []
+    # Cards this pass may still settle: the newly recovered ones plus any
+    # already-persisted card a `tool_complete` in this journal wave owns.
+    completable_tool_calls: list[dict] = []
     initial_message_count = len(session.messages or [])
     claimed_existing_assistant_indexes: set[int] = set()
 
@@ -3159,9 +3211,20 @@ def _append_journaled_partial_output(
             if dedupe_existing and _journal_tool_already_present(
                 session, name, preview, stream_id=stream_id,
             ):
+                # A previous pass already materialized this card. Track the
+                # persisted dict so a `tool_complete` arriving in a later journal
+                # wave can still settle it; without this the card stays
+                # `done=False` forever and never gets its duration, error flag or
+                # final preview. It is deliberately not re-appended to
+                # session.tool_calls below — only `recovered_tool_calls` is.
+                existing_card = _existing_recovered_tool_card(
+                    session, name, preview, stream_id=stream_id,
+                )
+                if existing_card is not None:
+                    completable_tool_calls.append(existing_card)
                 current_assistant_idx = anchor_idx
                 continue
-            recovered_tool_calls.append({
+            new_card = {
                 'name': name,
                 'preview': preview,
                 'snippet': preview,
@@ -3171,13 +3234,15 @@ def _append_journaled_partial_output(
                 'done': False,
                 '_recovered_from_run_journal': True,
                 '_recovered_stream_id': stream_id,
-            })
+            }
+            recovered_tool_calls.append(new_card)
+            completable_tool_calls.append(new_card)
             appended_any = True
             current_assistant_idx = anchor_idx
             continue
         if event_name == 'tool_complete':
             name = str(payload.get('name') or '')
-            for tool_call in reversed(recovered_tool_calls):
+            for tool_call in reversed(completable_tool_calls):
                 if tool_call.get('done'):
                     continue
                 if not name or tool_call.get('name') == name:
@@ -3433,7 +3498,22 @@ def _retry_journal_recovery_in_place(
             if recovered_output or terminal_error_recovered:
                 if not terminal_error_recovered:
                     msg['content'] = _INTERRUPTED_RECOVERED_WORDING
-                    _strip_journal_retry_meta(msg)
+                    # A dead-run marker (`_recovered_stream_id`, written by
+                    # `_recover_dead_run_journal`) stays armed until an
+                    # authoritative terminal event owns the run: its journal can
+                    # surface in several nonterminal waves, and disarming on the
+                    # first wave that yields anything makes every later wave —
+                    # including the terminal event and the prose arriving with it
+                    # — unreachable. Attempts and the first-seen timestamp are
+                    # deliberately left alone, so a journal that never terminates
+                    # still hits the existing give-up cap rather than retrying
+                    # forever. Pending-turn markers keep their established
+                    # finalize-on-first-success contract untouched.
+                    if (
+                        not msg.get('_recovered_stream_id')
+                        or _run_journal_terminal_state(session, stream_id) is not None
+                    ):
+                        _strip_journal_retry_meta(msg)
                 # The journaled rows were appended at the end of messages;
                 # move them above the marker before either retaining its
                 # interrupted wording or replacing it with a specific terminal

@@ -443,3 +443,109 @@ def test_pending_turn_repair_is_bounded_too(monkeypatch):
         "The clear path never reads the journal.",
         "So the prose is dropped on refresh.",
     ]
+
+
+def test_retry_stays_armed_across_several_nonterminal_waves():
+    """A journal can surface in waves; only a terminal event finalizes it.
+
+    Disarming on the first wave that yields output makes every later wave —
+    including the terminal event and the prose arriving with it — unreachable.
+    """
+    session_id = "hweb13_waves"
+    stream_id = "hweb13_stream_waves"
+    session = _dead_session(session_id, stream_id)
+    append_run_event(session_id, stream_id, "interim_assistant", {"text": "Wave one."})
+
+    assert _recover_dead_run_journal(session, stream_id) is True
+    assert session.messages[-1]["_pending_journal_recovery"] is True
+
+    # Second wave: still nonterminal, so the hook must survive this retry.
+    append_run_event(session_id, stream_id, "interim_assistant", {"text": "Wave two."})
+    assert models._retry_journal_recovery_in_place(session) is True
+    marker = next(m for m in session.messages if m.get("type") == "interrupted")
+    assert marker["_pending_journal_recovery"] is True, "hook disarmed on a nonterminal wave"
+
+    # Third wave carries the terminal event — now the marker may finalize.
+    append_run_event(session_id, stream_id, "interim_assistant", {"text": "Wave three."})
+    append_run_event(session_id, stream_id, "done", {})
+    assert models._retry_journal_recovery_in_place(session) is True
+    assert _visible(session) == ["Wave one.", "Wave two.", "Wave three."]
+    marker = next(m for m in session.messages if m.get("type") == "interrupted")
+    assert "_pending_journal_recovery" not in marker
+    assert models._session_has_pending_journal_retry(session) is False
+
+
+def test_late_tool_complete_settles_the_already_recovered_card():
+    """A `tool_complete` arriving in a later wave must settle the existing card.
+
+    The first wave materializes the tool card; the retry dedupes it, so without
+    tracking the persisted dict the completion has nothing to apply to and the
+    card stays running forever.
+    """
+    session_id = "hweb13_late_tool"
+    stream_id = "hweb13_stream_late_tool"
+    session = _dead_session(session_id, stream_id)
+    append_run_event(session_id, stream_id, "interim_assistant", {"text": "Running the search."})
+    append_run_event(
+        session_id,
+        stream_id,
+        "tool",
+        {"name": "terminal", "preview": "rg _journal_tool_already_present", "args": {"command": "rg x"}},
+    )
+
+    assert _recover_dead_run_journal(session, stream_id) is True
+    assert [t["done"] for t in session.tool_calls] == [False]
+
+    append_run_event(
+        session_id,
+        stream_id,
+        "tool_complete",
+        {"name": "terminal", "duration": 1.25, "is_error": False, "preview": "3 matches"},
+    )
+    append_run_event(session_id, stream_id, "done", {})
+    models._retry_journal_recovery_in_place(session)
+
+    assert len(session.tool_calls) == 1, "the retry duplicated the tool card"
+    card = session.tool_calls[0]
+    assert card["done"] is True
+    assert card["duration"] == 1.25
+    assert card["is_error"] is False
+    assert card["preview"] == "3 matches"
+
+
+def test_oversized_terminal_row_still_recovers(monkeypatch):
+    """One JSONL row larger than the recovery window must not read as empty.
+
+    `read_run_event_tail` seeks to `size - max_bytes` and trims through the next
+    newline, so a window landing inside an oversized row returns nothing. An
+    `apperror` embedding a whole terminal session payload is exactly that shape,
+    and treating it as eventless would clear the stream id and lose the error.
+    """
+    session_id = "hweb13_oversized"
+    stream_id = "hweb13_stream_oversized"
+    session = _dead_session(session_id, stream_id)
+    append_run_event(session_id, stream_id, "interim_assistant", {"text": "Work before the error."})
+    append_run_event(
+        session_id,
+        stream_id,
+        "apperror",
+        {
+            "session_id": session_id,
+            # Padding stands in for a large embedded terminal session payload.
+            "bulk": "x" * 4096,
+            "session": {
+                "session_id": session_id,
+                "messages": [
+                    {"role": "user", "content": "Trace the regression"},
+                    {"role": "assistant", "content": "Provider rejected the request.", "_error": True},
+                ],
+            },
+        },
+    )
+
+    # Shrink the window below that row so the trim consumes the whole read.
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_BYTES", 1024)
+
+    assert _recover_dead_run_journal(session, stream_id) is True
+    assert session.messages[-1]["content"] == "Provider rejected the request."
+    assert session.messages[-1]["_error"] is True
