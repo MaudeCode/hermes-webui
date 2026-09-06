@@ -197,6 +197,10 @@ _SESSION_INDEX_REBUILD_THREAD_TARGET: tuple[Path, Path] | None = None
 _PARSED_INDEX_CACHE_MAX = 8
 _PARSED_INDEX_CACHE: "collections.OrderedDict[str, tuple[tuple[int, int, int, int, int], list[dict]]]" = collections.OrderedDict()
 
+# ``_index.json`` is machine-only. Pretty-printing it costs ~30-40% extra bytes
+# to serialize, write and fsync on every save for a file no human reads.
+_INDEX_JSON_SEPARATORS = (',', ':')
+
 
 def _index_stat_signature(path: Path) -> tuple[int, int, int, int, int] | None:
     try:
@@ -221,8 +225,12 @@ def _cached_parsed_index(path: Path) -> list[dict] | None:
     return list(entries)
 
 
-def _cache_parsed_index(path: Path, entries: list[dict]) -> None:
-    signature = _index_stat_signature(path)
+def _cache_parsed_index(path: Path, entries: list[dict], *, signature=None) -> None:
+    # A caller that read the file outside the index write lock must pass the
+    # signature it verified around its own read: re-stat'ing here would bind
+    # those rows to whatever version landed in the meantime.
+    if signature is None:
+        signature = _index_stat_signature(path)
     if signature is None:
         return
     key = str(path)
@@ -230,6 +238,36 @@ def _cache_parsed_index(path: Path, entries: list[dict]) -> None:
     _PARSED_INDEX_CACHE.move_to_end(key)
     while len(_PARSED_INDEX_CACHE) > _PARSED_INDEX_CACHE_MAX:
         _PARSED_INDEX_CACHE.popitem(last=False)
+
+
+def _read_session_index_entries() -> list:
+    """Parsed ``_index.json`` rows, reusing the stat-validated parsed cache.
+
+    Every read-only index consumer used to pay its own ``read_bytes`` +
+    ``json.loads`` over the whole store even though ``_write_session_index``
+    already keeps a parsed copy. Returns the SHARED cached rows: callers that
+    mutate a row must copy it first.
+
+    Raises whatever ``json.loads`` raises on a corrupt index, and ``ValueError``
+    when the payload is not a list, so existing callers keep their fall-back
+    behavior.
+    """
+    path = SESSION_INDEX_FILE
+    entries = _cached_parsed_index(path)
+    if entries is None:
+        # This read is not serialized against ``_write_session_index``, so an
+        # index replaced mid-read would otherwise be cached as old rows under
+        # the new file's signature — and the next targeted write would accept
+        # that as its baseline and durably revert the save that replaced it.
+        # Only publish rows the stat signature proves came from one version.
+        signature = _index_stat_signature(path)
+        entries = json.loads(path.read_bytes())
+        if not isinstance(entries, list):
+            raise ValueError("session index must be a list")
+        if signature is not None and signature == _index_stat_signature(path):
+            _cache_parsed_index(path, entries, signature=signature)
+    return entries
+
 
 # Serializes ``_record_webui_zero_message_orphan_tombstone`` /
 # ``_clear_webui_zero_message_orphan_tombstone`` so two concurrent sidebar
@@ -400,8 +438,11 @@ def _index_entry_exists(session_id: str, in_memory_ids=None) -> bool:
 def _write_session_index(updates=None, *, session_dir: Path | None = None, session_index_file: Path | None = None):
     """Update the session index file.
 
-    When *updates* is provided (a list of Session objects whose compact
-    entries should be refreshed), this patches only those logical rows. The
+    When *updates* is provided (Session objects whose compact entries should
+    be refreshed, or already-compacted rows), this patches only those logical
+    rows. Passing compacted rows lets a caller bind the row to the same session
+    state it just persisted instead of whatever the session looks like by the
+    time this runs. The
     on-disk compatibility format remains one sorted JSON list, so serialization
     is still O(number of sessions); a stat-validated parsed cache avoids paying
     the full read+JSON-parse cost on every Session.save, and identical updates
@@ -454,7 +495,7 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                 ]
             entries.extend(in_memory_entries)
             entries.sort(key=lambda s: s.get('updated_at', 0), reverse=True)
-            _payload = json.dumps(entries, ensure_ascii=False, indent=2)
+            _payload = json.dumps(entries, ensure_ascii=False, separators=_INDEX_JSON_SEPARATORS)
 
             try:
                 with open(_tmp, 'w', encoding='utf-8') as f:
@@ -486,7 +527,14 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                 raise ValueError("session index must be a list")
             with LOCK:
                 in_memory_ids = set(SESSIONS.keys())
-                updated_map = {s.session_id: s.compact() for s in updates}
+                updated_map = {}
+                for update in updates:
+                    if isinstance(update, dict):
+                        sid = update.get('session_id')
+                        if sid:
+                            updated_map[sid] = update
+                    else:
+                        updated_map[update.session_id] = update.compact()
 
             filtered = [
                 e for e in existing
@@ -512,7 +560,7 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
             if not changed:
                 _cache_parsed_index(session_index_file, existing)
                 return
-            _payload = json.dumps(existing, ensure_ascii=False, indent=2)
+            _payload = json.dumps(existing, ensure_ascii=False, separators=_INDEX_JSON_SEPARATORS)
 
             try:
                 with open(_tmp, 'w', encoding='utf-8') as f:
@@ -543,6 +591,94 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
         )
 
 
+# Coalescing gate for ``Session.save()``'s index refresh. Turn start, turn end,
+# title generation and every 15s streaming checkpoint each trigger a save, so a
+# busy server paid N full index rewrites for N concurrent saves even though one
+# rewrite carrying all N rows is equivalent. Savers publish an immutable
+# snapshot of their row into the current batch; whoever finds no rewrite in
+# flight performs the next one. A saver returns as soon as the rewrite carrying
+# ITS batch is done and reports that rewrite's outcome as its own — it never
+# stays on to drain later arrivals, because ``Session.save()`` runs under the
+# session's mutation lock and a busy store would otherwise pin one session's
+# lock behind unrelated sessions' checkpoints. Whoever is still waiting picks
+# up the next rewrite instead. Waiting is what the old code did too (on
+# ``_INDEX_WRITE_LOCK``), so no durability is traded away — the win is that the
+# waiters' rows ride along in one rewrite instead of each paying its own.
+_INDEX_FLUSH_COND = threading.Condition()
+_INDEX_PENDING_ROWS: dict = {}
+_INDEX_PENDING_BATCH = None
+_INDEX_FLUSH_IN_PROGRESS = False
+
+
+class _IndexFlushBatch:
+    """One coalesced index rewrite and the outcome its savers are waiting on."""
+
+    __slots__ = ("done", "error")
+
+    def __init__(self):
+        self.done = False
+        self.error = None
+
+
+def _queue_session_index_update(sessions) -> None:
+    """Refresh index rows for *sessions*, coalescing concurrent bursts.
+
+    Each session is compacted up front, so the row that lands in the index is
+    the one that matched the sidecar its save just wrote — never a later
+    mutation made by the session's own streaming thread while the row sat in
+    the queue. The caller returns once the rewrite carrying its snapshot has
+    finished, and re-raises that rewrite's error, so a save still reports its
+    own index outcome exactly as it did before coalescing existed.
+    """
+    global _INDEX_FLUSH_IN_PROGRESS, _INDEX_PENDING_BATCH
+    with LOCK:
+        rows = [session.compact() for session in sessions]
+
+    with _INDEX_FLUSH_COND:
+        if _INDEX_PENDING_BATCH is None:
+            _INDEX_PENDING_BATCH = _IndexFlushBatch()
+        batch = _INDEX_PENDING_BATCH
+        for row in rows:
+            sid = row.get('session_id')
+            if sid:
+                _INDEX_PENDING_ROWS[sid] = row
+
+        while not batch.done:
+            if _INDEX_FLUSH_IN_PROGRESS:
+                # Someone else's rewrite is running. It cannot be carrying this
+                # batch (a batch is taken and replaced in one critical section),
+                # so wait to be woken and then take the next rewrite.
+                _INDEX_FLUSH_COND.wait()
+                continue
+
+            pending = list(_INDEX_PENDING_ROWS.values())
+            current = _INDEX_PENDING_BATCH
+            _INDEX_PENDING_ROWS.clear()
+            _INDEX_PENDING_BATCH = None
+            _INDEX_FLUSH_IN_PROGRESS = True
+
+            error = None
+            _INDEX_FLUSH_COND.release()
+            try:
+                _write_session_index(updates=pending)
+            except BaseException as exc:  # noqa: BLE001 - re-raised per batch
+                error = exc
+            finally:
+                _INDEX_FLUSH_COND.acquire()
+                # Publish the outcome and drop the role in one critical section:
+                # a saver that arrives in between must never wait on a rewrite
+                # that has already finished.
+                current.error = error
+                current.done = True
+                _INDEX_FLUSH_IN_PROGRESS = False
+                _INDEX_FLUSH_COND.notify_all()
+
+        error = batch.error
+
+    if error is not None:
+        raise error
+
+
 def prune_session_from_index(session_id: str) -> None:
     """Remove one session row from the persisted sidebar index if present."""
     sid = str(session_id or "")
@@ -560,7 +696,7 @@ def prune_session_from_index(session_id: str) -> None:
                 pruned = [e for e in existing if e.get('session_id') != sid]
                 if len(pruned) == len(existing):
                     return
-                _payload = json.dumps(pruned, ensure_ascii=False, indent=2)
+                _payload = json.dumps(pruned, ensure_ascii=False, separators=_INDEX_JSON_SEPARATORS)
 
             try:
                 with open(_tmp, 'w', encoding='utf-8') as f:
@@ -1215,7 +1351,7 @@ def _index_message_count_map(entries=None) -> dict[str, int]:
     """
     if entries is None:
         try:
-            entries = json.loads(SESSION_INDEX_FILE.read_bytes())
+            entries = _read_session_index_entries()
         except Exception:
             return {}
     if not isinstance(entries, list):
@@ -1615,7 +1751,7 @@ class Session:
                 pass
             raise
         if not skip_index:
-            _write_session_index(updates=[self])
+            _queue_session_index_update([self])
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the
@@ -3751,8 +3887,8 @@ def _has_compression_continuation(session) -> bool:
 
     try:
         if SESSION_INDEX_FILE.exists():
-            entries = json.loads(SESSION_INDEX_FILE.read_bytes())
-            if isinstance(entries, list) and any(_row_is_continuation(e) for e in entries):
+            entries = _read_session_index_entries()
+            if any(_row_is_continuation(e) for e in entries):
                 return True
     except Exception:
         logger.debug("Failed to inspect session index for compression continuation", exc_info=True)
@@ -6443,7 +6579,13 @@ def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
     if SESSION_INDEX_FILE.exists():
         try:
             _diag_stage(diag, "all_sessions.read_index")
-            index = json.loads(SESSION_INDEX_FILE.read_bytes())
+            # Row copies: the passes below stamp ``is_streaming`` and other
+            # runtime-only keys onto these dicts, which the parsed-index cache
+            # shares with the next reader and with ``_write_session_index``.
+            index = [
+                dict(row) if isinstance(row, dict) else row
+                for row in _read_session_index_entries()
+            ]
             _diag_stage(diag, "all_sessions.prune_index")
             with LOCK:
                 in_memory_ids = set(SESSIONS.keys())
@@ -6688,7 +6830,7 @@ def _backfill_project_profiles_if_needed(projects: list) -> bool:
     session_profile_by_project: dict[str, str] = {}
     if SESSION_INDEX_FILE.exists():
         try:
-            entries = json.loads(SESSION_INDEX_FILE.read_bytes())
+            entries = _read_session_index_entries()
             untagged_ids = {p['project_id'] for p in untagged if p.get('project_id')}
             for e in entries:
                 pid = e.get('project_id')
