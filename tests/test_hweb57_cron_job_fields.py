@@ -408,6 +408,15 @@ def test_repeat_guard_rejects_fractional_counts():
     assert "Number.isInteger(Number(repeatRaw)) && Number(repeatRaw)>=1" in body
 
 
+def test_save_uses_the_preserved_model_pin_while_the_picker_reloads():
+    # Counterpart of the delivery fix: omitting model/provider while the picker
+    # reloads silently drops a pin the user set before the toggle.
+    body = _function_body("saveCronForm")
+    assert "} else if (modelEl && _cronFormRendered && _cronFormRendered.model) {" in body
+    assert "} else if (_cronFormRendered && _cronFormRendered.model) {" in body
+    assert body.count("_cronModelBareName(_cronFormRendered.model, _cronFormRendered.provider)") == 2
+
+
 def test_save_uses_the_preserved_delivery_target_while_the_select_loads():
     # _cronFormValues alone was not enough: saveCronForm read the select
     # directly, so a duplicate saved during the load window sent deliver: ''

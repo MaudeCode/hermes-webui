@@ -2123,8 +2123,13 @@ async function saveCronForm(){
         } else if (modelLoaded) {
           updates.model = null;
           updates.provider = null;
+        } else if (_cronFormRendered && _cronFormRendered.model) {
+          // Picker still reloading after a mode re-render: send the pin the form
+          // was rendered with, so a re-render cannot quietly revert it.
+          updates.model = _cronModelBareName(_cronFormRendered.model, _cronFormRendered.provider) || null;
+          updates.provider = _cronFormRendered.provider || null;
         }
-        // else: select not yet populated — omit model/provider to preserve saved value
+        // else: select never populated — omit model/provider to preserve saved value
       }
       await api('/api/crons/update', {method:'POST', body: JSON.stringify(updates)});
       const editedId = _editingCronId;
@@ -2157,6 +2162,11 @@ async function saveCronForm(){
         body.model = _cronModelBareName(modelState.model, modelState.model_provider) || null;
         body.provider = modelState.model_provider || null;
       }
+    } else if (modelEl && _cronFormRendered && _cronFormRendered.model) {
+      // Picker still reloading after a mode re-render: use the pin the form was
+      // rendered with rather than dropping it, mirroring the delivery path.
+      body.model = _cronModelBareName(_cronFormRendered.model, _cronFormRendered.provider) || null;
+      body.provider = _cronFormRendered.provider || null;
     } else if (_cronIsDuplicate && _cronPreFormDetail && _cronPreFormDetail.model) {
       body.model = _cronModelBareName(_cronPreFormDetail.model, _cronPreFormDetail.provider) || null;
       body.provider = _cronPreFormDetail.provider || null;
