@@ -1397,6 +1397,20 @@ def _provider_has_key(provider_id: str, config_data: dict | None = None) -> bool
     return False
 
 
+def _unqualified_model_id(model_id: object) -> str:
+    """Strip a picker routing hint (``@provider:``) from *model_id*.
+
+    `_apply_provider_prefix()` qualifies a row when its provider is not the
+    active one, so the same configured model appears as ``acct/only`` or
+    ``@router:acct/only`` depending on unrelated state. Anything comparing a
+    published row against config has to compare the underlying id.
+    """
+    raw = str(model_id or "").strip()
+    if raw.startswith("@") and ":" in raw:
+        return raw.split(":", 1)[1]
+    return raw
+
+
 def _is_catalog_card_id(name: object) -> bool:
     """True when *name* is a provider the WebUI renders a card for in its own right."""
     slug = str(name or "").strip().lower()
@@ -1454,10 +1468,19 @@ def _config_provider_is(active_provider: object, provider_id: str) -> bool:
     active = str(active_provider or "").strip().lower()
     if not active:
         return False
-    if active == provider_id.strip().lower():
+    target = provider_id.strip().lower()
+    if active == target:
         return True
+    # Same standalone-card guard as `_config_provider_cfg_for()`. Without it an
+    # identity-only match is symmetric across cards that merely SHARE an
+    # identity: `model.provider: google` matched the gemini card too, so both
+    # showed configured and — far worse — removing the Gemini key deleted the
+    # active Google `model.api_key`. A name that is a card in its own right
+    # names only that card.
+    if _is_catalog_card_id(active):
+        return False
     identity = _provider_identity(active)
-    return bool(identity) and identity == _provider_identity(provider_id)
+    return bool(identity) and identity == _provider_identity(target)
 
 
 def _get_provider_api_key(provider_id: str, credential_id: str | None = None) -> str | None:
@@ -3753,8 +3776,14 @@ def get_providers() -> dict[str, Any]:
                 # so appending it again double-counts: a one-model allowlist
                 # rendered two identical tags and reported "2 models" while the
                 # picker showed one. Merge only what is not already present.
+                # Published rows are routing-qualified when this provider is
+                # not the active one (`@router:acct/only`), so an exact-id
+                # comparison would miss the match and append the raw id back —
+                # the very double-count this dedupe exists to prevent.
                 _seen_ids = {
-                    str(m.get("id")) for m in models if isinstance(m, dict) and m.get("id")
+                    _unqualified_model_id(m.get("id"))
+                    for m in models
+                    if isinstance(m, dict) and m.get("id")
                 }
                 _cfg_ids = (
                     list(cfg_models.keys())
@@ -3762,7 +3791,9 @@ def get_providers() -> dict[str, Any]:
                     else list(cfg_models) if isinstance(cfg_models, list) else []
                 )
                 models = models + [
-                    {"id": k, "label": k} for k in _cfg_ids if str(k) not in _seen_ids
+                    {"id": k, "label": k}
+                    for k in _cfg_ids
+                    if _unqualified_model_id(k) not in _seen_ids
                 ]
                 # Recompute models_total when config.yaml contributes additional
                 # entries on top of the live/static catalog. For non-Nous

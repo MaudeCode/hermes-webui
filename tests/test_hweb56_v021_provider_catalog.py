@@ -505,7 +505,12 @@ def test_config_stored_keys_are_found_through_provider_aliases(alias, canonical)
 
 @pytest.mark.parametrize(
     "alias,card",
-    [("grok", "x-ai"), ("z-ai", "zai"), ("opencode_go", "opencode-go"), ("qwen", "alibaba")],
+    # Deliberately excludes ("qwen", "alibaba"): `qwen` is a standalone card, so
+    # it names only itself. That case belongs to
+    # `test_active_provider_alias_match_respects_standalone_cards`, which asserts
+    # the opposite — an earlier version of this list asserted the buggy
+    # behaviour and had to be corrected.
+    [("grok", "x-ai"), ("z-ai", "zai"), ("opencode_go", "opencode-go")],
 )
 def test_alias_credential_lookup_covers_pre_existing_aliases(alias, card):
     """The same defect predates this PR for the WebUI's long-standing aliases."""
@@ -901,8 +906,13 @@ def test_configured_models_are_not_double_counted(monkeypatch, tmp_path):
     monkeypatch.setattr(providers, "is_plugin_model_provider", lambda _pid: False)
     monkeypatch.setattr(providers, "_provider_has_key", lambda _pid, **_kw: True)
     monkeypatch.setattr(providers, "published_catalog_is_available", lambda: True)
+    # A published row is routing-qualified whenever its provider is not the
+    # active one. Mocking the bare id here is what let the first version of this
+    # dedupe ship broken, so pin the qualified form.
     monkeypatch.setattr(
-        providers, "published_catalog_models", lambda _pid: [{"id": "acct/only", "label": "Only"}]
+        providers,
+        "published_catalog_models",
+        lambda _pid: [{"id": "@router:acct/only", "label": "Only"}],
     )
     monkeypatch.setattr(
         providers,
@@ -912,7 +922,7 @@ def test_configured_models_are_not_double_counted(monkeypatch, tmp_path):
 
     entry = next(p for p in providers.get_providers()["providers"] if p["id"] == "router")
 
-    assert [m["id"] for m in entry["models"]] == ["acct/only"]
+    assert [m["id"] for m in entry["models"]] == ["@router:acct/only"]
     assert entry["models_total"] == 1, "configured allowlist was counted twice"
 
 
@@ -960,3 +970,58 @@ def test_test_server_scrubs_every_recognised_provider_key():
 
     for env_var in {v for _s, (_d, v) in NEW_PROVIDERS.items()}:
         assert env_var in (literal | derived), f"{env_var} would leak into the test server"
+
+
+@pytest.mark.parametrize(
+    "active,card,expected",
+    [
+        # Cards that merely SHARE an identity must not answer for each other.
+        ("google", "google", True),
+        ("google", "gemini", False),
+        ("gemini", "gemini", True),
+        ("gemini", "google", False),
+        ("qwen", "alibaba", False),
+        ("alibaba", "qwen", False),
+        # Genuine aliases still resolve.
+        ("ramp", "router", True),
+        ("actual-computer", "actual", True),
+        ("z-ai", "zai", True),
+    ],
+)
+def test_active_provider_alias_match_respects_standalone_cards(active, card, expected):
+    """`model.provider` naming a real card must not answer for its identity twin."""
+    assert (
+        providers._provider_has_key(card, config_data={"model": {"provider": active, "api_key": "sk"}})
+        is expected
+    )
+
+
+def test_removing_one_card_key_cannot_delete_another_cards_active_key(monkeypatch, tmp_path):
+    """Remove on Gemini must not destroy the active Google credential.
+
+    `model.provider: google` + `model.api_key` is Google's key. An identity-only
+    match let the Gemini card claim it, and removal then deleted it outright —
+    silent destruction of a credential the user never asked to remove.
+    """
+    import yaml
+    import api.config as cfgmod
+
+    path = _write_config(tmp_path, {"model": {"provider": "google", "api_key": "sk-google-active"}})
+    monkeypatch.setattr(cfgmod, "_get_config_path", lambda: path)
+
+    providers._clean_provider_key_from_config("gemini")
+
+    written = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert written["model"]["api_key"] == "sk-google-active"
+
+    # ...but removing Google's own key must still work.
+    providers._clean_provider_key_from_config("google")
+    assert "api_key" not in yaml.safe_load(path.read_text(encoding="utf-8"))["model"]
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [("@router:acct/only", "acct/only"), ("acct/only", "acct/only"), ("@nous:a/b", "a/b"), ("", "")],
+)
+def test_unqualified_model_id_strips_only_the_routing_hint(raw, expected):
+    assert providers._unqualified_model_id(raw) == expected
