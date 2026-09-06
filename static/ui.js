@@ -612,6 +612,7 @@ function _clearMessageVirtualHeightCache(){
   _messageVirtualScrollSettleTimer=0;
   _messageVirtualDeferredMeasurement=null;
   if(typeof _clearUserRowIntrinsicHeightCache==='function') _clearUserRowIntrinsicHeightCache();
+  if(typeof _clearUserMessageExpandState==='function') _clearUserMessageExpandState();
 }
 function _resetMessageRenderWindow(sid){
   _messageRenderWindowSid=sid||null;
@@ -1343,6 +1344,27 @@ const _userRowIntrinsicHeightBySessionIdx=Object.create(null);
 // const binding stable for any closure that captured it.
 function _clearUserRowIntrinsicHeightCache(){
   for(const k in _userRowIntrinsicHeightBySessionIdx) delete _userRowIntrinsicHeightBySessionIdx[k];
+}
+// HWEB-3: which long user messages the reader has opened. renderMessages only
+// recycles DOM rows inside the virtual-scroll path (_msgNodeRecycleEnabled),
+// so every ORDINARY rerender — stream settle, refreshSession, a handoff rebuild
+// — builds fresh nodes and cannot read the state off the old row. Own it here
+// instead, keyed by the same stable session-relative index as the intrinsic
+// height cache above and released at the same session-switch chokepoint, so
+// keys can't collide across sessions.
+const _userMsgExpandedBySessionIdx=Object.create(null);
+function _clearUserMessageExpandState(){
+  for(const k in _userMsgExpandedBySessionIdx) delete _userMsgExpandedBySessionIdx[k];
+}
+function _userMessageIsExpanded(sessionMsgIdx){
+  const key=Number(sessionMsgIdx);
+  return Number.isFinite(key)&&_userMsgExpandedBySessionIdx[key]===true;
+}
+function _setUserMessageExpanded(sessionMsgIdx, expanded){
+  const key=Number(sessionMsgIdx);
+  if(!Number.isFinite(key)) return;
+  if(expanded) _userMsgExpandedBySessionIdx[key]=true;
+  else delete _userMsgExpandedBySessionIdx[key];
 }
 function _rememberUserRowIntrinsicHeight(sessionMsgIdx, height){
   const key=Number(sessionMsgIdx);
@@ -9098,27 +9120,56 @@ function _userMessageNeedsCollapse(text){
 }
 // The clip wrapper — not .msg-body — carries the fade, so the bubble's own
 // background/border stay solid in every skin instead of fading to the page.
-// `expanded` is the recycled row's current disclosure state, so a rerender
-// reproduces byte-identical markup and the caller's innerHTML comparison keeps
-// skipping the rebuild instead of silently re-collapsing what the reader opened.
+// The button carries data-i18n so applyLocaleToDOM() re-translates an already
+// rendered control when the reader changes Language, instead of it keeping the
+// previous language until the transcript happens to rerender.
 function _userMessageBodyHtml(bodyHtml, rawText, rawIdx, expanded){
   if(!_userMessageNeedsCollapse(rawText)) return `<div class="msg-body">${bodyHtml}</div>`;
   const clipId=`msgClip${rawIdx}`;
-  const label=t(expanded?'show_less_message':'show_full_message');
+  const key=expanded?'show_less_message':'show_full_message';
   return `<div class="msg-body"><div class="msg-clip" id="${clipId}">${bodyHtml}</div></div>`
     +`<button type="button" class="msg-expand-btn" aria-expanded="${expanded?'true':'false'}"`
-    +` aria-controls="${clipId}" onclick="toggleMessageExpand(this)">${esc(label)}</button>`;
+    +` aria-controls="${clipId}" data-i18n="${key}"`
+    +` onclick="toggleMessageExpand(this)">${esc(t(key))}</button>`;
 }
 function toggleMessageExpand(btn){
   const row=btn&&btn.closest?btn.closest('.msg-row'):null;
   if(!row) return;
   const expanded=row.dataset.msgExpanded==='1';
+  const key=expanded?'show_full_message':'show_less_message';
   if(expanded) delete row.dataset.msgExpanded; else row.dataset.msgExpanded='1';
+  _setUserMessageExpanded(row.dataset.sessionMsgIdx, !expanded);
   btn.setAttribute('aria-expanded',expanded?'false':'true');
-  btn.textContent=t(expanded?'show_full_message':'show_less_message');
+  btn.setAttribute('data-i18n',key);
+  btn.textContent=t(key);
   // Deliberately no scrollTop write: the bubble grows and shrinks downward, so
   // the row's top edge — and the reader's scroll offset — never move. Any
   // "helpful" re-anchor here is exactly the viewport jump this must not cause.
+}
+// Clipping is visual only: a link or button below the eighth line stays in the
+// tab order, so a keyboard reader could focus a control inside the hidden
+// overflow. Open the message when focus actually lands past the visible
+// preview, which keeps the focused control on screen and the announced
+// aria-expanded honest. Focus inside the visible preview changes nothing.
+if(typeof document!=='undefined'){
+  document.addEventListener('focusin',(e)=>{
+    const target=e.target;
+    if(!target||!target.closest) return;
+    const clip=target.closest('.msg-clip');
+    if(!clip) return;
+    const row=clip.closest('.msg-row');
+    if(!row||row.dataset.msgExpanded==='1') return;
+    // The browser scrolls a clipped box internally to reveal the focus target
+    // BEFORE focusin fires, so a plain "is it visible now?" test always says
+    // yes. A non-zero scrollTop is the reliable tell that it had to do that;
+    // keep the rect test for browsers that leave the box unscrolled.
+    const r=target.getBoundingClientRect();
+    const c=clip.getBoundingClientRect();
+    if(clip.scrollTop<=0&&r.bottom<=c.bottom+1&&r.top>=c.top-1) return;
+    clip.scrollTop=0;
+    const btn=row.querySelector('.msg-expand-btn');
+    if(btn) toggleMessageExpand(btn);
+  });
 }
 function copyMsg(btn){
   const row=btn.closest('[data-raw-text]');
@@ -18246,12 +18297,16 @@ function renderMessages(options){
       let row=_msgNodeRecycleEnabled?_recycleStash.get(rawIdx):null;
       if(row&&(!row.classList.contains('msg-row')||row.classList.contains('assistant-turn'))) row=null;
       const newRawText=String(displayContent).trim();
-      // HWEB-3: carry a recycled row's disclosure state into the markup, and drop
-      // it when the row's new text is short enough that no control is rendered.
+      // HWEB-3: read the disclosure state from its owning store (NOT from the
+      // recycled row — rows are only recycled inside the virtual-scroll path, so
+      // an ordinary rerender has no old row to read) and bake it into the markup,
+      // so a stream settle or refresh never re-collapses what the reader opened.
       // The typeof guards keep renderMessages runnable in the node test harnesses
       // that extract it without these helpers (they stub every collaborator by name).
+      const sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
       const collapsible=typeof _userMessageNeedsCollapse==='function'&&_userMessageNeedsCollapse(newRawText);
-      const wasExpanded=collapsible&&!!(row&&row.dataset&&row.dataset.msgExpanded==='1');
+      const wasExpanded=collapsible&&typeof _userMessageIsExpanded==='function'
+        &&_userMessageIsExpanded(sessionMsgIdx);
       const userBodyHtml=typeof _userMessageBodyHtml==='function'
         ? _userMessageBodyHtml(bodyHtml,newRawText,rawIdx,wasExpanded)
         : `<div class="msg-body">${bodyHtml}</div>`;
@@ -18260,7 +18315,7 @@ function renderMessages(options){
         row.className='msg-row';
         row.id=_userMessageDomId(rawIdx);
         row.dataset.msgIdx=rawIdx;
-        row.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
+        row.dataset.sessionMsgIdx=sessionMsgIdx;
         row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
         row.dataset.role='user';
         delete row.dataset.editing;
@@ -18273,13 +18328,20 @@ function renderMessages(options){
         row.className='msg-row';
         row.id=_userMessageDomId(rawIdx);
         row.dataset.msgIdx=rawIdx;
-        row.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
+        row.dataset.sessionMsgIdx=sessionMsgIdx;
         row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
         row.dataset.role='user';
         row.dataset.rawText=newRawText;
         row.innerHTML=nextRowHtml;
       }
-      if(wasExpanded) row.dataset.msgExpanded='1'; else delete row.dataset.msgExpanded;
+      // Keep the row attribute (the CSS hook) and the store in agreement, and
+      // drop a stale flag when an edit made the text short enough that no
+      // control renders at all.
+      if(wasExpanded) row.dataset.msgExpanded='1';
+      else{
+        delete row.dataset.msgExpanded;
+        if(!collapsible&&typeof _setUserMessageExpanded==='function') _setUserMessageExpanded(sessionMsgIdx,false);
+      }
       // Reserve this user row's real off-screen height up front so a wipe-and-rebuild
       // does not collapse scrollHeight to the flat 96px estimate (the collapse that
       // clamps/re-anchors the viewport on mobile — #5637/#5638, both jump classes). Uses

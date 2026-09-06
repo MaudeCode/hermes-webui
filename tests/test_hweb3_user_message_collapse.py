@@ -39,6 +39,7 @@ _SETUP_JS = """
     row.className = 'msg-row';
     row.dataset.role = 'user';
     row.dataset.msgIdx = String(rawIdx);
+    row.dataset.sessionMsgIdx = String(rawIdx);
     row.dataset.rawText = text;
     // Render through the shipped user-message renderer so line breaks, markdown
     // and escaping match production exactly.
@@ -50,7 +51,10 @@ _SETUP_JS = """
   if (empty) empty.style.display = 'none';
   return typeof window._userMessageBodyHtml === 'function'
     && typeof window.toggleMessageExpand === 'function'
-    && typeof window._getCachedRender === 'function';
+    && typeof window._getCachedRender === 'function'
+    && typeof window._userMessageIsExpanded === 'function'
+    && typeof window._setUserMessageExpanded === 'function'
+    && typeof window._clearUserMessageExpandState === 'function';
 }
 """
 
@@ -112,6 +116,8 @@ _TOGGLE_JS = """
     aria: btn.getAttribute('aria-expanded'),
     label: btn.textContent.trim(),
     rowExpanded: row.dataset.msgExpanded || '',
+    stored: window._userMessageIsExpanded(9100),
+    i18nKey: btn.getAttribute('data-i18n'),
   };
   btn.click();
   const collapsed = {
@@ -121,6 +127,8 @@ _TOGGLE_JS = """
     aria: btn.getAttribute('aria-expanded'),
     label: btn.textContent.trim(),
     rowExpanded: row.dataset.msgExpanded || '',
+    stored: window._userMessageIsExpanded(9100),
+    i18nKey: btn.getAttribute('data-i18n'),
   };
   return { before, expanded, collapsed };
 }
@@ -202,6 +210,9 @@ def test_toggle_flips_aria_expanded_and_holds_the_scroll_offset():
     assert r["collapsed"]["aria"] == "false", r
     assert r["expanded"]["rowExpanded"] == "1", r
     assert r["collapsed"]["rowExpanded"] == "", r
+    # The owning store, not just the DOM row, tracks the state.
+    assert r["expanded"]["stored"] is True, r
+    assert r["collapsed"]["stored"] is False, r
     assert r["expanded"]["label"] != r["collapsed"]["label"], r
 
     # The content really opened and closed again.
@@ -259,3 +270,148 @@ def test_mobile_disclosure_meets_the_44px_touch_target():
         browser.close()
         playwright.stop()
     assert h >= 44, h
+
+
+_RERENDER_JS = """
+(text) => {
+  const inner = document.getElementById('msgInner');
+  inner.innerHTML = '';
+  // Ordinary renders build FRESH nodes (row recycling is only on inside the
+  // virtual-scroll path), so a rebuilt row can only learn the disclosure state
+  // from the store. Simulate exactly that: open the message, throw the DOM away,
+  // rebuild from scratch, and read the new button.
+  const first = window.__hweb3Row(text, 7001);
+  inner.appendChild(first);
+  first.querySelector('.msg-expand-btn').click();
+  const afterToggle = first.querySelector('.msg-expand-btn').getAttribute('aria-expanded');
+
+  inner.innerHTML = '';
+  const rebuilt = document.createElement('div');
+  rebuilt.className = 'msg-row';
+  rebuilt.dataset.role = 'user';
+  rebuilt.dataset.sessionMsgIdx = '7001';
+  const expanded = window._userMessageIsExpanded(7001);
+  rebuilt.innerHTML = window._userMessageBodyHtml(
+    window._getCachedRender(text, true), text, 7001, expanded);
+  if (expanded) rebuilt.dataset.msgExpanded = '1';
+  inner.appendChild(rebuilt);
+  const btn = rebuilt.querySelector('.msg-expand-btn');
+  const clip = rebuilt.querySelector('.msg-clip');
+  const rebuiltState = {
+    aria: btn.getAttribute('aria-expanded'),
+    i18nKey: btn.getAttribute('data-i18n'),
+    clipHeight: clip.getBoundingClientRect().height,
+    contentHeight: clip.scrollHeight,
+  };
+
+  // A session switch releases the state, so the next session starts collapsed.
+  window._clearUserMessageExpandState();
+  return { afterToggle, rebuiltState, afterClear: window._userMessageIsExpanded(7001) };
+}
+"""
+
+
+def test_expansion_survives_a_rebuild_and_is_released_on_session_switch():
+    """The state must outlive a fresh-node rerender, which is every ordinary
+    renderMessages() call — row recycling only happens in the virtual-scroll path."""
+    playwright, browser, page = _page(1440)
+    try:
+        r = page.evaluate(_RERENDER_JS, _601)
+    finally:
+        browser.close()
+        playwright.stop()
+
+    assert r["afterToggle"] == "true", r
+    # Rebuilt from scratch, it comes back open — not silently re-collapsed.
+    assert r["rebuiltState"]["aria"] == "true", r
+    assert r["rebuiltState"]["i18nKey"] == "show_less_message", r
+    assert r["rebuiltState"]["clipHeight"] >= r["rebuiltState"]["contentHeight"] - 1, r
+    # And the store is released on session switch, so state can't leak sessions.
+    assert r["afterClear"] is False, r
+
+
+_FOCUS_JS = r"""
+() => {
+  const inner = document.getElementById('msgInner');
+  inner.innerHTML = '';
+  const text = Array.from({length: 12}, (_, i) => 'line ' + i).join('\n');
+  const row = window.__hweb3Row(text, 7100);
+  inner.appendChild(row);
+  const clip = row.querySelector('.msg-clip');
+  // A focusable descendant below the eighth line -- a link in a rendered user
+  // message, say. Clipping is visual only, so it stays in the tab order and a
+  // keyboard reader can land on a control inside the hidden overflow.
+  const link = document.createElement('a');
+  link.href = 'https://example.com/buried';
+  link.id = 'buriedLink';
+  link.textContent = 'buried link';
+  clip.appendChild(link);
+  const btn = row.querySelector('.msg-expand-btn');
+  const before = {
+    aria: btn.getAttribute('aria-expanded'),
+    linkTop: link.getBoundingClientRect().top,
+    clipBottom: clip.getBoundingClientRect().bottom,
+  };
+  link.focus();
+  return {
+    before,
+    after: {
+      aria: btn.getAttribute('aria-expanded'),
+      focused: document.activeElement === link,
+      linkVisible: link.getBoundingClientRect().bottom
+        <= clip.getBoundingClientRect().bottom + 1,
+    },
+  };
+}
+"""
+
+
+def test_focusing_a_clipped_control_opens_the_message():
+    playwright, browser, page = _page(1440)
+    try:
+        r = page.evaluate(_FOCUS_JS)
+    finally:
+        browser.close()
+        playwright.stop()
+
+    # Precondition: the link really did start below the visible preview.
+    assert r["before"]["linkTop"] > r["before"]["clipBottom"] + 1, r
+    assert r["before"]["aria"] == "false", r
+    assert r["after"]["aria"] == "true", r
+    assert r["after"]["focused"] is True, r
+    assert r["after"]["linkVisible"] is True, r
+
+
+_LOCALE_JS = """
+() => {
+  const inner = document.getElementById('msgInner');
+  inner.innerHTML = '';
+  const row = window.__hweb3Row('x'.repeat(601), 7200);
+  inner.appendChild(row);
+  const btn = row.querySelector('.msg-expand-btn');
+  const before = btn.textContent.trim();
+  // Swap the active locale the way Settings -> Language does, then re-apply.
+  const original = window.t('show_full_message');
+  window.LOCALES.__hweb3test = Object.assign({}, window.LOCALES.en, {
+    _lang: 'en', show_full_message: 'HWEB3_TRANSLATED',
+  });
+  window.setLocale('__hweb3test');
+  window.applyLocaleToDOM();
+  const after = btn.textContent.trim();
+  window.setLocale('en');
+  window.applyLocaleToDOM();
+  return { before, after, restored: btn.textContent.trim(), original };
+}
+"""
+
+
+def test_locale_change_retranslates_an_already_rendered_control():
+    playwright, browser, page = _page(1440)
+    try:
+        r = page.evaluate(_LOCALE_JS)
+    finally:
+        browser.close()
+        playwright.stop()
+    assert r["before"] == r["original"], r
+    assert r["after"] == "HWEB3_TRANSLATED", r
+    assert r["restored"] == r["original"], r
