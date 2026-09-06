@@ -2407,7 +2407,15 @@ def _apply_provider_prefix(
     account when it is. Qualify them so the picked provider stays authoritative.
     """
     _active = (active_provider or "").lower()
-    if not _active or provider_id == _active:
+    if provider_id == _active:
+        return list(raw_models)
+    # With no active provider (a fresh install whose ``model.provider`` is unset,
+    # or a key just added from Settings) nothing normally needs qualifying —
+    # there is no other provider for a row to be confused with. That reasoning
+    # does not hold for a portal provider: its namespaces name vendors it merely
+    # proxies, so a bare row is not left unrouted, it is actively misattributed
+    # to OpenRouter by resolve_model_provider's cross-provider branch.
+    if not _active and provider_id not in _PORTAL_PROVIDERS:
         return list(raw_models)
     result = []
     for m in raw_models:

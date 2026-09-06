@@ -244,6 +244,38 @@ def test_namespaced_rows_route_to_their_own_provider(slug):
         assert resolved == raw_id, f"{raw_id} mangled to {resolved!r}"
 
 
+@pytest.mark.parametrize("slug", NAMESPACED_AGGREGATORS)
+def test_namespaced_rows_route_correctly_with_no_active_provider(slug):
+    """A fresh install with `model.provider` unset must not leak rows to OpenRouter.
+
+    `_apply_provider_prefix()` short-circuits when nothing is active, which is
+    right for an ordinary provider (no sibling to be confused with) but wrong for
+    a portal one: `resolve_model_provider()`'s cross-provider branch claims the
+    bare `vendor/model` for OpenRouter.
+    """
+    no_provider_cfg = {"model": {}}
+    rows = config._PROVIDER_MODELS[slug] or [
+        {"id": "accounts/fireworks/models/kimi-k3", "label": "x"},
+        {"id": "Qwen/Qwen2.5-0.5B-Instruct-GGUF", "label": "x"},
+    ]
+    for entry in rows:
+        raw_id = entry["id"]
+        picked = config._apply_provider_prefix([dict(entry)], slug, "")[0]["id"]
+        resolved, provider, _base = config.resolve_model_provider(
+            picked, config_data=no_provider_cfg
+        )
+        assert provider == slug, f"{raw_id} misrouted to {provider!r} with no active provider"
+        assert resolved == raw_id
+
+
+def test_no_active_provider_leaves_ordinary_providers_untouched():
+    """The short-circuit still applies to everything outside _PORTAL_PROVIDERS."""
+    for pid, mid in (("openrouter", "deepseek/deepseek-v4-pro"), ("anthropic", "claude-opus-4.7")):
+        assert pid not in config._PORTAL_PROVIDERS
+        rows = config._apply_provider_prefix([{"id": mid, "label": "x"}], pid, "")
+        assert rows[0]["id"] == mid
+
+
 def test_portal_prefixing_leaves_non_aggregators_alone():
     """Only ``_PORTAL_PROVIDERS`` gained the namespaced-id qualification."""
     rows = config._apply_provider_prefix(
