@@ -1352,31 +1352,40 @@ function _clearUserRowIntrinsicHeightCache(){
 // every ORDINARY rerender — stream settle, refreshSession, a handoff rebuild —
 // builds fresh nodes and cannot read the state off the old row. Own it here.
 //
-// Keyed by session_id AND the stable session-relative index, deliberately NOT
-// by index alone: this is reader intent, not a measurement, so its correctness
-// must not depend on some cache-invalidation hook firing at the right moment.
-// The neighbouring height cache is keyed by index alone and released whenever
-// the virtual-height cache is dropped — which happens on ordinary transcript
-// churn, not just session changes. Reusing that lifecycle here erased the
-// state on the exact settle rerender it exists to survive. Full-identity keys
-// mean a stale entry can never be read by another session even if nothing
-// clears it; the session-change release below is hygiene, not correctness.
+// Keyed by session_id AND the message's content identity, deliberately NOT by
+// position: this is reader intent, not a measurement, so its correctness must
+// not depend on a cache-invalidation hook firing at the right moment, nor on a
+// numeric index staying attached to the same message.
+//
+// A positional key fails twice over. The neighbouring height cache is keyed by
+// index alone and released whenever the virtual-height cache is dropped — which
+// happens on ordinary transcript churn, not just session changes — so borrowing
+// that lifecycle erased the state on the exact settle rerender it exists to
+// survive. And an index is not identity: Clear conversation, undo, or an
+// edit/truncate shrinks the transcript without changing session_id, so a later
+// message can inherit a freed index and render itself expanded.
+//
+// _messageViewportAnchorKeyForMessage() is the codebase's existing stable
+// message identity (role + timestamp + attachment count + the first 160
+// normalized characters, so it stays bounded) and is already stamped on every
+// user row as data-message-anchor-key. Reuse it rather than minting a parallel
+// one. The session-change release below is hygiene, not correctness.
 const _userMsgExpandedByKey=Object.create(null);
-function _userMessageExpandKey(sessionMsgIdx){
-  const n=Number(sessionMsgIdx);
-  if(!Number.isFinite(n)) return '';
+function _userMessageExpandKey(messageAnchorKey){
+  const anchor=String(messageAnchorKey||'');
+  if(!anchor) return '';
   const sid=String((typeof S!=='undefined'&&S.session&&S.session.session_id)||'');
-  return sid?sid+':'+n:'';
+  return sid?sid+':'+anchor:'';
 }
 function _clearUserMessageExpandState(){
   for(const k in _userMsgExpandedByKey) delete _userMsgExpandedByKey[k];
 }
-function _userMessageIsExpanded(sessionMsgIdx){
-  const k=_userMessageExpandKey(sessionMsgIdx);
+function _userMessageIsExpanded(messageAnchorKey){
+  const k=_userMessageExpandKey(messageAnchorKey);
   return !!k&&_userMsgExpandedByKey[k]===true;
 }
-function _setUserMessageExpanded(sessionMsgIdx, expanded){
-  const k=_userMessageExpandKey(sessionMsgIdx);
+function _setUserMessageExpanded(messageAnchorKey, expanded){
+  const k=_userMessageExpandKey(messageAnchorKey);
   if(!k) return;
   if(expanded) _userMsgExpandedByKey[k]=true;
   else delete _userMsgExpandedByKey[k];
@@ -9153,7 +9162,7 @@ function toggleMessageExpand(btn){
   const expanded=row.dataset.msgExpanded==='1';
   const key=expanded?'show_full_message':'show_less_message';
   if(expanded) delete row.dataset.msgExpanded; else row.dataset.msgExpanded='1';
-  _setUserMessageExpanded(row.dataset.sessionMsgIdx, !expanded);
+  _setUserMessageExpanded(row.dataset.messageAnchorKey, !expanded);
   btn.setAttribute('aria-expanded',expanded?'false':'true');
   btn.setAttribute('data-i18n',key);
   btn.textContent=t(key);
@@ -18319,9 +18328,10 @@ function renderMessages(options){
       // The typeof guards keep renderMessages runnable in the node test harnesses
       // that extract it without these helpers (they stub every collaborator by name).
       const sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
+      const messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
       const collapsible=typeof _userMessageNeedsCollapse==='function'&&_userMessageNeedsCollapse(newRawText);
       const wasExpanded=collapsible&&typeof _userMessageIsExpanded==='function'
-        &&_userMessageIsExpanded(sessionMsgIdx);
+        &&_userMessageIsExpanded(messageAnchorKey);
       const userBodyHtml=typeof _userMessageBodyHtml==='function'
         ? _userMessageBodyHtml(bodyHtml,newRawText,rawIdx,wasExpanded)
         : `<div class="msg-body">${bodyHtml}</div>`;
@@ -18331,7 +18341,7 @@ function renderMessages(options){
         row.id=_userMessageDomId(rawIdx);
         row.dataset.msgIdx=rawIdx;
         row.dataset.sessionMsgIdx=sessionMsgIdx;
-        row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
+        row.dataset.messageAnchorKey=messageAnchorKey;
         row.dataset.role='user';
         delete row.dataset.editing;
         if(row.dataset.rawText!==newRawText||row.innerHTML!==nextRowHtml){
@@ -18344,7 +18354,7 @@ function renderMessages(options){
         row.id=_userMessageDomId(rawIdx);
         row.dataset.msgIdx=rawIdx;
         row.dataset.sessionMsgIdx=sessionMsgIdx;
-        row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
+        row.dataset.messageAnchorKey=messageAnchorKey;
         row.dataset.role='user';
         row.dataset.rawText=newRawText;
         row.innerHTML=nextRowHtml;
@@ -18355,7 +18365,7 @@ function renderMessages(options){
       if(wasExpanded) row.dataset.msgExpanded='1';
       else{
         delete row.dataset.msgExpanded;
-        if(!collapsible&&typeof _setUserMessageExpanded==='function') _setUserMessageExpanded(sessionMsgIdx,false);
+        if(!collapsible&&typeof _setUserMessageExpanded==='function') _setUserMessageExpanded(messageAnchorKey,false);
       }
       // Reserve this user row's real off-screen height up front so a wipe-and-rebuild
       // does not collapse scrollHeight to the flat 96px estimate (the collapse that

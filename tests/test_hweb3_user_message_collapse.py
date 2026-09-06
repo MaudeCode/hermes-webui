@@ -40,6 +40,8 @@ _SETUP_JS = """
     row.dataset.role = 'user';
     row.dataset.msgIdx = String(rawIdx);
     row.dataset.sessionMsgIdx = String(rawIdx);
+    // Stable content identity, the way renderMessages stamps it.
+    row.dataset.messageAnchorKey = 'anchor-' + rawIdx;
     row.dataset.rawText = text;
     // Render through the shipped user-message renderer so line breaks, markdown
     // and escaping match production exactly.
@@ -120,7 +122,7 @@ _TOGGLE_JS = """
     aria: btn.getAttribute('aria-expanded'),
     label: btn.textContent.trim(),
     rowExpanded: row.dataset.msgExpanded || '',
-    stored: window._userMessageIsExpanded(9100),
+    stored: window._userMessageIsExpanded('anchor-9100'),
     i18nKey: btn.getAttribute('data-i18n'),
   };
   btn.click();
@@ -131,7 +133,7 @@ _TOGGLE_JS = """
     aria: btn.getAttribute('aria-expanded'),
     label: btn.textContent.trim(),
     rowExpanded: row.dataset.msgExpanded || '',
-    stored: window._userMessageIsExpanded(9100),
+    stored: window._userMessageIsExpanded('anchor-9100'),
     i18nKey: btn.getAttribute('data-i18n'),
   };
   return { before, expanded, collapsed };
@@ -293,8 +295,8 @@ _RERENDER_JS = """
   const rebuilt = document.createElement('div');
   rebuilt.className = 'msg-row';
   rebuilt.dataset.role = 'user';
-  rebuilt.dataset.sessionMsgIdx = '7001';
-  const expanded = window._userMessageIsExpanded(7001);
+  rebuilt.dataset.messageAnchorKey = 'anchor-7001';
+  const expanded = window._userMessageIsExpanded('anchor-7001');
   rebuilt.innerHTML = window._userMessageBodyHtml(
     window._getCachedRender(text, true), text, 7001, expanded);
   if (expanded) rebuilt.dataset.msgExpanded = '1';
@@ -312,21 +314,28 @@ _RERENDER_JS = """
   // cache (which ordinary transcript churn does on a stream settle, not only a
   // session switch) must NOT take reader intent with it.
   window._clearMessageVirtualHeightCache();
-  const afterHeightCacheDrop = window._userMessageIsExpanded(7001);
+  const afterHeightCacheDrop = window._userMessageIsExpanded('anchor-7001');
   window.clearMessageRenderCache();
-  const afterRenderCacheDrop = window._userMessageIsExpanded(7001);
+  const afterRenderCacheDrop = window._userMessageIsExpanded('anchor-7001');
+
+  // Index reuse: Clear conversation / undo / edit-truncate shrinks the
+  // transcript without changing session_id, so a LATER message can land on the
+  // freed session index. Identity is the message, not its position, so a
+  // different message must never inherit the expanded state.
+  const reusedIndexDifferentMessage = window._userMessageIsExpanded('anchor-9999');
 
   // Another session must never read this session's entry, even unreleased.
   const ownSession = S.session.session_id;
   S.session = Object.assign({}, S.session, {session_id: 'other-session'});
-  const otherSession = window._userMessageIsExpanded(7001);
+  const otherSession = window._userMessageIsExpanded('anchor-7001');
   S.session = Object.assign({}, S.session, {session_id: ownSession});
 
   // A session switch still releases it.
   window._clearUserMessageExpandState();
   return {
     afterToggle, rebuiltState, afterHeightCacheDrop, afterRenderCacheDrop,
-    otherSession, afterClear: window._userMessageIsExpanded(7001),
+    reusedIndexDifferentMessage, otherSession,
+    afterClear: window._userMessageIsExpanded('anchor-7001'),
   };
 }
 """
@@ -351,6 +360,9 @@ def test_expansion_survives_a_rebuild_and_is_released_on_session_switch():
     # ordinary transcript churn does on a stream settle, must not erase it.
     assert r["afterHeightCacheDrop"] is True, r
     assert r["afterRenderCacheDrop"] is True, r
+    # Identity is the message, not its position: a different message that lands
+    # on a freed session index must not inherit the expanded state.
+    assert r["reusedIndexDifferentMessage"] is False, r
     # Full-identity keys: another session cannot read this session's entry.
     assert r["otherSession"] is False, r
     # And a session switch still releases it.
