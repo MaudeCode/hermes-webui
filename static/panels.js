@@ -2062,7 +2062,11 @@ async function saveCronForm(){
   const name=(nameEl?nameEl.value:'').trim();
   const schedule=schEl.value.trim();
   const prompt=promptEl ? promptEl.value.trim() : '';
-  const deliver=delivEl?delivEl.value:'local';
+  // The delivery select is filled by an async fetch. Until it lands its value
+  // is the disabled placeholder, so read the preserved value instead — the
+  // same fallback _cronFormValues uses, so the save and the re-render agree.
+  const delivLoaded=!!(delivEl && !delivEl.querySelector('option[value=""][disabled]'));
+  const deliver=(delivLoaded ? delivEl.value : ((_cronFormRendered||{}).deliver))||'local';
   const profile=profileEl?profileEl.value:'';
   const toastNotifications=toastEl?!!toastEl.checked:true;
   const scriptEl=$('cronFormScript');

@@ -19,6 +19,21 @@ REPO = Path(__file__).resolve().parents[1]
 PANELS_JS = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
 I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
 
+def _function_body(name: str) -> str:
+    """Return the body of a top-level function in panels.js."""
+    start = PANELS_JS.index(f"function {name}(")
+    brace = PANELS_JS.index("{", PANELS_JS.index(")", start))
+    depth = 0
+    for idx in range(brace, len(PANELS_JS)):
+        if PANELS_JS[idx] == "{":
+            depth += 1
+        elif PANELS_JS[idx] == "}":
+            depth -= 1
+            if depth == 0:
+                return PANELS_JS[brace + 1 : idx]
+    raise AssertionError(f"{name} body did not terminate")
+
+
 NEW_FIELDS = ("script", "no_agent", "monitor", "continuity", "context_from", "reasoning_effort")
 
 
@@ -384,6 +399,15 @@ def test_mode_toggle_preserves_selects_that_have_not_loaded_yet():
     assert "const delivLoaded = !!(delivEl && !delivEl.querySelector('option[value=\"\"][disabled]'));" in PANELS_JS
     assert "deliver: (delivLoaded ? delivEl.value : last.deliver) || 'local'," in PANELS_JS
     assert "model: modelLoaded ? modelEl.value : (last.model || '')," in PANELS_JS
+
+
+def test_save_uses_the_preserved_delivery_target_while_the_select_loads():
+    # _cronFormValues alone was not enough: saveCronForm read the select
+    # directly, so a duplicate saved during the load window sent deliver: ''
+    # and the server defaulted it to local (Codex round 6).
+    body = _function_body("saveCronForm")
+    assert "const delivLoaded=!!(delivEl && !delivEl.querySelector('option[value=\"\"][disabled]'));" in body
+    assert "const deliver=(delivLoaded ? delivEl.value : ((_cronFormRendered||{}).deliver))||'local';" in body
 
 
 def test_advanced_section_opens_for_a_configured_script():
