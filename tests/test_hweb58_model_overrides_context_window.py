@@ -10,7 +10,12 @@ a default to catalog-known models.
 The ring denominator is ``session.context_length``, produced by
 ``routes._resolve_context_length_for_session_model`` and rendered by
 ``static/ui.js``'s ``_syncCtxIndicator`` as ``ctxWindow = usage.context_length``.
-The last test drives both halves so the whole chain is covered.
+
+The precedence tests need a real hermes-agent, which CI does not provision, so
+they skip there like the rest of this repo's agent-dependent suite. The two
+links that live in *this* repo — the resolver's provider handoff and the ring's
+use of the denominator it is handed — are covered separately below with no
+agent required, so a regression in either still turns CI red.
 """
 
 import json
@@ -20,6 +25,9 @@ import types
 import pytest
 import yaml
 
+from tests.test_issue3717_context_length_provider_overrides import (
+    _install_fake_context_resolver,
+)
 from tests.test_issue4685_post_compression_context_metering import (
     _run_context_indicator,
 )
@@ -160,3 +168,44 @@ def test_override_moves_the_rendered_ring(monkeypatch, tmp_path):
     assert catalog_ring["tokens"].endswith("20000 / 100000 tokens used")
     assert override_ring["percent"] == "80"
     assert override_ring["tokens"].endswith("20000 / 25000 tokens used")
+
+
+# ── Agent-free halves: these run everywhere, including CI ──────────────────
+
+
+def _render_ring(prompt_tokens, context_length):
+    return _run_context_indicator(
+        {"last_prompt_tokens": prompt_tokens, "context_length": context_length}
+    )
+
+
+def test_ring_divides_by_the_denominator_it_is_handed():
+    """The resolved window drives the rendered percentage, whatever its source."""
+    assert _render_ring(20_000, 100_000)["percent"] == "20"
+    assert _render_ring(20_000, 25_000)["percent"] == "80"
+    assert _render_ring(20_000, 25_000)["tokens"].endswith("20000 / 25000 tokens used")
+
+
+def test_resolver_hands_provider_and_model_to_the_override_aware_lookup(monkeypatch):
+    """``_override_context_window`` needs both, or every override is ignored.
+
+    Step 0b of ``get_model_context_length`` is gated on ``if provider and
+    model``. Dropping either from this call silently reverts the whole feature,
+    so pin the handoff where the agent itself is unavailable.
+    """
+    import api.config as api_config
+    import api.routes as routes
+
+    calls = _install_fake_context_resolver(monkeypatch)
+    monkeypatch.setattr(api_config, "get_config", lambda *a, **k: {})
+
+    resolved = routes._resolve_context_length_for_session_model(
+        CATALOG_MODEL, "anthropic"
+    )
+
+    assert calls[-1]["provider"] == "anthropic"
+    assert calls[-1]["model"] == CATALOG_MODEL
+    # No WebUI-layer context setting is configured, so nothing may preempt the
+    # override at resolution step 0: the agent's answer is returned verbatim.
+    assert calls[-1]["config_context_length"] is None
+    assert resolved == 256_000
