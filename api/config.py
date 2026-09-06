@@ -5379,12 +5379,25 @@ def published_catalog_models(provider_id: str | None) -> list[dict] | None:
     provenance = _models_cache_provenance
     if provenance is None:
         return None
-    snapshot, _fingerprint = provenance
+    snapshot, published_fp = provenance
     if not isinstance(snapshot, dict):
         return None
     pid = str(provider_id or "").strip().lower()
     if not pid:
         return None
+    # Profile-isolation fail-safe, identical to the one in
+    # ``_endpoint_advertised_model_ids``: this cache is a process global, so a
+    # concurrently-active profile may have published the snapshot we are about
+    # to read. The fingerprint's ``config_yaml`` axis is the profile-specific
+    # config path, so a match proves the snapshot belongs to the profile asking.
+    # Any mismatch returns None and the caller falls back to its own source —
+    # rendering one profile's account-specific models on another's Settings
+    # cards would be worse than showing the curated list.
+    try:
+        if published_fp != _models_cache_source_fingerprint():
+            return None
+    except Exception:
+        return None  # fingerprint unavailable → no trustworthy provenance
     for group in snapshot.get("groups") or []:
         if not isinstance(group, dict):
             continue

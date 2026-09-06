@@ -558,3 +558,75 @@ def test_published_catalog_models_never_probes(monkeypatch):
     monkeypatch.setattr(config, "_read_live_provider_model_ids", _boom)
     monkeypatch.setattr(config, "get_available_models", _boom)
     config.published_catalog_models("commandcode")
+
+
+def test_published_catalog_rejects_a_foreign_profile_snapshot(monkeypatch):
+    """Profiles are islands — the catalog cache is not.
+
+    `_available_models_cache` is a process global, so a concurrently-active
+    profile can have published the snapshot. Serving it would put one profile's
+    account-specific model names on another's Settings cards.
+    """
+    snapshot = {"groups": [{"provider_id": "commandcode", "models": [{"id": "leaked", "label": "Leaked"}]}]}
+    monkeypatch.setattr(config, "_models_cache_provenance", (snapshot, {"config_yaml": "/profile-a/config.yaml"}))
+    monkeypatch.setattr(config, "_models_cache_source_fingerprint", lambda: {"config_yaml": "/profile-b/config.yaml"})
+    assert config.published_catalog_models("commandcode") is None
+
+    monkeypatch.setattr(config, "_models_cache_source_fingerprint", lambda: {"config_yaml": "/profile-a/config.yaml"})
+    assert [m["id"] for m in config.published_catalog_models("commandcode")] == ["leaked"]
+
+
+def test_published_catalog_rejects_an_unavailable_fingerprint(monkeypatch):
+    """No trustworthy provenance must fail closed, not fall through."""
+    snapshot = {"groups": [{"provider_id": "commandcode", "models": [{"id": "x", "label": "X"}]}]}
+    monkeypatch.setattr(config, "_models_cache_provenance", (snapshot, {"config_yaml": "/a"}))
+
+    def _boom():
+        raise RuntimeError("fingerprint unavailable")
+
+    monkeypatch.setattr(config, "_models_cache_source_fingerprint", _boom)
+    assert config.published_catalog_models("commandcode") is None
+
+
+def test_aliased_providers_block_does_not_render_a_second_card(monkeypatch, tmp_path):
+    """`providers.ramp` configures the `router` card — it is not its own card."""
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(providers, "_PROVIDER_DISPLAY", {"router": "Ramp Router"})
+    monkeypatch.setattr(providers, "_PROVIDER_MODELS", {"router": []})
+    monkeypatch.setattr(providers, "_OAUTH_PROVIDERS", frozenset())
+    monkeypatch.setattr(providers, "plugin_model_provider_ids", lambda: set())
+    monkeypatch.setattr(providers, "is_plugin_model_provider", lambda _pid: False)
+    monkeypatch.setattr(providers, "published_catalog_models", lambda _pid: None)
+    monkeypatch.setattr(providers, "_read_live_provider_model_ids", lambda _pid: [])
+    monkeypatch.setattr(
+        providers, "get_config", lambda: {"model": {}, "providers": {"ramp": {"api_key": "sk-test"}}}
+    )
+
+    ids = [p["id"] for p in providers.get_providers()["providers"]]
+
+    assert "ramp" not in ids, f"aliased block rendered its own card: {ids}"
+    assert ids.count("router") == 1
+
+
+def test_unknown_providers_block_still_gets_its_own_card(monkeypatch, tmp_path):
+    """Folding aliases must not swallow user-defined providers."""
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(providers, "_PROVIDER_DISPLAY", {"router": "Ramp Router"})
+    monkeypatch.setattr(providers, "_PROVIDER_MODELS", {"router": []})
+    monkeypatch.setattr(providers, "_OAUTH_PROVIDERS", frozenset())
+    monkeypatch.setattr(providers, "plugin_model_provider_ids", lambda: set())
+    monkeypatch.setattr(providers, "is_plugin_model_provider", lambda _pid: False)
+    monkeypatch.setattr(providers, "published_catalog_models", lambda _pid: None)
+    monkeypatch.setattr(providers, "_read_live_provider_model_ids", lambda _pid: [])
+    monkeypatch.setattr(
+        providers,
+        "get_config",
+        lambda: {"model": {}, "providers": {"my-own-relay": {"api_key": "sk", "base_url": "http://x/v1"}}},
+    )
+
+    ids = [p["id"] for p in providers.get_providers()["providers"]]
+    assert "my-own-relay" in ids

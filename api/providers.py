@@ -3453,7 +3453,15 @@ def get_providers() -> dict[str, Any]:
     providers = []
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
-        known_ids.update(providers_cfg.keys())
+        # Fold an aliased block onto the card it configures. `providers.ramp`
+        # names the `router` card, and since credential lookups resolve aliases
+        # the raw key would otherwise render a SECOND card for the same
+        # provider — one configurable, one not. A key that resolves to no known
+        # card is a user-defined provider and keeps its own card, so this only
+        # collapses genuine aliases.
+        for _cfg_key in providers_cfg:
+            _identity = _provider_identity(_cfg_key)
+            known_ids.add(_identity if _identity in known_ids else _cfg_key)
 
     # Add OAuth providers even if not in _PROVIDER_DISPLAY
     known_ids.update(_OAUTH_PROVIDERS)
