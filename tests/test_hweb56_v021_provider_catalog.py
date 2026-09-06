@@ -852,3 +852,111 @@ def test_published_catalog_still_wins_over_the_plugin_fallback(monkeypatch, tmp_
 
     entry = next(p for p in providers.get_providers()["providers"] if p["id"] == "yandex")
     assert [m["id"] for m in entry["models"]] == ["live/real"]
+
+
+def test_providers_cache_key_tracks_the_catalog_generation(monkeypatch, tmp_path):
+    """A new catalog must retire the cards cached from the old one.
+
+    The warm can overrun its rebuild budget and return the static fallback while
+    `models-catalog-rebuild` publishes later. Without the generation in the key,
+    Settings pins that fallback for the full 30s TTL.
+    """
+    monkeypatch.setattr(providers, "_get_hermes_home", lambda: tmp_path)
+    cfg = {"model": {}, "providers": {}}
+
+    monkeypatch.setattr(config, "_available_models_cache", {"groups": []})
+    config._sync_models_cache_provenance()
+    first = providers._providers_cache_key(cfg)
+
+    config._sync_models_cache_provenance()  # a later publish
+    second = providers._providers_cache_key(cfg)
+
+    assert first != second, "cache key ignored the new catalog generation"
+
+
+def test_catalog_generation_is_a_counter_not_an_object_id(monkeypatch):
+    """Reusing a freed id() would collide silently; the generation must not."""
+    monkeypatch.setattr(config, "_available_models_cache", {"groups": []})
+    config._sync_models_cache_provenance()
+    a = config.published_catalog_generation()
+    config._sync_models_cache_provenance()
+    b = config.published_catalog_generation()
+
+    assert isinstance(a, int) and isinstance(b, int)
+    assert b > a
+
+    monkeypatch.setattr(config, "_models_cache_provenance", None)
+    assert config.published_catalog_generation() is None
+
+
+def test_configured_models_are_not_double_counted(monkeypatch, tmp_path):
+    """`providers.<id>.models` is already in the published catalog it built."""
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(providers, "_PROVIDER_DISPLAY", {"router": "Ramp Router"})
+    monkeypatch.setattr(providers, "_PROVIDER_MODELS", {"router": []})
+    monkeypatch.setattr(providers, "_OAUTH_PROVIDERS", frozenset())
+    monkeypatch.setattr(providers, "plugin_model_provider_ids", lambda: set())
+    monkeypatch.setattr(providers, "is_plugin_model_provider", lambda _pid: False)
+    monkeypatch.setattr(providers, "_provider_has_key", lambda _pid, **_kw: True)
+    monkeypatch.setattr(providers, "published_catalog_is_available", lambda: True)
+    monkeypatch.setattr(
+        providers, "published_catalog_models", lambda _pid: [{"id": "acct/only", "label": "Only"}]
+    )
+    monkeypatch.setattr(
+        providers,
+        "get_config",
+        lambda: {"model": {}, "providers": {"router": {"models": ["acct/only"]}}},
+    )
+
+    entry = next(p for p in providers.get_providers()["providers"] if p["id"] == "router")
+
+    assert [m["id"] for m in entry["models"]] == ["acct/only"]
+    assert entry["models_total"] == 1, "configured allowlist was counted twice"
+
+
+def test_configured_models_absent_from_the_catalog_are_still_added(monkeypatch, tmp_path):
+    """Deduplication must not drop a configured model the catalog lacks."""
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(providers, "_PROVIDER_DISPLAY", {"router": "Ramp Router"})
+    monkeypatch.setattr(providers, "_PROVIDER_MODELS", {"router": []})
+    monkeypatch.setattr(providers, "_OAUTH_PROVIDERS", frozenset())
+    monkeypatch.setattr(providers, "plugin_model_provider_ids", lambda: set())
+    monkeypatch.setattr(providers, "is_plugin_model_provider", lambda _pid: False)
+    monkeypatch.setattr(providers, "_provider_has_key", lambda _pid, **_kw: True)
+    monkeypatch.setattr(providers, "published_catalog_is_available", lambda: True)
+    monkeypatch.setattr(
+        providers, "published_catalog_models", lambda _pid: [{"id": "acct/a", "label": "A"}]
+    )
+    monkeypatch.setattr(
+        providers,
+        "get_config",
+        lambda: {"model": {}, "providers": {"router": {"models": ["acct/a", "acct/b"]}}},
+    )
+
+    entry = next(p for p in providers.get_providers()["providers"] if p["id"] == "router")
+    assert {m["id"] for m in entry["models"]} == {"acct/a", "acct/b"}
+
+
+def test_test_server_scrubs_every_recognised_provider_key():
+    """The isolated test server must not inherit any key the WebUI acts on.
+
+    `tests/conftest.py` kept a hand-written list; anything the WebUI recognises
+    but the list omits lets a real exported credential enable a provider inside
+    the fixture and makes results depend on the host.
+    """
+    import re
+
+    source = (config.REPO_ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
+    assert "_PROVIDER_ENV_VAR" in source, "scrub list is no longer derived from the mapping"
+
+    literal = set(re.findall(r"'([A-Z][A-Z0-9_]*)'", source.split("_CRED_ENV_PREFIXES = (")[1].split(")")[0]))
+    derived = {v for v in providers._PROVIDER_ENV_VAR.values() if v}
+    for aliases in providers._PROVIDER_ENV_VAR_ALIASES.values():
+        derived.update(a for a in (aliases or ()) if a)
+
+    for env_var in {v for _s, (_d, v) in NEW_PROVIDERS.items()}:
+        assert env_var in (literal | derived), f"{env_var} would leak into the test server"

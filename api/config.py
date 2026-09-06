@@ -5342,6 +5342,7 @@ _advertised_model_ids_memo: tuple | None = None
 # provenance check introduces no lock-ordering edge (avoids the _cfg_lock ↔
 # _available_models_cache_lock deadlock) and never waits behind a catalog rebuild.
 _models_cache_provenance: tuple | None = None
+_models_cache_generation: int = 0
 
 
 def _sync_models_cache_provenance() -> None:
@@ -5355,11 +5356,27 @@ def _sync_models_cache_provenance() -> None:
     and this call sees the PREVIOUS consistent tuple (never a torn pair); once
     this runs, readers see the new consistent pair.
     """
-    global _models_cache_provenance
+    global _models_cache_provenance, _models_cache_generation
     snap = _available_models_cache
     _models_cache_provenance = (
         (snap, _available_models_cache_source_fingerprint) if snap is not None else None
     )
+    # Bumped on every publish AND invalidate so anything caching a catalog-derived
+    # view (the Settings provider cards) retires its entry the moment this moves.
+    _models_cache_generation += 1
+
+
+def published_catalog_generation() -> object | None:
+    """Opaque identity of the currently published catalog, or None when cold.
+
+    Callers that cache anything derived from the catalog key on this so their
+    entry retires the moment a new snapshot publishes — including the
+    out-of-band publication a rebuild that overran its budget performs later.
+    """
+    # A counter, not ``id(snapshot)``: this module already documents (on
+    # ``_advertised_model_ids_memo``) that a freed-then-reused id() can produce
+    # a false hit, and a cache key that silently collides is worse than no key.
+    return _models_cache_generation if _models_cache_provenance is not None else None
 
 
 def published_catalog_is_available() -> bool:

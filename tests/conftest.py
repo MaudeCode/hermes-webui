@@ -998,8 +998,27 @@ def test_server():
         # Github tokens (PR/issue tools shouldn't be exercised in tests)
         'GH_TOKEN', 'GITHUB_TOKEN',
     )
+    # Derive the rest from the canonical provider→env-var mapping instead of
+    # hand-maintaining it here. Every name the WebUI recognises for provider
+    # detection must be scrubbed, or a developer or runner that exports a real
+    # key silently enables that provider inside the "isolated" test server and
+    # results start depending on the host. The literal list above stays for the
+    # names that mapping does not cover (AWS, messaging, telemetry, tooling).
+    _derived_cred_prefixes: set[str] = set()
+    try:
+        from api.providers import _PROVIDER_ENV_VAR, _PROVIDER_ENV_VAR_ALIASES
+
+        _derived_cred_prefixes.update(v for v in _PROVIDER_ENV_VAR.values() if v)
+        for _aliases in _PROVIDER_ENV_VAR_ALIASES.values():
+            _derived_cred_prefixes.update(a for a in (_aliases or ()) if a)
+    except Exception:
+        # Import failure must not weaken isolation silently, but the literal
+        # list above still covers the long-standing providers.
+        pass
+
+    _all_cred_prefixes = tuple(_CRED_ENV_PREFIXES) + tuple(sorted(_derived_cred_prefixes))
     for _k in list(env):
-        if any(_k.startswith(p) for p in _CRED_ENV_PREFIXES):
+        if any(_k.startswith(p) for p in _all_cred_prefixes):
             del env[_k]
     # Model-selection overrides must not reach the test server either. They are
     # already popped from the pytest process env at module level, but strip them

@@ -1077,11 +1077,23 @@ def _providers_cache_key(cfg: Any) -> tuple[Any, ...]:
         home_key = str(home.resolve())
     except OSError:
         home_key = str(home)
+    # Cards render the picker's published catalog, so that catalog is an input.
+    # Without it, a warm whose rebuild overran `_LIVE_REBUILD_BUDGET_SECONDS`
+    # returns the static fallback, this cache pins that answer for its full TTL,
+    # and Settings keeps showing it for up to 30s after the live catalog lands.
+    # Keying on provenance retires the stale entry the moment it publishes.
+    try:
+        from api.config import published_catalog_generation
+
+        catalog_generation = published_catalog_generation()
+    except Exception:
+        catalog_generation = None
     return (
         home_key,
         _providers_file_mtime_ns(home / ".env"),
         _providers_file_mtime_ns(home / "config.yaml"),
         _providers_config_fingerprint(cfg),
+        catalog_generation,
     )
 
 
@@ -3481,6 +3493,18 @@ def get_providers() -> dict[str, Any]:
 
     # Also detect providers from config.yaml providers section
     cfg = get_config()
+    # Cards render the picker's published catalog. If nothing is published for
+    # this profile yet (startup, or just after profile invalidation), warm it
+    # once rather than letting every card fall back to its committed snapshot
+    # and then 30s-cache that stale answer.
+    #
+    # This MUST happen before the cache key is computed: the key includes the
+    # catalog generation, and warming publishes a new one. Keyed first, every
+    # call would invalidate the entry the previous call just stored and the TTL
+    # cache would never hit.
+    if not published_catalog_is_available():
+        _warm_published_catalog()
+
     cache_key = _providers_cache_key(cfg)
     cached = _get_cached_providers(cache_key)
     if cached is not None:
@@ -3501,13 +3525,6 @@ def get_providers() -> dict[str, Any]:
 
     # Add OAuth providers even if not in _PROVIDER_DISPLAY
     known_ids.update(_OAUTH_PROVIDERS)
-
-    # Cards render the picker's published catalog. If nothing is published for
-    # this profile yet (startup, or just after profile invalidation), warm it
-    # once here rather than letting every card fall back to its committed
-    # snapshot and then 30s-cache that stale answer.
-    if not published_catalog_is_available():
-        _warm_published_catalog()
 
     for pid in sorted(known_ids):
         display_name = effective_provider_display_name(pid, _PROVIDER_DISPLAY)
@@ -3732,10 +3749,21 @@ def get_providers() -> dict[str, Any]:
             provider_cfg = _config_provider_cfg_for(providers_cfg, pid)
             if isinstance(provider_cfg, dict) and "models" in provider_cfg:
                 cfg_models = provider_cfg["models"]
-                if isinstance(cfg_models, dict):
-                    models = models + [{"id": k, "label": k} for k in cfg_models.keys()]
-                elif isinstance(cfg_models, list):
-                    models = models + [{"id": k, "label": k} for k in cfg_models]
+                # The picker builds a published group FROM this same allowlist,
+                # so appending it again double-counts: a one-model allowlist
+                # rendered two identical tags and reported "2 models" while the
+                # picker showed one. Merge only what is not already present.
+                _seen_ids = {
+                    str(m.get("id")) for m in models if isinstance(m, dict) and m.get("id")
+                }
+                _cfg_ids = (
+                    list(cfg_models.keys())
+                    if isinstance(cfg_models, dict)
+                    else list(cfg_models) if isinstance(cfg_models, list) else []
+                )
+                models = models + [
+                    {"id": k, "label": k} for k in _cfg_ids if str(k) not in _seen_ids
+                ]
                 # Recompute models_total when config.yaml contributes additional
                 # entries on top of the live/static catalog. For non-Nous
                 # providers models_total still equals len(models); for Nous
