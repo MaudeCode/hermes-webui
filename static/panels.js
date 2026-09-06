@@ -1743,6 +1743,9 @@ function _cronFormValues({ isEdit }){
 // whatever the user has typed so far rather than trying to patch the DOM.
 function _onCronFormNoAgentToggle(){
   _renderCronForm(_cronFormValues({ isEdit: !!_editingCronId }));
+  // The re-render replaced #cronFormSkillSearch, so its listener went with the
+  // old element; agent mode needs the picker bound to the new one.
+  if ($('cronFormSkillSearch')) _bindCronSkillPicker();
 }
 
 let _cronFormRendered = null; // last args _renderCronForm was called with

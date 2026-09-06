@@ -392,7 +392,19 @@ def test_advanced_section_opens_for_a_configured_script():
     assert "const isOpen = !!(isNoAgent || script || monitor || continuity" in PANELS_JS
 
 
+def test_mode_toggle_rebinds_the_skill_picker():
+    # The re-render replaces #cronFormSkillSearch, so the listener bound to the
+    # old element goes with it and the picker is silently dead (Codex round 5).
+    assert "if ($('cronFormSkillSearch')) _bindCronSkillPicker();" in PANELS_JS
+
+
 def test_reasoning_effort_options_match_the_canonical_levels():
+    # The cron path validates through the AGENT's
+    # hermes_constants.VALID_REASONING_EFFORTS (imported by cron/jobs.py's
+    # _normalize_reasoning_effort), whose grammar is
+    # none|minimal|low|medium|high|xhigh|max|ultra. That is deliberately wider
+    # than the WebUI's own api/config.py mirror, which is the chat surface's
+    # copy and does not gate cron.
     assert (
         "const CRON_REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', "
         "'high', 'xhigh', 'max', 'ultra'];" in PANELS_JS
