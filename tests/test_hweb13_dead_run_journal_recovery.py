@@ -542,3 +542,66 @@ def test_oversized_terminal_row_still_recovers(monkeypatch):
     assert _recover_dead_run_journal(session, stream_id) is True
     assert session.messages[-1]["content"] == "Provider rejected the request."
     assert session.messages[-1]["_error"] is True
+
+
+def test_one_recovery_uses_a_single_journal_snapshot(monkeypatch):
+    """Replay and terminal classification must see the same journal.
+
+    Reading separately is a TOCTOU: a journal advancing mid-call lets replay see
+    a prefix while classification sees a later `done`, which suppresses the
+    interruption marker and then clears the stream id — presenting a turn as
+    successful while its tail is silently missing.
+    """
+    session_id = "hweb13_snapshot"
+    stream_id = "hweb13_stream_snapshot"
+    session = _dead_session(session_id, stream_id)
+    append_run_event(session_id, stream_id, "interim_assistant", {"text": "Only the prefix."})
+
+    real_read = models._read_run_journal_for_recovery
+    reads = {"n": 0}
+
+    def _advancing_read(sid, rid):
+        # Simulate the journal becoming visible mid-call: every read after the
+        # first also sees a terminal `done` the replay never got.
+        reads["n"] += 1
+        if reads["n"] > 1:
+            append_run_event(sid, rid, "done", {})
+        return real_read(sid, rid)
+
+    monkeypatch.setattr(models, "_read_run_journal_for_recovery", _advancing_read)
+
+    assert _recover_dead_run_journal(session, stream_id) is True
+    assert reads["n"] == 1, f"recovery took {reads['n']} journal snapshots, expected 1"
+    assert _visible(session) == ["Only the prefix."]
+    # Classification saw the same prefix replay did, so the turn is still marked
+    # interrupted rather than silently presented as complete.
+    assert [m for m in session.messages if m.get("type") == "interrupted"]
+
+
+def test_recovery_marker_does_not_bubble_an_old_session(monkeypatch):
+    """A recovery marker is dated by its run, not by when it was read.
+
+    `Session.compact()` derives `last_message_at` from the newest message
+    timestamp and the sidebar sorts on it, so a `time.time()` marker would move
+    an old conversation to the top merely by loading it — defeating the caller's
+    deliberate `save(touch_updated_at=False)`.
+    """
+    session_id = "hweb13_recency"
+    stream_id = "hweb13_stream_recency"
+    long_ago = time.time() - (30 * 24 * 3600)
+    session = _dead_session(
+        session_id,
+        stream_id,
+        messages=[{"role": "user", "content": "An old question", "timestamp": int(long_ago)}],
+    )
+    append_run_event(
+        session_id, stream_id, "interim_assistant",
+        {"text": "An old, interrupted answer."}, created_at=long_ago,
+    )
+    append_run_event(session_id, stream_id, "cancel", {}, created_at=long_ago + 1)
+
+    assert _recover_dead_run_journal(session, stream_id) is True
+
+    marker = next(m for m in session.messages if m.get("type") == "interrupted")
+    assert marker["timestamp"] <= int(long_ago) + 5, "marker dated by read time, not run time"
+    assert session.compact()["last_message_at"] <= int(long_ago) + 5

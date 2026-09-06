@@ -2679,11 +2679,14 @@ def _existing_recovered_tool_card(
     return None
 
 
-def _run_journal_has_visible_output(session, stream_id: str | None) -> bool:
+def _run_journal_has_visible_output(
+    session, stream_id: str | None, *, journal: dict | None = None,
+) -> bool:
     if not stream_id:
         return False
     try:
-        journal = _read_run_journal_for_recovery(session.session_id, stream_id)
+        if journal is None:
+            journal = _read_run_journal_for_recovery(session.session_id, stream_id)
     except Exception:
         return False
     for event in journal.get('events') or []:
@@ -2726,13 +2729,16 @@ def _run_journal_event_owns_run(
     )
 
 
-def _run_journal_terminal_state(session, stream_id: str | None) -> str | None:
+def _run_journal_terminal_state(
+    session, stream_id: str | None, *, journal: dict | None = None,
+) -> str | None:
     if not stream_id:
         return None
     try:
         from api.run_journal import select_authoritative_terminal_event
 
-        journal = _read_run_journal_for_recovery(session.session_id, stream_id)
+        if journal is None:
+            journal = _read_run_journal_for_recovery(session.session_id, stream_id)
         terminal = select_authoritative_terminal_event(journal.get('events') or [])
     except Exception:
         return None
@@ -2749,6 +2755,8 @@ def _run_journal_terminal_state(session, stream_id: str | None) -> str | None:
 def _recoverable_unsaved_gateway_terminal_error(
     session,
     stream_id: str | None,
+    *,
+    journal: dict | None = None,
 ) -> dict | None:
     """Return one validated current-turn terminal error from the run journal."""
     if not stream_id:
@@ -2756,7 +2764,8 @@ def _recoverable_unsaved_gateway_terminal_error(
     try:
         from api.run_journal import select_authoritative_terminal_event
 
-        journal = _read_run_journal_for_recovery(session.session_id, stream_id)
+        if journal is None:
+            journal = _read_run_journal_for_recovery(session.session_id, stream_id)
     except Exception:
         logger.debug(
             "Session %s: failed to read terminal error journal for stream %s",
@@ -2856,10 +2865,12 @@ def _materialize_unsaved_gateway_terminal_error(
     session,
     stream_id: str | None,
     recovery: dict | None = None,
+    *,
+    journal: dict | None = None,
 ) -> bool:
     """Place the validated current-turn gateway error at the transcript tail."""
     recovery = recovery or _recoverable_unsaved_gateway_terminal_error(
-        session, stream_id,
+        session, stream_id, journal=journal,
     )
     if not isinstance(recovery, dict):
         return False
@@ -2907,17 +2918,20 @@ def _recover_journaled_output_and_terminal_error(
     *,
     dedupe_existing: bool = False,
     terminal_recovery: dict | None = None,
+    journal: dict | None = None,
 ) -> tuple[bool, bool]:
     """Recover readable activity first, then append its authoritative terminal error."""
     recovered_output = _append_journaled_partial_output(
         session,
         stream_id,
         dedupe_existing=dedupe_existing,
+        journal=journal,
     )
     terminal_error_recovered = _materialize_unsaved_gateway_terminal_error(
         session,
         stream_id,
         terminal_recovery,
+        journal=journal,
     )
     return recovered_output, terminal_error_recovered
 
@@ -2960,6 +2974,7 @@ def _append_journaled_partial_output(
     stream_id: str | None,
     *,
     dedupe_existing: bool = False,
+    journal: dict | None = None,
 ) -> bool:
     """Recover already-emitted visible output from a dead stream journal.
 
@@ -2973,7 +2988,8 @@ def _append_journaled_partial_output(
         return False
 
     try:
-        journal = _read_run_journal_for_recovery(session.session_id, stream_id)
+        if journal is None:
+            journal = _read_run_journal_for_recovery(session.session_id, stream_id)
     except Exception:
         logger.debug(
             "Session %s: failed to read run journal for stream %s",
@@ -3561,6 +3577,32 @@ def _retry_journal_recovery_in_place(
         return False
 
 
+def _stamp_marker_with_run_time(marker: dict, journal: dict | None) -> None:
+    """Date a recovery marker by the run it describes, not by when it was read."""
+    run_time = _journal_last_event_time(journal)
+    if run_time is not None:
+        marker['timestamp'] = run_time
+
+
+def _journal_last_event_time(journal: dict | None) -> int | None:
+    """Newest `created_at` in a journal snapshot, as an int timestamp.
+
+    Recovery markers are appended long after the run actually stopped. Stamping
+    them with `time.time()` would move an old conversation to the top of the
+    sidebar simply by being loaded: `Session.compact()` derives
+    `last_message_at` from the newest message timestamp and the session list
+    sorts on it, which defeats the caller's deliberate
+    `save(touch_updated_at=False)`.
+    """
+    newest = None
+    for event in (journal or {}).get('events') or []:
+        created_at = event.get('created_at') if isinstance(event, dict) else None
+        if isinstance(created_at, (int, float)) and not isinstance(created_at, bool):
+            if newest is None or created_at > newest:
+                newest = created_at
+    return int(newest) if newest is not None else None
+
+
 def _recover_dead_run_journal(session, stream_id: str | None) -> bool:
     """Recover a dead run's journaled work when its pending state is already nil.
 
@@ -3584,6 +3626,14 @@ def _recover_dead_run_journal(session, stream_id: str | None) -> bool:
             return False
         if _has_compression_continuation(session):
             return False
+        # One snapshot for every decision below. Reading the journal separately
+        # for replay, terminal-error extraction and terminal classification is a
+        # TOCTOU: on a delayed-visibility filesystem the file can advance between
+        # those reads, so replay sees a prefix while classification sees a later
+        # `done`. That combination suppresses the interruption marker and then
+        # clears the stream id, presenting a turn as successful while its tail is
+        # silently missing. It also collapses three or four reads into one.
+        journal = _read_run_journal_for_recovery(session.session_id, stream_id)
         # Idempotency across repeated reads: the recovered rows themselves are
         # deduped by `dedupe_existing`, but the marker has no content to match
         # on, so it carries the stream id and gates a second pass.
@@ -3611,6 +3661,7 @@ def _recover_dead_run_journal(session, stream_id: str | None) -> bool:
         recovered_output, terminal_error_recovered = (
             _recover_journaled_output_and_terminal_error(
                 session, stream_id, dedupe_existing=dedupe_existing,
+                journal=journal,
             )
         )
         if not recovered_output and not terminal_error_recovered:
@@ -3622,7 +3673,9 @@ def _recover_dead_run_journal(session, stream_id: str | None) -> bool:
             # instead of failing open and losing the run for good.
             if (
                 _journal_is_still_arriving(session, stream_id)
-                or _run_journal_has_visible_output(session, stream_id)
+                or _run_journal_has_visible_output(
+                    session, stream_id, journal=journal,
+                )
             ):
                 marker = _build_recovery_marker_with_retry_hook(
                     recovered_output=False,
@@ -3630,6 +3683,7 @@ def _recover_dead_run_journal(session, stream_id: str | None) -> bool:
                     pending_started_at=getattr(session, 'pending_started_at', None),
                 )
                 marker['_recovered_stream_id'] = stream_id
+                _stamp_marker_with_run_time(marker, journal)
                 session.messages.append(marker)
                 return True
             # A journal that terminated in `cancel` or a generic error without
@@ -3639,17 +3693,22 @@ def _recover_dead_run_journal(session, stream_id: str | None) -> bool:
             # user turn with no outcome at all and no way to recover one.
             # `completed` is excluded: a run that finished normally is not an
             # interruption, so an empty one needs no marker.
-            if _run_journal_terminal_state(session, stream_id) not in (None, 'completed'):
+            if _run_journal_terminal_state(
+                session, stream_id, journal=journal,
+            ) not in (None, 'completed'):
                 marker = _interrupted_recovery_marker(
                     recovered_output=False,
                     stream_id=stream_id,
                     pending_started_at=getattr(session, 'pending_started_at', None),
                 )
                 marker['_recovered_stream_id'] = stream_id
+                _stamp_marker_with_run_time(marker, journal)
                 session.messages.append(marker)
                 return True
             return False
-        terminal_state = _run_journal_terminal_state(session, stream_id)
+        terminal_state = _run_journal_terminal_state(
+            session, stream_id, journal=journal,
+        )
         if not terminal_error_recovered and terminal_state != 'completed':
             # Deliberately NOT armed for retry. Re-running recovery over a
             # journal that has since grown replays it cumulatively: `token`
@@ -3668,6 +3727,7 @@ def _recover_dead_run_journal(session, stream_id: str | None) -> bool:
                 pending_started_at=getattr(session, 'pending_started_at', None),
             )
             marker['_recovered_stream_id'] = stream_id
+            _stamp_marker_with_run_time(marker, journal)
             session.messages.append(marker)
         logger.info(
             "Session %s: recovered dead run journal for stream %s without pending state",
