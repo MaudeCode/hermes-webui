@@ -245,6 +245,33 @@ def test_action_required_surfaces_block_auto_collapse(label, script):
         assert not _state(page)["collapsed"], f"{label} must keep the composer expanded"
 
 
+def test_programmatic_draft_restore_recomputes_the_collapse_state():
+    """Session-switch draft restore assigns `#msg.value` directly and never fires
+    an `input` event, so the collapse stage has to be recomputed from the shared
+    `autoResize()` chokepoint every programmatic composer write already calls."""
+    with _phone_page() as page:
+        assert _state(page)["collapsed"], "precondition: starts collapsed"
+
+        # The real session-switch restore path (static/sessions.js).
+        page.evaluate(
+            "() => _restoreComposerDraft({text: 'line one\\nline two', files: []}, null, {})"
+        )
+        _settle(page)
+        restored = _state(page)
+        assert restored["value"] == "line one\nline two", restored
+        assert not restored["collapsed"], (
+            "a restored multi-line draft must expand without waiting for a focus, "
+            "resize or observed-surface mutation"
+        )
+
+        # Restoring an empty draft over it returns to compact the same way.
+        page.evaluate("() => _restoreComposerDraft({text: '', files: []}, null, {})")
+        _settle(page)
+        cleared = _state(page)
+        assert cleared["value"] == "", cleared
+        assert cleared["collapsed"], cleared
+
+
 def test_an_open_composer_popup_survives_a_focus_loss():
     """iOS does not focus a tapped button, so focusout alone must not collapse."""
     with _phone_page() as page:

@@ -5264,8 +5264,9 @@ function _initComposerCollapse(){
     const msg=document.getElementById('msg');
     if(msg) msg.focus();
   });
-  const msg=document.getElementById('msg');
-  if(msg) msg.addEventListener('input',_scheduleComposerFit);
+  // No `input` listener here: the composer's input path already routes through
+  // scheduleComposerAutoResize() -> autoResize(), which schedules the fit for
+  // typed and programmatic value changes alike.
   if(window.MutationObserver){
     try{
       const surfaces=new MutationObserver(_scheduleComposerFit);
