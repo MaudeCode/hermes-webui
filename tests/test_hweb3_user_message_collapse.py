@@ -47,6 +47,8 @@ _SETUP_JS = """
       window._getCachedRender(text, true), text, rawIdx, false);
     return row;
   };
+  // The disclosure store is scoped by session_id, so give the page a session.
+  S.session = Object.assign({}, S.session, {session_id: 'hweb3-test'});
   const empty = document.getElementById('emptyState');
   if (empty) empty.style.display = 'none';
   return typeof window._userMessageBodyHtml === 'function'
@@ -54,7 +56,9 @@ _SETUP_JS = """
     && typeof window._getCachedRender === 'function'
     && typeof window._userMessageIsExpanded === 'function'
     && typeof window._setUserMessageExpanded === 'function'
-    && typeof window._clearUserMessageExpandState === 'function';
+    && typeof window._clearUserMessageExpandState === 'function'
+    && typeof window._clearMessageVirtualHeightCache === 'function'
+    && typeof window.clearMessageRenderCache === 'function';
 }
 """
 
@@ -304,9 +308,26 @@ _RERENDER_JS = """
     contentHeight: clip.scrollHeight,
   };
 
-  // A session switch releases the state, so the next session starts collapsed.
+  // The regression this store exists to prevent: dropping the virtual-height
+  // cache (which ordinary transcript churn does on a stream settle, not only a
+  // session switch) must NOT take reader intent with it.
+  window._clearMessageVirtualHeightCache();
+  const afterHeightCacheDrop = window._userMessageIsExpanded(7001);
+  window.clearMessageRenderCache();
+  const afterRenderCacheDrop = window._userMessageIsExpanded(7001);
+
+  // Another session must never read this session's entry, even unreleased.
+  const ownSession = S.session.session_id;
+  S.session = Object.assign({}, S.session, {session_id: 'other-session'});
+  const otherSession = window._userMessageIsExpanded(7001);
+  S.session = Object.assign({}, S.session, {session_id: ownSession});
+
+  // A session switch still releases it.
   window._clearUserMessageExpandState();
-  return { afterToggle, rebuiltState, afterClear: window._userMessageIsExpanded(7001) };
+  return {
+    afterToggle, rebuiltState, afterHeightCacheDrop, afterRenderCacheDrop,
+    otherSession, afterClear: window._userMessageIsExpanded(7001),
+  };
 }
 """
 
@@ -326,7 +347,13 @@ def test_expansion_survives_a_rebuild_and_is_released_on_session_switch():
     assert r["rebuiltState"]["aria"] == "true", r
     assert r["rebuiltState"]["i18nKey"] == "show_less_message", r
     assert r["rebuiltState"]["clipHeight"] >= r["rebuiltState"]["contentHeight"] - 1, r
-    # And the store is released on session switch, so state can't leak sessions.
+    # Reader intent is not a measurement: dropping the height/render caches, which
+    # ordinary transcript churn does on a stream settle, must not erase it.
+    assert r["afterHeightCacheDrop"] is True, r
+    assert r["afterRenderCacheDrop"] is True, r
+    # Full-identity keys: another session cannot read this session's entry.
+    assert r["otherSession"] is False, r
+    # And a session switch still releases it.
     assert r["afterClear"] is False, r
 
 

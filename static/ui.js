@@ -612,11 +612,13 @@ function _clearMessageVirtualHeightCache(){
   _messageVirtualScrollSettleTimer=0;
   _messageVirtualDeferredMeasurement=null;
   if(typeof _clearUserRowIntrinsicHeightCache==='function') _clearUserRowIntrinsicHeightCache();
-  if(typeof _clearUserMessageExpandState==='function') _clearUserMessageExpandState();
 }
 function _resetMessageRenderWindow(sid){
   _messageRenderWindowSid=sid||null;
   _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
+  // Only an actual session change releases reader intent. This is the one
+  // caller of this function, gated on `sid !== _messageRenderWindowSid`.
+  if(typeof _clearUserMessageExpandState==='function') _clearUserMessageExpandState();
   _cancelMessageVirtualizedRender();
   _clearRenderCache();
   clearVisibleMessageRowCache();
@@ -1346,25 +1348,38 @@ function _clearUserRowIntrinsicHeightCache(){
   for(const k in _userRowIntrinsicHeightBySessionIdx) delete _userRowIntrinsicHeightBySessionIdx[k];
 }
 // HWEB-3: which long user messages the reader has opened. renderMessages only
-// recycles DOM rows inside the virtual-scroll path (_msgNodeRecycleEnabled),
-// so every ORDINARY rerender — stream settle, refreshSession, a handoff rebuild
-// — builds fresh nodes and cannot read the state off the old row. Own it here
-// instead, keyed by the same stable session-relative index as the intrinsic
-// height cache above and released at the same session-switch chokepoint, so
-// keys can't collide across sessions.
-const _userMsgExpandedBySessionIdx=Object.create(null);
+// recycles DOM rows inside the virtual-scroll path (_msgNodeRecycleEnabled), so
+// every ORDINARY rerender — stream settle, refreshSession, a handoff rebuild —
+// builds fresh nodes and cannot read the state off the old row. Own it here.
+//
+// Keyed by session_id AND the stable session-relative index, deliberately NOT
+// by index alone: this is reader intent, not a measurement, so its correctness
+// must not depend on some cache-invalidation hook firing at the right moment.
+// The neighbouring height cache is keyed by index alone and released whenever
+// the virtual-height cache is dropped — which happens on ordinary transcript
+// churn, not just session changes. Reusing that lifecycle here erased the
+// state on the exact settle rerender it exists to survive. Full-identity keys
+// mean a stale entry can never be read by another session even if nothing
+// clears it; the session-change release below is hygiene, not correctness.
+const _userMsgExpandedByKey=Object.create(null);
+function _userMessageExpandKey(sessionMsgIdx){
+  const n=Number(sessionMsgIdx);
+  if(!Number.isFinite(n)) return '';
+  const sid=String((typeof S!=='undefined'&&S.session&&S.session.session_id)||'');
+  return sid?sid+':'+n:'';
+}
 function _clearUserMessageExpandState(){
-  for(const k in _userMsgExpandedBySessionIdx) delete _userMsgExpandedBySessionIdx[k];
+  for(const k in _userMsgExpandedByKey) delete _userMsgExpandedByKey[k];
 }
 function _userMessageIsExpanded(sessionMsgIdx){
-  const key=Number(sessionMsgIdx);
-  return Number.isFinite(key)&&_userMsgExpandedBySessionIdx[key]===true;
+  const k=_userMessageExpandKey(sessionMsgIdx);
+  return !!k&&_userMsgExpandedByKey[k]===true;
 }
 function _setUserMessageExpanded(sessionMsgIdx, expanded){
-  const key=Number(sessionMsgIdx);
-  if(!Number.isFinite(key)) return;
-  if(expanded) _userMsgExpandedBySessionIdx[key]=true;
-  else delete _userMsgExpandedBySessionIdx[key];
+  const k=_userMessageExpandKey(sessionMsgIdx);
+  if(!k) return;
+  if(expanded) _userMsgExpandedByKey[k]=true;
+  else delete _userMsgExpandedByKey[k];
 }
 function _rememberUserRowIntrinsicHeight(sessionMsgIdx, height){
   const key=Number(sessionMsgIdx);
