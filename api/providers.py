@@ -770,6 +770,16 @@ _PROVIDER_ENV_VAR: dict[str, str] = {
     # flip to "no key" after upgrading.
     "lmstudio": "LM_API_KEY",
     "nvidia": "NVIDIA_API_KEY",
+    # Hermes Agent v0.21.0 providers.  Canonical slug → the agent's primary
+    # API-key env var (hermes_cli/auth.py registry rows and the
+    # plugins/model-providers/<slug>/ profiles' first non-URL `env_vars` entry).
+    "commandcode": "COMMANDCODE_API_KEY",
+    "tencent-tokenplan": "TOKENPLAN_API_KEY",
+    "tencent-tokenhub": "TOKENHUB_API_KEY",
+    "nebius-token-factory": "NEBIUS_API_KEY",
+    "router": "RAMP_ROUTER_API_KEY",
+    "actual": "ACTUAL_API_KEY",
+    "meta-ai": "MODEL_API_KEY",
 }
 
 # Read-only legacy env-var aliases.  When `_provider_has_key(pid)` looks up its
@@ -788,6 +798,13 @@ _PROVIDER_ENV_VAR_ALIASES: dict[str, tuple[str, ...]] = {
     # show the groups as configured while chat fails the no-key path.
     "opencode-zen": ("OPENCODE_API_KEY",),
     "opencode-go": ("OPENCODE_API_KEY",),
+    # The v0.21.0 agent profiles accept several co-equal names for one key
+    # (providers.py HERMES_OVERLAYS / plugin `env_vars` tuples).  Reading the
+    # alternates too keeps Settings from reporting "no key" for a provider the
+    # agent is happily authenticating.
+    "nebius-token-factory": ("NEBIUS_TOKEN_FACTORY_API_KEY",),
+    "router": ("ROUTER_API_KEY",),
+    "meta-ai": ("META_API_KEY", "META_MODEL_API_KEY"),
 }
 
 _SELF_HOSTED_PROVIDER_IDS = frozenset({"ollama", "lmstudio"})

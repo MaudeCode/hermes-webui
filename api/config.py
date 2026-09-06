@@ -1204,6 +1204,24 @@ _PROVIDER_DISPLAY = {
     "nvidia": "NVIDIA NIM",
     "xiaomi": "Xiaomi",
     "bedrock": "AWS Bedrock",
+    # Providers added by Hermes Agent v0.21.0 (v2026.8.31).  Keys are the
+    # agent-canonical slugs, NOT the marketing names — the agent keeps the two
+    # apart and only the slug resolves in `--provider` / the CLI picker.  Each
+    # slug below is read from the agent core, not guessed:
+    #   commandcode           plugins/model-providers/commandcode/__init__.py
+    #   tencent-tokenplan     hermes_cli/auth.py (alias: "tokenplan")
+    #   tencent-tokenhub      hermes_cli/auth.py (alias: "tencent")
+    #   nebius-token-factory  plugins/model-providers/nebius-token-factory/
+    #   router                plugins/model-providers/router/ (aliases: ramp-router, ramp)
+    #   actual                plugins/model-providers/actual/ (alias: actual-computer)
+    #   meta-ai               plugins/model-providers/meta-ai/ (aliases: meta, muse-spark)
+    "commandcode": "CommandCode",
+    "tencent-tokenplan": "Tencent TokenPlan",
+    "tencent-tokenhub": "Tencent TokenHub",
+    "nebius-token-factory": "Nebius Token Factory",
+    "router": "Ramp Router",
+    "actual": "Actual Computer",
+    "meta-ai": "Meta Model API",
 }
 
 # Provider alias → canonical slug.  Users configure providers using the
@@ -1914,6 +1932,70 @@ _PROVIDER_MODELS = {
         {"id": "global.anthropic.claude-sonnet-4-5-20250929-v1:0", "label": "Global Claude Sonnet 4.5"},
         {"id": "global.anthropic.claude-haiku-4-5-20251001-v1:0",  "label": "Global Anthropic Claude Haiku 4.5"},
     ],
+    # ── Hermes Agent v0.21.0 providers ───────────────────────────────────────
+    # Model IDs are copied from the agent's own curated lists, never invented:
+    # plugin profiles expose `fallback_models`, the Tencent lanes come from
+    # hermes_cli/models_catalog_static.py `_TENCENT_MODELS`.  These are cold
+    # fallbacks only — `_read_live_provider_model_ids()` asks the agent for the
+    # live catalog first and supersedes them.
+    #
+    # CommandCode — one key fronts 20+ vendor models (api.commandcode.ai).
+    "commandcode": [
+        {"id": "deepseek/deepseek-v4-pro",   "label": "DeepSeek V4 Pro"},
+        {"id": "deepseek/deepseek-v4-flash", "label": "DeepSeek V4 Flash"},
+        {"id": "Qwen/Qwen3.7-Max",           "label": "Qwen3.7 Max"},
+        {"id": "Qwen/Qwen3.6-Plus",          "label": "Qwen3.6 Plus"},
+        {"id": "moonshotai/Kimi-K2.6",       "label": "Kimi K2.6"},
+        {"id": "zai-org/GLM-5.1",            "label": "GLM-5.1"},
+        {"id": "MiniMaxAI/MiniMax-M2.7",     "label": "MiniMax M2.7"},
+        {"id": "stepfun/Step-3.5-Flash",     "label": "Step 3.5 Flash"},
+        {"id": "xiaomi/mimo-v2.5-pro",       "label": "MiMo V2.5 Pro"},
+        {"id": "google/gemini-3.5-flash",    "label": "Gemini 3.5 Flash"},
+        {"id": "gpt-5.5",                    "label": "GPT-5.5"},
+    ],
+    # Tencent TokenPlan (api.lkeap.cloud.tencent.com, Anthropic Messages) and
+    # Tencent TokenHub (tokenhub.tencentmaas.com) are two distinct agent
+    # providers serving the same Hy catalog on different wires.
+    "tencent-tokenplan": [
+        {"id": "hy4-preview", "label": "Hy4 Preview"},
+        {"id": "hy3",         "label": "Hy3"},
+        {"id": "hy3-preview", "label": "Hy3 Preview"},
+    ],
+    "tencent-tokenhub": [
+        {"id": "hy4-preview", "label": "Hy4 Preview"},
+        {"id": "hy3",         "label": "Hy3"},
+        {"id": "hy3-preview", "label": "Hy3 Preview"},
+    ],
+    # Nebius Token Factory — OpenAI-compatible inference (api.tokenfactory.nebius.com).
+    "nebius-token-factory": [
+        {"id": "Qwen/Qwen3.5-397B-A17B-fast",     "label": "Qwen3.5 397B A17B (fast)"},
+        {"id": "deepseek-ai/DeepSeek-V4-Pro",     "label": "DeepSeek V4 Pro"},
+        {"id": "zai-org/GLM-5.1",                 "label": "GLM-5.1"},
+        {"id": "moonshotai/Kimi-K2.5-fast",       "label": "Kimi K2.5 (fast)"},
+        {"id": "MiniMaxAI/MiniMax-M2.5-fast",     "label": "MiniMax M2.5 (fast)"},
+        {"id": "deepseek-ai/DeepSeek-V3.2-fast",  "label": "DeepSeek V3.2 (fast)"},
+        {"id": "NousResearch/Hermes-4-70B",       "label": "Hermes 4 70B"},
+        {"id": "openai/gpt-oss-120b-fast",        "label": "GPT-OSS 120B (fast)"},
+        {"id": "meta-llama/Llama-3.3-70B-Instruct", "label": "Llama 3.3 70B Instruct"},
+    ],
+    # Meta Model API — Muse Spark family (api.meta.ai, Responses wire).
+    "meta-ai": [
+        {"id": "muse-spark-1.2",             "label": "Muse Spark 1.2"},
+        {"id": "muse-spark-1.2-contributor", "label": "Muse Spark 1.2 Contributor"},
+    ],
+    # Ramp Router (router.com) and Actual Computer (api.actual.inc) publish NO
+    # static catalog in the agent — both are account/cluster scoped and the
+    # agent's own profiles ship empty `fallback_models`.  Inventing IDs here
+    # would render models the user cannot select, so the keys stay empty and
+    # `_read_live_provider_model_ids()` fills the group from the account's live
+    # `GET /v1/models`.  Membership here is still load-bearing: it is what lets
+    # the group builder consider them at all (before this entry they fell into
+    # the "unrecognized provider" branch and were dropped outright).  Until the
+    # live probe returns, the group carries zero models and the picker's
+    # zero-model filter (#1568) hides it — deliberate, and the same treatment
+    # every other empty group gets.
+    "router": [],
+    "actual": [],
 }
 
 
