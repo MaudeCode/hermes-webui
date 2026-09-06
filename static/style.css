@@ -3185,7 +3185,7 @@
        with left:0;right:0 sizes it from the containing block instead of from its
        contents, so containment is irrelevant. It passes taps through to the
        textarea underneath; only .composer-right takes pointer events. */
-    .composer-box:has(> .composer-footer.cf-collapsed) textarea#msg{height:44px!important;min-height:44px;max-height:44px;padding:9px 60px 9px 14px;white-space:nowrap;overflow:hidden;}
+    .composer-box:has(> .composer-footer.cf-collapsed) textarea#msg{height:44px!important;min-height:44px;max-height:44px;padding:9px var(--cf-collapsed-pad,60px) 9px 14px;white-space:nowrap;overflow:hidden;}
     .composer-footer.cf-collapsed{position:absolute;left:0;right:0;top:0;bottom:0;justify-content:flex-end;padding:0 8px 0 0!important;pointer-events:none;}
     .composer-footer.cf-collapsed .composer-left{display:none;}
     .composer-footer.cf-collapsed .composer-right{pointer-events:auto;}

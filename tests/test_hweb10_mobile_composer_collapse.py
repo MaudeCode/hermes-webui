@@ -347,3 +347,53 @@ def test_reduced_motion_round_trip_is_instant():
         assert not _state(page)["collapsed"]
         _blur(page)
         assert _state(page)["collapsed"]
+
+
+def test_a_drag_over_the_composer_expands_the_drop_target():
+    """A file drag needs the full-height drop zone, not the 46px collapsed row."""
+    with _phone_page() as page:
+        assert _state(page)["collapsed"]
+        # panels.js's dragenter handler only toggles this class; nothing else in
+        # the drag path schedules a fit, so the class itself has to be observed.
+        page.evaluate("() => document.getElementById('composerWrap').classList.add('drag-over')")
+        _settle(page)
+        assert not _state(page)["collapsed"], "a hovering drag must expand the composer"
+
+        page.evaluate("() => document.getElementById('composerWrap').classList.remove('drag-over')")
+        _settle(page)
+        assert _state(page)["collapsed"], "leaving the drag collapses it again"
+
+
+def test_collapsed_draft_never_renders_under_the_right_side_indicators():
+    """#composerStatus and #bgBadge appear mid-run; the preview row must clear them."""
+    with _phone_page() as page:
+        page.evaluate("() => { const m = document.getElementById('msg'); m.value = 'ship the release notes for the collapsed composer'; if (typeof autoResize === 'function') autoResize(); m.blur(); }")
+        _settle(page)
+        assert _state(page)["collapsed"]
+
+        page.evaluate(
+            "() => { setComposerStatus('Running tool call'); "
+            "const b = document.getElementById('bgBadge'); b.style.display = ''; b.textContent = '3'; }"
+        )
+        _settle(page)
+
+        geometry = page.evaluate(
+            """() => {
+              const msg = document.getElementById('msg');
+              const right = document.querySelector('.composer-right');
+              const m = msg.getBoundingClientRect();
+              const r = right.getBoundingClientRect();
+              return {
+                textRight: m.right - parseFloat(getComputedStyle(msg).paddingRight),
+                rightLeft: r.left,
+                rightWidth: r.width,
+                collapsed: document.querySelector('.composer-footer').classList.contains('cf-collapsed'),
+              };
+            }"""
+        )
+        assert geometry["collapsed"], geometry
+        # The indicators really did widen the right group beyond the bare 44px
+        # send button — otherwise this test would pass vacuously.
+        assert geometry["rightWidth"] > 60, geometry
+        assert geometry["textRight"] <= geometry["rightLeft"] + 1, geometry
+        _assert_composer_controls_are_tappable(page, "collapsed+indicators")

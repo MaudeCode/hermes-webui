@@ -5137,6 +5137,9 @@ const _COMPOSER_EXPAND_SURFACES=[
   ['#approvalCard',''],['#clarifyCard',''],
   ['#queueCard','visible'],['#attachTray','has-files'],
   ['#micStatus',''],['#voiceModeBar',''],
+  // A drag hovering the composer needs the full-height drop target, and this
+  // entry is what gets that state observed: panels.js only toggles the class.
+  ['#composerWrap','drag-over'],
   // Composer popups that live outside .composer-footer: the workspace dropdown
   // is `hidden`-toggled, and the model/profile dropdowns get reparented to the
   // document root when they open.
@@ -5159,8 +5162,6 @@ function _shouldCollapseComposer(){
   const msg=document.getElementById('msg');
   // A multi-line draft has content that a single preview row would hide.
   if(msg&&(msg.disabled||String(msg.value||'').indexOf('\n')>=0)) return false;
-  const wrap=document.getElementById('composerWrap');
-  if(wrap&&wrap.classList.contains('drag-over')) return false;
   // An open footer popup owns the interaction. iOS does not move focus to a
   // tapped button, so focusout alone would otherwise collapse the config panel
   // (and the button that closes it) out from under the tap that opened it.
@@ -5183,7 +5184,15 @@ function _fitComposerFooter(){
   // Expanding restores the textarea's natural height: the collapsed rule pins
   // it with !important, so autoResize() can only measure once that is gone.
   if(wasCollapsed&&!collapse&&typeof autoResize==='function'){try{autoResize();}catch(_){ }}
-  if(collapse) return;
+  if(collapse){
+    // Reserve the room .composer-right actually occupies: which controls it
+    // holds changes at runtime (#composerStatus and #bgBadge appear during a
+    // run), so a fixed padding would let the draft render underneath them.
+    const right=footer.querySelector('.composer-right');
+    const box=footer.closest('.composer-box');
+    if(right&&box) box.style.setProperty('--cf-collapsed-pad',(right.offsetWidth+16)+'px');
+    return;
+  }
   if(!left.clientWidth) return;
   const overflows=function(){return left.scrollWidth>left.clientWidth+1;};
   footer.classList.remove('cf-icons','cf-burger');
@@ -5225,6 +5234,11 @@ function _initComposerFooterFit(){
       // resize, but that shrinks .composer-left's available room and must
       // retrigger a refit. (Codex gate #4657.)
       if(left && left!==footer){try{_composerFitResizeObserver.observe(left);}catch(_){ }}
+      // And the right group: while collapsed .composer-left has no box at all,
+      // so a status chip or bg badge appearing there is only observable here —
+      // and its width is what the collapsed textarea's padding reserves.
+      const right=footer.querySelector('.composer-right');
+      if(right){try{_composerFitResizeObserver.observe(right);}catch(_){ }}
     }catch(_){ }
   }
   if(window.MutationObserver){
