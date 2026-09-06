@@ -179,6 +179,47 @@ def test_update_never_forwards_bare_repeat_integer(monkeypatch):
     assert "repeat" not in updates
 
 
+# --- script-only creates (Codex P1) ------------------------------------------
+
+
+def test_script_only_create_is_not_rejected_for_an_empty_prompt(monkeypatch):
+    # The script-only form omits the prompt textarea entirely, so it posts
+    # prompt: ''. A blanket require(prompt) would 400 every script-only create
+    # before no_agent ever reached create_job.
+    kwargs = _create(
+        monkeypatch,
+        {"prompt": "", "schedule": "every 1h", "no_agent": True, "script": "watchdog.sh"},
+    )
+    assert kwargs["prompt"] == ""
+    assert kwargs["no_agent"] is True
+    assert kwargs["script"] == "watchdog.sh"
+
+
+def test_skills_only_create_is_not_rejected_for_an_empty_prompt(monkeypatch):
+    kwargs = _create(monkeypatch, {"prompt": "", "schedule": "every 1h", "skills": ["triage"]})
+    assert kwargs["skills"] == ["triage"]
+
+
+def test_create_still_rejects_a_payload_with_no_prompt_script_or_skills(monkeypatch):
+    import api.routes as routes
+
+    _stub_cron_jobs(monkeypatch, [])
+    handler = _JSONHandler()
+    routes._handle_cron_create(handler, {"prompt": "", "schedule": "every 1h"})
+    assert handler.status == 400
+    assert "prompt" in _payload(handler)["error"]
+
+
+def test_create_still_requires_a_schedule(monkeypatch):
+    import api.routes as routes
+
+    _stub_cron_jobs(monkeypatch, [])
+    handler = _JSONHandler()
+    routes._handle_cron_create(handler, {"prompt": "ping"})
+    assert handler.status == 400
+    assert "schedule" in _payload(handler)["error"]
+
+
 # --- read-back ---------------------------------------------------------------
 
 
@@ -273,6 +314,21 @@ def test_every_new_label_has_an_english_i18n_entry():
     ):
         assert f"{key}:" in I18N_JS, key
         assert f"t('{key}')" in PANELS_JS, key
+
+
+def test_mode_toggle_falls_back_to_the_last_rendered_prompt():
+    # The script-only re-render drops the prompt textarea; a DOM-only snapshot
+    # would read '' and eat the user's prompt on the way back (Codex P2).
+    assert "let _cronFormRendered = null;" in PANELS_JS
+    assert "_cronFormRendered = { prompt, script, monitor };" in PANELS_JS
+    assert "const last = _cronFormRendered || {};" in PANELS_JS
+    assert "prompt: val('cronFormPrompt', 'prompt')," in PANELS_JS
+
+
+def test_context_from_picker_excludes_foreign_profile_jobs():
+    # Cross-profile jobs arrive read_only; their bare IDs cannot be resolved in
+    # the active profile's cron store (Codex P2), matching _cronList's own guard.
+    assert "!job.read_only && job.id !== editingId" in PANELS_JS
 
 
 def test_reasoning_effort_options_match_the_canonical_levels():

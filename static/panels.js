@@ -1645,7 +1645,7 @@ function _cronFormAdvancedHtml({ isNoAgent, scriptRow, monitor, continuity, cont
   const selected = (Array.isArray(context_from) ? context_from : [])
     .map(id => String(id).trim())
     .filter(id => id && id.toLowerCase() !== 'self');
-  const chainable = (_cronList || []).filter(job => job && job.id && job.id !== editingId);
+  const chainable = (_cronList || []).filter(job => job && job.id && !job.read_only && job.id !== editingId);
   const chainOptions = chainable.map(job =>
     `<option value="${esc(job.id)}"${selected.includes(job.id) ? ' selected' : ''}>${esc(job.name || job.id)}</option>`
   ).join('');
@@ -1701,20 +1701,21 @@ function _cronFormAdvancedHtml({ isNoAgent, scriptRow, monitor, continuity, cont
 // argument shape. One reader for the fields, shared by the no_agent re-render
 // and by saveCronForm, so the two can never disagree about what was entered.
 function _cronFormValues({ isEdit }){
-  const val = (id) => { const el = $(id); return el ? el.value : ''; };
+  const last = _cronFormRendered || {};
+  const val = (id, key) => { const el = $(id); return el ? el.value : (key && last[key] != null ? String(last[key]) : ''); };
   const checked = (id) => { const el = $(id); return !!(el && el.checked); };
   const ctxEl = $('cronFormContextFrom');
   const modelEl = $('cronFormModel');
   return {
     name: val('cronFormName').trim(),
     schedule: val('cronFormSchedule').trim(),
-    prompt: val('cronFormPrompt'),
+    prompt: val('cronFormPrompt', 'prompt'),
     deliver: val('cronFormDeliver') || 'local',
     profile: val('cronFormProfile'),
     toast_notifications: $('cronFormToastNotifications') ? checked('cronFormToastNotifications') : true,
     no_agent: checked('cronFormNoAgent'),
-    script: val('cronFormScript').trim(),
-    monitor: val('cronFormMonitor').trim(),
+    script: val('cronFormScript', 'script').trim(),
+    monitor: val('cronFormMonitor', 'monitor').trim(),
     continuity: checked('cronFormContinuity'),
     context_from: ctxEl ? Array.from(ctxEl.selectedOptions || []).map(o => o.value) : [],
     reasoning_effort: val('cronFormReasoningEffort'),
@@ -1735,7 +1736,10 @@ function _onCronFormNoAgentToggle(){
   _renderCronForm(_cronFormValues({ isEdit: !!_editingCronId }));
 }
 
+let _cronFormRendered = null; // last args _renderCronForm was called with
+
 function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notifications=true, no_agent=false, script='', monitor='', continuity=false, context_from=[], reasoning_effort='', repeat='', model='', provider='', isEdit }){
+  _cronFormRendered = { prompt, script, monitor };
   const title = $('taskDetailTitle');
   const body = $('taskDetailBody');
   const empty = $('taskDetailEmpty');

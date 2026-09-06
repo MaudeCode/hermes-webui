@@ -26986,9 +26986,13 @@ def _selected_profile_snapshot_updates(
 
 def _handle_cron_create(handler, body):
     try:
-        require(body, "prompt", "schedule")
+        require(body, "schedule")
     except ValueError as e:
         return bad(handler, str(e))
+    # A script-only job has no prompt by design (the script IS the job), so the
+    # payload rule mirrors create_job's own: at least one of prompt/script/skills.
+    if not body.get("prompt") and not body.get("script") and not body.get("skills"):
+        return bad(handler, "Missing required field(s): prompt")
     try:
         from cron.jobs import create_job, update_job
 
@@ -27015,7 +27019,7 @@ def _handle_cron_create(handler, body):
         if body.get("repeat") is not None:
             create_kwargs["repeat"] = body["repeat"]
         job = create_job(
-            prompt=body["prompt"],
+            prompt=body.get("prompt") or "",
             schedule=body["schedule"],
             name=body.get("name") or None,
             deliver=body.get("deliver") or "local",
