@@ -26945,9 +26945,15 @@ def _selected_profile_snapshot_updates(
     *,
     provider,
     model,
+    no_agent: bool = False,
 ) -> dict[str, str | None]:
     selected_profile = str(profile or "").strip()
     if not selected_profile or (provider is not None and model is not None):
+        return {}
+    # A script-only job never calls a model, so resolving one is both pointless
+    # and harmful: an unresolvable profile LLM config would 400 an otherwise
+    # valid create. create_job returns (None, None) for no_agent jobs anyway.
+    if no_agent:
         return {}
 
     try:
@@ -26969,7 +26975,7 @@ def _selected_profile_snapshot_updates(
                     provider=provider,
                     model=model,
                     base_url=None,
-                    no_agent=False,
+                    no_agent=no_agent,
                 )
     except Exception as exc:
         raise RuntimeError(
@@ -27008,6 +27014,7 @@ def _handle_cron_create(handler, body):
                     profile,
                     provider=requested_provider,
                     model=requested_model,
+                    no_agent=bool(body.get("no_agent")),
                 )
             )
         if not toast_notifications:

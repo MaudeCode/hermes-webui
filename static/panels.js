@@ -1554,6 +1554,7 @@ function duplicateCurrentCron(){
     continuity: !!job.continuity,
     context_from: Array.isArray(job.context_from) ? job.context_from : [],
     reasoning_effort: job.reasoning_effort || '',
+    repeat: (job.repeat && job.repeat.times != null) ? job.repeat.times : '',
     model: job.model || '',
     provider: job.provider || '',
     isEdit: false,

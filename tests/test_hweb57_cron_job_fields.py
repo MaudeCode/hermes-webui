@@ -220,6 +220,44 @@ def test_create_still_requires_a_schedule(monkeypatch):
     assert "schedule" in _payload(handler)["error"]
 
 
+# --- script-only profile snapshots (Codex round 2) ----------------------------
+
+
+def test_script_only_create_skips_profile_model_snapshot_resolution(monkeypatch):
+    # A script-only job never calls a model, so an unresolvable profile LLM
+    # config must not 400 an otherwise valid create.
+    import api.routes as routes
+
+    def _explode(*a, **kw):
+        raise AssertionError("no_agent create must not resolve model snapshots")
+
+    monkeypatch.setattr(routes, "_normalize_cron_profile_value", lambda v: v or None)
+    assert (
+        routes._selected_profile_snapshot_updates(
+            "work", provider=None, model=None, no_agent=True
+        )
+        == {}
+    )
+    # ... and the create path passes the request's no_agent through to it.
+    seen = {}
+    monkeypatch.setattr(
+        routes,
+        "_selected_profile_snapshot_updates",
+        lambda profile, **kw: seen.update(kw) or {},
+    )
+    _create(
+        monkeypatch,
+        {
+            "prompt": "",
+            "schedule": "every 1h",
+            "profile": "work",
+            "no_agent": True,
+            "script": "watchdog.sh",
+        },
+    )
+    assert seen["no_agent"] is True
+
+
 # --- read-back ---------------------------------------------------------------
 
 
@@ -329,6 +367,12 @@ def test_context_from_picker_excludes_foreign_profile_jobs():
     # Cross-profile jobs arrive read_only; their bare IDs cannot be resolved in
     # the active profile's cron store (Codex P2), matching _cronList's own guard.
     assert "!job.read_only && job.id !== editingId" in PANELS_JS
+
+
+def test_duplicate_carries_a_finite_repeat_limit_into_the_create_form():
+    # The store keeps repeat as {times, completed}; only `times` is the limit
+    # the user set, and an unlimited job has times == null (Codex round 2).
+    assert "repeat: (job.repeat && job.repeat.times != null) ? job.repeat.times : ''," in PANELS_JS
 
 
 def test_reasoning_effort_options_match_the_canonical_levels():
