@@ -382,7 +382,8 @@ def test_kanban_stream_keeps_its_reconnect_and_poll_fallback():
     start = PANELS_JS.index("function _kanbanStartEventStream()")
     block = PANELS_JS[start:start + 1800]
     assert "_kanbanEventSourceFailures >= 3" in block
-    assert "setInterval(refreshKanbanEvents, 30000)" in block
+    # HWEB-38: the raw interval became the shared visibility-gated driver.
+    assert "_kanbanStartFallbackPoll();" in block
 
 
 def test_forced_reconnect_is_a_separate_verb_from_the_idempotent_open():

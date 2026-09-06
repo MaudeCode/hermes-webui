@@ -2,7 +2,7 @@ let _currentPanel = 'chat';
 let _renamingAppTitlebar = false;  // guard against re-entrant rename
 let _kanbanBoard = null;
 let _kanbanLatestEventId = 0;
-let _kanbanPollTimer = null;
+let _kanbanPollStop = null;   // stop function from startVisiblePoll, not a timer id
 let _kanbanCurrentTaskId = null;
 let _kanbanLanesByProfile = true;
 // Multi-board state. _kanbanCurrentBoard is the slug of the active board
@@ -34,7 +34,7 @@ let _currentProfileDetail = null; // full profile object
 let _profileMode = 'empty'; // 'empty' | 'read' | 'create'
 let _profilePreFormDetail = null;
 let _pendingSettingsTargetPanel = null; // destination selected while settings had unsaved changes
-let _logsAutoRefreshTimer = null;
+let _logsAutoRefreshStop = null;
 let _lastLogsLines = [];
 let _logsSeverityFilter = 'all';
 
@@ -2230,14 +2230,25 @@ function _formatCronRunUsageStrip(usage) {
 }
 
 // ── Cron run watch ────────────────────────────────────────────────────────────
-let _cronWatchInterval = null;
+let _cronWatchStop = null;
 let _cronWatchStart = null;
-let _cronWatchTimerInterval = null;
+let _cronWatchTimerStop = null;
 
 function _startCronWatch(jobId, detailKey) {
   _stopCronWatch();
   _cronWatchStart = Date.now();
-  _cronWatchInterval = setInterval(async () => {
+  // Visible-only + in-flight guarded: the watch only paints a running indicator
+  // nobody can see from a background tab, and a slow /api/crons/status would
+  // otherwise stack a new request every 3s on top of the one still open.
+  // Closure-local, not module-scoped: _stopCronWatch() cannot know whether a
+  // request from the watch it is replacing is still pending. A shared flag let
+  // that stale request's finally release the REPLACEMENT watch's guard, so the
+  // next tick overlapped it. Each watch now owns its own flag, and a dead
+  // watch's completion writes to a closure nobody reads.
+  let inFlight = false;
+  _cronWatchStop = startVisiblePoll(async () => {
+    if (inFlight) return;
+    inFlight = true;
     try {
       const data = await api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}`,{timeoutToast:false});
       if (!data.running) {
@@ -2253,9 +2264,11 @@ function _startCronWatch(jobId, detailKey) {
         if (el) el.querySelector('.cron-watch-elapsed').textContent = _formatElapsed(data.elapsed);
       }
     } catch(e) { /* ignore poll errors */ }
+    finally { inFlight = false; }
   }, 3000);
-  // Timer update every second
-  _cronWatchTimerInterval = setInterval(() => {
+  // Timer update every second — also visible-only; it repaints an indicator a
+  // hidden tab is not showing.
+  _cronWatchTimerStop = startVisiblePoll(() => {
     if (_cronDetailMatches(jobId, detailKey) && _cronWatchStart) {
       const el = $('cronRunningIndicator');
       if (el) el.querySelector('.cron-watch-elapsed').textContent = _formatElapsed((Date.now() - _cronWatchStart) / 1000);
@@ -2268,8 +2281,8 @@ function _startCronWatch(jobId, detailKey) {
 }
 
 function _stopCronWatch() {
-  if (_cronWatchInterval) { clearInterval(_cronWatchInterval); _cronWatchInterval = null; }
-  if (_cronWatchTimerInterval) { clearInterval(_cronWatchTimerInterval); _cronWatchTimerInterval = null; }
+  if (_cronWatchStop) { _cronWatchStop(); _cronWatchStop = null; }
+  if (_cronWatchTimerStop) { _cronWatchTimerStop(); _cronWatchTimerStop = null; }
   _cronWatchStart = null;
   const el = $('cronRunningIndicator');
   if (el) el.remove();
@@ -3085,19 +3098,26 @@ async function refreshKanbanEvents(){
   } catch(e) { /* polling should not spam toasts */ }
 }
 
+// All three fallback entry points share this: refreshKanbanEvents() checks only
+// _currentPanel, so a raw interval kept requesting /api/kanban/events from a
+// hidden tab parked on the Kanban panel.
+function _kanbanStartFallbackPoll(){
+  if (_kanbanPollStop) return;
+  _kanbanPollStop = startVisiblePoll(refreshKanbanEvents, 30000);
+}
+
 function _kanbanStartPolling(){
   // Prefer SSE for low-latency live updates. Fall back to polling on
   // browsers without EventSource or after repeated stream failures.
   if (typeof EventSource === 'undefined' || _kanbanEventSourceFailures >= 3) {
-    if (_kanbanPollTimer) return;
-    _kanbanPollTimer = setInterval(refreshKanbanEvents, 30000);
+    _kanbanStartFallbackPoll();
     return;
   }
   _kanbanStartEventStream();
 }
 
 function _kanbanStopPolling(){
-  if (_kanbanPollTimer) { clearInterval(_kanbanPollTimer); _kanbanPollTimer = null; }
+  if (_kanbanPollStop) { _kanbanPollStop(); _kanbanPollStop = null; }
   if (_kanbanEventSource) { try { if(_kanbanEventSource.readyState!==2)_kanbanEventSource.close(); } catch(_) {} _kanbanEventSource = null; }
 }
 
@@ -3112,9 +3132,7 @@ function _kanbanStartEventStream(){
     es = new EventSource(url);
   } catch(e) {
     _kanbanEventSourceFailures += 1;
-    if (_kanbanEventSourceFailures < 3 && !_kanbanPollTimer) {
-      _kanbanPollTimer = setInterval(refreshKanbanEvents, 30000);
-    }
+    if (_kanbanEventSourceFailures < 3) _kanbanStartFallbackPoll();
     return;
   }
   _kanbanEventSource = es;
@@ -3138,7 +3156,7 @@ function _kanbanStartEventStream(){
       // Give up on SSE for this session — fall back to HTTP polling.
       try { es.close(); } catch(_) {}
       _kanbanEventSource = null;
-      if (!_kanbanPollTimer) _kanbanPollTimer = setInterval(refreshKanbanEvents, 30000);
+      _kanbanStartFallbackPoll();
     }
     // EventSource auto-reconnects under the hood; nothing more to do here
     // until we hit the failure limit.
@@ -4677,19 +4695,28 @@ function _renderLogs(data) {
 }
 
 function _startLogsAutoRefresh() {
-  if (_logsAutoRefreshTimer) return;
-  _logsAutoRefreshTimer = setInterval(() => {
+  if (_logsAutoRefreshStop) return;
+  // Visible-only: the panel check alone does not stop a backgrounded tab from
+  // tailing the log file every 5s into a view nobody is reading. The catch-up
+  // tick reloads the tail the moment the tab is shown. The in-flight flag keeps
+  // a slow /api/logs (a large tail) from stacking overlapping reads.
+  // Closure-local for the same reason as the cron watch: a stop/restart must
+  // not let the outgoing poller's completion release the incoming one's guard.
+  let inFlight = false;
+  _logsAutoRefreshStop = startVisiblePoll(() => {
     if (_currentPanel !== 'logs') { _stopLogsAutoRefresh(); return; }
     const toggle = $('logsAutoRefresh');
     if (toggle && !toggle.checked) return;
-    loadLogs(false);
+    if (inFlight) return;
+    inFlight = true;
+    Promise.resolve(loadLogs(false)).catch(() => {}).finally(() => { inFlight = false; });
   }, 5000);
 }
 
 function _stopLogsAutoRefresh() {
-  if (_logsAutoRefreshTimer) {
-    clearInterval(_logsAutoRefreshTimer);
-    _logsAutoRefreshTimer = null;
+  if (_logsAutoRefreshStop) {
+    _logsAutoRefreshStop();
+    _logsAutoRefreshStop = null;
   }
 }
 

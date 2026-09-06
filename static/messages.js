@@ -8001,8 +8001,7 @@ async function toggleYoloFromApproval() {
 }
 
 // ── Approval polling ──
-let _approvalPollTimer = null;
-let _approvalFallbackPollInFlight = false;
+let _approvalPollStop = null;
 let _approvalHideTimer = null;
 let _approvalVisibleSince = 0;
 let _approvalSignature = '';
@@ -8535,15 +8534,20 @@ let _approvalSSEHealthTimer = null;
 let _approvalPollingSessionId = null;
 
 function _startApprovalFallbackPoll(sid) {
-  // Run one tick immediately so a session already blocked on a pending approval
-  // shows its card instantly (the removed SSE 'initial' event used to do this);
+  // Run one tick immediately (when visible) so a session already blocked on a
+  // pending approval shows its card instantly (the removed SSE 'initial' event
+  // used to do this);
   // then poll on the 1500ms cadence. (#3913 SHOULD-FIX)
+  // Closure-local: stopApprovalPolling() cannot know whether a request from the
+  // poll it is replacing is still pending, and a shared flag let that stale
+  // request's finally release the replacement poll's guard.
+  let inFlight = false;
   const _tick = async () => {
     if (_approvalPollingSessionMissingOrMismatched(sid)) {
       stopApprovalPolling(); _hideApprovalCardIfOwner(sid, true); return;
     }
-    if (_approvalFallbackPollInFlight) return;
-    _approvalFallbackPollInFlight = true;
+    if (inFlight) return;
+    inFlight = true;
     try {
       const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
       if (data.pending) { showApprovalForSession(sid, data.pending, data.pending_count||1); }
@@ -8558,10 +8562,19 @@ function _startApprovalFallbackPoll(sid) {
         }
       }
     } catch(e) { /* ignore poll errors */ }
-    finally { _approvalFallbackPollInFlight = false; }
+    finally { inFlight = false; }
   };
-  _approvalPollTimer = setInterval(_tick, 1500);  // matches the v0.50.247 polling cadence so degraded-mode users see the same responsiveness
-  _tick();
+  // Visible-only: a hidden tab cannot show an approval card, so 1500ms polling
+  // behind a backgrounded tab is pure waste (~400 requests over a 10-minute
+  // turn). startVisiblePoll fires one catch-up tick the instant the tab is shown
+  // again, so the card is current within a tick of the user coming back.
+  // 1500ms matches the v0.50.247 polling cadence so degraded-mode users see the
+  // same responsiveness.
+  _approvalPollStop = startVisiblePoll(_tick, 1500);
+  // Store the stop function before the first tick: _tick can decide the session
+  // is gone and call stopApprovalPolling() synchronously, and a stop that ran
+  // before the assignment would leave the interval running.
+  if (tabIsVisibleForPolling()) _tick();
 }
 
 function stopApprovalPollingForSession(sid) {
@@ -8570,10 +8583,9 @@ function stopApprovalPollingForSession(sid) {
 }
 
 function stopApprovalPolling() {
-  if (_approvalPollTimer) { clearInterval(_approvalPollTimer); _approvalPollTimer = null; }
+  if (_approvalPollStop) { _approvalPollStop(); _approvalPollStop = null; }
   if (_approvalEventSource) { try { if(_approvalEventSource.readyState!==2)_approvalEventSource.close(); } catch(_){} _approvalEventSource = null; }
   if (_approvalSSEHealthTimer) { clearInterval(_approvalSSEHealthTimer); _approvalSSEHealthTimer = null; }
-  _approvalFallbackPollInFlight = false;
   _approvalPollingSessionId = null;
 }
 
@@ -8709,12 +8721,18 @@ function _startHiddenActiveStreamPoll(sid) {
   if (!sid) return;
   _stopHiddenActiveStreamPoll();
   _sessionStreamHiddenPollSid = sid;
+  // A slow /api/session/status must not let 6s ticks stack up in-flight
+  // requests. Closure-local so a request outliving _stopHiddenActiveStreamPoll()
+  // cannot release the guard of the poll that replaced it.
+  let inFlight = false;
   const tick = () => {
     // Stop conditions: tab became visible (real SSE takes over), session
     // switched, or we're already rendering a stream.
     if (typeof document !== 'undefined' && !document.hidden) { _stopHiddenActiveStreamPoll(); return; }
     if (_sessionStreamHiddenPollSid !== sid) { _stopHiddenActiveStreamPoll(); return; }
     if (S.activeStreamId) return; // already rendering; wait it out
+    if (inFlight) return;
+    inFlight = true;
     try {
       fetch(_apiUrl('api/session/status?session_id=' + encodeURIComponent(sid)), {credentials: 'same-origin'})
         .then(r => r.ok ? r.json() : null)
@@ -8752,8 +8770,9 @@ function _startHiddenActiveStreamPoll(sid) {
             }
           }
         })
-        .catch(() => {});
-    } catch (_) {}
+        .catch(() => {})
+        .finally(() => { inFlight = false; });
+    } catch (_) { inFlight = false; }
   };
   _sessionStreamHiddenPollTimer = setInterval(tick, 6000);
   // Fire one immediately so a turn already running when we go hidden is caught
@@ -9619,9 +9638,8 @@ async function respondClarify(response) {
 }
 
 var _clarifyEventSource = null;
-var _clarifyFallbackTimer = null;
+var _clarifyFallbackStop = null;
 var _clarifyHealthTimer = null;
-let _clarifyFallbackPollInFlight = false;
 let _clarifyPollingSessionId = null;
 
 function startClarifyPolling(sid) {
@@ -9645,15 +9663,18 @@ function startClarifyPolling(sid) {
 
 function _startClarifyFallbackPoll(sid) {
   _clarifyPollingSessionId = sid || null;
-  // Run one tick immediately so a session already blocked on a pending clarify
-  // shows its card instantly (the removed SSE 'initial' event used to do this);
+  // Run one tick immediately (when visible) so a session already blocked on a
+  // pending clarify shows its card instantly (the removed SSE 'initial' event
+  // used to do this);
   // then poll on the 3000ms cadence. (#3913 SHOULD-FIX)
+  // Closure-local, same stop/restart reasoning as the approval poll.
+  let inFlight = false;
   const _tick = async () => {
     if (!S.session || S.session.session_id !== sid) {
       stopClarifyPolling(); _hideClarifyCardIfOwner(sid, true, 'session'); return;
     }
-    if (_clarifyFallbackPollInFlight) return;
-    _clarifyFallbackPollInFlight = true;
+    if (inFlight) return;
+    inFlight = true;
     try {
       const data = await api("/api/clarify/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
       if (data.pending) { showClarifyForSession(sid, data.pending); }
@@ -9721,11 +9742,16 @@ function _startClarifyFallbackPoll(sid) {
         console.warn("[clarify] pending poll failed", logDetails);
       }
     } finally {
-      _clarifyFallbackPollInFlight = false;
+      inFlight = false;
     }
   };
-  _clarifyFallbackTimer = setInterval(_tick, 3000);
-  _tick();
+  // Visible-only, same reasoning as the approval fallback poll: the clarify card
+  // is invisible to a backgrounded tab, and startVisiblePoll's catch-up tick
+  // brings it current within one interval of the tab regaining focus.
+  _clarifyFallbackStop = startVisiblePoll(_tick, 3000);
+  // Assignment before the first tick, same reason as the approval poll: _tick
+  // calls stopClarifyPolling() synchronously when the session no longer matches.
+  if (tabIsVisibleForPolling()) _tick();
 }
 
 function stopClarifyPollingForSession(sid) {
@@ -9735,9 +9761,8 @@ function stopClarifyPollingForSession(sid) {
 
 function stopClarifyPolling() {
   if (_clarifyEventSource) { try { if(_clarifyEventSource.readyState!==2)_clarifyEventSource.close(); } catch(_){} _clarifyEventSource = null; }
-  if (_clarifyFallbackTimer) { clearInterval(_clarifyFallbackTimer); _clarifyFallbackTimer = null; }
+  if (_clarifyFallbackStop) { _clarifyFallbackStop(); _clarifyFallbackStop = null; }
   if (_clarifyHealthTimer) { clearInterval(_clarifyHealthTimer); _clarifyHealthTimer = null; }
-  _clarifyFallbackPollInFlight = false;
   _clarifyPollingSessionId = null;
 }
 
@@ -9970,7 +9995,18 @@ function attachBtwStream(parentSid, streamId, question){
 
 // ── /background task tracking ────────────────────────────────────────────────
 
-let _bgPollTimers={};
+// Keyed by PARENT SESSION, not by task: /api/background/status is destructive.
+// get_results(parentSid) returns and removes every completed result for the
+// parent (api/background.py), so two pollers on one parent race — whichever
+// response lands first drains its sibling's result and then discards it for not
+// matching its own task_id, leaving that task's badge and poller waiting forever
+// for an answer that was already delivered and thrown away.
+// Map, not a plain object: session ids are [0-9a-zA-Z_-] (is_safe_session_id),
+// so a session legitimately named `constructor`, `toString` or `__proto__` would
+// hit an inherited Object property — the truthy lookup would skip poller
+// creation and the Map init, and pending.set() would then throw.
+let _bgPollTimers=new Map();            // parentSid -> stop function
+let _bgPendingTasksByParent=new Map();  // parentSid -> Map(taskId -> prompt)
 let _bgActiveTasks=new Set();
 
 function showBackgroundBadge(taskId){
@@ -9989,28 +10025,56 @@ function hideBackgroundBadge(taskId){
     badge.style.display=_bgActiveTasks.size?'':'none';
   }
 }
+// _bgPollTimers maps parentSid to the poller's stop function, not a timer id.
+function _stopBackgroundPolling(parentSid){
+  const stop=_bgPollTimers.get(parentSid);
+  _bgPollTimers.delete(parentSid);
+  _bgPendingTasksByParent.delete(parentSid);
+  if(typeof stop==='function') stop();
+}
 function startBackgroundPolling(parentSid, taskId, prompt){
-  if(_bgPollTimers[taskId]) return;
+  let pending=_bgPendingTasksByParent.get(parentSid);
+  if(!pending){ pending=new Map(); _bgPendingTasksByParent.set(parentSid,pending); }
+  pending.set(taskId,prompt);
+  // One poller per parent session — a second task joins the existing one rather
+  // than racing it for the same destructive endpoint.
+  if(_bgPollTimers.has(parentSid)) return;
+  // Was a self-rescheduling setTimeout chain with no visibility gate: a
+  // /background task left running behind a hidden tab kept hitting
+  // /api/background/status every 3s (~200 requests over 10 hidden minutes).
+  // The chain rescheduled itself sequentially, so it could not overlap; the
+  // interval-based driver can, hence the in-flight flag.
+  let inFlight=false;
   async function _poll(){
+    if(inFlight) return;
+    inFlight=true;
     try{
       const r=await api('/api/background/status?session_id='+encodeURIComponent(parentSid));
-      if(r&&r.results){
+      const owners=_bgPendingTasksByParent.get(parentSid);
+      if(r&&r.results&&owners){
+        let delivered=false;
         for(const res of r.results){
-          if(res.task_id===taskId){
-            hideBackgroundBadge(taskId);
-            delete _bgPollTimers[taskId];
-            const msg={role:'assistant',content:`**${t('bg_label')}** ${prompt.slice(0,80)}\n\n${res.answer||t('bg_no_answer')}`,'_background':true,_ts:Date.now()/1000};
-            S.messages.push(msg);
-            renderMessages({preserveScroll:true});
-            showToast(t('bg_complete'));
-            return;
-          }
+          // Deliver EVERY returned result to its owner. The server has already
+          // dropped them from tracking, so anything left unclaimed here is lost.
+          const ownerPrompt=owners.get(res.task_id);
+          if(ownerPrompt===undefined) continue;
+          owners.delete(res.task_id);
+          hideBackgroundBadge(res.task_id);
+          S.messages.push({role:'assistant',content:`**${t('bg_label')}** ${ownerPrompt.slice(0,80)}\n\n${res.answer||t('bg_no_answer')}`,'_background':true,_ts:Date.now()/1000});
+          showToast(t('bg_complete'));
+          delivered=true;
         }
+        if(delivered) renderMessages({preserveScroll:true});
+        if(!owners.size) _stopBackgroundPolling(parentSid);
       }
     }catch(_){}
-    _bgPollTimers[taskId]=setTimeout(_poll,3000);
+    finally{ inFlight=false; }
   }
-  _poll();
+  // Store the stop function before the first tick: a task that has already
+  // finished stops the poller from inside that tick, and a stop that ran before
+  // the assignment would leave the interval running.
+  _bgPollTimers.set(parentSid,startVisiblePoll(_poll,3000));
+  if(tabIsVisibleForPolling()) _poll();
 }
 
 // ── Panel navigation (Chat / Tasks / Skills / Memory) ──
