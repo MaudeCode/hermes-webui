@@ -73,7 +73,10 @@ function showToast(message, duration, kind) {
 function setTimeout(cb, ms) { cb(); return 1; }
 function clearTimeout() {}
 
-global.window = { _updateApplyInFlight: false, _updateData: updateData };
+global.window = { _updateApplyInFlight: false, _updateData: updateData, _updateCanManage: true, _updateHasApplyTargets: true };
+global._renderUpdateCapability = function () { button.disabled = window._updateCanManage !== true; };
+global._syncUpdateCapability = async function () { return window._updateCanManage === true; };
+global._noteUpdateForbidden = function (e) { if (e && e.status === 403) window._updateCanManage = false; };
 global.sessionStorage = sessionStorage;
 global.$ = $;
 global.api = api;

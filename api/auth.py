@@ -1165,6 +1165,20 @@ def is_public_path(path: str) -> bool:
     )
 
 
+def session_can_manage_server(session_info) -> bool:
+    """True when the caller may perform owner-only operations (OPERATOR_ONLY_PATHS).
+
+    Auth disabled means every caller is the owner. With auth enabled, only an
+    authenticated session that is not profile-bound qualifies; an absent
+    session or any bound profile (including ``default``) is not an owner.
+    """
+    if not is_auth_enabled():
+        return True
+    if not session_info:
+        return False
+    return not str(session_info.get('bound_profile') or '').strip()
+
+
 def check_auth(handler, parsed) -> bool:
     """Check if request is authorized. Returns True if OK.
     If not authorized, sends 401 (API) or 302 redirect (page) and returns False."""
@@ -1187,8 +1201,7 @@ def check_auth(handler, parsed) -> bool:
         return False
     session_info = ensure_trusted_auth_session(handler)
     if session_info:
-        bound_profile = str(session_info.get('bound_profile') or '').strip() or None
-        if bound_profile and parsed.path in OPERATOR_ONLY_PATHS:
+        if parsed.path in OPERATOR_ONLY_PATHS and not session_can_manage_server(session_info):
             body = b'{"error":"Owner session required"}'
             handler.send_response(403)
             handler.send_header('Content-Type', 'application/json')

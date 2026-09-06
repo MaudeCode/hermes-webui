@@ -510,6 +510,7 @@ def test_auth_status_reports_oidc_capability_without_regressing_passkey_fields(m
         "passkeys_count": 0,
         "passkey_feature_flag": False,
         "auth_disabled_acknowledged": False,
+        "can_manage_server": False,
     }
 
 

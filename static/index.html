@@ -416,9 +416,11 @@
           </div>
         </div>
         <div id="updateError" style="display:none;font-size:12px;color:var(--error,#e05);margin-top:4px;word-break:break-word"></div>
+        <div id="updateOwnerNote" role="status" style="display:none;font-size:12px;color:var(--muted);margin-top:4px;word-break:break-word"></div>
       </div>
       <div style="display:flex;gap:8px;flex-shrink:0;flex-wrap:wrap">
         <button class="update-btn" onclick="dismissUpdate()" data-i18n="update_later">Later</button>
+        <button class="update-btn" id="btnUpdatePermissionRetry" style="display:none" onclick="_syncUpdateCapability()" data-i18n="update_permission_retry">Retry permission check</button>
         <button class="update-btn update-primary" id="btnApplyUpdate" onclick="applyUpdates()" data-i18n="update_now">Update Now</button>
         <button class="update-btn" id="btnForceUpdate" style="display:none;background:var(--error,#e05);color:#fff;border-color:var(--error,#e05)" onclick="forceUpdate(this)" data-i18n="update_force">Force update</button>
         <button class="update-btn" id="btnClearUpdateLock" style="display:none" onclick="applyClearUpdateLock(this)" data-i18n="update_clear_lock_retry">Clear lock and retry update</button>

@@ -10851,7 +10851,8 @@ function _showUpdateBanner(data){
     const webuiUpdatable=!!(data&&data.webui&&data.webui.behind>0&&!webuiManual);
     const agentUpdatable=!!(data&&data.agent&&data.agent.behind>0);
     const hasApplyTargets=webuiUpdatable||agentUpdatable;
-    btnApply.disabled=!hasApplyTargets;
+    window._updateHasApplyTargets=hasApplyTargets;
+    btnApply.disabled=true;
     btnApply.style.display=hasApplyTargets?'':'none';
     if(webuiManual){
       const forceBtn=$('btnForceUpdate');
@@ -10875,6 +10876,56 @@ function _showUpdateBanner(data){
   if(banner) banner.classList.add('visible');
   const summaryMode=window._whatsNewSummaryEnabled===true?'summary':'diff';
   _renderUpdateWhatsNewLinks(data,{mode:summaryMode});
+  _syncUpdateCapability();
+}
+// HWEB-70: update mutations (apply/force/clear-lock) are owner-only server-side.
+// window._updateCanManage: undefined=loading, true/false=server answer, 'error'=fetch failed.
+// Anything but true keeps every mutation control disabled; the server stays authoritative.
+function _updateMutationAllowed(){
+  return window._updateCanManage===true;
+}
+function _renderUpdateCapability(){
+  const state=window._updateCanManage;
+  // Manual-only banners (e.g. Docker) have no in-app action to unlock, so
+  // show no permission copy at all; the host command is the only guidance.
+  const hasTargets=!!window._updateHasApplyTargets;
+  const allowed=state===true&&hasTargets;
+  // In-flight flags keep a control disabled even when a capability re-read
+  // lands mid-request, so a button never looks actionable while it is busy.
+  const apply=$('btnApplyUpdate');
+  if(apply) apply.disabled=!allowed||window._updateApplyInFlight===true;
+  const force=$('btnForceUpdate');
+  if(force) force.disabled=!allowed;
+  const clearLock=$('btnClearUpdateLock');
+  if(clearLock) clearLock.disabled=!allowed||window._clearLockInFlight===true;
+  const retry=$('btnUpdatePermissionRetry');
+  if(retry) retry.style.display=(hasTargets&&state==='error')?'':'none';
+  const note=$('updateOwnerNote');
+  if(!note) return;
+  let text='';
+  if(!hasTargets) text='';
+  else if(state===false) text=_i18nUpdateText('update_owner_required','Installing updates requires an owner session. Sign in with the owner password or passkey to update.');
+  else if(state==='error') text=_i18nUpdateText('update_permission_unknown','Could not confirm update permission. Updates stay disabled until it is confirmed.');
+  else if(state!==true) text=_i18nUpdateText('update_permission_checking','Checking update permission\u2026');
+  note.textContent=text;
+  note.style.display=text?'block':'none';
+}
+async function _syncUpdateCapability(){
+  window._updateCanManage=undefined;
+  _renderUpdateCapability();
+  try{
+    const status=await api('/api/auth/status');
+    window._updateCanManage=!!status&&status.can_manage_server===true;
+  }catch(_){
+    window._updateCanManage='error';
+  }
+  _renderUpdateCapability();
+  return _updateMutationAllowed();
+}
+async function _noteUpdateForbidden(error){
+  // A 403 can also come from the CSRF gate, so re-read the authoritative
+  // capability instead of assuming the session lost owner permission.
+  if(error&&error.status===403) await _syncUpdateCapability();
 }
 function _i18nUpdateText(key, fallback){
   if(typeof t==='function'){
@@ -10907,7 +10958,8 @@ async function applyUpdates(){
   const resetApplyButton=(delayMs)=>{
     const reset=()=>{
       window._updateApplyInFlight=false;
-      if(btn){btn.disabled=false;btn.textContent=updateText('update_now','Update Now');}
+      if(btn) btn.textContent=updateText('update_now','Update Now');
+      _renderUpdateCapability();
     };
     if(delayMs>0) setTimeout(reset,delayMs);
     else reset();
@@ -10915,6 +10967,7 @@ async function applyUpdates(){
   if(btn){btn.disabled=true;btn.textContent=updateText('update_updating','Updating\u2026');}
   const errEl=$('updateError');
   if(errEl){errEl.style.display='none';errEl.textContent='';}
+  if(!(await _syncUpdateCapability())){resetApplyButton(0);return;}
   // Hide any leftover force-update button from a prior conflict so a fresh
   // retry starts clean (otherwise stale state points at the wrong target).
   const forceBtnReset=$('btnForceUpdate');
@@ -10958,6 +11011,7 @@ async function applyUpdates(){
     sessionStorage.removeItem('hermes-update-dismissed');
     _waitForServerThenReload({baselineServerIdentity});
   }catch(e){
+    await _noteUpdateForbidden(e);
     const msg=_formatUpdateApplyExceptionMessage(e);
     if(errEl){errEl.textContent=msg;errEl.style.display='block';}
     else showToast(msg);
@@ -11001,6 +11055,7 @@ async function applyClearUpdateLock(btn){
   const originalLabel=btn.textContent;
   btn.textContent='Checking lock…';
   try{
+    if(!(await _syncUpdateCapability())) return;
     const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify({target}),timeoutMs:60000});
     if(res.ok){
       sessionStorage.removeItem('hermes-update-checked');
@@ -11021,14 +11076,16 @@ async function applyClearUpdateLock(btn){
       else showToast(msg);
     }
   }catch(e){
+    await _noteUpdateForbidden(e);
     const msg='Lock-check request failed: '+((e&&e.message)||String(e));
     const errEl=$('updateError');
     if(errEl){errEl.textContent=msg;errEl.style.display='block';}
     else showToast(msg);
   }finally{
     window._clearLockInFlight=false;
-    btn.disabled=false;
     btn.textContent=originalLabel;
+    btn.disabled=!_updateMutationAllowed();
+    _renderUpdateCapability();
   }
 }
 function _renderLockManualInstruction(target, res){
@@ -11130,6 +11187,7 @@ async function _readHealthServerIdentity() {
 async function forceUpdate(btn){
   const target=btn&&btn.dataset.target;
   if(!target) return;
+  if(!(await _syncUpdateCapability())) return;
   const confirmed=await showConfirmDialog({
     title:'Force update '+target+'?',
     message:'This will discard all local changes and delete untracked files in the '+target+' repo, then reset to the latest remote version. This cannot be undone.',
@@ -11146,7 +11204,8 @@ async function forceUpdate(btn){
     const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify((()=>{const b={target};const _ch=window._updateData?.[target]?.channel;if(_ch==='stable'||_ch==='experimental')b.channel=_ch;return b;})()),timeoutMs:120000});
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
-      btn.disabled=false;btn.textContent='Force update';
+      btn.textContent='Force update';
+      _renderUpdateCapability();
       return;
     }
     showToast('Force update applied — restarting…');
@@ -11154,8 +11213,10 @@ async function forceUpdate(btn){
     sessionStorage.removeItem('hermes-update-dismissed');
     _waitForServerThenReload({baselineServerIdentity});
   }catch(e){
+    await _noteUpdateForbidden(e);
     if(errEl){errEl.textContent='Force update failed: '+e.message;errEl.style.display='block';}
-    btn.disabled=false;btn.textContent='Force update';
+    btn.textContent='Force update';
+    _renderUpdateCapability();
   }
 }
 
