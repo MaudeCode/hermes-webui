@@ -356,3 +356,14 @@ def test_403_from_another_gate_does_not_lock_out_a_still_owner(action):
     assert out["noteDisplay"] == "none"
     assert "CSRF token mismatch" in out["errorText"]
     assert out["inFlight"] is False and out["lockInFlight"] is False
+
+
+@pytest.mark.parametrize("status", [{"can_manage_server": False}, {"throwMessage": "Failed to fetch"}])
+def test_manual_only_banner_shows_no_permission_copy(status):
+    """No in-app apply target means no owner note and no retry button (Codex P2)."""
+    manual_only = {"webui": {"behind": 1, "manual_update": True, "no_git": True}, "agent": None}
+    out = _run(["banner", "settle"], auth=[status], update_data=manual_only)
+    assert out["noteDisplay"] == "none"
+    assert out["noteText"] == ""
+    assert out["retryDisplay"] == "none"
+    assert out["applyDisabled"] is True

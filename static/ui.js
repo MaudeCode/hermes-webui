@@ -10886,19 +10886,23 @@ function _updateMutationAllowed(){
 }
 function _renderUpdateCapability(){
   const state=window._updateCanManage;
-  const allowed=state===true;
+  // Manual-only banners (e.g. Docker) have no in-app action to unlock, so
+  // show no permission copy at all; the host command is the only guidance.
+  const hasTargets=!!window._updateHasApplyTargets;
+  const allowed=state===true&&hasTargets;
   const apply=$('btnApplyUpdate');
-  if(apply) apply.disabled=!allowed||!window._updateHasApplyTargets;
+  if(apply) apply.disabled=!allowed;
   const force=$('btnForceUpdate');
   if(force) force.disabled=!allowed;
   const clearLock=$('btnClearUpdateLock');
   if(clearLock) clearLock.disabled=!allowed;
   const retry=$('btnUpdatePermissionRetry');
-  if(retry) retry.style.display=state==='error'?'':'none';
+  if(retry) retry.style.display=(hasTargets&&state==='error')?'':'none';
   const note=$('updateOwnerNote');
   if(!note) return;
   let text='';
-  if(state===false) text=_i18nUpdateText('update_owner_required','Installing updates requires an owner session. Sign in with the owner password or passkey to update.');
+  if(!hasTargets) text='';
+  else if(state===false) text=_i18nUpdateText('update_owner_required','Installing updates requires an owner session. Sign in with the owner password or passkey to update.');
   else if(state==='error') text=_i18nUpdateText('update_permission_unknown','Could not confirm update permission. Updates stay disabled until it is confirmed.');
   else if(state!==true) text=_i18nUpdateText('update_permission_checking','Checking update permission\u2026');
   note.textContent=text;
