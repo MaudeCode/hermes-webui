@@ -5362,6 +5362,41 @@ def _sync_models_cache_provenance() -> None:
     )
 
 
+def published_catalog_models(provider_id: str | None) -> list[dict] | None:
+    """Return the picker entries already published for *provider_id*, or None.
+
+    Reads ONLY the in-memory catalog snapshot the picker publishes — it never
+    builds, live-probes, or touches disk, so callers on a request path add no
+    latency. ``None`` means the catalog is cold or has no group for this
+    provider; callers must fall back to their own source rather than treat it
+    as "no models".
+
+    This exists so the Settings providers card can report exactly what the model
+    picker shows. Re-running `_read_live_provider_model_ids()` per provider
+    would agree too, but at the cost of a network probe per card on every cold
+    read — the published snapshot is the same answer for free.
+    """
+    provenance = _models_cache_provenance
+    if provenance is None:
+        return None
+    snapshot, _fingerprint = provenance
+    if not isinstance(snapshot, dict):
+        return None
+    pid = str(provider_id or "").strip().lower()
+    if not pid:
+        return None
+    for group in snapshot.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        if str(group.get("provider_id") or "").strip().lower() != pid:
+            continue
+        entries = [m for m in (group.get("models") or []) if isinstance(m, dict) and m.get("id")]
+        extra = [m for m in (group.get("extra_models") or []) if isinstance(m, dict) and m.get("id")]
+        combined = entries + extra
+        return copy.deepcopy(combined) if combined else None
+    return None
+
+
 def _endpoint_advertised_model_ids(provider_id: str | None) -> frozenset | None:
     """Model ids the given provider's group advertised in the current catalog.
 

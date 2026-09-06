@@ -483,3 +483,78 @@ def test_aliased_active_provider_keeps_its_own_namespaced_rows(alias, canonical)
 def test_commandcode_anthropic_is_not_folded_into_commandcode():
     """It is a separate agent provider profile, not an alias."""
     assert config._canonicalise_provider_id("commandcode-anthropic") != "commandcode"
+
+
+@pytest.mark.parametrize("alias,canonical", sorted(PROVIDER_ALIASES.items()))
+def test_config_stored_keys_are_found_through_provider_aliases(alias, canonical):
+    """`model.provider: <alias>` + a config key must read as configured.
+
+    Routing accepts the alias and the runtime can use the key, so a Settings
+    card that says "not configured" is the odd one out.
+    """
+    assert providers._provider_has_key(
+        canonical, config_data={"model": {"provider": alias, "api_key": "sk-test"}}
+    )
+    assert providers._provider_has_key(
+        canonical, config_data={"providers": {alias: {"api_key": "sk-test"}}}
+    )
+
+
+@pytest.mark.parametrize(
+    "alias,card",
+    [("grok", "x-ai"), ("z-ai", "zai"), ("opencode_go", "opencode-go"), ("qwen", "alibaba")],
+)
+def test_alias_credential_lookup_covers_pre_existing_aliases(alias, card):
+    """The same defect predates this PR for the WebUI's long-standing aliases."""
+    assert providers._provider_has_key(
+        card, config_data={"model": {"provider": alias, "api_key": "sk-test"}}
+    )
+
+
+def test_alias_credential_lookup_does_not_over_match():
+    """An unrelated provider must not inherit another's configured key."""
+    assert not providers._provider_has_key(
+        "deepseek", config_data={"model": {"provider": "ramp", "api_key": "sk-test"}}
+    )
+    assert not providers._provider_has_key(
+        "zai", config_data={"providers": {"ramp": {"api_key": "sk-test"}}}
+    )
+
+
+def test_providers_card_reports_the_published_picker_catalog(monkeypatch, tmp_path):
+    """Settings must show what the picker published, not a stale static snapshot."""
+    import api.profiles as profiles
+
+    published = [{"id": "live-only-model", "label": "Live Only Model"}]
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(providers, "_PROVIDER_DISPLAY", {"commandcode": "CommandCode"})
+    monkeypatch.setattr(providers, "_PROVIDER_MODELS", {"commandcode": [{"id": "stale", "label": "Stale"}]})
+    monkeypatch.setattr(providers, "_OAUTH_PROVIDERS", frozenset())
+    monkeypatch.setattr(providers, "plugin_model_provider_ids", lambda: set())
+    monkeypatch.setattr(providers, "is_plugin_model_provider", lambda _pid: False)
+    monkeypatch.setattr(providers, "get_config", lambda: {"model": {}, "providers": {}})
+    monkeypatch.setattr(providers, "_provider_has_key", lambda _pid, **_kw: True)
+    monkeypatch.setattr(providers, "published_catalog_models", lambda pid: published if pid == "commandcode" else None)
+
+    entry = next(p for p in providers.get_providers()["providers"] if p["id"] == "commandcode")
+
+    assert [m["id"] for m in entry["models"]] == ["live-only-model"]
+    assert entry["models_total"] == 1
+
+
+def test_providers_card_falls_back_to_static_when_the_catalog_is_cold():
+    """A cold catalog must render the curated list, never an empty card."""
+    assert config.published_catalog_models("commandcode") is None or isinstance(
+        config.published_catalog_models("commandcode"), list
+    )
+    assert config.published_catalog_models("definitely-not-a-provider") is None
+
+
+def test_published_catalog_models_never_probes(monkeypatch):
+    """It reads the snapshot only — no network, no rebuild on a request path."""
+    def _boom(*_a, **_k):
+        raise AssertionError("published_catalog_models must not probe")
+
+    monkeypatch.setattr(config, "_read_live_provider_model_ids", _boom)
+    monkeypatch.setattr(config, "get_available_models", _boom)
+    config.published_catalog_models("commandcode")

@@ -37,12 +37,15 @@ except ImportError:  # pragma: no cover - exercised only where fcntl is unavaila
 from api.config import (
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
+    _canonicalise_provider_id,
+    _resolve_provider_alias,
     _coerce_provider_cost_budget,
     _configured_model_ids,
     _custom_provider_slug_from_name,
     _get_label_for_model,
     _models_from_live_provider_ids,
     _pool_entry_payloads,
+    published_catalog_models,
     _read_live_provider_model_ids,
     _read_visible_codex_cache_model_ids,
     _save_yaml_config_file,
@@ -1357,14 +1360,15 @@ def _provider_has_key(provider_id: str, config_data: dict | None = None) -> bool
     # "configured" when the active provider had a top-level api_key.
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict) and str(model_cfg.get("api_key") or "").strip():
-        active_provider = model_cfg.get("provider")
-        if active_provider and str(active_provider).strip().lower() == provider_id.lower():
+        # Alias-tolerant: `model.provider: ramp` names the `router` card, and
+        # routing already accepts it, so credential detection must agree.
+        if _config_provider_is(model_cfg.get("provider"), provider_id):
             if _provider_value_counts_as_api_key(provider_id, model_cfg.get("api_key")):
                 return True
     # Check providers.<id>.api_key
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
-        provider_cfg = providers_cfg.get(provider_id, {})
+        provider_cfg = _config_provider_cfg_for(providers_cfg, provider_id)
         if isinstance(provider_cfg, dict) and str(provider_cfg.get("api_key") or "").strip():
             if _provider_value_counts_as_api_key(provider_id, provider_cfg.get("api_key")):
                 return True
@@ -1377,6 +1381,54 @@ def _provider_has_key(provider_id: str, config_data: dict | None = None) -> bool
                     if _provider_value_counts_as_api_key(provider_id, cp.get("api_key")):
                         return True
     return False
+
+
+def _provider_identity(name: object) -> str:
+    """Fold *name* to one comparable identity for credential lookups.
+
+    `_canonicalise_provider_id()` alone is not enough: it deliberately preserves
+    ``x-ai`` rather than folding it to the agent's ``xai`` target, because the
+    WebUI indexes its cards by ``x-ai``. That is right for picking a card and
+    wrong for asking "do these two names mean the same provider?", which is all
+    this is used for — the result is never used as a card id.
+    """
+    slug = _canonicalise_provider_id(name)
+    if not slug:
+        return ""
+    return _resolve_provider_alias(slug) or slug
+
+
+def _config_provider_cfg_for(providers_cfg: object, provider_id: str) -> dict:
+    """Return ``providers.<id>`` for *provider_id*, matching aliases too.
+
+    Users write the provider name they see on the vendor's site (``z-ai``,
+    ``ramp``, ``actual-computer``); the WebUI keys its cards by canonical slug.
+    An exact-key lookup therefore misses an aliased block and reports a
+    configured provider as unconfigured.
+    """
+    if not isinstance(providers_cfg, dict):
+        return {}
+    exact = providers_cfg.get(provider_id)
+    if isinstance(exact, dict):
+        return exact
+    canonical = _provider_identity(provider_id)
+    if not canonical:
+        return {}
+    for key, value in providers_cfg.items():
+        if isinstance(value, dict) and _provider_identity(key) == canonical:
+            return value
+    return {}
+
+
+def _config_provider_is(active_provider: object, provider_id: str) -> bool:
+    """True when ``model.provider`` names *provider_id*, alias or not."""
+    active = str(active_provider or "").strip().lower()
+    if not active:
+        return False
+    if active == provider_id.strip().lower():
+        return True
+    identity = _provider_identity(active)
+    return bool(identity) and identity == _provider_identity(provider_id)
 
 
 def _get_provider_api_key(provider_id: str, credential_id: str | None = None) -> str | None:
@@ -1414,14 +1466,17 @@ def _get_provider_api_key(provider_id: str, credential_id: str | None = None) ->
     cfg = get_config()
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict):
-        active_provider = str(model_cfg.get("provider") or "").strip().lower()
         model_key = str(model_cfg.get("api_key") or "").strip()
-        if model_key and active_provider == provider_id and _provider_value_counts_as_api_key(provider_id, model_key):
+        if (
+            model_key
+            and _config_provider_is(model_cfg.get("provider"), provider_id)
+            and _provider_value_counts_as_api_key(provider_id, model_key)
+        ):
             return model_key
 
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
-        provider_cfg = providers_cfg.get(provider_id, {})
+        provider_cfg = _config_provider_cfg_for(providers_cfg, provider_id)
         if isinstance(provider_cfg, dict):
             provider_key = str(provider_cfg.get("api_key") or "").strip()
             if _provider_value_counts_as_api_key(provider_id, provider_key):
@@ -3353,6 +3408,25 @@ def get_provider_cost_history(provider_id: str | None = None, days: int = 7) -> 
 # SECTION: Public API
 
 
+# Providers whose model list is NOT a plain live-then-static lookup. Each is
+# resolved by its own branch inside get_providers() before the generic pass, or
+# must not be probed at all — running the generic lookup over them would undo
+# that work.
+_BESPOKE_CATALOG_PROVIDERS = frozenset({
+    # Merges the local Codex CLI cache on top of the live catalog (#1807).
+    "openai-codex",
+    # Renders a featured subset while reporting the full live count (#1567).
+    "nous",
+    # Already resolved live above.
+    "xai-oauth",
+    "lmstudio",
+    # The public catalog advertises models the Go tier cannot serve, so the
+    # picker deliberately skips its live probe — mirror that here or the
+    # Settings card reinstates exactly the entries #5311 removed.
+    "opencode-go",
+})
+
+
 def get_providers() -> dict[str, Any]:
     """Return a list of all known providers with their configuration status.
 
@@ -3568,27 +3642,36 @@ def get_providers() -> dict[str, Any]:
                     models_total = len(models)
             except Exception:
                 logger.debug("Failed to load LM Studio models from hermes_cli")
-        # Plugin providers have no static catalog, and neither do the
-        # curated-but-live-only ones (router, actual): their entry in
-        # _PROVIDER_MODELS is deliberately empty because the catalog is
-        # account/cluster scoped. Without the second clause /api/providers
-        # reports `models: []` for them while /api/models shows the same
-        # provider's live catalog — the Settings card would read "0 models"
-        # for a provider the picker populates fine.
-        if is_plugin_model_provider(pid) or (pid in _PROVIDER_MODELS and not _PROVIDER_MODELS[pid]):
+        # Prefer the live catalog, exactly like the picker
+        # (_build_available_models_uncached asks hermes_cli first and treats
+        # _PROVIDER_MODELS as the offline fallback). Gating this on "is a plugin"
+        # or "has an empty static list" left every statically-catalogued provider
+        # reporting whatever snapshot happened to be committed, so the Settings
+        # card and /api/models disagreed about the same account whenever the two
+        # drifted. The static list stays the fallback: `if live_models` means a
+        # cold or failed probe still renders the curated set.
+        if pid not in _BESPOKE_CATALOG_PROVIDERS:
             try:
-                live_models = _models_from_live_provider_ids(
-                    pid,
-                    _read_live_provider_model_ids(pid),
-                )
-                if live_models:
-                    models = live_models
+                published = published_catalog_models(pid)
+                if published:
+                    models = published
                     models_total = len(models)
+                elif is_plugin_model_provider(pid) or (
+                    pid in _PROVIDER_MODELS and not _PROVIDER_MODELS[pid]
+                ):
+                    # Cold catalog and nothing static to fall back on — these
+                    # would render "0 models" for a working provider, so pay for
+                    # one probe rather than show a wrong count.
+                    live_models = _models_from_live_provider_ids(
+                        pid,
+                        _read_live_provider_model_ids(pid),
+                    )
+                    if live_models:
+                        models = live_models
+                        models_total = len(models)
             except Exception:
                 logger.debug(
-                    "Failed to load plugin model-provider catalog for %s",
-                    pid,
-                    exc_info=True,
+                    "Failed to resolve published catalog for %s", pid, exc_info=True
                 )
         # Also include models from config.yaml providers section
         if isinstance(providers_cfg, dict):
