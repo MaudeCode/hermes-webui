@@ -52,6 +52,8 @@ const LOCALES = {
     text_pasted: 'Pasted text attached as ',
     // messages.js
     edit_message: 'Edit message',
+    show_full_message: 'Show full message',
+    show_less_message: 'Show less',
     regenerate: 'Regenerate response',
     copy: 'Copy',
     copied: 'Copied!',
@@ -1836,6 +1838,8 @@ const LOCALES = {
     text_pasted: 'Testo incollato allegato come ',
     // messages.js
     edit_message: 'Modifica messaggio',
+    show_full_message: 'Mostra messaggio completo',
+    show_less_message: 'Mostra meno',
     regenerate: 'Rigenera risposta',
     copy: 'Copia',
     copied: 'Copiato!',
@@ -3602,6 +3606,8 @@ const LOCALES = {
     text_pasted: '貼り付けたテキストを添付しました: ',
     // messages.js
     edit_message: 'メッセージを編集',
+    show_full_message: 'メッセージ全体を表示',
+    show_less_message: '表示を減らす',
     regenerate: '応答を再生成',
     copy: 'コピー',
     copied: 'コピーしました!',
@@ -5370,6 +5376,8 @@ const LOCALES = {
     image_pasted: 'Изображение вставлено: ',
     text_pasted: 'Вставленный текст прикреплён как ',
     edit_message: 'Редактировать сообщение',
+    show_full_message: 'Показать сообщение полностью',
+    show_less_message: 'Свернуть',
     regenerate: 'Сгенерировать ответ заново',
     copy: 'Копировать',
     copied: 'Скопировано!',
@@ -7103,6 +7111,8 @@ const LOCALES = {
     text_pasted: 'Texto pegado adjuntado como ',
     // messages.js
     edit_message: 'Editar mensaje',
+    show_full_message: 'Mostrar mensaje completo',
+    show_less_message: 'Mostrar menos',
     regenerate: 'Regenerar respuesta',
     copy: 'Copiar',
     copied: '¡Copiado!',
@@ -8815,6 +8825,8 @@ const LOCALES = {
     text_pasted: 'Eingefügter Text angehängt als ',
     // messages.js
     edit_message: 'Nachricht bearbeiten',
+    show_full_message: 'Vollständige Nachricht anzeigen',
+    show_less_message: 'Weniger anzeigen',
     regenerate: 'Antwort regenerieren',
     copy: 'Kopieren',
     copied: 'Kopiert!',
@@ -10521,6 +10533,8 @@ const LOCALES = {
     text_pasted: '已将粘贴文本附加为：',
     // messages.js
     edit_message: '编辑消息',
+    show_full_message: '显示完整消息',
+    show_less_message: '收起',
     regenerate: '重新生成回复',
     copy: '复制',
     copied: '已复制',
@@ -12237,6 +12251,8 @@ const LOCALES = {
     text_pasted: '已將貼上文字附加為：',
     // messages.js
     edit_message: '編輯訊息',
+    show_full_message: '顯示完整訊息',
+    show_less_message: '收合',
     regenerate: '重新產生回覆',
     copy: '複製',
     copied: '已複製！',
@@ -13990,6 +14006,8 @@ const LOCALES = {
     text_pasted: 'Texto colado anexado como ',
     // messages.js
     edit_message: 'Editar mensagem',
+    show_full_message: 'Mostrar mensagem completa',
+    show_less_message: 'Mostrar menos',
     regenerate: 'Regenerar resposta',
     copy: 'Copiar',
     copied: 'Copiado!',
@@ -15575,6 +15593,8 @@ const LOCALES = {
     text_pasted: '붙여넣은 텍스트를 첨부했습니다: ',
     // messages.js
     edit_message: '메시지 편집',
+    show_full_message: '전체 메시지 보기',
+    show_less_message: '접기',
     regenerate: '응답 다시 생성',
     copy: '복사',
     copied: '복사됨!',
@@ -17342,6 +17362,8 @@ const LOCALES = {
     image_pasted: 'Image collée : ',
     text_pasted: 'Texte collé joint en tant que ',
     edit_message: 'Modifier le message',
+    show_full_message: 'Afficher le message complet',
+    show_less_message: 'Afficher moins',
     regenerate: 'Régénérer la réponse',
     copy: 'Copier',
     copied: 'Copié !',
@@ -20377,6 +20399,8 @@ const LOCALES = {
     edit: 'Upravit',
     edit_failed: 'Úprava se nezdařila:',
     edit_message: 'Upravit zprávu',
+    show_full_message: 'Zobrazit celou zprávu',
+    show_less_message: 'Zobrazit méně',
     edit_title: 'Upravit tento soubor',
     expand_all: 'Rozbalit vše',
     external_link_grant_expired: 'Toto externí zobrazení vypršelo. Znovu otevřete symbolický odkaz únikového cíle a znovu jej autorizujte.',
@@ -20812,6 +20836,8 @@ const LOCALES = {
     text_pasted: 'Yapıştırılan metin şu adla eklendi: ',
     // messages.js
     edit_message: 'Mesajı düzenle',
+    show_full_message: 'Tüm mesajı göster',
+    show_less_message: 'Daha az göster',
     regenerate: 'Yanıtı yeniden oluştur',
     copy: 'Kopyala',
     copied: 'Kopyalandı!',
@@ -22571,6 +22597,8 @@ const LOCALES = {
     text_pasted: 'Wklejony tekst załączono jako ',
     // messages.js
     edit_message: 'Edytuj wiadomość',
+    show_full_message: 'Pokaż całą wiadomość',
+    show_less_message: 'Pokaż mniej',
     regenerate: 'Wygeneruj ponownie odpowiedź',
     copy: 'Kopiuj',
     copied: 'Skopiowano!',
@@ -24330,6 +24358,8 @@ const LOCALES = {
     image_pasted: 'Đã dán ảnh: ',
     // messages.js
     edit_message: 'Chỉnh sửa tin nhắn',
+    show_full_message: 'Hiển thị toàn bộ tin nhắn',
+    show_less_message: 'Thu gọn',
     regenerate: 'Tạo lại phản hồi',
     copy: 'Sao chép',
     copied: 'Đã sao chép!',

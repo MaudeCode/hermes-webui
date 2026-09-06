@@ -187,6 +187,17 @@ scroll/jump/outline buttons) use `--chat-col-inset` to ride the column's right
 edge instead of the pane's. Do not add a second width rule, a per-surface
 gutter, or a wide-viewport breakpoint.
 
+User bubbles are right-aligned inside that column and may use up to 80% of it
+(90% under 600px), sized as a percentage of `--msg-max` rather than of the
+center pane. Length is handled by progressive disclosure, not by a narrower
+bubble: a user message longer than 600 characters or 8 lines renders clipped to
+8 lines behind a quiet fade with a **Show full message** / **Show less** button
+that carries `aria-expanded`. The thresholds live in two places that must move
+together — `USER_MSG_COLLAPSE_CHARS` / `USER_MSG_COLLAPSE_LINES` in
+`static/ui.js` and `--msg-collapse-lines` in `static/style.css`. The fade sits
+on the `.msg-clip` wrapper, not on `.msg-body`, so skins that repaint the bubble
+background with `!important` keep a solid bubble.
+
 ## Themes and skins
 
 Theme and skin work should use the existing variable system. `THEMES.md` points

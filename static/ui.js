@@ -9080,6 +9080,46 @@ function copyStatusSessionId(btn){
     setTimeout(()=>{btn.innerHTML=orig;btn.classList.remove('copied');},1500);
   }).catch(()=>showToast(t('copy_failed')));
 }
+// ── HWEB-3: progressive disclosure for long user messages ──
+// A pasted prompt or log dump otherwise dominates the transcript. Anything past
+// 600 characters OR 8 lines renders clipped to the collapsed height with a quiet
+// fade and a keyboard-accessible disclosure button. The line budget mirrors
+// --msg-collapse-lines in style.css — change both together.
+const USER_MSG_COLLAPSE_CHARS=600;
+const USER_MSG_COLLAPSE_LINES=8;
+function _userMessageNeedsCollapse(text){
+  const s=String(text==null?'':text);
+  if(s.length>USER_MSG_COLLAPSE_CHARS) return true;
+  let lines=1;
+  for(let i=0;i<s.length;i++){
+    if(s.charCodeAt(i)===10&&++lines>USER_MSG_COLLAPSE_LINES) return true;
+  }
+  return false;
+}
+// The clip wrapper — not .msg-body — carries the fade, so the bubble's own
+// background/border stay solid in every skin instead of fading to the page.
+// `expanded` is the recycled row's current disclosure state, so a rerender
+// reproduces byte-identical markup and the caller's innerHTML comparison keeps
+// skipping the rebuild instead of silently re-collapsing what the reader opened.
+function _userMessageBodyHtml(bodyHtml, rawText, rawIdx, expanded){
+  if(!_userMessageNeedsCollapse(rawText)) return `<div class="msg-body">${bodyHtml}</div>`;
+  const clipId=`msgClip${rawIdx}`;
+  const label=t(expanded?'show_less_message':'show_full_message');
+  return `<div class="msg-body"><div class="msg-clip" id="${clipId}">${bodyHtml}</div></div>`
+    +`<button type="button" class="msg-expand-btn" aria-expanded="${expanded?'true':'false'}"`
+    +` aria-controls="${clipId}" onclick="toggleMessageExpand(this)">${esc(label)}</button>`;
+}
+function toggleMessageExpand(btn){
+  const row=btn&&btn.closest?btn.closest('.msg-row'):null;
+  if(!row) return;
+  const expanded=row.dataset.msgExpanded==='1';
+  if(expanded) delete row.dataset.msgExpanded; else row.dataset.msgExpanded='1';
+  btn.setAttribute('aria-expanded',expanded?'false':'true');
+  btn.textContent=t(expanded?'show_full_message':'show_less_message');
+  // Deliberately no scrollTop write: the bubble grows and shrinks downward, so
+  // the row's top edge — and the reader's scroll offset — never move. Any
+  // "helpful" re-anchor here is exactly the viewport jump this must not cause.
+}
 function copyMsg(btn){
   const row=btn.closest('[data-raw-text]');
   const text=row?row.dataset.rawText:'';
@@ -18206,7 +18246,16 @@ function renderMessages(options){
       let row=_msgNodeRecycleEnabled?_recycleStash.get(rawIdx):null;
       if(row&&(!row.classList.contains('msg-row')||row.classList.contains('assistant-turn'))) row=null;
       const newRawText=String(displayContent).trim();
-      const nextRowHtml=`${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`;
+      // HWEB-3: carry a recycled row's disclosure state into the markup, and drop
+      // it when the row's new text is short enough that no control is rendered.
+      // The typeof guards keep renderMessages runnable in the node test harnesses
+      // that extract it without these helpers (they stub every collaborator by name).
+      const collapsible=typeof _userMessageNeedsCollapse==='function'&&_userMessageNeedsCollapse(newRawText);
+      const wasExpanded=collapsible&&!!(row&&row.dataset&&row.dataset.msgExpanded==='1');
+      const userBodyHtml=typeof _userMessageBodyHtml==='function'
+        ? _userMessageBodyHtml(bodyHtml,newRawText,rawIdx,wasExpanded)
+        : `<div class="msg-body">${bodyHtml}</div>`;
+      const nextRowHtml=`${filesHtml}${userBodyHtml}${footHtml}`;
       if(row){
         row.className='msg-row';
         row.id=_userMessageDomId(rawIdx);
@@ -18230,6 +18279,7 @@ function renderMessages(options){
         row.dataset.rawText=newRawText;
         row.innerHTML=nextRowHtml;
       }
+      if(wasExpanded) row.dataset.msgExpanded='1'; else delete row.dataset.msgExpanded;
       // Reserve this user row's real off-screen height up front so a wipe-and-rebuild
       // does not collapse scrollHeight to the flat 96px estimate (the collapse that
       // clamps/re-anchors the viewport on mobile — #5637/#5638, both jump classes). Uses
