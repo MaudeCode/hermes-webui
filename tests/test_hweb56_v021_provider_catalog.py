@@ -630,3 +630,111 @@ def test_unknown_providers_block_still_gets_its_own_card(monkeypatch, tmp_path):
 
     ids = [p["id"] for p in providers.get_providers()["providers"]]
     assert "my-own-relay" in ids
+
+
+def _write_config(tmp_path, data):
+    import yaml
+
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize("alias,card", [("ramp", "router"), ("actual-computer", "actual")])
+def test_removing_a_key_clears_the_aliased_config_block(monkeypatch, tmp_path, alias, card):
+    """Remove must clear what `_provider_has_key()` accepts, or it lies.
+
+    Detection honours `providers.<alias>` and `model.provider: <alias>`, so a
+    removal that only matches the literal card id returns ok while leaving the
+    credential live — the provider is still configured after a reload.
+    """
+    import yaml
+    import api.config as cfgmod
+
+    path = _write_config(
+        tmp_path,
+        {"model": {"provider": alias, "api_key": "sk-model"}, "providers": {alias: {"api_key": "sk-block"}}},
+    )
+    monkeypatch.setattr(cfgmod, "_get_config_path", lambda: path)
+
+    providers._clean_provider_key_from_config(card)
+
+    written = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert "api_key" not in (written.get("providers") or {}).get(alias, {})
+    assert "api_key" not in (written.get("model") or {})
+
+
+def test_removing_a_key_leaves_other_providers_alone(monkeypatch, tmp_path):
+    """Alias-aware removal must not reach into an unrelated provider's block."""
+    import yaml
+    import api.config as cfgmod
+
+    path = _write_config(tmp_path, {"providers": {"ramp": {"api_key": "sk-router"}, "deepseek": {"api_key": "sk-ds"}}})
+    monkeypatch.setattr(cfgmod, "_get_config_path", lambda: path)
+
+    providers._clean_provider_key_from_config("router")
+
+    written = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert "api_key" not in written["providers"]["ramp"]
+    assert written["providers"]["deepseek"]["api_key"] == "sk-ds"
+
+
+def test_aliased_models_block_reaches_the_canonical_card(monkeypatch, tmp_path):
+    """`providers.ramp.models` must land on the router card it now folds into."""
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(providers, "_PROVIDER_DISPLAY", {"router": "Ramp Router"})
+    monkeypatch.setattr(providers, "_PROVIDER_MODELS", {"router": []})
+    monkeypatch.setattr(providers, "_OAUTH_PROVIDERS", frozenset())
+    monkeypatch.setattr(providers, "plugin_model_provider_ids", lambda: set())
+    monkeypatch.setattr(providers, "is_plugin_model_provider", lambda _pid: False)
+    monkeypatch.setattr(providers, "published_catalog_models", lambda _pid: None)
+    monkeypatch.setattr(providers, "_probe_live_models_within", lambda _pid, _d: [])
+    monkeypatch.setattr(
+        providers,
+        "get_config",
+        lambda: {"model": {}, "providers": {"ramp": {"api_key": "sk", "models": ["acct/model-a"]}}},
+    )
+
+    entry = next(p for p in providers.get_providers()["providers"] if p["id"] == "router")
+    assert "acct/model-a" in {m["id"] for m in entry["models"]}
+
+
+def test_cold_catalog_probe_is_bounded_by_one_request_budget(monkeypatch):
+    """A slow provider must not stall the endpoint, and must fall back to static."""
+    import time as _time
+
+    monkeypatch.setattr(providers, "_COLD_CATALOG_PROBE_BUDGET_S", 0.2)
+
+    def _hang(_pid):
+        _time.sleep(30)
+        return ["never-returned"]
+
+    monkeypatch.setattr(providers, "_read_live_provider_model_ids", _hang)
+
+    started = _time.monotonic()
+    result = providers._probe_live_models_within("commandcode", _time.monotonic() + 0.2)
+    elapsed = _time.monotonic() - started
+
+    assert result == []
+    assert elapsed < 5, f"probe blocked for {elapsed:.1f}s despite the deadline"
+
+
+def test_cold_catalog_probe_returns_live_models_when_fast(monkeypatch):
+    monkeypatch.setattr(providers, "_read_live_provider_model_ids", lambda _pid: ["a/b"])
+    import time as _time
+
+    out = providers._probe_live_models_within("commandcode", _time.monotonic() + 5)
+    assert [m["id"] for m in out] == ["a/b"]
+
+
+def test_expired_budget_skips_the_probe_entirely(monkeypatch):
+    """Once the request budget is spent, remaining providers must not probe."""
+    def _boom(_pid):
+        raise AssertionError("probe ran after the deadline")
+
+    monkeypatch.setattr(providers, "_read_live_provider_model_ids", _boom)
+    import time as _time
+
+    assert providers._probe_live_models_within("commandcode", _time.monotonic() - 1) == []

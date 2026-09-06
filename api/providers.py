@@ -3408,6 +3408,55 @@ def get_provider_cost_history(provider_id: str | None = None, days: int = 7) -> 
 # SECTION: Public API
 
 
+# A cold-catalog probe is a network call on a request path, so the whole
+# endpoint gets ONE budget rather than each provider getting its own timeout:
+# the cost of /api/providers must not scale with how many providers a user has
+# configured. Whatever does not answer inside the budget keeps its static list,
+# which is the same answer this endpoint gave before probing existed.
+_COLD_CATALOG_PROBE_BUDGET_S = 2.0
+_COLD_CATALOG_PROBE_MAX_WORKERS = 4
+_cold_catalog_probe_executor: ThreadPoolExecutor | None = None
+_cold_catalog_probe_lock = threading.Lock()
+
+
+def _get_cold_catalog_probe_executor() -> ThreadPoolExecutor:
+    """Shared, bounded pool for cold-catalog probes.
+
+    Deliberately module-level and never shut down: a probe that overruns the
+    budget is abandoned by the caller but keeps running, and a per-call
+    executor would either block on shutdown (defeating the deadline) or spawn an
+    unbounded number of threads. A fixed pool means abandoned work queues
+    instead of multiplying.
+    """
+    global _cold_catalog_probe_executor
+    with _cold_catalog_probe_lock:
+        if _cold_catalog_probe_executor is None:
+            _cold_catalog_probe_executor = ThreadPoolExecutor(
+                max_workers=_COLD_CATALOG_PROBE_MAX_WORKERS,
+                thread_name_prefix="cold-catalog-probe",
+            )
+        return _cold_catalog_probe_executor
+
+
+def _probe_live_models_within(provider_id: str, deadline: float) -> list[dict]:
+    """Live catalog for *provider_id*, or [] if it cannot answer by *deadline*."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return []
+    future = _get_cold_catalog_probe_executor().submit(
+        lambda: _models_from_live_provider_ids(
+            provider_id, _read_live_provider_model_ids(provider_id)
+        )
+    )
+    try:
+        return future.result(timeout=remaining) or []
+    except Exception:
+        # Timeout, or the probe itself failed. Either way the caller falls back
+        # to the static catalog rather than rendering an empty card.
+        logger.debug("Cold catalog probe did not complete for %s", provider_id)
+        return []
+
+
 # Providers whose model list is NOT a plain live-then-static lookup. Each is
 # resolved by its own branch inside get_providers() before the generic pass, or
 # must not be probed at all — running the generic lookup over them would undo
@@ -3465,6 +3514,9 @@ def get_providers() -> dict[str, Any]:
 
     # Add OAuth providers even if not in _PROVIDER_DISPLAY
     known_ids.update(_OAUTH_PROVIDERS)
+
+    # One budget for the whole response, not one per provider.
+    _probe_deadline = time.monotonic() + _COLD_CATALOG_PROBE_BUDGET_S
 
     for pid in sorted(known_ids):
         display_name = effective_provider_display_name(pid, _PROVIDER_DISPLAY)
@@ -3664,16 +3716,19 @@ def get_providers() -> dict[str, Any]:
                 if published:
                     models = published
                     models_total = len(models)
-                elif is_plugin_model_provider(pid) or (
-                    pid in _PROVIDER_MODELS and not _PROVIDER_MODELS[pid]
-                ):
-                    # Cold catalog and nothing static to fall back on — these
-                    # would render "0 models" for a working provider, so pay for
-                    # one probe rather than show a wrong count.
-                    live_models = _models_from_live_provider_ids(
-                        pid,
-                        _read_live_provider_model_ids(pid),
-                    )
+                elif has_key or is_plugin_model_provider(pid):
+                    # Cold catalog (startup, or just after profile invalidation):
+                    # the static list may not match the account, and the picker
+                    # will show the live one moments later. Probe so the card
+                    # does not serve — and 30s-cache — a stale answer.
+                    #
+                    # Gated on `has_key` so this cannot become a fan-out across
+                    # every known provider: an unconfigured provider has no
+                    # account catalog to discover, so probing it buys nothing and
+                    # costs a request. In practice that bounds this to the
+                    # handful the user actually configured, and only until the
+                    # picker publishes its snapshot.
+                    live_models = _probe_live_models_within(pid, _probe_deadline)
                     if live_models:
                         models = live_models
                         models_total = len(models)
@@ -3681,9 +3736,12 @@ def get_providers() -> dict[str, Any]:
                 logger.debug(
                     "Failed to resolve published catalog for %s", pid, exc_info=True
                 )
-        # Also include models from config.yaml providers section
+        # Also include models from config.yaml providers section. Alias-aware to
+        # match the card fold above: `providers.ramp` no longer renders its own
+        # card, so its `models:` must reach the canonical router card or the
+        # user's configured choices vanish entirely.
         if isinstance(providers_cfg, dict):
-            provider_cfg = providers_cfg.get(pid, {})
+            provider_cfg = _config_provider_cfg_for(providers_cfg, pid)
             if isinstance(provider_cfg, dict) and "models" in provider_cfg:
                 cfg_models = provider_cfg["models"]
                 if isinstance(cfg_models, dict):
@@ -3933,9 +3991,14 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
                 return
 
             # 1. Clean providers.<id>.api_key
+            # Alias-aware on both sides: `_provider_has_key()` accepts
+            # `providers.ramp` / `model.provider: ramp` for the router card, so
+            # Remove has to clear the same blocks. Comparing the literal id here
+            # deleted only the env var, returned ok, and left the YAML
+            # credential live — the provider stayed configured after reload.
             providers_cfg = cfg.get("providers") or {}
             if isinstance(providers_cfg, dict):
-                provider_cfg = providers_cfg.get(provider_id, {})
+                provider_cfg = _config_provider_cfg_for(providers_cfg, provider_id)
                 if isinstance(provider_cfg, dict) and provider_cfg.get("api_key"):
                     del provider_cfg["api_key"]
                     changed = True
@@ -3943,8 +4006,7 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
             # 2. Clean model.api_key — only if this provider is the active one
             model_cfg = cfg.get("model", {})
             if isinstance(model_cfg, dict) and model_cfg.get("api_key"):
-                active_provider = model_cfg.get("provider")
-                if active_provider and str(active_provider).strip().lower() == provider_id.lower():
+                if _config_provider_is(model_cfg.get("provider"), provider_id):
                     del model_cfg["api_key"]
                     changed = True
 
