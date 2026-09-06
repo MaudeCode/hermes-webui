@@ -3490,12 +3490,44 @@ def _recover_dead_run_journal(session, stream_id: str | None) -> bool:
                 and message.get('_recovered_stream_id') == stream_id
             ):
                 return False
+        # A first pass for this run owns nothing in the transcript yet, so
+        # session-wide content dedupe could only mis-claim an unrelated
+        # historical row — `_find_existing_assistant_for_journal_content`
+        # matches from index 0 and there is no pending checkpoint here to bound
+        # the turn. An agent repeating an earlier answer would have its whole
+        # dead turn swallowed by that older row. Dedupe only against a run this
+        # path already partly recovered, which is the sole duplicate it can
+        # create; first passes follow `_apply_core_sync_or_error_marker` and
+        # append.
+        dedupe_existing = any(
+            isinstance(message, dict)
+            and message.get('_recovered_stream_id') == stream_id
+            for message in getattr(session, 'messages', None) or []
+        )
         recovered_output, terminal_error_recovered = (
             _recover_journaled_output_and_terminal_error(
-                session, stream_id, dedupe_existing=True,
+                session, stream_id, dedupe_existing=dedupe_existing,
             )
         )
         if not recovered_output and not terminal_error_recovered:
+            # Inconclusive is not conclusively empty. The journal may still be
+            # arriving (WSL2 9p / DrvFs page-cache loss, an un-fsynced tail), or
+            # it may hold visible output that this pass could not place. The
+            # caller clears `active_stream_id` next, and that is the only key
+            # back to the journal, so hand it to the existing lazy-retry hook
+            # instead of failing open and losing the run for good.
+            if (
+                _journal_is_still_arriving(session, stream_id)
+                or _run_journal_has_visible_output(session, stream_id)
+            ):
+                marker = _build_recovery_marker_with_retry_hook(
+                    recovered_output=False,
+                    stream_id=stream_id,
+                    pending_started_at=getattr(session, 'pending_started_at', None),
+                )
+                marker['_recovered_stream_id'] = stream_id
+                session.messages.append(marker)
+                return True
             return False
         if (
             not terminal_error_recovered

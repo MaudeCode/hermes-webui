@@ -196,10 +196,12 @@ def test_errored_dead_run_materializes_the_gateway_error():
     assert session.messages[-1]["_error"] is True
 
 
-def test_empty_journal_leaves_the_transcript_untouched():
+def test_conclusively_empty_journal_leaves_the_transcript_untouched():
+    """A sealed journal with no visible output is not an inconclusive read."""
     session_id = "hweb13_empty"
     stream_id = "hweb13_stream_empty"
     session = _dead_session(session_id, stream_id)
+    append_run_event(session_id, stream_id, "done", {})
 
     assert _recover_dead_run_journal(session, stream_id) is False
     assert len(session.messages) == 1
@@ -274,3 +276,56 @@ def test_pending_turns_still_route_through_core_sync_repair(monkeypatch):
     ]
     assert len([m for m in session.messages if m.get("type") == "interrupted"]) == 1
     assert session.pending_user_message is None
+
+
+def test_invisible_journal_keeps_the_stream_id_on_a_retry_hook():
+    """A journal that is not yet visible must not lose its only lookup key.
+
+    `active_stream_id` is the only way back to the run journal.  On a
+    delayed-visibility filesystem the journal appears moments later, so hand the
+    stream id to the existing lazy-retry hook rather than clearing it.
+    """
+    session_id = "hweb13_invisible"
+    stream_id = "hweb13_stream_invisible"
+    session = _dead_session(session_id, stream_id)
+    # No journal events at all yet — the file has not become visible.
+
+    assert _recover_dead_run_journal(session, stream_id) is True
+
+    marker = session.messages[-1]
+    assert marker["_pending_journal_recovery"] is True
+    assert marker["_journal_retry_stream_id"] == stream_id
+    assert marker["_journal_retry_attempts"] == 0
+
+    # The armed marker is what the read-side self-heal looks for, and the retry
+    # recovers the output once the journal lands.
+    assert models._session_has_pending_journal_retry(session) is True
+    append_run_event(session_id, stream_id, "interim_assistant", {"text": "Late but real output."})
+    assert models._retry_journal_recovery_in_place(session) is True
+    assert _visible(session) == ["Late but real output."]
+
+
+def test_repeated_historical_prose_is_not_claimed_by_an_unrelated_row():
+    """Journal prose matching an older answer must not be swallowed by it.
+
+    Without pending metadata there is no turn boundary, so session-wide content
+    dedupe could claim an unrelated historical assistant row — the dead run's
+    output and its interruption marker would both vanish.
+    """
+    session_id = "hweb13_repeat_prose"
+    stream_id = "hweb13_stream_repeat_prose"
+    repeated = "The migration is already applied; nothing further to do."
+    session = _dead_session(
+        session_id,
+        stream_id,
+        messages=[
+            {"role": "user", "content": "Is the migration applied?", "timestamp": 1},
+            {"role": "assistant", "content": repeated, "timestamp": 2},
+            {"role": "user", "content": "Check again after the restart", "timestamp": 3},
+        ],
+    )
+    append_run_event(session_id, stream_id, "interim_assistant", {"text": repeated})
+
+    assert _recover_dead_run_journal(session, stream_id) is True
+    assert _visible(session) == [repeated]
+    assert len([m for m in session.messages if m.get("type") == "interrupted"]) == 1
