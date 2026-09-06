@@ -798,13 +798,6 @@ _PROVIDER_ENV_VAR_ALIASES: dict[str, tuple[str, ...]] = {
     # show the groups as configured while chat fails the no-key path.
     "opencode-zen": ("OPENCODE_API_KEY",),
     "opencode-go": ("OPENCODE_API_KEY",),
-    # The v0.21.0 agent profiles accept several co-equal names for one key
-    # (providers.py HERMES_OVERLAYS / plugin `env_vars` tuples).  Reading the
-    # alternates too keeps Settings from reporting "no key" for a provider the
-    # agent is happily authenticating.
-    "nebius-token-factory": ("NEBIUS_TOKEN_FACTORY_API_KEY",),
-    "router": ("ROUTER_API_KEY",),
-    "meta-ai": ("META_API_KEY", "META_MODEL_API_KEY"),
 }
 
 _SELF_HOSTED_PROVIDER_IDS = frozenset({"ollama", "lmstudio"})
@@ -3575,7 +3568,14 @@ def get_providers() -> dict[str, Any]:
                     models_total = len(models)
             except Exception:
                 logger.debug("Failed to load LM Studio models from hermes_cli")
-        if is_plugin_model_provider(pid):
+        # Plugin providers have no static catalog, and neither do the
+        # curated-but-live-only ones (router, actual): their entry in
+        # _PROVIDER_MODELS is deliberately empty because the catalog is
+        # account/cluster scoped. Without the second clause /api/providers
+        # reports `models: []` for them while /api/models shows the same
+        # provider's live catalog — the Settings card would read "0 models"
+        # for a provider the picker populates fine.
+        if is_plugin_model_provider(pid) or (pid in _PROVIDER_MODELS and not _PROVIDER_MODELS[pid]):
             try:
                 live_models = _models_from_live_provider_ids(
                     pid,

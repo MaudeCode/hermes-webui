@@ -2378,6 +2378,14 @@ _PORTAL_PROVIDERS = {
     "nvidia",
     "commandcode",
     "nebius-token-factory",
+    # Live-only catalogs: Ramp Router routes across OpenAI/Anthropic/xAI and
+    # returns account-scoped ids like ``accounts/fireworks/models/kimi-k3``;
+    # Actual Computer serves your own cluster, which registers models under
+    # their full HuggingFace-style ``vendor/model`` name. Neither namespace
+    # belongs to the vendor it names, so the same qualification applies even
+    # though their static catalogs are empty.
+    "router",
+    "actual",
 }
 
 

@@ -206,7 +206,7 @@ def test_new_providers_reach_the_model_picker(monkeypatch, tmp_path):
 # ``vendor/model`` row from one of these falls through
 # ``resolve_model_provider``'s OpenRouter default, which either fails outright
 # (OpenRouter unconfigured) or bills the wrong account.
-NAMESPACED_AGGREGATORS = ("commandcode", "nebius-token-factory")
+NAMESPACED_AGGREGATORS = ("commandcode", "nebius-token-factory", "router", "actual")
 
 
 @pytest.mark.parametrize("slug", NAMESPACED_AGGREGATORS)
@@ -216,7 +216,14 @@ def test_namespaced_rows_route_to_their_own_provider(slug):
     own_cfg = {"model": {"provider": slug, "default": "x"}}
     other_cfg = {"model": {"provider": "anthropic", "default": "x"}}
 
-    for entry in config._PROVIDER_MODELS[slug]:
+    # router / actual carry no static rows — exercise the id shapes their live
+    # account catalogs actually return.
+    rows = config._PROVIDER_MODELS[slug] or [
+        {"id": "accounts/fireworks/models/kimi-k3", "label": "x"},
+        {"id": "Qwen/Qwen2.5-0.5B-Instruct-GGUF", "label": "x"},
+        {"id": "deepseek/deepseek-v4-pro", "label": "x"},
+    ]
+    for entry in rows:
         raw_id = entry["id"]
 
         # Selected while this provider is active — the id stays bare.
@@ -255,3 +262,44 @@ def test_nvidia_namespaced_rows_survive_the_round_trip():
         assert config.resolve_model_provider(active_id, config_data=cfg_nvidia)[:2] == (raw_id, "nvidia")
         cross_id = config._apply_provider_prefix([dict(entry)], "nvidia", "anthropic")[0]["id"]
         assert config.resolve_model_provider(cross_id, config_data=cfg_other)[:2] == (raw_id, "nvidia")
+
+
+@pytest.mark.parametrize("slug", ["router", "actual"])
+def test_live_only_providers_report_their_catalog_on_the_providers_endpoint(
+    monkeypatch, tmp_path, slug
+):
+    """`/api/providers` must not report 0 models for a live-only provider.
+
+    `get_providers()` initialises from `_PROVIDER_MODELS`, which is empty for
+    these two by design. Without the live lookup the Settings card reads "0
+    models" while `/api/models` renders the same provider's live catalog.
+    """
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(providers, "_PROVIDER_DISPLAY", {slug: config._PROVIDER_DISPLAY[slug]})
+    monkeypatch.setattr(providers, "_PROVIDER_MODELS", {slug: []})
+    monkeypatch.setattr(providers, "_OAUTH_PROVIDERS", frozenset())
+    monkeypatch.setattr(providers, "plugin_model_provider_ids", lambda: set())
+    monkeypatch.setattr(providers, "is_plugin_model_provider", lambda _pid: False)
+    monkeypatch.setattr(providers, "get_config", lambda: {"model": {}, "providers": {}})
+    monkeypatch.setattr(providers, "_provider_has_key", lambda _pid, **_kw: True)
+    monkeypatch.setattr(
+        providers, "_read_live_provider_model_ids", lambda _pid: ["vendor/model-a", "model-b"]
+    )
+
+    entry = next(p for p in providers.get_providers()["providers"] if p["id"] == slug)
+
+    assert entry["models_total"] == 2
+    assert {m["id"] for m in entry["models"]} == {"vendor/model-a", "model-b"}
+
+
+def test_env_var_removal_clears_every_name_that_grants_access():
+    """No provider may be detected via a name its key-removal path won't clear.
+
+    `_provider_has_key()` also honours `_PROVIDER_ENV_VAR_ALIASES`, but removal
+    writes only the canonical var. Any new provider that gained an alias here
+    would show "removed" in Settings while still being configured after reload.
+    """
+    for slug in NEW_PROVIDERS:
+        assert slug not in providers._PROVIDER_ENV_VAR_ALIASES
