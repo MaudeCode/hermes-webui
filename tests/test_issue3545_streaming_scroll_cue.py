@@ -80,6 +80,8 @@ def test_new_message_cue_i18n_keys_exist_in_locale_blocks():
 
 
 def test_new_message_cue_has_stable_pill_styling():
+    # HWEB-9: the base control is the pill now, so the new-message state only
+    # recolors it and the label span is always rendered.
     assert ".scroll-to-bottom-btn.scroll-to-bottom-btn--new-message" in STYLE_CSS
-    assert "max-width:min(220px,calc(100% - 40px))" in STYLE_CSS
-    assert ".scroll-to-bottom-btn.scroll-to-bottom-btn--new-message .session-jump-btn__text" in STYLE_CSS
+    assert "max-width:min(260px,calc(100% - 40px))" in STYLE_CSS
+    assert ".session-jump-btn__text{display:inline" in STYLE_CSS

@@ -673,7 +673,7 @@ const LOCALES = {
     settings_label_workspace_todos_tab: 'Show Todos tab in workspace panel',
     settings_desc_workspace_todos_tab: 'When enabled, a Todos tab appears in the workspace panel. The sidebar Todos panel remains available.',
     settings_label_session_jump_buttons: 'Show session jump buttons',
-    settings_desc_session_jump_buttons: 'Show floating Start and End buttons while reading long session histories.',
+    settings_desc_session_jump_buttons: 'Show a floating Start button for jumping to the beginning of long session histories.',
     settings_label_terminal_auto_expand: 'Auto-expand terminal on output',
     settings_desc_terminal_auto_expand: 'Expand the collapsed terminal panel automatically when a running command emits new output.',
 
@@ -2456,7 +2456,7 @@ const LOCALES = {
     settings_label_workspace_todos_tab: 'Mostra tab Todos nel pannello workspace',
     settings_desc_workspace_todos_tab: 'Se abilitato, nel pannello workspace appare una tab Todos. Il pannello Todos della barra laterale rimane disponibile.',
     settings_label_session_jump_buttons: 'Mostra pulsanti salto sessione',
-    settings_desc_session_jump_buttons: 'Mostra pulsanti fluttuanti Inizio e Fine durante la lettura di sessioni lunghe.',
+    settings_desc_session_jump_buttons: "Mostra un pulsante fluttuante Inizio per saltare all'inizio delle sessioni lunghe.",
     settings_label_terminal_auto_expand: 'Espandi automaticamente il terminale sull\'output',
     settings_desc_terminal_auto_expand: 'Espandi automaticamente il pannello terminale compresso quando un comando in esecuzione emette nuovo output.',
 
@@ -4222,7 +4222,7 @@ const LOCALES = {
     settings_label_workspace_todos_tab: 'ワークスペースパネルにTodosタブを表示',
     settings_desc_workspace_todos_tab: '有効にすると、ワークスペースパネルにTodosタブが表示されます。サイドバーのTodosパネルは引き続き利用できます。',
     settings_label_session_jump_buttons: 'セッションジャンプボタンを表示',
-    settings_desc_session_jump_buttons: '長いセッション履歴を読むときに、浮動表示の「開始」と「末尾」ボタンを表示します。',
+    settings_desc_session_jump_buttons: '長いセッション履歴の先頭へ移動するための浮動「開始」ボタンを表示します。',
     settings_label_terminal_auto_expand: '出力時にターミナルを自動展開',
     settings_desc_terminal_auto_expand: '実行中のコマンドが新しい出力を生成したときに、折りたたまれたターミナルパネルを自動的に展開します。',
 
@@ -6753,7 +6753,7 @@ const LOCALES = {
     settings_label_workspace_todos_tab: 'Показывать вкладку Todos в панели рабочей области',
     settings_desc_workspace_todos_tab: 'При включении в панели рабочей области появляется вкладка Todos. Боковая панель Todos остаётся доступной.',
     settings_label_session_jump_buttons: 'Показывать кнопки перехода по сессии',
-    settings_desc_session_jump_buttons: 'Показывать плавающие кнопки «Начало» и «Конец» при чтении длинных историй сессий.',
+    settings_desc_session_jump_buttons: 'Показывать плавающую кнопку «Начало» для перехода к началу длинных историй сессий.',
     settings_label_terminal_auto_expand: 'Автораскрытие терминала при выводе',
     settings_desc_terminal_auto_expand: 'Автоматически разворачивать свёрнутую панель терминала, когда запущенная команда выдаёт новый вывод.',
 
@@ -8488,7 +8488,7 @@ const LOCALES = {
     settings_label_workspace_todos_tab: 'Mostrar pestaña Todos en el panel de espacio de trabajo',
     settings_desc_workspace_todos_tab: 'Cuando está habilitado, aparece una pestaña Todos en el panel de espacio de trabajo. El panel Todos de la barra lateral sigue disponible.',
     settings_label_session_jump_buttons: 'Mostrar botones de salto de sesión',
-    settings_desc_session_jump_buttons: 'Muestra botones flotantes de Inicio y Fin al leer historiales de sesión largos.',
+    settings_desc_session_jump_buttons: 'Muestra un botón flotante de Inicio para saltar al principio de los historiales de sesión largos.',
     settings_label_terminal_auto_expand: 'Expandir terminal automáticamente al recibir salida',
     settings_desc_terminal_auto_expand: 'Expandir automáticamente el panel de terminal contraído cuando un comando en ejecución emite nueva salida.',
 
@@ -9862,7 +9862,7 @@ const LOCALES = {
     settings_label_workspace_todos_tab: 'Todos-Tab im Arbeitsbereich-Panel anzeigen',
     settings_desc_workspace_todos_tab: 'Wenn aktiviert, erscheint ein Todos-Tab im Arbeitsbereich-Panel. Das Todos-Panel in der Seitenleiste bleibt weiterhin verfügbar.',
     settings_label_session_jump_buttons: 'Sitzungs-Sprungtasten anzeigen',
-    settings_desc_session_jump_buttons: 'Zeigt beim Lesen langer Sitzungsverläufe schwebende Anfang- und Ende-Tasten an.',
+    settings_desc_session_jump_buttons: 'Zeigt eine schwebende Anfang-Taste, um zum Beginn langer Sitzungsverläufe zu springen.',
     settings_label_terminal_auto_expand: 'Terminal bei Ausgabe automatisch aufklappen',
     settings_desc_terminal_auto_expand: 'Das eingeklappte Terminal-Panel automatisch aufklappen, wenn ein laufender Befehl neue Ausgaben erzeugt.',
 
@@ -11915,7 +11915,7 @@ const LOCALES = {
     settings_label_workspace_todos_tab: '在工作区面板中显示待办事项标签',
     settings_desc_workspace_todos_tab: '启用后，工作区面板会显示待办事项标签。侧边栏的待办事项面板仍然可用。',
     settings_label_session_jump_buttons: '显示会话跳转按钮',
-    settings_desc_session_jump_buttons: '阅读较长会话历史时显示悬浮的开头和结尾按钮。',
+    settings_desc_session_jump_buttons: '显示悬浮的开头按钮，用于跳转到较长会话历史的开头。',
     settings_label_terminal_auto_expand: '输出时自动展开终端',
     settings_desc_terminal_auto_expand: '当运行中的命令产生新输出时，自动展开已折叠的终端面板。',
 
@@ -12848,7 +12848,7 @@ const LOCALES = {
     settings_label_workspace_todos_tab: '在工作區面板顯示待辦事項標籤',
     settings_desc_workspace_todos_tab: '啟用後，工作區面板會顯示待辦事項標籤。側邊欄的待辦事項面板仍然可用。',
     settings_label_session_jump_buttons: '顯示對話跳轉按鈕',
-    settings_desc_session_jump_buttons: '閱讀較長對話記錄時，顯示浮動的開頭與結尾按鈕。',
+    settings_desc_session_jump_buttons: '顯示浮動的開頭按鈕，用於跳至較長對話記錄的開頭。',
     settings_label_terminal_auto_expand: '輸出時自動展開終端',
     settings_desc_terminal_auto_expand: '當運行中的命令產生新輸出時，自動展開已折疊的終端面板。',
 
@@ -14509,7 +14509,7 @@ const LOCALES = {
     settings_label_workspace_todos_tab: 'Mostrar aba Todos no painel workspace',
     settings_desc_workspace_todos_tab: 'Quando ativado, uma aba Todos aparece no painel workspace. O painel Todos da barra lateral continua disponível.',
     settings_label_session_jump_buttons: 'Mostrar botões de salto da sessão',
-    settings_desc_session_jump_buttons: 'Mostra botões flutuantes Início e Fim ao ler históricos longos de sessão.',
+    settings_desc_session_jump_buttons: 'Mostra um botão flutuante Início para saltar para o começo de históricos longos de sessão.',
     settings_label_terminal_auto_expand: 'Expandir terminal automaticamente na saída',
     settings_desc_terminal_auto_expand: 'Expandir automaticamente o painel de terminal recolhido quando um comando em execução emite nova saída.',
 
@@ -16173,7 +16173,7 @@ const LOCALES = {
     settings_label_workspace_todos_tab: '워크스페이스 패널에 Todos 탭 표시',
     settings_desc_workspace_todos_tab: '활성화하면 워크스페이스 패널에 Todos 탭이 나타납니다. 사이드바 Todos 패널은 계속 사용할 수 있습니다.',
     settings_label_session_jump_buttons: '세션 이동 버튼 표시',
-    settings_desc_session_jump_buttons: '긴 세션 기록을 읽을 때 떠 있는 시작 및 끝 버튼을 표시합니다.',
+    settings_desc_session_jump_buttons: '긴 세션 기록의 처음으로 이동하는 떠 있는 시작 버튼을 표시합니다.',
     settings_label_terminal_auto_expand: '출력 시 터미널 자동 펼치기',
     settings_desc_terminal_auto_expand: '실행 중인 명령이 새 출력을 생성할 때 접힌 터미널 패널을 자동으로 펼칩니다.',
 
@@ -17953,7 +17953,7 @@ const LOCALES = {
     settings_label_workspace_todos_tab: 'Afficher l\'onglet Todos dans le panneau de l\'espace de travail',
     settings_desc_workspace_todos_tab: 'Lorsqu\'il est activé, un onglet Todos apparaît dans le panneau de l\'espace de travail. Le panneau Todos de la barre latérale reste disponible.',
     settings_label_session_jump_buttons: 'Afficher les boutons de saut de session',
-    settings_desc_session_jump_buttons: 'Afficher les boutons flottants Début et Fin lors de la lecture de longs historiques de session.',
+    settings_desc_session_jump_buttons: 'Afficher un bouton flottant Début pour aller au début des longs historiques de session.',
     settings_label_terminal_auto_expand: 'Développer automatiquement le terminal en cas de sortie',
     settings_desc_terminal_auto_expand: 'Développer automatiquement le panneau de terminal réduit lorsqu\'une commande en cours d\'exécution émet une nouvelle sortie.',
 
@@ -19974,7 +19974,7 @@ const LOCALES = {
     settings_desc_raw_audio: 'Nahrávat a odesílat původní audio soubor agentovi místo prvního převodu na text. Agent ho pak může přepsat nebo zpracovat (emoce, pozadí, vlastní STT). Podobně jako hlasové zprávy na Telegramu.',
     settings_desc_render_user_markdown: 'Když povoleno, tučné, kurzíva, odkazy a další markdown ve vašich vlastních zprávách jsou vykresleny. Standardně vypnuto; ohraničené bloky kódu a matematika jsou vždy vykresleny bez ohledu na toto nastavení.',
     settings_desc_session_endless_scroll: 'Když povoleno, starší zprávy se načítají automaticky při posouvání nahoru. Když zakázáno, použijte tlačítko starších zpráv.',
-    settings_desc_session_jump_buttons: 'Zobrazit plovoucí tlačítka Spustit a Konec při čtení dlouhých historií relací.',
+    settings_desc_session_jump_buttons: 'Zobrazit plovoucí tlačítko Začátek pro skok na začátek dlouhých historií relací.',
     settings_desc_show_titlebar_profile: 'Když povoleno, přepínač profilů se objeví v levém horním záhlaví aplikace pro změnu profilů z jakékoliv karty. Standardně vypnuto; zápatí kompozitoru vždy obsahuje přepínač profilů bez ohledu na toto nastavení.',
     settings_desc_shutdown_after_cmd: ' nebo nativní aplikace) před tím než je WebUI znovu dosažitelný.',
     settings_desc_shutdown_before_cmd: 'Řízeně zastaví lokální WebUI server. Užitečné pokud jste spustili přes ',
@@ -21412,7 +21412,7 @@ const LOCALES = {
     settings_label_workspace_todos_tab: 'Çalışma alanı panelinde Todos sekmesini göster',
     settings_desc_workspace_todos_tab: 'Etkinleştirildiğinde, çalışma alanı panelinde bir Todos sekmesi görünür. Kenar çubuğu Todos paneli kullanılabilir olmaya devam eder.',
     settings_label_session_jump_buttons: 'Oturum atlama düğmelerini göster',
-    settings_desc_session_jump_buttons: 'Uzun oturum geçmişlerini okurken kayan Başlat ve Bitir düğmelerini gösterin.',
+    settings_desc_session_jump_buttons: 'Uzun oturum geçmişlerinin başına atlamak için kayan bir Başlangıç düğmesi gösterin.',
     settings_label_terminal_auto_expand: 'Çıktı geldiğinde terminali otomatik genişlet',
     settings_desc_terminal_auto_expand: 'Çalışan bir komut yeni çıktı ürettiğinde daraltılmış terminal panelini otomatik olarak genişletir.',
 
@@ -23192,7 +23192,7 @@ const LOCALES = {
     settings_label_workspace_panel_open: 'Zachowaj panel obszaru roboczego domyślnie otwarty',
     settings_desc_workspace_panel_open: 'Gdy ta opcja jest włączona, panel obszaru roboczego / przeglądarki plików otwiera się automatycznie przy każdej nowej sesji. Nadal możesz go zamknąć ręcznie w dowolnym momencie.',
     settings_label_session_jump_buttons: 'Pokaż przyciski skoku sesji',
-    settings_desc_session_jump_buttons: 'Pokaż pływające przyciski Początek i Koniec podczas czytania długich historii sesji.',
+    settings_desc_session_jump_buttons: 'Pokaż pływający przycisk Początek, aby przejść na początek długich historii sesji.',
     settings_label_terminal_auto_expand: 'Automatycznie rozwiń terminal przy wyjściu',
     settings_desc_terminal_auto_expand: 'Automatycznie rozwija zwinięty panel terminala, gdy uruchomione polecenie generuje nowe wyjście.',
 
@@ -25979,7 +25979,7 @@ const LOCALES = {
     settings_label_workspace_todos_tab: 'Hiển thị tab Todos trong bảng workspace',
     settings_desc_workspace_todos_tab: 'Khi bật, một tab Todos sẽ xuất hiện trong panel workspace. Panel Todos ở sidebar vẫn có sẵn.',
     settings_label_session_jump_buttons: 'Hiển thị nút nhảy trong phiên',
-    settings_desc_session_jump_buttons: 'Hiển thị các nút Đầu và Cuối nổi khi đọc lịch sử phiên dài.',
+    settings_desc_session_jump_buttons: 'Hiển thị nút Đầu nổi để nhảy tới đầu các lịch sử phiên dài.',
     settings_label_terminal_auto_expand: 'Tự mở rộng terminal khi có output',
     settings_desc_terminal_auto_expand: 'Tự động mở rộng panel terminal đang thu gọn khi một lệnh đang chạy phát sinh output mới.',
     settings_label_virtualize_transcript: 'Ảo hóa transcript dài (thử nghiệm)',
