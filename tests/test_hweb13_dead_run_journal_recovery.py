@@ -605,3 +605,35 @@ def test_recovery_marker_does_not_bubble_an_old_session(monkeypatch):
     marker = next(m for m in session.messages if m.get("type") == "interrupted")
     assert marker["timestamp"] <= int(long_ago) + 5, "marker dated by read time, not run time"
     assert session.compact()["last_message_at"] <= int(long_ago) + 5
+
+
+def test_arrival_decision_uses_the_captured_snapshot(monkeypatch):
+    """An empty captured snapshot must fail closed and keep the stream id.
+
+    `_journal_is_still_arriving()` takes its own fresh view of the file. If the
+    journal becomes visible between that call and the captured snapshot's checks,
+    it reports "settled" while everything else still sees the empty snapshot —
+    and the stream id, the only key back to the journal, is dropped without the
+    output ever being replayed.
+    """
+    session_id = "hweb13_arrival"
+    stream_id = "hweb13_stream_arrival"
+    session = _dead_session(session_id, stream_id)
+
+    # The captured snapshot is empty, but the journal lands (with a terminal
+    # event) before the arrival check runs — so a fresh view says "settled".
+    def _settled_now(_session, _stream_id):
+        return False
+
+    monkeypatch.setattr(models, "_journal_is_still_arriving", _settled_now)
+
+    assert _recover_dead_run_journal(session, stream_id) is True
+    marker = session.messages[-1]
+    assert marker["_pending_journal_recovery"] is True
+    assert marker["_journal_retry_stream_id"] == stream_id
+
+    # The retry still reaches the output that arrived late.
+    append_run_event(session_id, stream_id, "interim_assistant", {"text": "Arrived late."})
+    append_run_event(session_id, stream_id, "done", {})
+    assert models._retry_journal_recovery_in_place(session) is True
+    assert _visible(session) == ["Arrived late."]

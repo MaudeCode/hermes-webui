@@ -3671,11 +3671,15 @@ def _recover_dead_run_journal(session, stream_id: str | None) -> bool:
             # caller clears `active_stream_id` next, and that is the only key
             # back to the journal, so hand it to the existing lazy-retry hook
             # instead of failing open and losing the run for good.
-            if (
-                _journal_is_still_arriving(session, stream_id)
-                or _run_journal_has_visible_output(
-                    session, stream_id, journal=journal,
-                )
+            # Decided from the captured snapshot only. `_journal_is_still_arriving`
+            # takes its own fresh `latest_run_summary()`/`stat()` view, so a
+            # journal becoming visible between the two would let it report
+            # "settled" while the checks below still inspect the original empty
+            # snapshot — dropping the stream id without ever replaying the output
+            # that had just appeared. An empty snapshot is inconclusive by
+            # definition, so it fails closed and keeps the key.
+            if not (journal.get('events') or []) or _run_journal_has_visible_output(
+                session, stream_id, journal=journal,
             ):
                 marker = _build_recovery_marker_with_retry_hook(
                     recovered_output=False,
