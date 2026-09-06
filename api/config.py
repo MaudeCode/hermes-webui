@@ -5362,6 +5362,25 @@ def _sync_models_cache_provenance() -> None:
     )
 
 
+def published_catalog_is_available() -> bool:
+    """True when a catalog snapshot for THIS profile is published and current.
+
+    Cheap and side-effect free — same provenance + fingerprint check
+    ``published_catalog_models`` performs, without naming a provider. Lets a
+    caller decide whether it needs to warm the catalog before reading cards.
+    """
+    provenance = _models_cache_provenance
+    if provenance is None:
+        return False
+    snapshot, published_fp = provenance
+    if not isinstance(snapshot, dict):
+        return False
+    try:
+        return published_fp == _models_cache_source_fingerprint()
+    except Exception:
+        return False
+
+
 def published_catalog_models(provider_id: str | None) -> list[dict] | None:
     """Return the picker entries already published for *provider_id*, or None.
 

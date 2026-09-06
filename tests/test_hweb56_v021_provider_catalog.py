@@ -316,8 +316,11 @@ def test_live_only_providers_report_their_catalog_on_the_providers_endpoint(
     monkeypatch.setattr(providers, "is_plugin_model_provider", lambda _pid: False)
     monkeypatch.setattr(providers, "get_config", lambda: {"model": {}, "providers": {}})
     monkeypatch.setattr(providers, "_provider_has_key", lambda _pid, **_kw: True)
+    monkeypatch.setattr(providers, "published_catalog_is_available", lambda: True)
     monkeypatch.setattr(
-        providers, "_read_live_provider_model_ids", lambda _pid: ["vendor/model-a", "model-b"]
+        providers,
+        "published_catalog_models",
+        lambda _pid: [{"id": "vendor/model-a", "label": "A"}, {"id": "model-b", "label": "B"}],
     )
 
     entry = next(p for p in providers.get_providers()["providers"] if p["id"] == slug)
@@ -598,8 +601,8 @@ def test_aliased_providers_block_does_not_render_a_second_card(monkeypatch, tmp_
     monkeypatch.setattr(providers, "_OAUTH_PROVIDERS", frozenset())
     monkeypatch.setattr(providers, "plugin_model_provider_ids", lambda: set())
     monkeypatch.setattr(providers, "is_plugin_model_provider", lambda _pid: False)
+    monkeypatch.setattr(providers, "published_catalog_is_available", lambda: True)
     monkeypatch.setattr(providers, "published_catalog_models", lambda _pid: None)
-    monkeypatch.setattr(providers, "_read_live_provider_model_ids", lambda _pid: [])
     monkeypatch.setattr(
         providers, "get_config", lambda: {"model": {}, "providers": {"ramp": {"api_key": "sk-test"}}}
     )
@@ -620,8 +623,8 @@ def test_unknown_providers_block_still_gets_its_own_card(monkeypatch, tmp_path):
     monkeypatch.setattr(providers, "_OAUTH_PROVIDERS", frozenset())
     monkeypatch.setattr(providers, "plugin_model_provider_ids", lambda: set())
     monkeypatch.setattr(providers, "is_plugin_model_provider", lambda _pid: False)
+    monkeypatch.setattr(providers, "published_catalog_is_available", lambda: True)
     monkeypatch.setattr(providers, "published_catalog_models", lambda _pid: None)
-    monkeypatch.setattr(providers, "_read_live_provider_model_ids", lambda _pid: [])
     monkeypatch.setattr(
         providers,
         "get_config",
@@ -689,8 +692,8 @@ def test_aliased_models_block_reaches_the_canonical_card(monkeypatch, tmp_path):
     monkeypatch.setattr(providers, "_OAUTH_PROVIDERS", frozenset())
     monkeypatch.setattr(providers, "plugin_model_provider_ids", lambda: set())
     monkeypatch.setattr(providers, "is_plugin_model_provider", lambda _pid: False)
+    monkeypatch.setattr(providers, "published_catalog_is_available", lambda: True)
     monkeypatch.setattr(providers, "published_catalog_models", lambda _pid: None)
-    monkeypatch.setattr(providers, "_probe_live_models_within", lambda _pid, _d: [])
     monkeypatch.setattr(
         providers,
         "get_config",
@@ -701,40 +704,70 @@ def test_aliased_models_block_reaches_the_canonical_card(monkeypatch, tmp_path):
     assert "acct/model-a" in {m["id"] for m in entry["models"]}
 
 
-def test_cold_catalog_probe_is_bounded_by_one_request_budget(monkeypatch):
-    """A slow provider must not stall the endpoint, and must fall back to static."""
-    import time as _time
+def test_cold_cards_warm_the_catalog_once(monkeypatch, tmp_path):
+    """A cold catalog is warmed through the picker, not probed per provider."""
+    import api.profiles as profiles
 
-    monkeypatch.setattr(providers, "_COLD_CATALOG_PROBE_BUDGET_S", 0.2)
+    calls = []
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(providers, "_PROVIDER_DISPLAY", {"commandcode": "CommandCode", "router": "Ramp Router"})
+    monkeypatch.setattr(providers, "_PROVIDER_MODELS", {"commandcode": [{"id": "s", "label": "S"}], "router": []})
+    monkeypatch.setattr(providers, "_OAUTH_PROVIDERS", frozenset())
+    monkeypatch.setattr(providers, "plugin_model_provider_ids", lambda: set())
+    monkeypatch.setattr(providers, "is_plugin_model_provider", lambda _pid: False)
+    monkeypatch.setattr(providers, "get_config", lambda: {"model": {}, "providers": {}})
+    monkeypatch.setattr(providers, "_provider_has_key", lambda _pid, **_kw: True)
+    monkeypatch.setattr(providers, "published_catalog_is_available", lambda: False)
+    monkeypatch.setattr(providers, "_warm_published_catalog", lambda: calls.append("warm"))
+    monkeypatch.setattr(providers, "published_catalog_models", lambda _pid: None)
 
-    def _hang(_pid):
-        _time.sleep(30)
-        return ["never-returned"]
+    providers.get_providers()
 
-    monkeypatch.setattr(providers, "_read_live_provider_model_ids", _hang)
-
-    started = _time.monotonic()
-    result = providers._probe_live_models_within("commandcode", _time.monotonic() + 0.2)
-    elapsed = _time.monotonic() - started
-
-    assert result == []
-    assert elapsed < 5, f"probe blocked for {elapsed:.1f}s despite the deadline"
-
-
-def test_cold_catalog_probe_returns_live_models_when_fast(monkeypatch):
-    monkeypatch.setattr(providers, "_read_live_provider_model_ids", lambda _pid: ["a/b"])
-    import time as _time
-
-    out = providers._probe_live_models_within("commandcode", _time.monotonic() + 5)
-    assert [m["id"] for m in out] == ["a/b"]
+    assert calls == ["warm"], f"expected exactly one shared warm, got {calls}"
 
 
-def test_expired_budget_skips_the_probe_entirely(monkeypatch):
-    """Once the request budget is spent, remaining providers must not probe."""
-    def _boom(_pid):
-        raise AssertionError("probe ran after the deadline")
+def test_warm_is_skipped_when_the_catalog_is_already_published(monkeypatch, tmp_path):
+    """A warm catalog must not trigger a rebuild on every Settings read."""
+    import api.profiles as profiles
 
-    monkeypatch.setattr(providers, "_read_live_provider_model_ids", _boom)
-    import time as _time
+    calls = []
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(providers, "_PROVIDER_DISPLAY", {"commandcode": "CommandCode"})
+    monkeypatch.setattr(providers, "_PROVIDER_MODELS", {"commandcode": [{"id": "s", "label": "S"}]})
+    monkeypatch.setattr(providers, "_OAUTH_PROVIDERS", frozenset())
+    monkeypatch.setattr(providers, "plugin_model_provider_ids", lambda: set())
+    monkeypatch.setattr(providers, "is_plugin_model_provider", lambda _pid: False)
+    monkeypatch.setattr(providers, "get_config", lambda: {"model": {}, "providers": {}})
+    monkeypatch.setattr(providers, "_provider_has_key", lambda _pid, **_kw: True)
+    monkeypatch.setattr(providers, "published_catalog_is_available", lambda: True)
+    monkeypatch.setattr(providers, "_warm_published_catalog", lambda: calls.append("warm"))
+    monkeypatch.setattr(providers, "published_catalog_models", lambda _pid: [{"id": "live", "label": "Live"}])
 
-    assert providers._probe_live_models_within("commandcode", _time.monotonic() - 1) == []
+    entry = next(p for p in providers.get_providers()["providers"] if p["id"] == "commandcode")
+
+    assert calls == []
+    assert [m["id"] for m in entry["models"]] == ["live"]
+
+
+def test_providers_endpoint_owns_no_probe_pool():
+    """The card path must not run its own provider probes on a worker thread.
+
+    A pool here would inherit neither the request's profile thread-local nor its
+    environment, so probes would resolve the default profile and could render
+    one profile's account catalog on another's cards.
+    """
+    assert not hasattr(providers, "_probe_live_models_within")
+    assert not hasattr(providers, "_cold_catalog_probe_executor")
+
+
+def test_published_catalog_is_available_matches_the_fingerprint(monkeypatch):
+    snapshot = {"groups": []}
+    monkeypatch.setattr(config, "_models_cache_provenance", (snapshot, {"config_yaml": "/a"}))
+    monkeypatch.setattr(config, "_models_cache_source_fingerprint", lambda: {"config_yaml": "/a"})
+    assert config.published_catalog_is_available() is True
+
+    monkeypatch.setattr(config, "_models_cache_source_fingerprint", lambda: {"config_yaml": "/b"})
+    assert config.published_catalog_is_available() is False
+
+    monkeypatch.setattr(config, "_models_cache_provenance", None)
+    assert config.published_catalog_is_available() is False

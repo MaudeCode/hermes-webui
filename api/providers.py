@@ -45,6 +45,7 @@ from api.config import (
     _get_label_for_model,
     _models_from_live_provider_ids,
     _pool_entry_payloads,
+    published_catalog_is_available,
     published_catalog_models,
     _read_live_provider_model_ids,
     _read_visible_codex_cache_model_ids,
@@ -3408,53 +3409,23 @@ def get_provider_cost_history(provider_id: str | None = None, days: int = 7) -> 
 # SECTION: Public API
 
 
-# A cold-catalog probe is a network call on a request path, so the whole
-# endpoint gets ONE budget rather than each provider getting its own timeout:
-# the cost of /api/providers must not scale with how many providers a user has
-# configured. Whatever does not answer inside the budget keeps its static list,
-# which is the same answer this endpoint gave before probing existed.
-_COLD_CATALOG_PROBE_BUDGET_S = 2.0
-_COLD_CATALOG_PROBE_MAX_WORKERS = 4
-_cold_catalog_probe_executor: ThreadPoolExecutor | None = None
-_cold_catalog_probe_lock = threading.Lock()
+def _warm_published_catalog() -> None:
+    """Publish the picker catalog once so provider cards can read it.
 
-
-def _get_cold_catalog_probe_executor() -> ThreadPoolExecutor:
-    """Shared, bounded pool for cold-catalog probes.
-
-    Deliberately module-level and never shut down: a probe that overruns the
-    budget is abandoned by the caller but keeps running, and a per-call
-    executor would either block on shutdown (defeating the deadline) or spawn an
-    unbounded number of threads. A fixed pool means abandoned work queues
-    instead of multiplying.
+    Deliberately NOT a probe pool of our own. `get_available_models()` already
+    owns a bounded, profile-scoped rebuild for exactly this — the
+    ``models-catalog-rebuild`` worker with `_LIVE_REBUILD_BUDGET_SECONDS` and
+    `profile_scope_for_detached_worker()`. Reusing it means one shared build
+    instead of a probe per provider, the profile binding is handled where it is
+    already proven, and what the card shows is by construction what
+    /api/models will show rather than a second opinion assembled here.
     """
-    global _cold_catalog_probe_executor
-    with _cold_catalog_probe_lock:
-        if _cold_catalog_probe_executor is None:
-            _cold_catalog_probe_executor = ThreadPoolExecutor(
-                max_workers=_COLD_CATALOG_PROBE_MAX_WORKERS,
-                thread_name_prefix="cold-catalog-probe",
-            )
-        return _cold_catalog_probe_executor
-
-
-def _probe_live_models_within(provider_id: str, deadline: float) -> list[dict]:
-    """Live catalog for *provider_id*, or [] if it cannot answer by *deadline*."""
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        return []
-    future = _get_cold_catalog_probe_executor().submit(
-        lambda: _models_from_live_provider_ids(
-            provider_id, _read_live_provider_model_ids(provider_id)
-        )
-    )
     try:
-        return future.result(timeout=remaining) or []
+        from api.config import get_available_models
+
+        get_available_models()
     except Exception:
-        # Timeout, or the probe itself failed. Either way the caller falls back
-        # to the static catalog rather than rendering an empty card.
-        logger.debug("Cold catalog probe did not complete for %s", provider_id)
-        return []
+        logger.debug("Cold catalog warm failed; cards fall back to static", exc_info=True)
 
 
 # Providers whose model list is NOT a plain live-then-static lookup. Each is
@@ -3515,8 +3486,12 @@ def get_providers() -> dict[str, Any]:
     # Add OAuth providers even if not in _PROVIDER_DISPLAY
     known_ids.update(_OAUTH_PROVIDERS)
 
-    # One budget for the whole response, not one per provider.
-    _probe_deadline = time.monotonic() + _COLD_CATALOG_PROBE_BUDGET_S
+    # Cards render the picker's published catalog. If nothing is published for
+    # this profile yet (startup, or just after profile invalidation), warm it
+    # once here rather than letting every card fall back to its committed
+    # snapshot and then 30s-cache that stale answer.
+    if not published_catalog_is_available():
+        _warm_published_catalog()
 
     for pid in sorted(known_ids):
         display_name = effective_provider_display_name(pid, _PROVIDER_DISPLAY)
@@ -3716,22 +3691,9 @@ def get_providers() -> dict[str, Any]:
                 if published:
                     models = published
                     models_total = len(models)
-                elif has_key or is_plugin_model_provider(pid):
-                    # Cold catalog (startup, or just after profile invalidation):
-                    # the static list may not match the account, and the picker
-                    # will show the live one moments later. Probe so the card
-                    # does not serve — and 30s-cache — a stale answer.
-                    #
-                    # Gated on `has_key` so this cannot become a fan-out across
-                    # every known provider: an unconfigured provider has no
-                    # account catalog to discover, so probing it buys nothing and
-                    # costs a request. In practice that bounds this to the
-                    # handful the user actually configured, and only until the
-                    # picker publishes its snapshot.
-                    live_models = _probe_live_models_within(pid, _probe_deadline)
-                    if live_models:
-                        models = live_models
-                        models_total = len(models)
+                # No `published` entry means the picker published no group for
+                # this provider — there is nothing live to show, so the static
+                # list stands. The warm above already did the one rebuild.
             except Exception:
                 logger.debug(
                     "Failed to resolve published catalog for %s", pid, exc_info=True
