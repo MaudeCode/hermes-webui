@@ -162,6 +162,15 @@ def test_new_providers_reach_the_model_picker(monkeypatch, tmp_path):
     )
     # No live catalog probe — this asserts the static fallback path.
     monkeypatch.setattr(config, "_read_live_provider_model_ids", lambda _pid: [])
+    # Building a catalog reloads the config cache and rebinds `_cfg_path` to the
+    # tmp config. Left behind, that makes the next `get_config()` see
+    # `path_changed` and force a reload that discards whatever cfg a later test
+    # installed in memory. Snapshot the cache identity through monkeypatch so
+    # this test cannot leak into another test's routing decisions.
+    monkeypatch.setattr(config, "_cfg_path", config._cfg_path, raising=False)
+    monkeypatch.setattr(config, "_available_models_cache", config._available_models_cache)
+    monkeypatch.setattr(config, "_models_cache_provenance", config._models_cache_provenance)
+    monkeypatch.setattr(config, "_advertised_model_ids_memo", config._advertised_model_ids_memo)
     monkeypatch.setattr(config, "_models_cache_path", tmp_path / "models_cache.json")
     monkeypatch.setattr(config, "_get_config_path", lambda: tmp_path / "missing-config.yaml")
     monkeypatch.setattr("api.profiles.get_active_hermes_home", lambda: tmp_path, raising=False)
@@ -191,3 +200,58 @@ def test_new_providers_reach_the_model_picker(monkeypatch, tmp_path):
         assert slug in groups, f"{slug} missing from the picker"
         assert groups[slug]["provider"] == display
         assert groups[slug]["models"]
+
+
+# Aggregators that serve foreign vendor namespaces under their own key. A bare
+# ``vendor/model`` row from one of these falls through
+# ``resolve_model_provider``'s OpenRouter default, which either fails outright
+# (OpenRouter unconfigured) or bills the wrong account.
+NAMESPACED_AGGREGATORS = ("commandcode", "nebius-token-factory")
+
+
+@pytest.mark.parametrize("slug", NAMESPACED_AGGREGATORS)
+def test_namespaced_rows_route_to_their_own_provider(slug):
+    """Every catalog row resolves back to *slug*, active or cross-provider."""
+    assert slug in config._PORTAL_PROVIDERS
+    own_cfg = {"model": {"provider": slug, "default": "x"}}
+    other_cfg = {"model": {"provider": "anthropic", "default": "x"}}
+
+    for entry in config._PROVIDER_MODELS[slug]:
+        raw_id = entry["id"]
+
+        # Selected while this provider is active — the id stays bare.
+        active_rows = config._apply_provider_prefix([dict(entry)], slug, slug)
+        _model, provider, _base = config.resolve_model_provider(
+            active_rows[0]["id"], config_data=own_cfg
+        )
+        assert provider == slug, f"{raw_id} misrouted to {provider!r} while active"
+
+        # Selected from another provider's session — must be qualified.
+        cross_rows = config._apply_provider_prefix([dict(entry)], slug, "anthropic")
+        cross_id = cross_rows[0]["id"]
+        assert cross_id == f"@{slug}:{raw_id}"
+        resolved, provider, _base = config.resolve_model_provider(
+            cross_id, config_data=other_cfg
+        )
+        assert provider == slug, f"{raw_id} misrouted to {provider!r} cross-provider"
+        assert resolved == raw_id, f"{raw_id} mangled to {resolved!r}"
+
+
+def test_portal_prefixing_leaves_non_aggregators_alone():
+    """Only ``_PORTAL_PROVIDERS`` gained the namespaced-id qualification."""
+    rows = config._apply_provider_prefix(
+        [{"id": "deepseek/deepseek-v4-pro", "label": "x"}], "openrouter", "anthropic"
+    )
+    assert rows[0]["id"] == "deepseek/deepseek-v4-pro"
+
+
+def test_nvidia_namespaced_rows_survive_the_round_trip():
+    """The pre-existing portal provider keeps resolving to itself either way."""
+    cfg_nvidia = {"model": {"provider": "nvidia", "default": "x"}}
+    cfg_other = {"model": {"provider": "anthropic", "default": "x"}}
+    for entry in config._PROVIDER_MODELS["nvidia"]:
+        raw_id = entry["id"]
+        active_id = config._apply_provider_prefix([dict(entry)], "nvidia", "nvidia")[0]["id"]
+        assert config.resolve_model_provider(active_id, config_data=cfg_nvidia)[:2] == (raw_id, "nvidia")
+        cross_id = config._apply_provider_prefix([dict(entry)], "nvidia", "anthropic")[0]["id"]
+        assert config.resolve_model_provider(cross_id, config_data=cfg_other)[:2] == (raw_id, "nvidia")

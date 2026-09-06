@@ -2364,6 +2364,23 @@ def _split_picker_overflow_models(
     return visible, extras
 
 
+# Providers that serve models from multiple upstream namespaces under their own
+# credentials, so a ``vendor/model`` id belongs to THEM rather than to the vendor
+# the prefix names.  Both the resolver (keep the full namespaced path, route
+# through this provider) and the picker (``_apply_provider_prefix``: qualify the
+# row with ``@provider:`` so a cross-provider selection cannot be misread as an
+# OpenRouter-style id) key off this set.  Adding an aggregator here without the
+# picker half leaves its rows resolving to ``openrouter``.
+_PORTAL_PROVIDERS = {
+    "nous",
+    "opencode-zen",
+    "opencode-go",
+    "nvidia",
+    "commandcode",
+    "nebius-token-factory",
+}
+
+
 def _apply_provider_prefix(
     raw_models: list[dict],
     provider_id: str,
@@ -2372,7 +2389,14 @@ def _apply_provider_prefix(
     """Return *raw_models* with @provider: prefixes applied when needed.
 
     Prefixing is skipped when (a) the provider is already the active one, or
-    (b) a model id already starts with '@' or contains '/' (already routable).
+    (b) a model id already starts with '@', or (c) it contains '/' and the
+    namespace genuinely routes on its own.
+
+    Case (c) does NOT hold for a ``_PORTAL_PROVIDERS`` aggregator: it serves
+    ``deepseek/…`` / ``Qwen/…`` under its own key, and left bare those ids fall
+    through ``resolve_model_provider``'s OpenRouter default — the row then fails
+    outright when OpenRouter is unconfigured, or silently bills the wrong
+    account when it is. Qualify them so the picked provider stays authoritative.
     """
     _active = (active_provider or "").lower()
     if not _active or provider_id == _active:
@@ -2381,7 +2405,7 @@ def _apply_provider_prefix(
     for m in raw_models:
         mid = m["id"]
         entry = dict(m)
-        if mid.startswith("@") or "/" in mid:
+        if mid.startswith("@") or ("/" in mid and provider_id not in _PORTAL_PROVIDERS):
             result.append(entry)
         else:
             entry["id"] = f"@{provider_id}:{mid}"
@@ -3113,7 +3137,6 @@ def resolve_model_provider(
         # fired in the prefix==config_provider case, causing HTTP 404 from the
         # portal which requires the full provider/model id (#2177; sibling of
         # #854 / #894 for Nous, where this guard was originally added).
-        _PORTAL_PROVIDERS = {"nous", "opencode-zen", "opencode-go", "nvidia"}
         if config_provider in _PORTAL_PROVIDERS:
             return _finalize(model_id, config_provider, config_base_url)
         # If prefix matches config provider exactly, strip it and use that provider directly.
