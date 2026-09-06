@@ -108,12 +108,14 @@ def test_selected_text_reply_styles_and_i18n_exist_for_all_locales():
     assert ".selection-context-quote" in css
     assert "-webkit-line-clamp:3" in css
     assert "white-space:pre-wrap" in css
-    assert "max-width:clamp(780px,60vw,1100px)" in css
+    # HWEB-2: the chips share the one chat-column token with the composer
+    # and transcript instead of carrying their own clamp.
+    assert ".composer-selection-chips{display:flex;flex-direction:column;gap:8px;max-width:var(--msg-max);" in css
     assert "margin:0 auto" in css
     assert "max-height:min(32vh,280px)" in css
     assert "overflow-y:auto" in css
     assert "scrollbar-gutter:stable" in css
-    assert "@media (min-width:1600px){.composer-selection-chips{max-width:1600px;}}" in css
+    assert "@media (min-width:1600px){.composer-selection-chips" not in css
     assert "min-width:28px" in css
     assert "min-height:28px" in css
     assert "min-width:44px" in css

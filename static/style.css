@@ -1383,7 +1383,7 @@
   :root:not(.dark) .project-chip.active{background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent-bg-strong);}
   :root:not(.dark) .chip{border-color:rgba(0,0,0,.1);background:rgba(0,0,0,.04);}
   :root:not(.dark) .chip.model{color:var(--accent-text);border-color:var(--accent-bg-strong);background:var(--accent-bg);}
-.composer-selection-chips{display:flex;flex-direction:column;gap:8px;max-width:clamp(780px,60vw,1100px);width:100%;box-sizing:border-box;margin:0 auto;padding:8px 0 0;min-height:0;max-height:min(32vh,280px);overflow-y:auto;scrollbar-gutter:stable;}
+.composer-selection-chips{display:flex;flex-direction:column;gap:8px;max-width:var(--msg-max);width:100%;box-sizing:border-box;margin:0 auto;padding:8px 0 0;min-height:0;max-height:min(32vh,280px);overflow-y:auto;scrollbar-gutter:stable;}
 .composer-selection-chips[hidden]{display:none;}
 .selection-context-card{display:flex;gap:10px;align-items:stretch;border:1px solid var(--border2);border-radius:12px;background:linear-gradient(135deg,var(--surface-subtle),rgba(255,255,255,.015));box-shadow:0 1px 0 rgba(255,255,255,.03) inset;color:var(--text);overflow:hidden;}
 .selection-context-accent{width:3px;flex:0 0 3px;background:var(--accent);opacity:.82;}
@@ -1398,7 +1398,6 @@
 .selection-context-quote{margin:0;color:var(--muted);font-family:var(--font-ui);font-size:12.5px;line-height:1.45;white-space:pre-wrap;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;}
 .selection-chip-edit{font-size:11px;border:1px solid var(--accent);outline:none;border-radius:6px;padding:2px 6px;background:var(--surface);color:var(--text);width:130px;max-width:70vw;}
 .selection-chip-edit:focus{box-shadow:0 0 0 2px var(--focus-ring);}
-@media (min-width:1600px){.composer-selection-chips{max-width:1600px;}}
 @media (hover:none) and (pointer:coarse){.composer-selection-chips{max-height:min(28dvh,220px);}.selection-context-name,.selection-context-remove{min-height:44px;}.selection-context-remove{min-width:44px;}}
 .sent-selection-context{margin:10px 0 0;padding:10px 12px;border:1px solid color-mix(in srgb,var(--user-bubble-border) 72%,var(--accent) 28%);border-left:3px solid var(--accent);border-radius:10px;background:color-mix(in srgb,var(--user-bubble-bg) 86%,var(--accent-bg) 14%);}
 .sent-selection-context-label{margin-bottom:5px;color:var(--accent-text);font-size:11px;font-weight:750;line-height:1.25;letter-spacing:.01em;}
@@ -1934,7 +1933,7 @@
   .onboarding-oauth-pending .onboarding-oauth-icon{color:#c9a84c;}
   .onboarding-actions{display:flex;justify-content:space-between;gap:10px;margin-top:auto;}
   .onboarding-actions .sm-btn{padding:10px 16px;}
-  .reconnect-banner{display:none;background:var(--surface);border:1px solid var(--accent-bg-strong);border-radius:10px;padding:10px 16px;margin:10px auto;max-width:780px;font-size:13px;color:var(--accent-text);display:none;align-items:center;justify-content:space-between;gap:12px;}
+  .reconnect-banner{display:none;background:var(--surface);border:1px solid var(--accent-bg-strong);border-radius:10px;padding:10px 16px;margin:10px auto;max-width:var(--msg-max);width:calc(100% - 40px);box-sizing:border-box;font-size:13px;color:var(--accent-text);display:none;align-items:center;justify-content:space-between;gap:12px;}
   .reconnect-banner.visible{display:flex;}
   .reconnect-btn{padding:6px 12px;border-radius:8px;font-size:12px;font-weight:600;background:var(--accent-bg-strong);border:1px solid var(--accent-bg-strong);color:var(--accent-text);cursor:pointer;}
   .reconnect-btn:hover{background:var(--accent-bg-strong);}
@@ -1977,7 +1976,7 @@
   .composer-wrap.terminal-dock-visible .composer-flyout{z-index:4;}
   /* ── Approval card ── */
   .approval-card[hidden],.clarify-card[hidden]{display:none!important;}
-  .approval-card{position:absolute;left:0;right:0;bottom:-24px;max-width:var(--msg-max);margin:0 auto;padding:0 20px;box-sizing:border-box;width:100%;overflow:hidden;pointer-events:none;}
+  .approval-card{position:absolute;left:0;right:0;bottom:-24px;max-width:var(--msg-max);margin:0 auto;box-sizing:border-box;width:100%;overflow:hidden;pointer-events:none;}
   .approval-card.visible{pointer-events:auto;z-index:3;}
   .approval-inner{background:var(--surface);backdrop-filter:blur(8px);border:1px solid var(--accent-bg-strong);border-radius:14px;padding:16px 18px 40px;transform:translateY(100%);opacity:0;transition:transform .4s cubic-bezier(.32,.72,.16,1),opacity .25s ease;}
   .approval-card.visible .approval-inner{transform:translateY(0);opacity:1;}
@@ -2012,7 +2011,7 @@
   .yolo-pill-icon{font-size:12px;}
   .yolo-pill-label{font-size:10px;}
   /* ── Queue flyout (same slide-up pattern as approval-card) ── */
-  .queue-card{position:absolute;left:0;right:0;bottom:0;max-width:var(--msg-max);margin:0 auto;padding:0 20px;box-sizing:border-box;width:100%;overflow:hidden;pointer-events:none;z-index:2;}
+  .queue-card{position:absolute;left:0;right:0;bottom:0;max-width:var(--msg-max);margin:0 auto;box-sizing:border-box;width:100%;overflow:hidden;pointer-events:none;z-index:2;}
   .queue-card.visible{pointer-events:auto;}
   /* When queue is visible, add bottom padding to messages so last bubble isn't covered */
   .messages.queue-open{padding-bottom:var(--queue-card-height,280px);}
@@ -2054,7 +2053,7 @@
   .approval-btn.deny:hover{background:rgba(239,83,80,.12);border-color:var(--error);}
   .approval-btn.loading{opacity:.7;cursor:wait;}
   /* ── Clarify card ── */
-  .clarify-card{position:absolute;left:0;right:0;bottom:-24px;max-width:var(--msg-max);margin:0 auto;padding:0 20px;box-sizing:border-box;width:100%;overflow:hidden;pointer-events:none;max-height:clamp(180px,min(68vh,calc(100vh - 220px)),420px);}
+  .clarify-card{position:absolute;left:0;right:0;bottom:-24px;max-width:var(--msg-max);margin:0 auto;box-sizing:border-box;width:100%;overflow:hidden;pointer-events:none;max-height:clamp(180px,min(68vh,calc(100vh - 220px)),420px);}
   .clarify-card.visible{pointer-events:auto;}
   .clarify-card .clarify-inner{max-height:clamp(180px,min(68vh,calc(100vh - 220px)),420px);overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;box-sizing:border-box;transform:translateY(100%);opacity:0;transition:transform .4s cubic-bezier(.32,.72,.16,1),opacity .25s ease,max-height .2s ease;}
   @supports (height:100dvh){.clarify-card,.clarify-card .clarify-inner{max-height:clamp(180px,min(68dvh,calc(100dvh - 220px)),420px);}}
@@ -2269,23 +2268,21 @@
   .workspace-toggle-btn:disabled{opacity:.38;cursor:not-allowed;}
   .chip.model{color:var(--accent-text);border-color:var(--accent-bg-strong);background:var(--accent-bg);}
   .messages-shell{flex:1;min-height:0;position:relative;display:flex;flex-direction:column;}
-  .messages{flex:1;overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column;min-height:0;position:relative;z-index:0;-webkit-overflow-scrolling:touch;touch-action:pan-y;overscroll-behavior-y:contain;overflow-anchor:auto;}
+  .messages{flex:1;padding-left:20px;padding-right:20px;overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column;min-height:0;position:relative;z-index:0;-webkit-overflow-scrolling:touch;touch-action:pan-y;overscroll-behavior-y:contain;overflow-anchor:auto;}
 @media (hover:hover) and (pointer:fine){.messages{overflow-anchor:none;}}
   /* Overlay scroll controls so they do not affect the transcript's native scroll geometry. */
-  .scroll-to-bottom-btn{position:absolute;right:20px;bottom:16px;width:32px;height:32px;border-radius:50%;border:1px solid var(--border2);background:var(--code-bg);color:var(--muted);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,.25);z-index:10;transition:color .12s,border-color .12s,background .12s,transform .12s;}
+  .scroll-to-bottom-btn{position:absolute;right:var(--chat-col-inset);bottom:16px;width:32px;height:32px;border-radius:50%;border:1px solid var(--border2);background:var(--code-bg);color:var(--muted);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,.25);z-index:10;transition:color .12s,border-color .12s,background .12s,transform .12s;}
   .scroll-to-bottom-btn:hover{color:var(--text);border-color:var(--border);background:var(--hover-bg);}
   .scroll-to-bottom-btn.scroll-to-bottom-btn--new-message{width:auto;min-width:32px;max-width:min(220px,calc(100% - 40px));border-radius:999px;font-size:12px;font-weight:600;gap:5px;padding:0 11px;color:var(--accent-text);border-color:var(--accent-bg-strong);background:var(--accent-bg);}
   .scroll-to-bottom-btn.scroll-to-bottom-btn--new-message .session-jump-btn__text{display:inline;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .session-jump-btn__text{display:none;}
-  .session-jump-btn{position:absolute;right:20px;height:32px;border-radius:999px;border:1px solid var(--border2);background:var(--code-bg);color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:5px;padding:0 11px;box-shadow:0 2px 8px rgba(0,0,0,.25);z-index:11;transition:color .12s,border-color .12s,background .12s,opacity .12s,transform .12s;}
+  .session-jump-btn{position:absolute;right:var(--chat-col-inset);height:32px;border-radius:999px;border:1px solid var(--border2);background:var(--code-bg);color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:5px;padding:0 11px;box-shadow:0 2px 8px rgba(0,0,0,.25);z-index:11;transition:color .12s,border-color .12s,background .12s,opacity .12s,transform .12s;}
   .session-jump-btn:hover{color:var(--text);border-color:var(--border);background:var(--hover-bg);transform:translateY(-1px);}
   .session-jump-btn--start{top:16px;}
   .messages.session-nav-enabled .scroll-to-bottom-btn{width:auto;min-width:32px;border-radius:999px;font-size:12px;font-weight:600;gap:5px;padding:0 11px;}
   .messages.session-nav-enabled .scroll-to-bottom-btn:hover{transform:translateY(-1px);}
   .messages.session-nav-enabled .session-jump-btn__text{display:inline;}
-  .messages-inner{margin:0 auto;width:100%;padding:20px 24px 32px;display:flex;flex-direction:column;}
-  @media(min-width:1400px){.messages-inner{max-width:1100px;}}
-  @media(min-width:1800px){.messages-inner{max-width:1200px;}}
+  .messages-inner{margin:0 auto;width:100%;padding:20px 0 32px;display:flex;flex-direction:column;}
   .msg-row{padding:10px 0;}
   .msg-row+.msg-row{border-top:none;}
   /* Steer indicator: transient banner below messages, removed on renderMessages rebuild */
@@ -2305,7 +2302,7 @@
   .role-icon{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;flex-shrink:0;}
   .role-icon.user{background:var(--accent-bg);color:var(--accent-text);border:1px solid var(--accent-bg-strong);}
   .role-icon.assistant{background:var(--accent-bg-strong);color:var(--accent-text);border:1px solid var(--accent-bg-strong);}
-  .msg-body{font-family:var(--font-conversation);font-size:var(--message-body-font-size);line-height:var(--message-body-line-height);color:var(--text);padding-left:30px;max-width:680px;overflow-wrap:anywhere;}
+  .msg-body{font-family:var(--font-conversation);font-size:var(--message-body-font-size);line-height:var(--message-body-line-height);color:var(--text);padding-left:30px;max-width:var(--msg-max);overflow-wrap:anywhere;}
   .msg-body p{margin-bottom:10px;}.msg-body p:last-child{margin-bottom:0;}
   .msg-body td p,.msg-body th p{margin:0;}
   .msg-body ul,.msg-body ol{margin:6px 0 10px 20px;}.msg-body li{margin-bottom:3px;}
@@ -2412,7 +2409,10 @@
   .msg-body blockquote p{margin:0;}
   .msg-body a{color:var(--blue);text-decoration:underline;}
   .msg-body hr{border:none;border-top:1px solid var(--border);margin:14px 0;}
-  .msg-body table{border-collapse:collapse;width:100%;margin:8px 0;font-size:12px;}
+  /* HWEB-2: a wide markdown table must scroll inside the reading column, not
+     escape it — .messages clips horizontally, so an escaped table loses its
+     right-hand columns entirely. Same containment .csv-table-wrap gives CSV. */
+  .msg-body table{border-collapse:collapse;display:block;width:100%;max-width:100%;overflow-x:auto;margin:8px 0;font-size:12px;}
   .msg-body th{background:rgba(255,255,255,.07);padding:6px 10px;text-align:left;font-weight:600;border:1px solid var(--border2);}
   .msg-body td{padding:5px 10px;border:1px solid rgba(255,255,255,.06);}
   .msg-body tr:nth-child(even){background:rgba(255,255,255,.03);}
@@ -2573,7 +2573,7 @@
   .suggestion:hover{background:var(--accent-bg);color:var(--text);border-color:var(--accent-bg);transform:translateX(2px);}
   /* ── Composer ── */
   .composer-wrap{padding:12px 20px 16px;background:var(--bg);flex-shrink:0;}
-  .composer-box{max-width:clamp(780px,60vw,1100px);margin:0 auto;background:linear-gradient(var(--input-bg),var(--input-bg)),var(--bg);border:1px solid var(--border2);border-radius:16px;display:flex;flex-direction:column;transition:border-color .2s,box-shadow .2s;position:relative;z-index:2;}
+  .composer-box{max-width:var(--msg-max);margin:0 auto;background:linear-gradient(var(--input-bg),var(--input-bg)),var(--bg);border:1px solid var(--border2);border-radius:16px;display:flex;flex-direction:column;transition:border-color .2s,box-shadow .2s;position:relative;z-index:2;}
   .composer-box:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg);}
   .composer-wrap.drag-over .composer-box{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg);}
   .drop-hint{display:none;position:absolute;inset:0;align-items:center;justify-content:center;gap:10px;background:linear-gradient(var(--input-bg),var(--input-bg)),var(--bg);border:2px dashed var(--accent);border-radius:16px;font-size:13.5px;font-weight:600;color:var(--accent-text);pointer-events:none;z-index:30;flex-direction:column;text-align:center;padding:8px;}
@@ -3119,7 +3119,8 @@
        `overflow-x:clip` suppresses horizontal overflow (the original #4583
        intent) WITHOUT coercing overflow-y or creating a scroll container, so
        min-height:auto stays min-content and the inner grows normally. */
-    .messages-inner{padding:12px 10px 20px;max-width:100%;overflow-x:clip;word-break:break-word;min-width:0;padding-left:max(10px,env(safe-area-inset-left,0));padding-right:max(10px,env(safe-area-inset-right,0));}
+    .messages{padding-left:max(10px,env(safe-area-inset-left,0));padding-right:max(10px,env(safe-area-inset-right,0));}
+    .messages-inner{padding:12px 0 20px;max-width:100%;overflow-x:clip;word-break:break-word;min-width:0;}
     .msg-body{padding-left:0;max-width:100%;}
     .msg-role{font-size:12px;}
     .composer-wrap{padding:8px 10px calc(12px + var(--keyboard-bottom-inset, 0px))!important;padding-left:max(10px,env(safe-area-inset-left,0))!important;padding-right:max(10px,env(safe-area-inset-right,0))!important;}
@@ -3247,7 +3248,7 @@
        which can jitter the 44px hit area while typing/scrolling. */
     .send-btn.visible{animation:none;opacity:1;transform:none;}
     /* Approval card */
-    .approval-card{padding-left:10px;padding-right:10px;bottom:8px;overflow:visible;}
+    .approval-card{bottom:8px;overflow:visible;}
     .approval-inner{max-height:min(52vh,360px);overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:12px 12px 14px;border-radius:12px;box-shadow:0 -10px 30px rgba(0,0,0,.24);min-width:min(100%,280px);}
     @supports (height:100dvh){.approval-inner{max-height:min(60dvh,420px);}}
     .approval-header{margin-bottom:8px;}
@@ -3258,7 +3259,7 @@
     .approval-btn.yolo{grid-column:1 / -1;}
     .approval-kbd{display:none;}
     /* Clarify card */
-    .clarify-card{padding-left:10px;padding-right:10px;overflow:visible;max-height:clamp(180px,min(62vh,calc(100vh - 180px)),360px);}
+    .clarify-card{overflow:visible;max-height:clamp(180px,min(62vh,calc(100vh - 180px)),360px);}
     .clarify-card .clarify-inner{max-height:clamp(180px,min(62vh,calc(100vh - 180px)),360px);}
     @supports (height:100dvh){.clarify-card,.clarify-card .clarify-inner{max-height:clamp(180px,min(62dvh,calc(100dvh - 180px)),360px);}}
     .clarify-inner{padding:12px 12px 13px;min-width:min(100%,280px);}
@@ -4523,10 +4524,9 @@ button.tool-card-header{width:calc(100% + 8px);border:0;background:transparent;t
 /* ── Manual compression cards (transient transcript-local feedback) ── */
 .live-compression-cards{
   display:none;
-  max-width:800px;
+  max-width:var(--msg-max);
   width:100%;
   margin:0 auto;
-  padding:0 24px;
 }
 /* LiveFooter: inline stream spark · elapsed · tokens · status */
 .live-run-status{display:flex;align-items:center;gap:8px;padding-left:0;margin:2px 0 6px;margin-left:var(--msg-rail);max-width:var(--msg-max);font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums;line-height:1;}
@@ -5952,7 +5952,14 @@ main.main > #mainPlugin{display:none;}
    ═══════════════════════════════════════════════════════════════════ */
 :root {
   --msg-rail: 0;
-  --msg-max: 780px;
+  /* The one chat-column width. 768px = 48rem at the CSS-default 16px root;
+     kept in px because :root font-size here is a user preference. */
+  --msg-max: 768px;
+  /* Inset of the chat column's right edge from its containing block, so
+     overlay affordances (scroll/jump/outline buttons) hug the column
+     instead of the pane. Collapses to the plain 20px gutter once the pane
+     is narrower than the column. */
+  --chat-col-inset: max(20px, calc((100% - var(--msg-max)) / 2 + 20px));
   --user-bubble-bg: var(--accent);
   --user-bubble-border: var(--accent-hover);
   --user-bubble-text: #fff;
@@ -6460,10 +6467,8 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
 }
 .msg-date-sep::before, .msg-date-sep::after { content: ''; flex: 1; height: 1px; background: var(--border); }
 
-/* ── Widths: collapse messages-inner to match content column ── */
+/* ── Widths: the transcript column is the shared chat column ── */
 .messages-inner { max-width: var(--msg-max); }
-@media (min-width: 1400px) { .messages-inner { max-width: calc(var(--msg-max) + 40px); } }
-@media (min-width: 1800px) { .messages-inner { max-width: calc(var(--msg-max) + 80px); } }
 
 /* Opt-in layout for wide monitors and split-pane workflows. The compact
    reading column remains the default; this mode consumes only the available
@@ -6675,8 +6680,8 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
   font-weight: 600;
 }
 
-  /* Queue pill outer: identical wrapper to .queue-card — max-width+padding positions the pill at card-inner width */
-  .queue-pill-outer{display:none;max-width:var(--msg-max);margin:0 auto;padding:0 20px;box-sizing:border-box;width:100%;}
+  /* Queue pill outer: identical wrapper to .queue-card — the chat column, gutter supplied by .composer-wrap */
+  .queue-pill-outer{display:none;max-width:var(--msg-max);margin:0 auto;box-sizing:border-box;width:100%;}
   .queue-pill-outer.show{display:block;animation:queuePillIn .18s ease;}
   @keyframes queuePillIn{from{opacity:0;transform:translateY(4px);}to{opacity:1;transform:translateY(0);}}
   /* Queue pill button: fills the outer slot, styled like queue-card-inner */
@@ -7290,11 +7295,6 @@ main.main.showing-logs > #mainLogs{display:flex;}
   unicode-bidi:isolate;
 }
 
-/* Cap composer width on very wide displays so the chip-cluster gap stays bounded */
-@media (min-width:1600px) {
-  .composer-box{max-width:1600px;margin:0 auto;}
-}
-
 #composerMobileCtxBadge { display: none !important; }
 
 /* Interim progress note collapse (#2403) */
@@ -7310,7 +7310,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
 
 /* ── Conversation Outline Panel (#2124) ─────────────────────────────────── */
 #outlineToggleBtn{
-  position:absolute;bottom:60px;right:20px;z-index:12;
+  position:absolute;bottom:60px;right:var(--chat-col-inset);z-index:12;
   width:38px;height:38px;border-radius:50%;
   background:var(--surface);border:1px solid var(--border2);
   color:var(--text);cursor:pointer;

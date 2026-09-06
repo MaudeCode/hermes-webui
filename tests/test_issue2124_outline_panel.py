@@ -143,7 +143,9 @@ def test_outline_fab_stacks_with_scroll_controls():
     scroll_css = _css_rule_body(".scroll-to-bottom-btn")
     assert "position:absolute" in outline_css
     assert "position:fixed" not in outline_css
-    assert _css_px(outline_css, "right") == _css_px(scroll_css, "right")
+    # HWEB-2: both ride the shared chat-column edge rather than a raw px inset.
+    assert "right:var(--chat-col-inset)" in outline_css
+    assert "right:var(--chat-col-inset)" in scroll_css
 
     outline_gap = _css_px(outline_css, "bottom")
     scroll_top = _css_px(scroll_css, "bottom") + _css_px(scroll_css, "height")
