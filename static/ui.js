@@ -1652,8 +1652,8 @@ function _isSessionJumpButtonsEnabled(){
   return window._sessionJumpButtonsEnabled===true;
 }
 function _applySessionNavigationPrefs(){
-  const container=$('messages');
-  if(container) container.classList.toggle('session-nav-enabled',_isSessionJumpButtonsEnabled());
+  // HWEB-9: the scroll-to-end pill is unconditional chrome now, so this pref
+  // only gates the optional start-of-session jump button.
   _updateSessionStartJumpButton();
 }
 function _updateSessionStartJumpButton(){

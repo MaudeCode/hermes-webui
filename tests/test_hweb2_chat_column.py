@@ -187,12 +187,17 @@ def test_desktop_widths_share_one_48rem_column(label, viewport, pane):
 
 
 def test_scroll_affordance_rides_the_column_edge():
-    """The scroll-to-bottom button hugs the reading column, not the pane edge."""
+    """The scroll affordance sits inside the reading column, not the pane edge.
+
+    HWEB-9 centred it on that column instead of hugging its right edge.
+    """
     m = _measure(1920)
     col = m["messagesInner"]
-    assert m["scrollBtn"]["right"] <= col["right"] + 1, m
+    btn = m["scrollBtn"]
+    assert btn["left"] >= col["left"] - 1 and btn["right"] <= col["right"] + 1, m
+    assert abs((btn["left"] + btn["right"]) / 2 - (col["left"] + col["right"]) / 2) <= 1, m
     # It is pulled well in from the pane edge on a wide window.
-    assert m["scrollBtn"]["right"] < m["pane"]["right"] - 100, m
+    assert btn["right"] < m["pane"]["right"] - 100, m
 
 
 def test_mobile_uses_the_available_width_without_overflow():

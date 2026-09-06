@@ -63,10 +63,14 @@ def test_jump_to_session_start_button_loads_full_history_and_scrolls_top():
 def test_session_jump_buttons_match_pill_layout_without_regressing_default_arrow():
     assert ".session-jump-btn" in STYLE_CSS
     assert ".session-jump-btn--start{top:16px" in STYLE_CSS
-    assert ".session-jump-btn__text{display:none" in STYLE_CSS
-    assert ".messages.session-nav-enabled .scroll-to-bottom-btn" in STYLE_CSS
-    assert ".messages.session-nav-enabled .session-jump-btn__text{display:inline" in STYLE_CSS
-    assert "classList.toggle('session-nav-enabled',_isSessionJumpButtonsEnabled())" in UI_JS
+    # HWEB-9: the scroll-to-end pill is unconditional chrome, so its label is
+    # always rendered and the opt-in `session-nav-enabled` reveal is gone. The
+    # pref now gates only the optional start-of-session button.
+    assert ".session-jump-btn__text{display:inline" in STYLE_CSS
+    assert "session-nav-enabled" not in STYLE_CSS
+    assert "session-nav-enabled" not in UI_JS
+    prefs = _function_body(UI_JS, "function _applySessionNavigationPrefs")
+    assert "_updateSessionStartJumpButton()" in prefs
 
 
 def test_session_jump_buttons_are_i18n_localized_in_text_tooltip_and_aria():
@@ -76,7 +80,7 @@ def test_session_jump_buttons_are_i18n_localized_in_text_tooltip_and_aria():
         "session_jump_end": "End",
         "session_jump_end_label": "Jump to end of session",
         "settings_label_session_jump_buttons": "Show session jump buttons",
-        "settings_desc_session_jump_buttons": "Show floating Start and End buttons while reading long session histories.",
+        "settings_desc_session_jump_buttons": "Show a floating Start button for jumping to the beginning of long session histories.",
     }
     for key in english_literals:
         assert I18N_JS.count(f"{key}:") >= 8, f"missing locale entries for {key}"

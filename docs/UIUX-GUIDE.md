@@ -142,7 +142,7 @@ subtle border or a subtle tint, not aggressive combinations of both.
 
 Avoid stacks of nested rounded rectangles. Rows and list items should feel
 compact; panels and cards may be slightly rounder; true pills are reserved for
-chips and badges.
+chips, badges, and the floating scroll-to-end control.
 
 ## Composer and controls
 
@@ -182,10 +182,16 @@ full-width chat** under Settings → Appearance, which is the only override.
 The column's gutter lives on the containers — `.messages` and `.composer-wrap`
 — not on the surfaces inside them, so a new chat surface only needs
 `max-width:var(--msg-max);margin:0 auto` to line up with prose, worklogs, tool
-rows, status cards, approvals and the composer. Overlay affordances (the
-scroll/jump/outline buttons) use `--chat-col-inset` to ride the column's right
-edge instead of the pane's. Do not add a second width rule, a per-surface
-gutter, or a wide-viewport breakpoint.
+rows, status cards, approvals and the composer. Do not add a second width rule,
+a per-surface gutter, or a wide-viewport breakpoint.
+
+Overlay affordances split by role. The scroll-to-end pill is the primary
+recovery action for the response being read, so it is centred on the column
+immediately above the composer (`left:50%` + `translateX(-50%)`) and is the one
+floating control that carries a visible label. The secondary edge affordances —
+the optional Start jump button and the outline FAB — use `--chat-col-inset` to
+ride the column's right edge instead of the pane's, and stack vertically so a
+taller composer cannot make them collide.
 
 ## Themes and skins
 
