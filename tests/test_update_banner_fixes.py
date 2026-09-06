@@ -2366,6 +2366,7 @@ const state = {{
 global.window = {{}};
 global.$ = (id) => state[id] || null;
 global._renderUpdateWhatsNewLinks = () => {{}};
+global._syncUpdateCapability = () => {{}};
 global.t = (key, ...args) => {{
   const values = {{ settings_update_manual_docker: 'Manual update required: run {{0}}, then recreate the container.' }};
   return (values[key] || key).replace(/\{{(\d+)\}}/g, (_, i) => args[Number(i)] ?? '');

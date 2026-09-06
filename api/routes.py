@@ -14292,6 +14292,7 @@ def handle_get(handler, parsed) -> bool:
             is_auth_enabled,
             is_oidc_auth_enabled,
             is_trusted_auth_enabled,
+            session_can_manage_server,
         )
         from api.passkeys import registered_credentials
 
@@ -14316,6 +14317,7 @@ def handle_get(handler, parsed) -> bool:
             "passkeys_count": len(passkeys),
             "passkey_feature_flag": passkey_flag,
             "auth_disabled_acknowledged": bool(load_settings().get("auth_disabled_acknowledged")) if not auth_enabled else False,
+            "can_manage_server": session_can_manage_server(session_info),
         }
         if is_trusted_auth_enabled() or (session_info and session_info.get("auth_type") == "trusted"):
             payload["trusted_auth_enabled"] = True
