@@ -401,6 +401,13 @@ def test_mode_toggle_preserves_selects_that_have_not_loaded_yet():
     assert "model: modelLoaded ? modelEl.value : (last.model || '')," in PANELS_JS
 
 
+def test_repeat_guard_rejects_fractional_counts():
+    # The header Save button is onclick="saveCronForm()" (index.html), so it
+    # bypasses the input's step="1" constraint validation (Codex round 7).
+    body = _function_body("saveCronForm")
+    assert "Number.isInteger(Number(repeatRaw)) && Number(repeatRaw)>=1" in body
+
+
 def test_save_uses_the_preserved_delivery_target_while_the_select_loads():
     # _cronFormValues alone was not enough: saveCronForm read the select
     # directly, so a duplicate saved during the load window sent deliver: ''

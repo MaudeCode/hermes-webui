@@ -2091,7 +2091,9 @@ async function saveCronForm(){
   if(isNoAgent && !script){errEl.textContent=t('cron_no_agent_script_required')||'A script-only job needs a script path.';errEl.style.display='';return;}
   // The agent rejects a monitor on a no_agent job; never submit both set.
   if(isNoAgent && monitor){errEl.textContent=t('cron_monitor_no_agent_conflict')||'A monitor cannot be combined with a script-only job.';errEl.style.display='';return;}
-  if(repeatRaw && !(Number(repeatRaw)>=1)){errEl.textContent=t('cron_repeat_invalid')||'Repeat count must be 1 or more.';errEl.style.display='';return;}
+  // The header Save button calls saveCronForm() directly, outside the form, so
+  // the input's step="1" constraint validation never runs — validate here.
+  if(repeatRaw && !(Number.isInteger(Number(repeatRaw)) && Number(repeatRaw)>=1)){errEl.textContent=t('cron_repeat_invalid')||'Repeat count must be a whole number of 1 or more.';errEl.style.display='';return;}
   try{
     const modelEl = $('cronFormModel');
     const modelLoaded = !!(modelEl && modelEl.dataset.loaded === '1');
