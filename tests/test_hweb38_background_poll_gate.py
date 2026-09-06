@@ -77,13 +77,21 @@ def test_every_previously_ungated_poller_uses_the_driver():
 
 
 def test_slow_endpoints_cannot_stack_in_flight_requests():
-    assert "if (_cronWatchInFlight) return;" in PANELS_JS
-    assert "finally { _cronWatchInFlight = false; }" in PANELS_JS
-    assert "if (_logsAutoRefreshInFlight) return;" in PANELS_JS
-    assert "if (_sessionStreamHiddenPollInFlight) return;" in MESSAGES_JS
-    assert "finally(() => { _sessionStreamHiddenPollInFlight = false; })" in MESSAGES_JS
-    # The chain could not overlap; the interval-based driver can.
+    # Every guard is closure-local (`let inFlight`), never module-scoped: a
+    # module flag let a request outliving its poller's stop release the guard of
+    # the poller that replaced it, and the next tick then overlapped.
+    assert "if (inFlight) return;" in PANELS_JS
+    assert "finally { inFlight = false; }" in PANELS_JS
+    assert "finally(() => { inFlight = false; });" in MESSAGES_JS
     assert "if(inFlight) return;" in MESSAGES_JS
+    for stale in (
+        "_cronWatchInFlight",
+        "_logsAutoRefreshInFlight",
+        "_sessionStreamHiddenPollInFlight",
+        "_approvalFallbackPollInFlight",
+        "_clarifyFallbackPollInFlight",
+    ):
+        assert stale not in PANELS_JS and stale not in MESSAGES_JS, stale
 
 
 def test_dashboard_status_interval_is_releasable():
@@ -166,10 +174,15 @@ _HARNESS = textwrap.dedent(
     const fetches = {};
     let pendingResolvers = [];
     let blockRequests = false;
+    let concurrent = 0, maxConcurrent = 0;
     function record(url) {
       const key = String(url).split('?')[0];
       fetches[key] = (fetches[key] || 0) + 1;
-      if (blockRequests) return new Promise((resolve) => pendingResolvers.push(resolve));
+      if (blockRequests) {
+        concurrent += 1;
+        maxConcurrent = Math.max(maxConcurrent, concurrent);
+        return new Promise((resolve) => pendingResolvers.push(() => { concurrent -= 1; resolve({}); }));
+      }
       return Promise.resolve({});
     }
 
@@ -386,6 +399,34 @@ _HARNESS = textwrap.dedent(
       out.protoSidMessages = S.messages.length;
       bgResults = null;
 
+      // ── A stop/restart must not release the replacement poller's guard ──
+      // _stopCronWatch() cannot know whether the outgoing watch has a request
+      // still pending. With a module-scoped flag that stale request's finally
+      // released the REPLACEMENT watch's guard and the next tick overlapped it.
+      timers.clear();
+      (listeners.get('visibilitychange') || new Set()).clear();
+      _cronWatchStop = null; _cronWatchTimerStop = null; _cronWatchStart = null;
+      for (const k of Object.keys(fetches)) delete fetches[k];
+      pendingResolvers = [];
+      concurrent = 0; maxConcurrent = 0;
+      blockRequests = true;
+      _startCronWatch('job-1', 'k1');
+      tickAll(); await flush();          // request A in flight (old watch)
+      _startCronWatch('job-2', 'k2');    // stop + restart while A is pending
+      tickAll(); await flush();          // request B in flight (new watch)
+      pendingResolvers.shift()();        // A completes -> its stale finally fires
+      await flush();
+      // A is gone; only B is pending. Re-baseline so we measure the REPLACEMENT
+      // watch overlapping ITSELF, not the old/new overlap a restart always has.
+      maxConcurrent = concurrent;
+      tickAll(); await flush();          // B2 must NOT start while B is pending
+      out.cronMaxConcurrentAfterStaleCompletion = maxConcurrent;
+      pendingResolvers.forEach((r) => r());
+      pendingResolvers = [];
+      blockRequests = false;
+      await flush();
+      _stopCronWatch();
+
       console.log(JSON.stringify(out));
     })();
     """
@@ -482,6 +523,16 @@ def test_session_id_matching_an_object_property_still_polls(driver):
     assert driver["protoSidPollers"] == 1, driver["protoSidPollers"]
     assert driver["protoSidDelivered"] == ["task-P"], driver["protoSidDelivered"]
     assert driver["protoSidMessages"] == 1, driver["protoSidMessages"]
+
+
+@requires_node
+def test_stop_restart_cannot_release_the_replacement_pollers_guard(driver):
+    # Measures the replacement watch overlapping ITSELF after the outgoing
+    # watch's request completes — not the old/new overlap inherent to any
+    # restart. Verified against the pre-fix module-scoped flag: this reached 2.
+    assert driver["cronMaxConcurrentAfterStaleCompletion"] == 1, driver[
+        "cronMaxConcurrentAfterStaleCompletion"
+    ]
 
 
 @requires_node

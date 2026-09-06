@@ -8002,7 +8002,6 @@ async function toggleYoloFromApproval() {
 
 // ── Approval polling ──
 let _approvalPollStop = null;
-let _approvalFallbackPollInFlight = false;
 let _approvalHideTimer = null;
 let _approvalVisibleSince = 0;
 let _approvalSignature = '';
@@ -8539,12 +8538,16 @@ function _startApprovalFallbackPoll(sid) {
   // pending approval shows its card instantly (the removed SSE 'initial' event
   // used to do this);
   // then poll on the 1500ms cadence. (#3913 SHOULD-FIX)
+  // Closure-local: stopApprovalPolling() cannot know whether a request from the
+  // poll it is replacing is still pending, and a shared flag let that stale
+  // request's finally release the replacement poll's guard.
+  let inFlight = false;
   const _tick = async () => {
     if (_approvalPollingSessionMissingOrMismatched(sid)) {
       stopApprovalPolling(); _hideApprovalCardIfOwner(sid, true); return;
     }
-    if (_approvalFallbackPollInFlight) return;
-    _approvalFallbackPollInFlight = true;
+    if (inFlight) return;
+    inFlight = true;
     try {
       const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
       if (data.pending) { showApprovalForSession(sid, data.pending, data.pending_count||1); }
@@ -8559,7 +8562,7 @@ function _startApprovalFallbackPoll(sid) {
         }
       }
     } catch(e) { /* ignore poll errors */ }
-    finally { _approvalFallbackPollInFlight = false; }
+    finally { inFlight = false; }
   };
   // Visible-only: a hidden tab cannot show an approval card, so 1500ms polling
   // behind a backgrounded tab is pure waste (~400 requests over a 10-minute
@@ -8583,7 +8586,6 @@ function stopApprovalPolling() {
   if (_approvalPollStop) { _approvalPollStop(); _approvalPollStop = null; }
   if (_approvalEventSource) { try { if(_approvalEventSource.readyState!==2)_approvalEventSource.close(); } catch(_){} _approvalEventSource = null; }
   if (_approvalSSEHealthTimer) { clearInterval(_approvalSSEHealthTimer); _approvalSSEHealthTimer = null; }
-  _approvalFallbackPollInFlight = false;
   _approvalPollingSessionId = null;
 }
 
@@ -8614,8 +8616,6 @@ let _sessionStreamHiddenSid = null;
 // on session switch.
 let _sessionStreamHiddenPollTimer = null;
 let _sessionStreamHiddenPollSid = null;
-// A slow /api/session/status must not let 6s ticks stack up in-flight requests.
-let _sessionStreamHiddenPollInFlight = false;
 // Bounded-retry budget for the hidden poll's "attach returned false → keep
 // polling" path (PR #5266 follow-up gate). A never-current pane (multi-pane:
 // another session stays on screen) would otherwise poll /api/session/status
@@ -8721,14 +8721,18 @@ function _startHiddenActiveStreamPoll(sid) {
   if (!sid) return;
   _stopHiddenActiveStreamPoll();
   _sessionStreamHiddenPollSid = sid;
+  // A slow /api/session/status must not let 6s ticks stack up in-flight
+  // requests. Closure-local so a request outliving _stopHiddenActiveStreamPoll()
+  // cannot release the guard of the poll that replaced it.
+  let inFlight = false;
   const tick = () => {
     // Stop conditions: tab became visible (real SSE takes over), session
     // switched, or we're already rendering a stream.
     if (typeof document !== 'undefined' && !document.hidden) { _stopHiddenActiveStreamPoll(); return; }
     if (_sessionStreamHiddenPollSid !== sid) { _stopHiddenActiveStreamPoll(); return; }
     if (S.activeStreamId) return; // already rendering; wait it out
-    if (_sessionStreamHiddenPollInFlight) return;
-    _sessionStreamHiddenPollInFlight = true;
+    if (inFlight) return;
+    inFlight = true;
     try {
       fetch(_apiUrl('api/session/status?session_id=' + encodeURIComponent(sid)), {credentials: 'same-origin'})
         .then(r => r.ok ? r.json() : null)
@@ -8767,8 +8771,8 @@ function _startHiddenActiveStreamPoll(sid) {
           }
         })
         .catch(() => {})
-        .finally(() => { _sessionStreamHiddenPollInFlight = false; });
-    } catch (_) { _sessionStreamHiddenPollInFlight = false; }
+        .finally(() => { inFlight = false; });
+    } catch (_) { inFlight = false; }
   };
   _sessionStreamHiddenPollTimer = setInterval(tick, 6000);
   // Fire one immediately so a turn already running when we go hidden is caught
@@ -8779,7 +8783,6 @@ function _startHiddenActiveStreamPoll(sid) {
 function _stopHiddenActiveStreamPoll() {
   if (_sessionStreamHiddenPollTimer) { clearInterval(_sessionStreamHiddenPollTimer); _sessionStreamHiddenPollTimer = null; }
   _sessionStreamHiddenPollSid = null;
-  _sessionStreamHiddenPollInFlight = false;
   // Reset the bounded-retry budget so a fresh poll never inherits a stale count.
   _sessionStreamHiddenPollFalseStreamId = null;
   _sessionStreamHiddenPollFalseCount = 0;
@@ -9637,7 +9640,6 @@ async function respondClarify(response) {
 var _clarifyEventSource = null;
 var _clarifyFallbackStop = null;
 var _clarifyHealthTimer = null;
-let _clarifyFallbackPollInFlight = false;
 let _clarifyPollingSessionId = null;
 
 function startClarifyPolling(sid) {
@@ -9665,12 +9667,14 @@ function _startClarifyFallbackPoll(sid) {
   // pending clarify shows its card instantly (the removed SSE 'initial' event
   // used to do this);
   // then poll on the 3000ms cadence. (#3913 SHOULD-FIX)
+  // Closure-local, same stop/restart reasoning as the approval poll.
+  let inFlight = false;
   const _tick = async () => {
     if (!S.session || S.session.session_id !== sid) {
       stopClarifyPolling(); _hideClarifyCardIfOwner(sid, true, 'session'); return;
     }
-    if (_clarifyFallbackPollInFlight) return;
-    _clarifyFallbackPollInFlight = true;
+    if (inFlight) return;
+    inFlight = true;
     try {
       const data = await api("/api/clarify/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
       if (data.pending) { showClarifyForSession(sid, data.pending); }
@@ -9738,7 +9742,7 @@ function _startClarifyFallbackPoll(sid) {
         console.warn("[clarify] pending poll failed", logDetails);
       }
     } finally {
-      _clarifyFallbackPollInFlight = false;
+      inFlight = false;
     }
   };
   // Visible-only, same reasoning as the approval fallback poll: the clarify card
@@ -9759,7 +9763,6 @@ function stopClarifyPolling() {
   if (_clarifyEventSource) { try { if(_clarifyEventSource.readyState!==2)_clarifyEventSource.close(); } catch(_){} _clarifyEventSource = null; }
   if (_clarifyFallbackStop) { _clarifyFallbackStop(); _clarifyFallbackStop = null; }
   if (_clarifyHealthTimer) { clearInterval(_clarifyHealthTimer); _clarifyHealthTimer = null; }
-  _clarifyFallbackPollInFlight = false;
   _clarifyPollingSessionId = null;
 }
 

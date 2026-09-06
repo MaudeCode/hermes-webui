@@ -35,7 +35,6 @@ let _profileMode = 'empty'; // 'empty' | 'read' | 'create'
 let _profilePreFormDetail = null;
 let _pendingSettingsTargetPanel = null; // destination selected while settings had unsaved changes
 let _logsAutoRefreshStop = null;
-let _logsAutoRefreshInFlight = false;
 let _lastLogsLines = [];
 let _logsSeverityFilter = 'all';
 
@@ -2033,7 +2032,6 @@ function _formatCronRunUsageStrip(usage) {
 let _cronWatchStop = null;
 let _cronWatchStart = null;
 let _cronWatchTimerStop = null;
-let _cronWatchInFlight = false;
 
 function _startCronWatch(jobId, detailKey) {
   _stopCronWatch();
@@ -2041,9 +2039,15 @@ function _startCronWatch(jobId, detailKey) {
   // Visible-only + in-flight guarded: the watch only paints a running indicator
   // nobody can see from a background tab, and a slow /api/crons/status would
   // otherwise stack a new request every 3s on top of the one still open.
+  // Closure-local, not module-scoped: _stopCronWatch() cannot know whether a
+  // request from the watch it is replacing is still pending. A shared flag let
+  // that stale request's finally release the REPLACEMENT watch's guard, so the
+  // next tick overlapped it. Each watch now owns its own flag, and a dead
+  // watch's completion writes to a closure nobody reads.
+  let inFlight = false;
   _cronWatchStop = startVisiblePoll(async () => {
-    if (_cronWatchInFlight) return;
-    _cronWatchInFlight = true;
+    if (inFlight) return;
+    inFlight = true;
     try {
       const data = await api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}`,{timeoutToast:false});
       if (!data.running) {
@@ -2059,7 +2063,7 @@ function _startCronWatch(jobId, detailKey) {
         if (el) el.querySelector('.cron-watch-elapsed').textContent = _formatElapsed(data.elapsed);
       }
     } catch(e) { /* ignore poll errors */ }
-    finally { _cronWatchInFlight = false; }
+    finally { inFlight = false; }
   }, 3000);
   // Timer update every second — also visible-only; it repaints an indicator a
   // hidden tab is not showing.
@@ -2078,7 +2082,6 @@ function _startCronWatch(jobId, detailKey) {
 function _stopCronWatch() {
   if (_cronWatchStop) { _cronWatchStop(); _cronWatchStop = null; }
   if (_cronWatchTimerStop) { _cronWatchTimerStop(); _cronWatchTimerStop = null; }
-  _cronWatchInFlight = false;
   _cronWatchStart = null;
   const el = $('cronRunningIndicator');
   if (el) el.remove();
@@ -4496,13 +4499,16 @@ function _startLogsAutoRefresh() {
   // tailing the log file every 5s into a view nobody is reading. The catch-up
   // tick reloads the tail the moment the tab is shown. The in-flight flag keeps
   // a slow /api/logs (a large tail) from stacking overlapping reads.
+  // Closure-local for the same reason as the cron watch: a stop/restart must
+  // not let the outgoing poller's completion release the incoming one's guard.
+  let inFlight = false;
   _logsAutoRefreshStop = startVisiblePoll(() => {
     if (_currentPanel !== 'logs') { _stopLogsAutoRefresh(); return; }
     const toggle = $('logsAutoRefresh');
     if (toggle && !toggle.checked) return;
-    if (_logsAutoRefreshInFlight) return;
-    _logsAutoRefreshInFlight = true;
-    Promise.resolve(loadLogs(false)).catch(() => {}).finally(() => { _logsAutoRefreshInFlight = false; });
+    if (inFlight) return;
+    inFlight = true;
+    Promise.resolve(loadLogs(false)).catch(() => {}).finally(() => { inFlight = false; });
   }, 5000);
 }
 
@@ -4511,7 +4517,6 @@ function _stopLogsAutoRefresh() {
     _logsAutoRefreshStop();
     _logsAutoRefreshStop = null;
   }
-  _logsAutoRefreshInFlight = false;
 }
 
 function _syncLogsAutoRefresh() {

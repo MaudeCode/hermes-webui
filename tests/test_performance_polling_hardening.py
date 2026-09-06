@@ -30,18 +30,33 @@ def test_session_list_refreshes_are_coalesced_while_in_flight():
 
 
 def test_approval_and_clarify_fallback_polls_do_not_overlap():
-    src = _source(MESSAGES_JS)
-    assert "let _approvalFallbackPollInFlight = false" in src
-    assert "if (_approvalFallbackPollInFlight) return" in src
-    assert "_approvalFallbackPollInFlight = true" in src
-    assert "finally { _approvalFallbackPollInFlight = false; }" in src
-    assert "_approvalFallbackPollInFlight = false;\n  _approvalPollingSessionId = null;" in src
+    """Both fallback polls still refuse to overlap.
 
-    assert "let _clarifyFallbackPollInFlight = false" in src
-    assert "if (_clarifyFallbackPollInFlight) return" in src
-    assert "_clarifyFallbackPollInFlight = true" in src
-    assert "finally {\n      _clarifyFallbackPollInFlight = false;\n    }" in src
-    assert "_clarifyFallbackPollInFlight = false;\n  _clarifyPollingSessionId = null;" in src
+    HWEB-38 moved the guards from module-scoped flags to closure-local `let
+    inFlight` declared inside each _start*FallbackPoll. A module flag was reset
+    by stopApprovalPolling()/stopClarifyPolling(), so a request that outlived a
+    stop/restart released the REPLACEMENT poll's guard and let the next tick
+    overlap it. A closure-local flag is per poller generation, so a stale
+    completion writes to a closure nothing reads.
+    """
+    src = _source(MESSAGES_JS)
+    approval = src[src.index("function _startApprovalFallbackPoll("):]
+    approval = approval[: approval.index("\nfunction ")]
+    assert "let inFlight = false;" in approval
+    assert "if (inFlight) return;" in approval
+    assert "inFlight = true;" in approval
+    assert "finally { inFlight = false; }" in approval
+
+    clarify = src[src.index("function _startClarifyFallbackPoll("):]
+    clarify = clarify[: clarify.index("\nfunction ")]
+    assert "let inFlight = false;" in clarify
+    assert "if (inFlight) return;" in clarify
+    assert "inFlight = true;" in clarify
+    assert "finally {\n      inFlight = false;\n    }" in clarify
+
+    # The old module-scoped flags must not come back.
+    assert "_approvalFallbackPollInFlight" not in src
+    assert "_clarifyFallbackPollInFlight" not in src
 
 
 def test_idle_sidebar_hover_or_focus_cannot_defer_fresh_payloads_forever():
