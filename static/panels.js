@@ -1727,6 +1727,10 @@ function _cronFormValues({ isEdit }){
     context_from: ctxEl ? Array.from(ctxEl.selectedOptions || []).map(o => o.value) : [],
     reasoning_effort: val('cronFormReasoningEffort'),
     repeat: val('cronFormRepeat').trim(),
+    // A blank from a LOADED picker is the user choosing Default; a blank from
+    // an unloaded one carries no intent. Track which so the save can tell them
+    // apart after a re-render.
+    modelExplicit: modelLoaded ? true : !!last.modelExplicit,
     model: modelLoaded ? modelEl.value : (last.model || ''),
     provider: modelLoaded
       ? (selectedOpt
@@ -1750,8 +1754,8 @@ function _onCronFormNoAgentToggle(){
 
 let _cronFormRendered = null; // last args _renderCronForm was called with
 
-function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notifications=true, no_agent=false, script='', monitor='', continuity=false, context_from=[], reasoning_effort='', repeat='', model='', provider='', isEdit }){
-  _cronFormRendered = { prompt, script, monitor, deliver, model, provider };
+function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notifications=true, no_agent=false, script='', monitor='', continuity=false, context_from=[], reasoning_effort='', repeat='', model='', provider='', modelExplicit=false, isEdit }){
+  _cronFormRendered = { prompt, script, monitor, deliver, model, provider, modelExplicit };
   const title = $('taskDetailTitle');
   const body = $('taskDetailBody');
   const empty = $('taskDetailEmpty');
@@ -2123,6 +2127,11 @@ async function saveCronForm(){
         } else if (modelLoaded) {
           updates.model = null;
           updates.provider = null;
+        } else if (_cronFormRendered && _cronFormRendered.modelExplicit && !_cronFormRendered.model) {
+          // Explicit Default chosen before the re-render: clear the pin rather
+          // than omitting the fields and preserving the stored one.
+          updates.model = null;
+          updates.provider = null;
         } else if (_cronFormRendered && _cronFormRendered.model) {
           // Picker still reloading after a mode re-render: send the pin the form
           // was rendered with, so a re-render cannot quietly revert it.
@@ -2162,6 +2171,9 @@ async function saveCronForm(){
         body.model = _cronModelBareName(modelState.model, modelState.model_provider) || null;
         body.provider = modelState.model_provider || null;
       }
+    } else if (modelEl && _cronFormRendered && _cronFormRendered.modelExplicit && !_cronFormRendered.model) {
+      // User explicitly chose Default before the re-render — honor it rather
+      // than letting the duplicate fallback reinstate the source pin.
     } else if (modelEl && _cronFormRendered && _cronFormRendered.model) {
       // Picker still reloading after a mode re-render: use the pin the form was
       // rendered with rather than dropping it, mirroring the delivery path.

@@ -1516,10 +1516,18 @@ def _cron_continuity_refs(context_from, continuity: bool) -> list:
     agent's ``_apply_continuity``): true adds it, false removes it, and every
     other reference is preserved untouched.
     """
-    if isinstance(context_from, str):
+    if context_from is None:
+        refs = []
+    elif isinstance(context_from, str):
         refs = [context_from.strip()] if context_from.strip() else []
+    elif isinstance(context_from, (list, tuple)):
+        refs = [str(ref).strip() for ref in context_from if str(ref).strip()]
     else:
-        refs = [str(ref).strip() for ref in (context_from or []) if str(ref).strip()]
+        # Trust boundary: anything else (an int, a dict) would raise TypeError
+        # here and escape _handle_cron_update's ValueError handler as a 500.
+        raise ValueError(
+            "context_from must be a job ID string or a list of job ID strings"
+        )
     has_self = any(ref.lower() == "self" for ref in refs)
     if continuity and not has_self:
         refs.append("self")

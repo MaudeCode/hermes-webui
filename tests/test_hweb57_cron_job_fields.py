@@ -273,6 +273,38 @@ def test_script_only_create_skips_profile_model_snapshot_resolution(monkeypatch)
     assert seen["no_agent"] is True
 
 
+# --- hostile input (Codex round 9) --------------------------------------------
+
+
+def test_malformed_context_from_is_a_400_not_a_500(monkeypatch):
+    # Iterating a non-sequence raised TypeError, which escaped
+    # _handle_cron_update's ValueError handler as an unhandled 500.
+    import api.routes as routes
+
+    for bad_value in (1, {"a": 1}, True):
+        _stub_cron_jobs(monkeypatch, [])
+        handler = _JSONHandler()
+        routes._handle_cron_update(
+            handler,
+            {"job_id": "job-1", "context_from": bad_value, "continuity": True},
+        )
+        assert handler.status == 400, bad_value
+        assert "context_from" in _payload(handler)["error"]
+
+
+def test_valid_context_from_shapes_still_accepted(monkeypatch):
+    assert routes_refs("abc") == ["abc"]
+    assert routes_refs(["abc", "def"]) == ["abc", "def"]
+    assert routes_refs(("abc",)) == ["abc"]
+    assert routes_refs(None) == []
+
+
+def routes_refs(value):
+    import api.routes as routes
+
+    return routes._cron_continuity_refs(value, False)
+
+
 # --- read-back ---------------------------------------------------------------
 
 
@@ -394,7 +426,7 @@ def test_mode_toggle_preserves_selects_that_have_not_loaded_yet():
     # The model and delivery selects are filled by an async fetch and show a
     # placeholder until it lands. A toggle inside that window must not snapshot
     # a cleared model override or a defaulted 'local' target (Codex round 3).
-    assert "_cronFormRendered = { prompt, script, monitor, deliver, model, provider };" in PANELS_JS
+    assert "_cronFormRendered = { prompt, script, monitor, deliver, model, provider" in PANELS_JS
     assert "const modelLoaded = !!(modelEl && modelEl.dataset.loaded === '1');" in PANELS_JS
     assert "const delivLoaded = !!(delivEl && !delivEl.querySelector('option[value=\"\"][disabled]'));" in PANELS_JS
     assert "deliver: (delivLoaded ? delivEl.value : last.deliver) || 'local'," in PANELS_JS
@@ -406,6 +438,16 @@ def test_repeat_guard_rejects_fractional_counts():
     # bypasses the input's step="1" constraint validation (Codex round 7).
     body = _function_body("saveCronForm")
     assert "Number.isInteger(Number(repeatRaw)) && Number(repeatRaw)>=1" in body
+
+
+def test_explicit_default_survives_a_mode_rerender():
+    # A blank from a LOADED picker means "use the default"; a blank from an
+    # unloaded one carries no intent. Conflating them let an explicit Default be
+    # overridden by the stored pin on edit and by the source pin on duplicate.
+    assert "modelExplicit: modelLoaded ? true : !!last.modelExplicit," in PANELS_JS
+    body = _function_body("saveCronForm")
+    assert "_cronFormRendered.modelExplicit && !_cronFormRendered.model" in body
+    assert body.count("_cronFormRendered.modelExplicit && !_cronFormRendered.model") == 2
 
 
 def test_save_uses_the_preserved_model_pin_while_the_picker_reloads():
