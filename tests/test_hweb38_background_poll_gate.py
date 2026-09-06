@@ -75,6 +75,18 @@ def test_dashboard_status_interval_is_releasable():
     assert "window.addEventListener('pagehide',_stopDashboardStatusPoll)" in UI_JS
 
 
+def test_bfcache_restore_restarts_the_poll_without_reloading_the_settings_form():
+    # A bfcache restore must not run the full probe: loadDashboardSettings()
+    # overwrites the dashboard mode/URL inputs from the server, discarding the
+    # unsaved draft bfcache just restored for the user navigating back.
+    start = UI_JS.index("window.addEventListener('pageshow'")
+    handler = UI_JS[start:UI_JS.index("});", start)]
+    assert "_startDashboardStatusPoll()" in handler
+    assert "refreshDashboardStatus(true)" in handler
+    assert "_initDashboardLinkProbe" not in handler
+    assert "loadDashboardSettings" not in handler
+
+
 # ── Behavioural driver ───────────────────────────────────────────────────────
 
 _HARNESS = textwrap.dedent(
