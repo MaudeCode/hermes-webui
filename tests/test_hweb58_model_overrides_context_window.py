@@ -9,19 +9,20 @@ a default to catalog-known models.
 
 The ring denominator is ``session.context_length``, produced by
 ``routes._resolve_context_length_for_session_model`` and rendered by
-``static/ui.js`` as ``ctxWindow = usage.context_length``.
+``static/ui.js``'s ``_syncCtxIndicator`` as ``ctxWindow = usage.context_length``.
+The last test drives both halves so the whole chain is covered.
 """
 
 import json
 import sys
 import types
-from pathlib import Path
 
 import pytest
 import yaml
 
-REPO = Path(__file__).resolve().parent.parent
-UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+from tests.test_issue4685_post_compression_context_metering import (
+    _run_context_indicator,
+)
 
 CATALOG_MODEL = "catalog-known-model"
 CATALOG_CONTEXT = 100_000
@@ -142,7 +143,20 @@ def test_absent_or_empty_overrides_change_nothing(monkeypatch, tmp_path, overrid
     assert _resolve(monkeypatch, tmp_path, overrides, UNKNOWN_MODEL) != 4242
 
 
-def test_ring_reads_the_resolved_context_length():
-    """Pin the last hop: the ring divides by ``usage.context_length``."""
-    assert "const ctxWindow=usage.context_length||DEFAULT_CTX;" in UI_JS
-    assert "Math.round((contextPromptTok/ctxWindow)*100)" in UI_JS
+def test_override_moves_the_rendered_ring(monkeypatch, tmp_path):
+    """End to end: the override reaches the percentage the ring actually renders."""
+    prompt_tokens = 20_000
+    overrides = {"anthropic": {CATALOG_MODEL: {"context_window": 25_000}}}
+
+    def render(context_length):
+        return _run_context_indicator(
+            {"last_prompt_tokens": prompt_tokens, "context_length": context_length}
+        )
+
+    catalog_ring = render(_resolve(monkeypatch, tmp_path, None, CATALOG_MODEL))
+    override_ring = render(_resolve(monkeypatch, tmp_path, overrides, CATALOG_MODEL))
+
+    assert catalog_ring["percent"] == "20"
+    assert catalog_ring["tokens"].endswith("20000 / 100000 tokens used")
+    assert override_ring["percent"] == "80"
+    assert override_ring["tokens"].endswith("20000 / 25000 tokens used")
