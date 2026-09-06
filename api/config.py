@@ -1274,6 +1274,38 @@ _PROVIDER_ALIASES = {
     "nemotron": "nvidia",
     "mimo": "xiaomi",
     "xiaomi-mimo": "xiaomi",
+    # v0.21.0 provider aliases, mirrored from the agent (plugin profiles'
+    # ``aliases=`` tuples and hermes_cli's own alias table). The docstring above
+    # is the reason these are duplicated here rather than left to the merge:
+    # this table has to stand alone when the agent tree is not importable, which
+    # is exactly the standalone deployment the static catalog above serves.
+    # Without them an aliased ``model.provider`` canonicalises to itself and
+    # misses `_PORTAL_PROVIDERS`, sending namespaced rows to OpenRouter.
+    # ``commandcode-anthropic`` is deliberately absent — it is a separate agent
+    # provider profile, not an alias of ``commandcode``.
+    "commandcode-chat": "commandcode",
+    "ramp-router": "router",
+    "ramp": "router",
+    "router.com": "router",
+    "actual-computer": "actual",
+    "actualcomputer": "actual",
+    "aci": "actual",
+    "nebius": "nebius-token-factory",
+    "nebius-tokenfactory": "nebius-token-factory",
+    "nebius-tf": "nebius-token-factory",
+    "token-factory": "nebius-token-factory",
+    "tokenfactory": "nebius-token-factory",
+    "meta": "meta-ai",
+    "muse": "meta-ai",
+    "muse-spark": "meta-ai",
+    "model-api": "meta-ai",
+    "msl": "meta-ai",
+    "tencent": "tencent-tokenhub",
+    "tokenhub": "tencent-tokenhub",
+    "tencent-cloud": "tencent-tokenhub",
+    "tencentmaas": "tencent-tokenhub",
+    "tokenplan": "tencent-tokenplan",
+    "tencent-lkeap": "tencent-tokenplan",
     # Legacy alias — earlier WebUI builds wrote ``provider: local`` for unknown
     # loopback endpoints, but ``local`` is not registered in
     # ``hermes_cli.auth.PROVIDER_REGISTRY``. Routing it through ``custom``
@@ -3153,7 +3185,16 @@ def resolve_model_provider(
         # fired in the prefix==config_provider case, causing HTTP 404 from the
         # portal which requires the full provider/model id (#2177; sibling of
         # #854 / #894 for Nous, where this guard was originally added).
-        if config_provider in _PORTAL_PROVIDERS:
+        #
+        # Test the CANONICAL slug: `_PORTAL_PROVIDERS` is keyed canonically, but
+        # `config_provider` keeps whatever alias the user wrote
+        # (`_resolve_configured_provider_id(..., resolve_alias=False)`). Left
+        # raw, `provider: actual-computer` / `aci` / `commandcode-chat` missed
+        # this set and fell through to the cross-provider branch, which handed a
+        # recognized namespace to OpenRouter — the picker had already resolved
+        # the group canonically, so the two disagreed about the same identity.
+        # Same reasoning as the `_canon_config_provider` lookup above (#5511).
+        if (_canon_config_provider or config_provider) in _PORTAL_PROVIDERS:
             return _finalize(model_id, config_provider, config_base_url)
         # If prefix matches config provider exactly, strip it and use that provider directly.
         # e.g. config=anthropic, model=anthropic/claude-... → bare name to anthropic API

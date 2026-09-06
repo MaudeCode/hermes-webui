@@ -413,3 +413,73 @@ def test_fallback_detection_keeps_the_openai_slug_special_case(monkeypatch, tmp_
     groups = _fallback_groups(monkeypatch, tmp_path, {"OPENAI_API_KEY": "k"})
     assert "openai" not in groups
     assert {"openai-api", "openai-codex"} <= groups
+
+
+# Agent-supported aliases → canonical slug, mirrored from the plugin profiles'
+# `aliases=` tuples and hermes_cli's own table.
+PROVIDER_ALIASES = {
+    "commandcode-chat": "commandcode",
+    "ramp-router": "router",
+    "ramp": "router",
+    "router.com": "router",
+    "actual-computer": "actual",
+    "actualcomputer": "actual",
+    "aci": "actual",
+    "nebius": "nebius-token-factory",
+    "nebius-tokenfactory": "nebius-token-factory",
+    "nebius-tf": "nebius-token-factory",
+    "token-factory": "nebius-token-factory",
+    "tokenfactory": "nebius-token-factory",
+    "meta": "meta-ai",
+    "muse": "meta-ai",
+    "muse-spark": "meta-ai",
+    "model-api": "meta-ai",
+    "msl": "meta-ai",
+    "tencent": "tencent-tokenhub",
+    "tokenhub": "tencent-tokenhub",
+    "tencent-cloud": "tencent-tokenhub",
+    "tencentmaas": "tencent-tokenhub",
+    "tokenplan": "tencent-tokenplan",
+    "tencent-lkeap": "tencent-tokenplan",
+}
+
+
+@pytest.mark.parametrize("alias,canonical", sorted(PROVIDER_ALIASES.items()))
+def test_agent_aliases_canonicalise_without_the_agent_importable(alias, canonical):
+    """The WebUI's own alias table must stand alone.
+
+    `_PROVIDER_ALIASES` merges hermes_cli's table when importable, but standalone
+    deployments have no agent tree — the same deployments the static catalog
+    serves. An alias that canonicalises to itself misses `_PORTAL_PROVIDERS`.
+    """
+    assert config._canonicalise_provider_id(alias) == canonical
+
+
+@pytest.mark.parametrize("alias,canonical", sorted(PROVIDER_ALIASES.items()))
+def test_aliased_active_provider_keeps_its_own_namespaced_rows(alias, canonical):
+    """`model.provider: <alias>` must not leak namespaced rows to OpenRouter.
+
+    The picker resolves the group canonically while `resolve_model_provider()`
+    keeps the raw alias (`resolve_alias=False`), so a canonical-only membership
+    test made the two disagree about the same provider.
+    """
+    if canonical not in config._PORTAL_PROVIDERS:
+        pytest.skip(f"{canonical} serves only bare ids")
+    rows = config._PROVIDER_MODELS[canonical] or [
+        {"id": "accounts/fireworks/models/kimi-k3", "label": "x"}
+    ]
+    namespaced = [entry for entry in rows if "/" in entry["id"]]
+    assert namespaced, f"{canonical} needs a namespaced row to exercise this"
+
+    cfg = {"model": {"provider": alias, "default": "x"}}
+    for entry in namespaced:
+        picked = config._apply_provider_prefix([dict(entry)], canonical, canonical)[0]["id"]
+        _model, provider, _base = config.resolve_model_provider(picked, config_data=cfg)
+        assert provider in (alias, canonical), (
+            f"provider={alias} row={entry['id']} leaked to {provider!r}"
+        )
+
+
+def test_commandcode_anthropic_is_not_folded_into_commandcode():
+    """It is a separate agent provider profile, not an alias."""
+    assert config._canonicalise_provider_id("commandcode-anthropic") != "commandcode"
