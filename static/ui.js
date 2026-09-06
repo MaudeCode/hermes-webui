@@ -10890,12 +10890,14 @@ function _renderUpdateCapability(){
   // show no permission copy at all; the host command is the only guidance.
   const hasTargets=!!window._updateHasApplyTargets;
   const allowed=state===true&&hasTargets;
+  // In-flight flags keep a control disabled even when a capability re-read
+  // lands mid-request, so a button never looks actionable while it is busy.
   const apply=$('btnApplyUpdate');
-  if(apply) apply.disabled=!allowed;
+  if(apply) apply.disabled=!allowed||window._updateApplyInFlight===true;
   const force=$('btnForceUpdate');
   if(force) force.disabled=!allowed;
   const clearLock=$('btnClearUpdateLock');
-  if(clearLock) clearLock.disabled=!allowed;
+  if(clearLock) clearLock.disabled=!allowed||window._clearLockInFlight===true;
   const retry=$('btnUpdatePermissionRetry');
   if(retry) retry.style.display=(hasTargets&&state==='error')?'':'none';
   const note=$('updateOwnerNote');

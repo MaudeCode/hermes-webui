@@ -186,7 +186,7 @@ global.api = async (path, opts) => {
     if (res && res.throwMessage) throw new Error(res.throwMessage);
     return res;
   }
-  apiCalls.push({ path, body: JSON.parse(opts.body) });
+  apiCalls.push({ path, body: JSON.parse(opts.body), applyDisabled: dom.btnApplyUpdate.disabled, clearLockDisabled: dom.btnClearUpdateLock.disabled });
   const res = updateResponses.shift() || { ok: true };
   if (res.httpStatus) { const e = new Error(res.message || 'HTTP ' + res.httpStatus); e.status = res.httpStatus; throw e; }
   return res;
@@ -280,12 +280,15 @@ def test_owner_session_keeps_existing_multi_target_apply():
     assert [c["body"]["target"] for c in out["apiCalls"]] == ["agent", "webui"]
     assert out["waitCalls"] == 1
     assert out["noteDisplay"] == "none"
+    # The pre-mutation capability re-read must not re-enable Update Now mid-flight.
+    assert all(c["applyDisabled"] is True for c in out["apiCalls"])
 
 
 def test_owner_force_and_clear_lock_still_send_requests():
     out = _run(["banner", "settle", "force", "clearLock"], updates=[{"ok": True}, {"ok": True}])
     assert _mutations(out) == ["/api/updates/force", "/api/updates/clear_lock"]
     assert out["waitCalls"] == 2
+    assert out["apiCalls"][1]["clearLockDisabled"] is True
 
 
 @pytest.mark.parametrize("status", [{}, {"can_manage_server": "true"}, {"can_manage_server": None}, None])
