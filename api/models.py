@@ -225,8 +225,12 @@ def _cached_parsed_index(path: Path) -> list[dict] | None:
     return list(entries)
 
 
-def _cache_parsed_index(path: Path, entries: list[dict]) -> None:
-    signature = _index_stat_signature(path)
+def _cache_parsed_index(path: Path, entries: list[dict], *, signature=None) -> None:
+    # A caller that read the file outside the index write lock must pass the
+    # signature it verified around its own read: re-stat'ing here would bind
+    # those rows to whatever version landed in the meantime.
+    if signature is None:
+        signature = _index_stat_signature(path)
     if signature is None:
         return
     key = str(path)
@@ -251,10 +255,17 @@ def _read_session_index_entries() -> list:
     path = SESSION_INDEX_FILE
     entries = _cached_parsed_index(path)
     if entries is None:
+        # This read is not serialized against ``_write_session_index``, so an
+        # index replaced mid-read would otherwise be cached as old rows under
+        # the new file's signature — and the next targeted write would accept
+        # that as its baseline and durably revert the save that replaced it.
+        # Only publish rows the stat signature proves came from one version.
+        signature = _index_stat_signature(path)
         entries = json.loads(path.read_bytes())
         if not isinstance(entries, list):
             raise ValueError("session index must be a list")
-        _cache_parsed_index(path, entries)
+        if signature is not None and signature == _index_stat_signature(path):
+            _cache_parsed_index(path, entries, signature=signature)
     return entries
 
 
@@ -584,13 +595,16 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
 # title generation and every 15s streaming checkpoint each trigger a save, so a
 # busy server paid N full index rewrites for N concurrent saves even though one
 # rewrite carrying all N rows is equivalent. Savers publish an immutable
-# snapshot of their row and the first one in becomes the flusher for everybody
-# waiting; a latecomer blocks until the rewrite carrying its snapshot finishes
-# and then reports that rewrite's outcome as its own. Waiting is what the old
-# code did too (on ``_INDEX_WRITE_LOCK``), so no durability is traded away —
-# the win is that the waiters' rows ride along in one rewrite instead of each
-# paying its own.
-_INDEX_FLUSH_LOCK = threading.Lock()
+# snapshot of their row into the current batch; whoever finds no rewrite in
+# flight performs the next one. A saver returns as soon as the rewrite carrying
+# ITS batch is done and reports that rewrite's outcome as its own — it never
+# stays on to drain later arrivals, because ``Session.save()`` runs under the
+# session's mutation lock and a busy store would otherwise pin one session's
+# lock behind unrelated sessions' checkpoints. Whoever is still waiting picks
+# up the next rewrite instead. Waiting is what the old code did too (on
+# ``_INDEX_WRITE_LOCK``), so no durability is traded away — the win is that the
+# waiters' rows ride along in one rewrite instead of each paying its own.
+_INDEX_FLUSH_COND = threading.Condition()
 _INDEX_PENDING_ROWS: dict = {}
 _INDEX_PENDING_BATCH = None
 _INDEX_FLUSH_IN_PROGRESS = False
@@ -599,10 +613,10 @@ _INDEX_FLUSH_IN_PROGRESS = False
 class _IndexFlushBatch:
     """One coalesced index rewrite and the outcome its savers are waiting on."""
 
-    __slots__ = ("event", "error")
+    __slots__ = ("done", "error")
 
     def __init__(self):
-        self.event = threading.Event()
+        self.done = False
         self.error = None
 
 
@@ -612,15 +626,15 @@ def _queue_session_index_update(sessions) -> None:
     Each session is compacted up front, so the row that lands in the index is
     the one that matched the sidecar its save just wrote — never a later
     mutation made by the session's own streaming thread while the row sat in
-    the queue. The caller returns only once the rewrite carrying its snapshot
-    has finished, and re-raises that rewrite's error, so a save still reports
-    its own index outcome exactly as it did before coalescing existed.
+    the queue. The caller returns once the rewrite carrying its snapshot has
+    finished, and re-raises that rewrite's error, so a save still reports its
+    own index outcome exactly as it did before coalescing existed.
     """
     global _INDEX_FLUSH_IN_PROGRESS, _INDEX_PENDING_BATCH
     with LOCK:
         rows = [session.compact() for session in sessions]
 
-    with _INDEX_FLUSH_LOCK:
+    with _INDEX_FLUSH_COND:
         if _INDEX_PENDING_BATCH is None:
             _INDEX_PENDING_BATCH = _IndexFlushBatch()
         batch = _INDEX_PENDING_BATCH
@@ -628,45 +642,41 @@ def _queue_session_index_update(sessions) -> None:
             sid = row.get('session_id')
             if sid:
                 _INDEX_PENDING_ROWS[sid] = row
-        flushing = _INDEX_FLUSH_IN_PROGRESS
-        if not flushing:
+
+        while not batch.done:
+            if _INDEX_FLUSH_IN_PROGRESS:
+                # Someone else's rewrite is running. It cannot be carrying this
+                # batch (a batch is taken and replaced in one critical section),
+                # so wait to be woken and then take the next rewrite.
+                _INDEX_FLUSH_COND.wait()
+                continue
+
+            pending = list(_INDEX_PENDING_ROWS.values())
+            current = _INDEX_PENDING_BATCH
+            _INDEX_PENDING_ROWS.clear()
+            _INDEX_PENDING_BATCH = None
             _INDEX_FLUSH_IN_PROGRESS = True
 
-    if flushing:
-        batch.event.wait()
-        if batch.error is not None:
-            raise batch.error
-        return
-
-    try:
-        while True:
-            with _INDEX_FLUSH_LOCK:
-                if not _INDEX_PENDING_ROWS:
-                    # Emptiness and the flag must clear in one critical section:
-                    # a publisher that slipped in between would see a flusher
-                    # that is already gone and wait forever.
-                    _INDEX_FLUSH_IN_PROGRESS = False
-                    break
-                pending = list(_INDEX_PENDING_ROWS.values())
-                current = _INDEX_PENDING_BATCH
-                _INDEX_PENDING_ROWS.clear()
-                _INDEX_PENDING_BATCH = None
+            error = None
+            _INDEX_FLUSH_COND.release()
             try:
                 _write_session_index(updates=pending)
-            except BaseException as exc:  # noqa: BLE001 - re-raised for this batch
-                current.error = exc
+            except BaseException as exc:  # noqa: BLE001 - re-raised per batch
+                error = exc
             finally:
-                # Release this batch's savers whether the rewrite landed or
-                # failed, then keep draining: a batch queued behind a failing
-                # one still has savers blocked on it.
-                current.event.set()
-    except BaseException:
-        with _INDEX_FLUSH_LOCK:
-            _INDEX_FLUSH_IN_PROGRESS = False
-        raise
+                _INDEX_FLUSH_COND.acquire()
+                # Publish the outcome and drop the role in one critical section:
+                # a saver that arrives in between must never wait on a rewrite
+                # that has already finished.
+                current.error = error
+                current.done = True
+                _INDEX_FLUSH_IN_PROGRESS = False
+                _INDEX_FLUSH_COND.notify_all()
 
-    if batch.error is not None:
-        raise batch.error
+        error = batch.error
+
+    if error is not None:
+        raise error
 
 
 def prune_session_from_index(session_id: str) -> None:

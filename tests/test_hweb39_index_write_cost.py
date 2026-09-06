@@ -245,3 +245,95 @@ def test_a_saver_queued_behind_a_failing_rewrite_observes_the_failure(index_stor
     assert isinstance(errors.get("waiter"), OSError)
     # The gate must not stay latched after a failure, or every later save hangs.
     assert models._INDEX_FLUSH_IN_PROGRESS is False
+
+
+def test_flusher_returns_after_its_own_batch_instead_of_draining_later_ones(
+    index_store, monkeypatch
+):
+    """A saver must not stay on as flusher for unrelated sessions' rewrites.
+
+    ``Session.save()`` runs under its session's mutation lock, so a flusher that
+    kept draining a busy store's queue would pin that lock behind other
+    sessions' streaming checkpoints indefinitely.
+    """
+    writers = []
+    first_replace_entered = threading.Event()
+    release_first_replace = threading.Event()
+    real_replace = models._safe_replace
+
+    def gated_replace(src, dst):
+        writers.append(threading.current_thread().name)
+        if len(writers) == 1:
+            first_replace_entered.set()
+            assert release_first_replace.wait(timeout=10), "gate never released"
+        real_replace(src, dst)
+
+    monkeypatch.setattr(models, "_safe_replace", gated_replace)
+
+    flusher = threading.Thread(
+        name="saver-a",
+        target=models._queue_session_index_update,
+        args=([_session("sid-0", 9000)],),
+    )
+    flusher.start()
+    assert first_replace_entered.wait(timeout=10), "flusher never reached the rewrite"
+
+    waiter = threading.Thread(
+        name="saver-b",
+        target=models._queue_session_index_update,
+        args=([_session("sid-1", 9001)],),
+    )
+    waiter.start()
+    deadline = time.monotonic() + 10
+    while "sid-1" not in models._INDEX_PENDING_ROWS:
+        assert time.monotonic() < deadline, "waiter never queued its row"
+        time.sleep(0.01)
+
+    release_first_replace.set()
+    for thread in (flusher, waiter):
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+    # saver-a wrote only its own batch; saver-b picked up the handed-off role.
+    assert writers == ["saver-a", "saver-b"]
+    persisted = {row["session_id"]: row for row in json.loads(index_store.path.read_bytes())}
+    assert persisted["sid-0"]["updated_at"] == 9000
+    assert persisted["sid-1"]["updated_at"] == 9001
+
+
+def test_index_replaced_mid_read_is_never_cached_under_the_new_signature(
+    index_store, monkeypatch
+):
+    """A racy read must not poison the parsed cache with superseded rows.
+
+    ``_read_session_index_entries()`` runs outside the index write lock, so the
+    file can be replaced between its read and its stat. Caching the old rows
+    under the new file's signature would hand the next targeted write a stale
+    baseline and durably revert the save that replaced it.
+    """
+    path = index_store.path
+    real_read_bytes = type(path).read_bytes
+    replaced_rows = [dict(row) for row in index_store.rows]
+    replaced_rows[1]["title"] = "written-by-the-intervening-save"
+
+    raced = []
+
+    def read_then_replace(self):
+        data = real_read_bytes(self)
+        if self == path and not raced:
+            # Another writer lands between this read and the stat that follows.
+            raced.append(True)
+            path.write_text(json.dumps(replaced_rows), encoding="utf-8")
+        return data
+
+    monkeypatch.setattr(type(path), "read_bytes", read_then_replace)
+
+    stale = models._read_session_index_entries()
+    assert stale[1]["title"] == "sid-1", "test did not exercise the mid-read replace"
+    assert models._cached_parsed_index(path) is None, "stale rows were cached"
+
+    # The next targeted write must build on the replaced file, not the stale read.
+    models._write_session_index(updates=[_session("sid-0", 9000)])
+    persisted = {row["session_id"]: row for row in json.loads(path.read_bytes())}
+    assert persisted["sid-1"]["title"] == "written-by-the-intervening-save"
+    assert persisted["sid-0"]["updated_at"] == 9000
