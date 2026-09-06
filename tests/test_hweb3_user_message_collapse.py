@@ -496,6 +496,56 @@ _SETTLE_JS = r"""
 }
 """
 
+_COLLISION_JS = r"""
+() => {
+  const id = (t) => window._userMessageExpandIdentity(t, 0);
+  // A shared 160-character prefix is realistic: pasted logs routinely open with
+  // the same header. Identity must follow the whole message, not its opening.
+  const prefix = 'Here is the full deploy log from the failing run. '.repeat(4);
+  const longA = prefix + 'A'.repeat(700);
+  const longB = prefix + 'B'.repeat(700);
+  // Same length, differing only in the middle -- the exact shape that defeated
+  // the clipped signature in #6999.
+  const midA = 'x'.repeat(400) + 'AAAA' + 'y'.repeat(400);
+  const midB = 'x'.repeat(400) + 'BBBB' + 'y'.repeat(400);
+  // A short message whose whole text is the long one's opening. Under the old
+  // prefix key this shared an identity, and the short row's !collapsible
+  // cleanup then deleted the long row's entry.
+  const shortSharingPrefix = prefix.slice(0, 160);
+
+  window._setUserMessageExpanded(id(longA), true);
+  const beforeCleanup = window._userMessageIsExpanded(id(longA));
+  // Simulate the !collapsible cleanup renderMessages runs for a short row.
+  window._setUserMessageExpanded(id(shortSharingPrefix), false);
+
+  return {
+    sharedPrefixDistinct: id(longA) !== id(longB),
+    middleEditDistinct: id(midA) !== id(midB),
+    shortDistinctFromLong: id(shortSharingPrefix) !== id(longA),
+    beforeCleanup,
+    survivesShortRowCleanup: window._userMessageIsExpanded(id(longA)),
+  };
+}
+"""
+
+
+def test_disclosure_identity_follows_complete_content():
+    """A prefix key collides for messages sharing an opening, and the short-row
+    cleanup turns that collision into deletion of a long message's entry."""
+    playwright, browser, page = _page(1440)
+    try:
+        r = page.evaluate(_COLLISION_JS)
+    finally:
+        browser.close()
+        playwright.stop()
+
+    assert r["sharedPrefixDistinct"] is True, r
+    assert r["middleEditDistinct"] is True, r
+    assert r["shortDistinctFromLong"] is True, r
+    assert r["beforeCleanup"] is True, r
+    # The destructive half: a short row's cleanup must not collapse a long one.
+    assert r["survivesShortRowCleanup"] is True, r
+
 
 def test_expansion_survives_the_optimistic_to_settled_swap():
     """Expanding a long prompt while its response streams must not collapse when

@@ -1378,10 +1378,18 @@ function _clearUserRowIntrinsicHeightCache(){
 // Two identical prompts in one session share a key, which merely means they
 // open together. The session-change release below is hygiene, not correctness.
 const _userMsgExpandedByKey=Object.create(null);
+// Hashes the COMPLETE normalized content, never a prefix. #6999 already burned
+// this repo once: a length+head+tail clip "made same-length middle-only edits
+// produce identical signatures — a deterministic stale-cache collision". The
+// same truncation here is worse than a shared key, because the `!collapsible`
+// cleanup in renderMessages DELETES the entry: a short message colliding with a
+// long one would silently collapse the long one the reader had open. Length is
+// carried alongside the digest so a short message can never share an identity
+// with a long one whatever the hash does.
 function _userMessageExpandIdentity(rawText, attachmentCount){
-  const norm=String(rawText==null?'':rawText).replace(/\s+/g,' ').trim().slice(0,160);
+  const norm=String(rawText==null?'':rawText).replace(/\s+/g,' ').trim();
   if(!norm) return '';
-  return 'u|'+(Number(attachmentCount)||0)+'|'+_safeEncodeURIComponent(norm);
+  return 'u|'+(Number(attachmentCount)||0)+'|'+norm.length+'|'+_worklogDetailHashKey(norm);
 }
 function _userMessageExpandKey(identity){
   const id=String(identity||'');
