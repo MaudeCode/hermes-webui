@@ -62,7 +62,7 @@ def test_every_previously_ungated_poller_uses_the_driver():
     assert "_logsAutoRefreshStop = startVisiblePoll(" in PANELS_JS
     # The /background task poller was a self-rescheduling setTimeout chain
     # with no gate at all; it now runs on the same driver.
-    assert "_bgPollTimers[taskId]=startVisiblePoll(_poll,3000)" in MESSAGES_JS
+    assert "_bgPollTimers[parentSid]=startVisiblePoll(_poll,3000)" in MESSAGES_JS
     assert "if(tabIsVisibleForPolling()) _poll();" in MESSAGES_JS
 
 
@@ -165,9 +165,17 @@ _HARNESS = textwrap.dedent(
 
     // ── shared stubs ───────────────────────────────────────────────────────
     global.encodeURIComponent = encodeURIComponent;
-    global.S = { busy: true, session: { session_id: 'sid-1' }, activeStreamId: null };
+    global.S = { busy: true, session: { session_id: 'sid-1' }, activeStreamId: null, messages: [] };
+    let bgResults = null;
     global.$ = () => null;
-    global.api = (url) => record(url).then(() => ({ pending: null, running: true, elapsed: 1, lines: [] }));
+    global.api = (url) => record(url).then(() => {
+      // /api/background/status is DESTRUCTIVE: get_results(parentSid) returns
+      // every completed result for the parent and removes it from tracking, so
+      // a second reader gets nothing. Model that — it is the whole bug.
+      let results = null;
+      if (String(url).startsWith('/api/background/status')) { results = bgResults; bgResults = null; }
+      return { pending: null, running: true, elapsed: 1, lines: [], results };
+    });
 
     // approval
     global._approvalFallbackPollInFlight = false;
@@ -207,6 +215,7 @@ _HARNESS = textwrap.dedent(
 
     // background task
     global._bgPollTimers = {};
+    global._bgPendingTasksByParent = {};
     global.hideBackgroundBadge = () => {};
     global.renderMessages = () => {};
     global.showToast = () => {};
@@ -280,6 +289,32 @@ _HARNESS = textwrap.dedent(
       out.timersAfterSelfStop = timers.size;
       out.listenersAfterSelfStop = (listeners.get('visibilitychange') || new Set()).size;
 
+      // ── /background: one poller per parent, every result delivered ───────
+      // /api/background/status is destructive (get_results drains the parent),
+      // so a second poller on the same parent would drain and then discard its
+      // sibling's result, stranding that task forever.
+      timers.clear();
+      (listeners.get('visibilitychange') || new Set()).clear();
+      _bgPollTimers = {};
+      _bgPendingTasksByParent = {};
+      S.messages = [];
+      const hiddenBadges = [];
+      hideBackgroundBadge = (id) => { hiddenBadges.push(id); };
+      startBackgroundPolling('parent-1', 'task-A', 'first');
+      startBackgroundPolling('parent-1', 'task-B', 'second');
+      await flush();
+      out.bgPollersForOneParent = timers.size;
+
+      for (const k of Object.keys(fetches)) delete fetches[k];
+      bgResults = [{ task_id: 'task-A', answer: 'A!' }, { task_id: 'task-B', answer: 'B!' }];
+      tickAll();
+      await flush();
+      out.bgRequestsPerTick = fetches['/api/background/status'] || 0;
+      out.bgDelivered = hiddenBadges.slice().sort();
+      out.bgMessages = S.messages.length;
+      out.bgTimersAfterAllDone = timers.size;
+      bgResults = null;
+
       console.log(JSON.stringify(out));
     })();
     """
@@ -340,6 +375,22 @@ def test_slow_cron_status_cannot_produce_concurrent_requests(driver):
 def test_start_tick_that_stops_its_own_poller_leaks_nothing(driver):
     assert driver["timersAfterSelfStop"] == 0, driver["timersAfterSelfStop"]
     assert driver["listenersAfterSelfStop"] == 0, driver["listenersAfterSelfStop"]
+
+
+@requires_node
+def test_sibling_background_tasks_share_one_poller_and_all_results_land(driver):
+    # Two /background tasks on one parent session must be served by a single
+    # poller. Two pollers race for a destructive endpoint: whichever response
+    # lands first drains both results and discards the one whose task_id does
+    # not match, stranding that task's badge and poller forever.
+    assert driver["bgPollersForOneParent"] == 1, driver["bgPollersForOneParent"]
+    assert driver["bgRequestsPerTick"] == 1, driver["bgRequestsPerTick"]
+    # The endpoint drains on read, so both results must be delivered from the
+    # single response — an unclaimed one is gone for good.
+    assert driver["bgDelivered"] == ["task-A", "task-B"], driver["bgDelivered"]
+    assert driver["bgMessages"] == 2, driver["bgMessages"]
+    # Last task done → poller released.
+    assert driver["bgTimersAfterAllDone"] == 0, driver["bgTimersAfterAllDone"]
 
 
 @requires_node

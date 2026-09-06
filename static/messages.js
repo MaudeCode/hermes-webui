@@ -9992,7 +9992,14 @@ function attachBtwStream(parentSid, streamId, question){
 
 // ── /background task tracking ────────────────────────────────────────────────
 
-let _bgPollTimers={};
+// Keyed by PARENT SESSION, not by task: /api/background/status is destructive.
+// get_results(parentSid) returns and removes every completed result for the
+// parent (api/background.py), so two pollers on one parent race — whichever
+// response lands first drains its sibling's result and then discards it for not
+// matching its own task_id, leaving that task's badge and poller waiting forever
+// for an answer that was already delivered and thrown away.
+let _bgPollTimers={};              // parentSid -> stop function
+let _bgPendingTasksByParent={};    // parentSid -> Map(taskId -> prompt)
 let _bgActiveTasks=new Set();
 
 function showBackgroundBadge(taskId){
@@ -10011,14 +10018,20 @@ function hideBackgroundBadge(taskId){
     badge.style.display=_bgActiveTasks.size?'':'none';
   }
 }
-// `_bgPollTimers[taskId]` holds the poller's stop function, not a timer id.
-function _stopBackgroundPolling(taskId){
-  const stop=_bgPollTimers[taskId];
-  delete _bgPollTimers[taskId];
+// `_bgPollTimers[parentSid]` holds the poller's stop function, not a timer id.
+function _stopBackgroundPolling(parentSid){
+  const stop=_bgPollTimers[parentSid];
+  delete _bgPollTimers[parentSid];
+  delete _bgPendingTasksByParent[parentSid];
   if(typeof stop==='function') stop();
 }
 function startBackgroundPolling(parentSid, taskId, prompt){
-  if(_bgPollTimers[taskId]) return;
+  const pending=_bgPendingTasksByParent[parentSid]
+    ||(_bgPendingTasksByParent[parentSid]=new Map());
+  pending.set(taskId,prompt);
+  // One poller per parent session — a second task joins the existing one rather
+  // than racing it for the same destructive endpoint.
+  if(_bgPollTimers[parentSid]) return;
   // Was a self-rescheduling setTimeout chain with no visibility gate: a
   // /background task left running behind a hidden tab kept hitting
   // /api/background/status every 3s (~200 requests over 10 hidden minutes).
@@ -10030,18 +10043,22 @@ function startBackgroundPolling(parentSid, taskId, prompt){
     inFlight=true;
     try{
       const r=await api('/api/background/status?session_id='+encodeURIComponent(parentSid));
-      if(r&&r.results){
+      const owners=_bgPendingTasksByParent[parentSid];
+      if(r&&r.results&&owners){
+        let delivered=false;
         for(const res of r.results){
-          if(res.task_id===taskId){
-            hideBackgroundBadge(taskId);
-            _stopBackgroundPolling(taskId);
-            const msg={role:'assistant',content:`**${t('bg_label')}** ${prompt.slice(0,80)}\n\n${res.answer||t('bg_no_answer')}`,'_background':true,_ts:Date.now()/1000};
-            S.messages.push(msg);
-            renderMessages({preserveScroll:true});
-            showToast(t('bg_complete'));
-            return;
-          }
+          // Deliver EVERY returned result to its owner. The server has already
+          // dropped them from tracking, so anything left unclaimed here is lost.
+          const ownerPrompt=owners.get(res.task_id);
+          if(ownerPrompt===undefined) continue;
+          owners.delete(res.task_id);
+          hideBackgroundBadge(res.task_id);
+          S.messages.push({role:'assistant',content:`**${t('bg_label')}** ${ownerPrompt.slice(0,80)}\n\n${res.answer||t('bg_no_answer')}`,'_background':true,_ts:Date.now()/1000});
+          showToast(t('bg_complete'));
+          delivered=true;
         }
+        if(delivered) renderMessages({preserveScroll:true});
+        if(!owners.size) _stopBackgroundPolling(parentSid);
       }
     }catch(_){}
     finally{ inFlight=false; }
@@ -10049,7 +10066,7 @@ function startBackgroundPolling(parentSid, taskId, prompt){
   // Store the stop function before the first tick: a task that has already
   // finished stops the poller from inside that tick, and a stop that ran before
   // the assignment would leave the interval running.
-  _bgPollTimers[taskId]=startVisiblePoll(_poll,3000);
+  _bgPollTimers[parentSid]=startVisiblePoll(_poll,3000);
   if(tabIsVisibleForPolling()) _poll();
 }
 
