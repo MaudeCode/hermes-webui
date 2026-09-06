@@ -75,6 +75,11 @@ def _import_agent_metadata():
     import agent.model_metadata  # noqa: F401
     import agent.models_dev as models_dev
 
+    # `model_overrides` landed in agent v0.21.0. Older agents import fine but
+    # have no override resolver at all — `api/routes.py:8656` still carries the
+    # legacy two-argument fallback for them — so skip rather than fail.
+    if not hasattr(models_dev, "_override_context_window"):
+        pytest.skip("hermes-agent predates model_overrides (agent < v0.21.0)")
     return models_dev
 
 
@@ -144,11 +149,20 @@ def test_provider_default_beats_global_default(monkeypatch, tmp_path):
     )
 
 
-@pytest.mark.parametrize("overrides", [None, {}, {"anthropic": {}}])
-def test_absent_or_empty_overrides_change_nothing(monkeypatch, tmp_path, overrides):
-    """The default path is untouched when no override applies."""
-    assert _resolve(monkeypatch, tmp_path, overrides, CATALOG_MODEL) == CATALOG_CONTEXT
-    assert _resolve(monkeypatch, tmp_path, overrides, UNKNOWN_MODEL) != 4242
+def test_absent_or_empty_overrides_change_nothing(monkeypatch, tmp_path):
+    """Every empty form resolves to exactly what no override block resolves to."""
+    baselines = {
+        model: _resolve(monkeypatch, tmp_path, None, model)
+        for model in (CATALOG_MODEL, UNKNOWN_MODEL)
+    }
+    # Guard the comparison itself: a resolver that errored would return 0 for
+    # both sides and make every equality below vacuously true.
+    assert baselines[CATALOG_MODEL] == CATALOG_CONTEXT
+    assert baselines[UNKNOWN_MODEL] > 0
+
+    for overrides in ({}, {"anthropic": {}}, {"anthropic": {}, "_default": {}}):
+        for model, baseline in baselines.items():
+            assert _resolve(monkeypatch, tmp_path, overrides, model) == baseline
 
 
 def test_override_moves_the_rendered_ring(monkeypatch, tmp_path):
