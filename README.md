@@ -328,7 +328,7 @@ Create the named Hermes profiles and any owner recovery password or passkey befo
 
 ### Panels
 - **Chat** -- session list, search, pin, archive, projects, new conversation
-- **Tasks** -- view, create, edit, run, pause/resume, delete cron jobs; run history; completion alerts
+- **Tasks** -- view, create, edit, run, pause/resume, delete cron jobs; run history; completion alerts; script-only jobs, monitor sources, continuity, and job chaining ([docs](docs/scheduled-jobs.md))
 - **Skills** -- list all skills by category, search, preview, create/edit/delete; linked files viewer
 - **Memory** -- view and edit MEMORY.md and USER.md inline
 - **Profiles** -- create, switch, delete agent profiles; clone config
@@ -701,6 +701,7 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 
 **Using & customizing**
 - [`THEMES.md`](THEMES.md) — theme + skin system, custom theme guide
+- [`docs/scheduled-jobs.md`](docs/scheduled-jobs.md) — the Tasks panel's cron job controls, including script-only jobs, monitor sources, continuity, and job chaining
 - [`docs/workspace-git.md`](docs/workspace-git.md) — the workspace Git controls
 - [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) — administrator-controlled WebUI extension injection
 
