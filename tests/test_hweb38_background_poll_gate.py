@@ -63,8 +63,12 @@ def test_every_previously_ungated_poller_uses_the_driver():
     assert "_logsAutoRefreshStop = startVisiblePoll(" in PANELS_JS
     # The /background task poller was a self-rescheduling setTimeout chain
     # with no gate at all; it now runs on the same driver.
-    assert "_bgPollTimers[parentSid]=startVisiblePoll(_poll,3000)" in MESSAGES_JS
+    assert "_bgPollTimers.set(parentSid,startVisiblePoll(_poll,3000))" in MESSAGES_JS
     assert "if(tabIsVisibleForPolling()) _poll();" in MESSAGES_JS
+    # Session ids are [0-9a-zA-Z_-], so a session named `constructor` or
+    # `__proto__` would hit an inherited Object property on a plain-object map.
+    assert "let _bgPollTimers=new Map();" in MESSAGES_JS
+    assert "let _bgPendingTasksByParent=new Map();" in MESSAGES_JS
     # Kanban had three separate fallback setInterval sites; they now share one
     # start helper so the gate cannot be reintroduced at just one of them.
     assert "_kanbanPollStop = startVisiblePoll(refreshKanbanEvents, 30000)" in PANELS_JS
@@ -230,8 +234,8 @@ _HARNESS = textwrap.dedent(
     global._kanbanEventSource = null;
 
     // background task
-    global._bgPollTimers = {};
-    global._bgPendingTasksByParent = {};
+    global._bgPollTimers = new Map();
+    global._bgPendingTasksByParent = new Map();
     global.hideBackgroundBadge = () => {};
     global.renderMessages = () => {};
     global.showToast = () => {};
@@ -315,8 +319,8 @@ _HARNESS = textwrap.dedent(
       // sibling's result, stranding that task forever.
       timers.clear();
       (listeners.get('visibilitychange') || new Set()).clear();
-      _bgPollTimers = {};
-      _bgPendingTasksByParent = {};
+      _bgPollTimers = new Map();
+      _bgPendingTasksByParent = new Map();
       S.messages = [];
       const hiddenBadges = [];
       hideBackgroundBadge = (id) => { hiddenBadges.push(id); };
@@ -355,6 +359,32 @@ _HARNESS = textwrap.dedent(
       setHidden(true); setHidden(false);
       await flush();
       out.kanbanAfterStop = fetches['/api/kanban/events'] || 0;
+
+      // ── A session named `constructor` must behave like any other ────────
+      // is_safe_session_id() allows all-letter ids, so this is a reachable sid.
+      // On plain objects _bgPollTimers[sid] is truthy (Object.prototype
+      // .constructor), so the poller never starts, and the Map init is skipped
+      // so pending.set() throws.
+      timers.clear();
+      (listeners.get('visibilitychange') || new Set()).clear();
+      _bgPollTimers = new Map();
+      _bgPendingTasksByParent = new Map();
+      S.messages = [];
+      const protoBadges = [];
+      hideBackgroundBadge = (id) => { protoBadges.push(id); };
+      for (const k of Object.keys(fetches)) delete fetches[k];
+      out.protoSidThrew = false;
+      try {
+        startBackgroundPolling('constructor', 'task-P', 'proto task');
+        await flush();
+      } catch (e) { out.protoSidThrew = true; }
+      out.protoSidPollers = timers.size;
+      bgResults = [{ task_id: 'task-P', answer: 'P!' }];
+      tickAll();
+      await flush();
+      out.protoSidDelivered = protoBadges.slice();
+      out.protoSidMessages = S.messages.length;
+      bgResults = null;
 
       console.log(JSON.stringify(out));
     })();
@@ -441,6 +471,17 @@ def test_kanban_sse_fallback_is_gated_and_releasable(driver):
     assert driver["kanbanHidden"] == 0, driver["kanbanHidden"]
     assert driver["kanbanOnVisible"] == 1, driver["kanbanOnVisible"]
     assert driver["kanbanAfterStop"] == 0, driver["kanbanAfterStop"]
+
+
+@requires_node
+def test_session_id_matching_an_object_property_still_polls(driver):
+    # `constructor` passes is_safe_session_id(), so it is a reachable session id.
+    # On a plain object it silently broke the poller: the truthy inherited
+    # lookup skipped both the poller creation and the Map init.
+    assert driver["protoSidThrew"] is False
+    assert driver["protoSidPollers"] == 1, driver["protoSidPollers"]
+    assert driver["protoSidDelivered"] == ["task-P"], driver["protoSidDelivered"]
+    assert driver["protoSidMessages"] == 1, driver["protoSidMessages"]
 
 
 @requires_node

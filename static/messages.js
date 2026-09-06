@@ -9998,8 +9998,12 @@ function attachBtwStream(parentSid, streamId, question){
 // response lands first drains its sibling's result and then discards it for not
 // matching its own task_id, leaving that task's badge and poller waiting forever
 // for an answer that was already delivered and thrown away.
-let _bgPollTimers={};              // parentSid -> stop function
-let _bgPendingTasksByParent={};    // parentSid -> Map(taskId -> prompt)
+// Map, not a plain object: session ids are [0-9a-zA-Z_-] (is_safe_session_id),
+// so a session legitimately named `constructor`, `toString` or `__proto__` would
+// hit an inherited Object property — the truthy lookup would skip poller
+// creation and the Map init, and pending.set() would then throw.
+let _bgPollTimers=new Map();            // parentSid -> stop function
+let _bgPendingTasksByParent=new Map();  // parentSid -> Map(taskId -> prompt)
 let _bgActiveTasks=new Set();
 
 function showBackgroundBadge(taskId){
@@ -10018,20 +10022,20 @@ function hideBackgroundBadge(taskId){
     badge.style.display=_bgActiveTasks.size?'':'none';
   }
 }
-// `_bgPollTimers[parentSid]` holds the poller's stop function, not a timer id.
+// _bgPollTimers maps parentSid to the poller's stop function, not a timer id.
 function _stopBackgroundPolling(parentSid){
-  const stop=_bgPollTimers[parentSid];
-  delete _bgPollTimers[parentSid];
-  delete _bgPendingTasksByParent[parentSid];
+  const stop=_bgPollTimers.get(parentSid);
+  _bgPollTimers.delete(parentSid);
+  _bgPendingTasksByParent.delete(parentSid);
   if(typeof stop==='function') stop();
 }
 function startBackgroundPolling(parentSid, taskId, prompt){
-  const pending=_bgPendingTasksByParent[parentSid]
-    ||(_bgPendingTasksByParent[parentSid]=new Map());
+  let pending=_bgPendingTasksByParent.get(parentSid);
+  if(!pending){ pending=new Map(); _bgPendingTasksByParent.set(parentSid,pending); }
   pending.set(taskId,prompt);
   // One poller per parent session — a second task joins the existing one rather
   // than racing it for the same destructive endpoint.
-  if(_bgPollTimers[parentSid]) return;
+  if(_bgPollTimers.has(parentSid)) return;
   // Was a self-rescheduling setTimeout chain with no visibility gate: a
   // /background task left running behind a hidden tab kept hitting
   // /api/background/status every 3s (~200 requests over 10 hidden minutes).
@@ -10043,7 +10047,7 @@ function startBackgroundPolling(parentSid, taskId, prompt){
     inFlight=true;
     try{
       const r=await api('/api/background/status?session_id='+encodeURIComponent(parentSid));
-      const owners=_bgPendingTasksByParent[parentSid];
+      const owners=_bgPendingTasksByParent.get(parentSid);
       if(r&&r.results&&owners){
         let delivered=false;
         for(const res of r.results){
@@ -10066,7 +10070,7 @@ function startBackgroundPolling(parentSid, taskId, prompt){
   // Store the stop function before the first tick: a task that has already
   // finished stops the poller from inside that tick, and a stop that ran before
   // the assignment would leave the interval running.
-  _bgPollTimers[parentSid]=startVisiblePoll(_poll,3000);
+  _bgPollTimers.set(parentSid,startVisiblePoll(_poll,3000));
   if(tabIsVisibleForPolling()) _poll();
 }
 
