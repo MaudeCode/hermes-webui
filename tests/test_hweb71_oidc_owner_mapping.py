@@ -184,6 +184,8 @@ def test_absent_owner_policy_is_disabled(monkeypatch):
         ("groups", None),          # claim without values
         (None, OWNER_GROUP),       # values without a claim
         ("groups", ""),            # present-but-blank values
+        ("", ""),                  # both explicitly blank, e.g. templated env vars
+        ("", OWNER_GROUP),
         ("   ", OWNER_GROUP),      # whitespace-only claim
         ("groups", []),            # empty list
         ("groups", [OWNER_GROUP, 7]),      # a number is not a group name
@@ -223,6 +225,66 @@ def test_owner_values_accept_supported_string_shapes(raw_values, expected):
     _, values, error, configured = auth_oidc._normalize_owner_policy("groups", raw_values)
 
     assert (values, error, configured) == (expected, None, True)
+
+
+def test_explicitly_blank_env_settings_activate_the_match_nobody_path(monkeypatch):
+    """Blank templated env vars are supplied configuration, not absence."""
+    import api.auth as auth
+    import api.auth_oidc as auth_oidc
+
+    _configure(monkeypatch, owner_claim="", owner_values="")
+    cfg = auth_oidc._resolve_oidc_config()
+    assert cfg["owner_policy_configured"] is True
+    assert cfg["owner_values"] == []
+
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    cookie = auth.create_session(auth_type="oidc", username="legacy@example.com")
+    try:
+        assert _status(monkeypatch, cookie)["can_manage_server"] is False
+    finally:
+        auth.invalidate_session(cookie)
+
+
+def test_unreadable_operator_config_does_not_restore_legacy_owner_access(monkeypatch):
+    """An unreadable policy is unknown, and unknown must not grant ownership."""
+    import api.auth as auth
+    import api.auth_oidc as auth_oidc
+
+    _configure(monkeypatch, owner_claim=None, owner_values=None)
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    legacy = auth.create_session()
+
+    try:
+        assert _status(monkeypatch, legacy)["can_manage_server"] is True
+
+        def _broken():
+            raise OSError("config.yaml is unreadable")
+
+        monkeypatch.setattr(auth_oidc, "_load_operator_config", _broken)
+        assert auth_oidc._resolve_oidc_config()["config_read_failed"] is True
+        assert auth.oidc_owner_policy_is_configured() is True
+        assert _status(monkeypatch, legacy)["can_manage_server"] is False
+    finally:
+        auth.invalidate_session(legacy)
+
+
+def test_removing_the_policy_does_not_re_elevate_a_policy_era_session(monkeypatch):
+    """A session minted under the policy carries a fingerprint naming it."""
+    import api.auth as auth
+
+    private_key, token = _configure(monkeypatch)
+    cookie = _session(monkeypatch, _login(monkeypatch, private_key, token, {
+        "email": "user@example.com", "groups": ["users"],
+    }))
+
+    try:
+        assert auth.session_can_manage_server(auth.get_session_info(cookie)) is False
+        monkeypatch.delenv("HERMES_WEBUI_OIDC_OWNER_CLAIM")
+        monkeypatch.delenv("HERMES_WEBUI_OIDC_OWNER_VALUES")
+
+        assert auth.session_can_manage_server(auth.get_session_info(cookie)) is False
+    finally:
+        auth.invalidate_session(cookie)
 
 
 def test_environment_overrides_config_file_owner_policy(monkeypatch):

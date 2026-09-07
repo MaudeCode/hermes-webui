@@ -1188,14 +1188,20 @@ def is_public_path(path: str) -> bool:
 
 
 def oidc_owner_policy_is_configured() -> bool:
-    """True when the operator has opted into the selective OIDC owner policy."""
+    """True when the selective OIDC owner policy is configured, or unknown.
+
+    Fails closed: a temporarily missing, unreadable, or malformed operator
+    config resolves to "unknown", and unknown must not restore owner authority
+    to sessions whose provenance we cannot establish.
+    """
     try:
         from api.auth_oidc import _resolve_oidc_config
 
-        return bool(_resolve_oidc_config().get("owner_policy_configured"))
+        cfg = _resolve_oidc_config()
+        return bool(cfg.get("owner_policy_configured") or cfg.get("config_read_failed"))
     except Exception:
         logger.debug("Failed to inspect the OIDC owner policy", exc_info=True)
-        return False
+        return True
 
 
 def session_can_manage_server(session_info) -> bool:

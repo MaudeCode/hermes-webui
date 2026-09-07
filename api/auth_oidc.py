@@ -506,12 +506,16 @@ def _load_operator_config() -> dict[str, Any]:
 
 def _resolve_oidc_config() -> dict[str, Any]:
     raw = {}
+    config_read_failed = False
     try:
         cfg = _load_operator_config()
         value = cfg.get("webui_oidc") if isinstance(cfg, dict) else None
         if isinstance(value, dict):
             raw.update(value)
     except Exception:
+        # An unreadable config is "unknown", not "unset". Callers that gate
+        # privilege on the resolved policy must be able to tell them apart.
+        config_read_failed = True
         logger.debug("Failed to read webui_oidc config", exc_info=True)
 
     def pick(name: str, env_name: str) -> Any:
@@ -562,6 +566,7 @@ def _resolve_oidc_config() -> dict[str, Any]:
         "owner_values": owner_values,
         "owner_policy_configured": owner_policy_configured,
         "owner_policy_error": owner_policy_error,
+        "config_read_failed": config_read_failed,
     }
 
 
@@ -688,11 +693,14 @@ def _normalize_owner_policy(
 
 
 def _owner_setting_present(raw: Any) -> bool:
-    if raw is None:
-        return False
-    if isinstance(raw, str):
-        return bool(raw.strip())
-    return True
+    """True when the operator supplied a value, even an unusable one.
+
+    Only an unset key or a null resolves to absent. An explicitly blank value
+    -- a templated ``HERMES_WEBUI_OIDC_OWNER_CLAIM=""``, say -- is security
+    configuration the operator meant to supply, so it activates the
+    match-nobody path instead of restoring legacy owner access.
+    """
+    return raw is not None
 
 
 def _normalize_owner_values(raw: Any) -> list[str]:
@@ -857,7 +865,12 @@ def oidc_session_can_manage_server(session_info: dict[str, Any]) -> bool:
     except (OIDCAuthError, OIDCConfigError):
         return False
     if not cfg.get("owner_policy_configured"):
-        return not str(session_info.get("bound_profile") or "").strip()
+        if str(session_info.get("bound_profile") or "").strip():
+            return False
+        # The session may have been minted while a policy was configured; its
+        # fingerprint covers that policy, so a session from the policy era
+        # cannot be re-read as a legacy owner after the settings disappear.
+        return oidc_session_binding_is_current(session_info)
     if not session_info.get("oidc_owner"):
         return False
     if _owner_evidence_expiry(session_info) <= time.time():

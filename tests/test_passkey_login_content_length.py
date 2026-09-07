@@ -47,7 +47,7 @@ def test_passkey_login_success_sets_content_length(monkeypatch):
     monkeypatch.setattr(auth, "_check_login_rate", lambda ip: True)
     # WebAuthn verification is out of scope here — make it succeed.
     monkeypatch.setattr(passkeys, "finish_login", lambda body, handler: None)
-    monkeypatch.setattr(auth, "create_session", lambda: "sess-cookie")
+    monkeypatch.setattr(auth, "create_session", lambda **_kwargs: "sess-cookie")
     monkeypatch.setattr(auth, "set_auth_cookie", lambda handler, cookie: None)
 
     handler = RouteFakeHandler()
@@ -74,7 +74,7 @@ def test_content_length_precedes_end_headers(monkeypatch):
     monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
     monkeypatch.setattr(auth, "_check_login_rate", lambda ip: True)
     monkeypatch.setattr(passkeys, "finish_login", lambda body, handler: None)
-    monkeypatch.setattr(auth, "create_session", lambda: "sess-cookie")
+    monkeypatch.setattr(auth, "create_session", lambda **_kwargs: "sess-cookie")
     monkeypatch.setattr(auth, "set_auth_cookie",
                         lambda handler, cookie: handler.send_header("Set-Cookie", "s=1"))
 
