@@ -511,17 +511,29 @@ def _load_operator_config() -> dict[str, Any]:
 
 
 def _raise_if_operator_config_is_unreadable(path: Path) -> None:
+    """Raise when the file exists but its contents could not be resolved.
+
+    api.config's loader returns {} for a missing, empty, unreadable, or
+    malformed file alike. Re-parsing here separates them by outcome rather than
+    by guessing from the text: an empty document, an explicit ``{}``, and a
+    comments-only file are all legitimately "nothing configured".
+    """
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return
     except OSError as exc:
         raise OIDCConfigError(f"Operator config at {path} could not be read") from exc
-    if any(
-        line.strip() and not line.lstrip().startswith("#")
-        for line in text.splitlines()
-    ):
-        raise OIDCConfigError(f"Operator config at {path} could not be parsed")
+    try:
+        import yaml as _yaml
+    except ImportError:
+        return
+    try:
+        parsed = _yaml.safe_load(text)
+    except Exception as exc:
+        raise OIDCConfigError(f"Operator config at {path} could not be parsed") from exc
+    if parsed is not None and not isinstance(parsed, dict):
+        raise OIDCConfigError(f"Operator config at {path} is not a mapping")
 
 
 def _resolve_oidc_config() -> dict[str, Any]:

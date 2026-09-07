@@ -326,16 +326,51 @@ def test_unreadable_config_denies_ownership_to_a_typed_oidc_session(monkeypatch,
         auth.invalidate_session(cookie)
 
 
-def test_comments_only_operator_config_is_not_a_read_failure(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "content",
+    ["# nothing configured yet\n\n", "", "{}\n", "---\n", "# lead\n{}\n"],
+)
+def test_legitimately_empty_operator_config_is_not_a_read_failure(monkeypatch, tmp_path, content):
+    """An empty document, an explicit {}, and comments are all "nothing set"."""
     import api.auth_oidc as auth_oidc
     import api.profiles as profiles
 
     monkeypatch.setattr(auth_oidc, "_load_operator_config", _REAL_LOAD_OPERATOR_CONFIG)
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("# nothing configured yet\n\n", encoding="utf-8")
+    config_path.write_text(content, encoding="utf-8")
     monkeypatch.setattr(profiles, "_INITIAL_HERMES_CONFIG_PATH", str(config_path))
 
     assert auth_oidc._resolve_oidc_config()["config_read_failed"] is False
+
+
+def test_non_mapping_operator_config_is_a_read_failure(monkeypatch, tmp_path):
+    import api.auth_oidc as auth_oidc
+    import api.profiles as profiles
+
+    monkeypatch.setattr(auth_oidc, "_load_operator_config", _REAL_LOAD_OPERATOR_CONFIG)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("- just\n- a list\n", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_CONFIG_PATH", str(config_path))
+
+    assert auth_oidc._resolve_oidc_config()["config_read_failed"] is True
+
+
+def test_startup_warning_explains_an_unresolved_operator_config(monkeypatch, tmp_path):
+    """A denied-owner state must be diagnosable, not a silent lockout."""
+    import api.auth as auth
+    import api.auth_oidc as auth_oidc
+    import api.profiles as profiles
+
+    _configure(monkeypatch, owner_claim=None, owner_values=None)
+    monkeypatch.setattr(auth_oidc, "_load_operator_config", _REAL_LOAD_OPERATOR_CONFIG)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("webui_oidc: [this is: not, a mapping\n", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_CONFIG_PATH", str(config_path))
+
+    warning = auth.get_oidc_startup_warning() or ""
+
+    assert "could not be parsed" in warning
+    assert "owner operations are denied" in warning
 
 
 def test_removing_the_policy_does_not_re_elevate_a_policy_era_session(monkeypatch):

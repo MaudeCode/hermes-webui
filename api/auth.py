@@ -525,6 +525,7 @@ def is_oidc_auth_enabled() -> bool:
 def get_oidc_startup_warning() -> str | None:
     """Return a startup warning when OIDC auth is only partially configured,
     or when allow_values uses whitespace that is no longer a separator."""
+    operator_config_error = None
     try:
         from api.auth_oidc import _load_operator_config
 
@@ -532,7 +533,11 @@ def get_oidc_startup_warning() -> str | None:
         raw = cfg.get("webui_oidc") if isinstance(cfg, dict) else {}
         if not isinstance(raw, dict):
             raw = {}
-    except Exception:
+    except Exception as exc:
+        # Authorization denies every OIDC owner operation while the config is
+        # unresolved, so say so at startup instead of leaving the operator with
+        # an unexplained management lockout.
+        operator_config_error = str(exc).strip() or "The operator config could not be read"
         logger.debug("Failed to read webui_oidc config", exc_info=True)
         raw = {}
 
@@ -583,10 +588,18 @@ def get_oidc_startup_warning() -> str | None:
     except Exception:
         logger.debug("Failed to normalize OIDC owner policy", exc_info=True)
 
-    if not any((issuer, client_id, allow_claim, allow_values, profile_map_configured, owner_policy_configured)):
+    if not any((
+        issuer, client_id, allow_claim, allow_values,
+        profile_map_configured, owner_policy_configured, operator_config_error,
+    )):
         return None
 
     warnings = []
+    if operator_config_error:
+        warnings.append(
+            f"{operator_config_error}. OIDC owner operations are denied until it is "
+            "readable, because an unresolved owner policy is not treated as an absent one."
+        )
 
     if not (issuer and client_id and allow_claim and allow_values):
         missing = []
