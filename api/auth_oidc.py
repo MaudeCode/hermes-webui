@@ -594,12 +594,16 @@ def _operator_env_value(name: str, placeholder: str) -> str:
         from api import profiles
 
         if env_name in (getattr(profiles, "_loaded_profile_env_keys", None) or set()):
+            # A profile .env overwrote the live value. Recover the operator's
+            # own value from the startup snapshot rather than discarding it --
+            # rejecting the profile value must not lock the operator out.
+            startup = getattr(profiles, "_INITIAL_PROCESS_ENV", None) or {}
             logger.warning(
                 "Ignoring profile-supplied %s while expanding the operator config; "
                 "operator authentication policy is not profile-controlled",
                 env_name,
             )
-            return placeholder
+            return startup.get(env_name, placeholder)
     except Exception:
         logger.debug("Failed to inspect profile-supplied env keys", exc_info=True)
         return placeholder

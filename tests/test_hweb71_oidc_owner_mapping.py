@@ -554,6 +554,31 @@ def test_a_profile_dotenv_cannot_supply_an_interpolated_owner_group(monkeypatch,
         profiles._reload_dotenv(tmp_path)
 
 
+def test_a_shadowed_placeholder_falls_back_to_the_startup_value(monkeypatch, tmp_path):
+    """Rejecting the profile value must not discard the operator's own."""
+    import api.auth_oidc as auth_oidc
+    import api.profiles as profiles
+
+    _configure(monkeypatch, owner_claim=None, owner_values=None)
+    _operator_config_with_interpolated_owner(monkeypatch, tmp_path)
+    monkeypatch.setitem(profiles._INITIAL_PROCESS_ENV, "OIDC_OWNER_GROUP", OWNER_GROUP)
+    monkeypatch.setenv("OIDC_OWNER_GROUP", OWNER_GROUP)
+
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    (profile_home / ".env").write_text("OIDC_OWNER_GROUP=attackers\n", encoding="utf-8")
+    profiles._reload_dotenv(profile_home)
+    try:
+        assert os.environ["OIDC_OWNER_GROUP"] == "attackers"
+
+        cfg = auth_oidc._resolve_oidc_config()
+        assert cfg["owner_values"] == [OWNER_GROUP]
+        assert auth_oidc._resolve_owner_permission(cfg, {"groups": [OWNER_GROUP]}) is True
+        assert auth_oidc._resolve_owner_permission(cfg, {"groups": ["attackers"]}) is False
+    finally:
+        profiles._reload_dotenv(tmp_path)
+
+
 def test_the_operator_environment_still_resolves_an_interpolated_owner_group(monkeypatch, tmp_path):
     import api.auth_oidc as auth_oidc
 
