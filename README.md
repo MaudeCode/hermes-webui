@@ -306,6 +306,8 @@ Create the named Hermes profiles and any owner recovery password or passkey befo
 
 Owner permission is server-side evidence recorded at login, never inferred from a client request or from an empty `bound_profile`. It expires at the earlier of the session expiry or one hour after the validated login, and activity, a reload, or a native app exchange cannot extend it; when it expires the elevated session is invalidated and a fresh OIDC login is required. Removing someone from the group at the IdP therefore takes effect at their next login, within at most one hour of their last validated claim set, and only once the IdP stops issuing the claim -- this is not instantaneous remote revocation. Changing `owner_claim`, `owner_values`, the login allowlist, or the profile map locally invalidates existing evidence at the next authorization check.
 
+Activating the policy also stops honouring sessions created before this release as owner sessions, because their provenance is not recorded and they could be pre-policy SSO logins. Sign in once after enabling it; password and passkey logins issued from then on are owner sessions as before.
+
 ### Themes
 - Appearance is split into two axes: Theme (`system`, `dark`, `light`) and Skin
   (`default`, `ares`, `mono`, `slate`, `poseidon`, `sisyphus`, `charizard`,

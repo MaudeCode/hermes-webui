@@ -1187,6 +1187,17 @@ def is_public_path(path: str) -> bool:
     )
 
 
+def oidc_owner_policy_is_configured() -> bool:
+    """True when the operator has opted into the selective OIDC owner policy."""
+    try:
+        from api.auth_oidc import _resolve_oidc_config
+
+        return bool(_resolve_oidc_config().get("owner_policy_configured"))
+    except Exception:
+        logger.debug("Failed to inspect the OIDC owner policy", exc_info=True)
+        return False
+
+
 def session_can_manage_server(session_info) -> bool:
     """True when the caller may perform owner-only operations (OPERATOR_ONLY_PATHS).
 
@@ -1196,16 +1207,24 @@ def session_can_manage_server(session_info) -> bool:
 
     OIDC sessions defer to the OIDC owner policy: with an explicit owner
     allowlist configured they need server-created owner evidence, so being
-    unbound is not enough.
+    unbound is not enough, and a session whose provenance is unknown (an
+    untyped record from before typed logins) is not an owner either.
     """
     if not is_auth_enabled():
         return True
     if not session_info:
         return False
-    if str(session_info.get('auth_type') or '') == 'oidc':
+    auth_type = str(session_info.get('auth_type') or '')
+    if auth_type == 'oidc':
         from api.auth_oidc import oidc_session_can_manage_server
 
         return oidc_session_can_manage_server(session_info)
+    if not auth_type and oidc_owner_policy_is_configured():
+        # An untyped record predates typed logins, so it may be an unbound OIDC
+        # session minted before the owner policy existed. Unknown provenance is
+        # not owner authority while a selective policy is active; the operator
+        # signs in again once to get a typed session.
+        return False
     return not str(session_info.get('bound_profile') or '').strip()
 
 

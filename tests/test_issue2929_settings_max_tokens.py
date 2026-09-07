@@ -335,6 +335,11 @@ def test_post_settings_does_not_write_max_tokens_before_auth_failures(monkeypatc
     monkeypatch.setattr(auth, "get_password_hash", lambda: "hash")
     monkeypatch.setattr(auth, "parse_cookie", lambda handler: "")
     monkeypatch.setattr(auth, "verify_session", lambda cookie: False)
+    # Owner-credential changes need an owner session; this case is about the
+    # password check that runs after it, so model an unbound owner.
+    monkeypatch.setattr(
+        auth, "ensure_trusted_auth_session", lambda _handler: {"auth_type": "password"}
+    )
     monkeypatch.setattr(auth, "verify_password", lambda current_password: False)
     monkeypatch.setattr(
         "api.config.set_max_tokens",

@@ -18402,7 +18402,7 @@ def handle_post(handler, parsed) -> bool:
         new_cookie = None
 
         if auth_just_enabled and not logged_in_before:
-            new_cookie = create_session()
+            new_cookie = create_session(auth_type="password")
             logged_in_after = True
 
         saved["auth_enabled"] = auth_enabled_after
@@ -19092,7 +19092,7 @@ def handle_post(handler, parsed) -> bool:
             _record_login_attempt(client_ip)
             return bad(handler, "Invalid password", 401)
         _clear_login_attempts(client_ip)
-        cookie_val = create_session()
+        cookie_val = create_session(auth_type="password")
         body = json.dumps({"ok": True}).encode()
         handler.send_response(200)
         handler.send_header("Content-Type", "application/json")
@@ -19136,7 +19136,7 @@ def handle_post(handler, parsed) -> bool:
         except PasskeyError as e:
             _record_login_attempt(client_ip)
             return bad(handler, str(e), status=401)
-        cookie_val = create_session()
+        cookie_val = create_session(auth_type="passkey")
         body = json.dumps({"ok": True}).encode()
         handler.send_response(200)
         handler.send_header("Content-Type", "application/json")

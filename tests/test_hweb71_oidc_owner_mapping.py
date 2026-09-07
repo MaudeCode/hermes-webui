@@ -188,6 +188,8 @@ def test_absent_owner_policy_is_disabled(monkeypatch):
         ("groups", []),            # empty list
         ("groups", [OWNER_GROUP, 7]),      # a number is not a group name
         ("groups", [OWNER_GROUP, True]),   # nor is a boolean
+        ("groups", [OWNER_GROUP, ""]),     # a blank entry is malformed, not droppable
+        ("groups", [OWNER_GROUP, "   "]),
         ("groups", {"a": OWNER_GROUP}),    # nor is an object
         ("groups", 42),
     ],
@@ -519,12 +521,69 @@ def test_unbound_oidc_session_is_the_owner_when_no_policy_is_configured(monkeypa
         auth.invalidate_session(cookie)
 
 
+def test_untyped_legacy_session_is_not_an_owner_once_the_policy_is_configured(monkeypatch):
+    """A record predating typed logins could be an unbound OIDC session.
+
+    Its provenance is unknowable, so it must not carry owner authority while a
+    selective policy is active. One re-login mints a typed session.
+    """
+    import api.auth as auth
+
+    _configure(monkeypatch)
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    legacy = auth.create_session()
+    typed = auth.create_session(auth_type="password")
+
+    try:
+        assert _status(monkeypatch, legacy)["can_manage_server"] is False
+        allowed, handler = _operator_guard(legacy)
+        assert (allowed, handler.status) == (False, 403)
+
+        assert _status(monkeypatch, typed)["can_manage_server"] is True
+        assert _operator_guard(typed)[0] is True
+    finally:
+        auth.invalidate_session(legacy)
+        auth.invalidate_session(typed)
+
+
+def test_untyped_legacy_session_keeps_owner_access_without_a_policy(monkeypatch):
+    import api.auth as auth
+
+    _configure(monkeypatch, owner_claim=None, owner_values=None)
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    legacy = auth.create_session()
+
+    try:
+        assert _status(monkeypatch, legacy)["can_manage_server"] is True
+    finally:
+        auth.invalidate_session(legacy)
+
+
+def test_ordinary_unbound_session_is_revoked_when_login_policy_changes(monkeypatch):
+    """A fingerprint is reconciled regardless of privilege level."""
+    import api.auth as auth
+
+    private_key, token = _configure(monkeypatch)
+    cookie = _session(monkeypatch, _login(monkeypatch, private_key, token, {
+        "email": "user@example.com", "groups": ["users"],
+    }))
+
+    try:
+        assert auth.ensure_trusted_auth_session(RouteFakeHandler(cookie)) is not None
+        monkeypatch.setenv("HERMES_WEBUI_OIDC_ALLOW_VALUES", "owner@example.com")
+
+        assert auth.ensure_trusted_auth_session(RouteFakeHandler(cookie)) is None
+        assert auth.verify_session(cookie) is False
+    finally:
+        auth.invalidate_session(cookie)
+
+
 def test_password_session_owner_behaviour_is_unchanged(monkeypatch):
     import api.auth as auth
 
     _configure(monkeypatch)
     monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
-    cookie = auth.create_session()
+    cookie = auth.create_session(auth_type="password")
 
     try:
         assert _status(monkeypatch, cookie)["can_manage_server"] is True

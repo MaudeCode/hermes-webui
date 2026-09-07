@@ -700,7 +700,9 @@ def _normalize_owner_values(raw: Any) -> list[str]:
     if isinstance(raw, str):
         values = [part.strip() for part in raw.replace("\n", ",").split(",")]
     elif isinstance(raw, (list, tuple)):
-        if not all(isinstance(item, str) for item in raw):
+        # An explicitly authored list must contain only non-empty strings; a
+        # blank entry is a malformed policy, not a value to quietly drop.
+        if not all(isinstance(item, str) and item.strip() for item in raw):
             return []
         values = [item.strip() for item in raw]
     else:
@@ -813,17 +815,20 @@ def _oidc_binding_is_current(binding: dict[str, Any] | None, profile: str | None
 def oidc_session_binding_is_current(session_info: dict[str, Any]) -> bool:
     """Reconcile a persisted OIDC session against the live policy.
 
-    A session with nothing policy-bound (no profile, no owner evidence) has
-    nothing to reconcile; it simply is not an owner while a selective policy is
-    configured. Anything bound must still match, and expired owner evidence
-    invalidates the elevated session rather than silently demoting it.
+    Every session that recorded a fingerprint reconciles it, regardless of
+    privilege: dropping an identity from the login allowlist or changing the
+    issuer must end ordinary access too, not only owner access. Only a legacy
+    record with no fingerprint, no profile, and no owner evidence has nothing
+    to check. Expired owner evidence invalidates the elevated session rather
+    than silently demoting it.
     """
     profile = str(session_info.get("bound_profile") or "").strip()
     owner_evidence = bool(session_info.get("oidc_owner"))
-    if not profile and not owner_evidence:
+    fingerprint = str(session_info.get("oidc_mapping_fingerprint") or "")
+    if not fingerprint and not profile and not owner_evidence:
         return True
     binding = {
-        "mapping_fingerprint": session_info.get("oidc_mapping_fingerprint"),
+        "mapping_fingerprint": fingerprint,
         "profile_identity": session_info.get("oidc_profile_identity"),
     }
     if not _oidc_binding_is_current(binding, profile):
