@@ -1299,15 +1299,77 @@ console.log(JSON.stringify({{
     }
 
 
-def test_stream_end_fallback_persists_the_projected_anchor_scene():
-    """HWEB-80: stream_end with no done and no restorable snapshot is a settlement exit."""
-    fallback = _function_body(MESSAGES_JS, "_finalizeStreamEndFallback")
+def test_stream_end_fallback_traces_instead_of_misfiling_the_scene():
+    """HWEB-80 / Codex P1: the current turn's assistant is not in S.messages here.
 
-    flush_idx = fallback.index("_flushReasoningToAnchor();")
-    clear_idx = fallback.index("clearLiveToolCards();")
-    attach_idx = fallback.index("_attachProjectedAnchorSceneToLastAssistant(S.messages);")
-    render_idx = fallback.index("renderMessages({preserveScroll:true});", attach_idx)
-    assert flush_idx < clear_idx < attach_idx < render_idx
+    `_handleStreamError` materializes one via `_ensureSingleTerminalStreamErrorMarker`
+    before it attaches. `_finalizeStreamEndFallback` has no such target, so an
+    unqualified attach would select the PREVIOUS turn's assistant and
+    `_completeSettledAnchorSceneForTurn` would rewrite final_answer /
+    final_message_ref from it — durably filing this run's activity under the prior
+    answer. The exit must record a reason rather than persist.
+    """
+    fallback = _function_body(MESSAGES_JS, "_finalizeStreamEndFallback")
+    stream_error = _function_body(MESSAGES_JS, "_handleStreamError")
+
+    assert "_attachProjectedAnchorSceneToLastAssistant" not in fallback
+    trace_idx = fallback.index("attach-skipped:no-settled-target-on-stream-end")
+    render_idx = fallback.index("renderMessages({preserveScroll:true});", trace_idx)
+    assert trace_idx < render_idx
+
+    # The path that DOES attach must keep materializing its own target first.
+    marker_idx = stream_error.index("_ensureSingleTerminalStreamErrorMarker(S.messages);")
+    attach_idx = stream_error.index("_attachProjectedAnchorSceneToLastAssistant(S.messages);")
+    assert marker_idx < attach_idx
+
+
+def test_pane_ownership_is_not_stolen_from_a_replacement_send():
+    """HWEB-80 / Codex P1: send() nulls S.activeStreamId across /api/chat/start.
+
+    A delayed terminal event from the previous stream must not settle its stale
+    transcript over the new optimistic turn during that window.
+    """
+    ownership_lost = _function_body(MESSAGES_JS, "_streamPaneOwnershipLost")
+    script = f"""
+const activeSid='sid-A';
+const streamId='stream-A';
+let _sendInProgress=false;
+let _sendInProgressSid=null;
+const S={{session:{{session_id:'sid-A'}},activeStreamId:'stream-A'}};
+function _isActiveSession(){{ return !!(S.session&&S.session.session_id===activeSid); }}
+function _streamPaneOwnershipLost(){{{ownership_lost}}}
+const owned=_streamPaneOwnershipLost();
+S.activeStreamId=null;                 // sidebar idle reconciliation
+const afterIdleReconcile=_streamPaneOwnershipLost();
+_sendInProgress=true; _sendInProgressSid='sid-A';   // replacement send in flight
+const duringReplacementSend=_streamPaneOwnershipLost();
+_sendInProgressSid='sid-B';            // a send into a DIFFERENT session
+const duringOtherSessionSend=_streamPaneOwnershipLost();
+_sendInProgress=false; _sendInProgressSid=null;
+S.activeStreamId='stream-B';
+const afterNewerStream=_streamPaneOwnershipLost();
+S.session={{session_id:'sid-B'}};      // reader switched away
+const afterSessionSwitch=_streamPaneOwnershipLost();
+console.log(JSON.stringify({{
+  owned,
+  afterIdleReconcile,
+  duringReplacementSend,
+  duringOtherSessionSend,
+  afterNewerStream,
+  afterSessionSwitch,
+}}));
+"""
+    result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "owned": False,
+        "afterIdleReconcile": False,
+        "duringReplacementSend": True,
+        "duringOtherSessionSend": False,
+        "afterNewerStream": True,
+        "afterSessionSwitch": False,
+    }
 
 
 def test_terminal_recovery_paths_share_one_pane_ownership_predicate():

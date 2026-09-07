@@ -2669,7 +2669,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // the lifecycle gate saw `anchor scene requests: []`. Ownership is only lost
   // when a DIFFERENT stream id owns the pane.
   function _streamPaneOwnershipLost(){
-    return _isActiveSession() && !!S.activeStreamId && S.activeStreamId!==streamId;
+    if(!_isActiveSession()) return false;
+    // A set id is authoritative: whoever claimed the pane owns it.
+    if(S.activeStreamId) return S.activeStreamId!==streamId;
+    // A null id normally means nobody took over — EXCEPT during a replacement
+    // send, which deliberately nulls it for the whole /api/chat/start
+    // round-trip (see send(): "will be set after stream starts"). A delayed
+    // terminal event from the previous stream must not settle its stale
+    // transcript over the new optimistic turn or clear its busy state. Same
+    // fence sessions.js:_reconcileActiveSessionIdleStateFromList already uses.
+    return !!(typeof _sendInProgress!=='undefined'&&_sendInProgress&&_sendInProgressSid===activeSid);
   }
   function _ownsActiveStreamOrBackground(){
     return !_streamPaneOwnershipLost();
@@ -2871,11 +2880,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(_isActiveSession()){
       S.activeStreamId=null;
       clearLiveToolCards();if(!assistantText)removeThinking();
-      // HWEB-80: this is a real settlement exit (stream_end with no done and no
-      // settled snapshot to restore). It cleared the live Worklog without ever
-      // attaching or persisting the projected scene, so the turn lost its Worklog
-      // on the next reload. Mirror the _handleStreamError terminal path.
-      _attachProjectedAnchorSceneToLastAssistant(S.messages);
+      // HWEB-80: this exit deliberately does NOT persist. The current turn's
+      // assistant message is not in S.messages here — that is why
+      // _handleStreamError materializes one via
+      // _ensureSingleTerminalStreamErrorMarker before it attaches. Attaching
+      // without a target would select the PREVIOUS turn's assistant, and
+      // _completeSettledAnchorSceneForTurn would rewrite final_answer /
+      // final_message_ref from it, durably filing this run's activity under the
+      // prior answer. Materializing a terminal marker here would add a
+      // user-visible banner this path does not have today, so the exit is traced
+      // instead; reopening the session rebuilds from the durable endpoint.
+      _noteAnchorSceneOutcome('attach-skipped:no-settled-target-on-stream-end');
       renderMessages({preserveScroll:true});
     }
     renderSessionList();
