@@ -68,7 +68,6 @@ function installRuntimeHelpers() {
     "_isTerminalStreamErrorMarkerMessage",
     "_ensureSingleTerminalStreamErrorMarker",
     "_noteAnchorSceneOutcome",
-    "_paneTurnStartClaimed",
     "_streamPaneOwnershipLost",
     "_restoreSettledSession",
     "_handleStreamError",
@@ -94,7 +93,6 @@ function buildRuntime() {
   if (!Object.prototype.hasOwnProperty.call(globalThis.S, 'activeStreamId')) {
     globalThis.S.activeStreamId = streamId;
   }
-  globalThis._PANE_TURN_START_CLAIMS = new Set();
   globalThis.INFLIGHT = {};
   globalThis._EPHEMERAL_TURN_FIELDS = [
     '_turnUsage',

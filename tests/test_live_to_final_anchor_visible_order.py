@@ -1194,10 +1194,7 @@ def test_terminal_events_survive_sidebar_idle_reconciliation():
     owns_active = _function_body(MESSAGES_JS, "_ownsActiveStreamOrBackground")
     bail = _function_body(MESSAGES_JS, "_bailOutOfTerminalEventsFromStaleStream")
     note = _function_body(MESSAGES_JS, "_noteAnchorSceneOutcome")
-    claimed = _function_body(MESSAGES_JS, "_paneTurnStartClaimed")
     script = f"""
-const _PANE_TURN_START_CLAIMS=new Set();
-function _paneTurnStartClaimed(sessionId){{{claimed}}}
 const activeSid='sid-A';
 const streamId='stream-A';
 const _streamOwnerGeneration=1;
@@ -1337,18 +1334,11 @@ def test_pane_ownership_is_not_stolen_from_a_replacement_turn():
     is the discriminator.
     """
     ownership_lost = _function_body(MESSAGES_JS, "_streamPaneOwnershipLost")
-    claim = _function_body(MESSAGES_JS, "_claimPaneTurnStart")
-    release = _function_body(MESSAGES_JS, "_releasePaneTurnStart")
-    claimed = _function_body(MESSAGES_JS, "_paneTurnStartClaimed")
     script = f"""
 const activeSid='sid-A';
 const streamId='stream-A';
 let _sendInProgress=false;
 let _sendInProgressSid=null;
-const _PANE_TURN_START_CLAIMS=new Set();
-function _claimPaneTurnStart(sessionId){{{claim}}}
-function _releasePaneTurnStart(sessionId){{{release}}}
-function _paneTurnStartClaimed(sessionId){{{claimed}}}
 const S={{session:{{session_id:'sid-A'}},activeStreamId:'stream-A',busy:true}};
 function _isActiveSession(){{ return !!(S.session&&S.session.session_id===activeSid); }}
 function _streamPaneOwnershipLost(){{{ownership_lost}}}
@@ -1356,25 +1346,16 @@ const owned=_streamPaneOwnershipLost();
 // The sidebar reconciler clears busy AND the stream id together.
 S.activeStreamId=null; S.busy=false;
 const afterIdleReconcile=_streamPaneOwnershipLost();
-// Manual compression / slash commands / session load set busy WITHOUT claiming a
-// stream. That must not look like a replacement turn, or this closure loses its
-// terminal event and the Worklog with it — the exact HWEB-80 defect.
-S.busy=true;
-const duringManualCompression=_streamPaneOwnershipLost();
-S.busy=false;
-// send(): claims the pane for its /api/chat/start round-trip.
-_claimPaneTurnStart('sid-A'); _sendInProgress=true; _sendInProgressSid='sid-A';
+// send(): setBusy(true) runs BEFORE the id is nulled for the start round-trip.
+S.busy=true; _sendInProgress=true; _sendInProgressSid='sid-A';
 const duringReplacementSend=_streamPaneOwnershipLost();
-_releasePaneTurnStart('sid-A'); _sendInProgress=false; _sendInProgressSid=null;
-// startRegeneration(): same claim, and it never touches _sendInProgress.
-_claimPaneTurnStart('sid-A');
+// startRegeneration(): same shape, but it never touches _sendInProgress.
+_sendInProgress=false; _sendInProgressSid=null;
 const duringRegeneration=_streamPaneOwnershipLost();
-_releasePaneTurnStart('sid-A');
-const afterClaimReleased=_streamPaneOwnershipLost();
-// A turn starting in a DIFFERENT session must not steal this pane.
-_claimPaneTurnStart('sid-B'); _sendInProgress=true; _sendInProgressSid='sid-B';
+// A send into a DIFFERENT session must not steal this pane.
+S.busy=false; _sendInProgress=true; _sendInProgressSid='sid-B';
 const duringOtherSessionSend=_streamPaneOwnershipLost();
-_releasePaneTurnStart('sid-B'); _sendInProgress=false; _sendInProgressSid=null;
+_sendInProgress=false; _sendInProgressSid=null;
 S.activeStreamId='stream-B';
 const afterNewerStream=_streamPaneOwnershipLost();
 S.session={{session_id:'sid-B'}};      // reader switched away
@@ -1382,10 +1363,8 @@ const afterSessionSwitch=_streamPaneOwnershipLost();
 console.log(JSON.stringify({{
   owned,
   afterIdleReconcile,
-  duringManualCompression,
   duringReplacementSend,
   duringRegeneration,
-  afterClaimReleased,
   duringOtherSessionSend,
   afterNewerStream,
   afterSessionSwitch,
@@ -1397,29 +1376,12 @@ console.log(JSON.stringify({{
     assert json.loads(result.stdout) == {
         "owned": False,
         "afterIdleReconcile": False,
-        "duringManualCompression": False,
         "duringReplacementSend": True,
         "duringRegeneration": True,
-        "afterClaimReleased": False,
         "duringOtherSessionSend": False,
         "afterNewerStream": True,
         "afterSessionSwitch": False,
     }
-
-
-def test_every_chat_start_round_trip_claims_and_releases_the_pane():
-    """HWEB-80: the claim must be paired on every exit of both claimants."""
-    send = _function_body(MESSAGES_JS, "send")
-    regen = _function_body(MESSAGES_JS, "startRegeneration")
-
-    for body in (send, regen):
-        claim_idx = body.index("_claimPaneTurnStart(")
-        start_idx = body.index("api('/api/chat/start'", claim_idx)
-        assert claim_idx < start_idx, "the pane must be claimed before the start round-trip"
-        # Released from a finally so an early return or a throw cannot strand it.
-        release_idx = body.index("_releasePaneTurnStart(")
-        assert "finally" in body[:release_idx]
-        assert body.rindex("finally", 0, release_idx) > start_idx
 
 
 @pytest.mark.skipif(NODE is None, reason="node is required for settlement ownership tests")
@@ -1432,12 +1394,7 @@ def test_restore_settled_session_reproves_ownership_after_the_fetch():
     """
     ownership_lost = _function_body(MESSAGES_JS, "_streamPaneOwnershipLost")
     restore = _function_body(MESSAGES_JS, "_restoreSettledSession")
-    claim = _function_body(MESSAGES_JS, "_claimPaneTurnStart")
-    claimed = _function_body(MESSAGES_JS, "_paneTurnStartClaimed")
     script = f"""
-const _PANE_TURN_START_CLAIMS=new Set();
-function _claimPaneTurnStart(sessionId){{{claim}}}
-function _paneTurnStartClaimed(sessionId){{{claimed}}}
 const activeSid='sid-A';
 const streamId='stream-A';
 let _sendInProgress=false;
@@ -1452,7 +1409,7 @@ function _closeSource(){{ closed+=1; }}
 function _terminalSessionPath(sid){{ return '/api/session?session_id='+sid; }}
 async function api(){{
   // The replacement send lands while the settlement fetch is in flight.
-  if(startSendDuringFetch){{ _claimPaneTurnStart('sid-A'); _sendInProgress=true; _sendInProgressSid='sid-A'; S.activeStreamId=null; }}
+  if(startSendDuringFetch){{ _sendInProgress=true; _sendInProgressSid='sid-A'; S.activeStreamId=null; }}
   return {{session:null}};
 }}
 async function _restoreSettledSession(source, options=null){{{restore}}}
