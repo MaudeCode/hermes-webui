@@ -2659,8 +2659,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _isActiveSession(){
     return !!(S.session&&S.session.session_id===activeSid);
   }
+  // HWEB-80: a CLEARED S.activeStreamId is not evidence that another stream took
+  // the pane. The sidebar poll's idle reconciliation
+  // (_reconcileActiveSessionIdleStateFromList) nulls it as soon as the server row
+  // reports the run finished, which routinely lands BEFORE this stream's own
+  // terminal SSE event. Treating that as "stale" made the terminal handlers drop
+  // the whole event — including the projected Anchor scene, whose only copy lives
+  // in this closure's registry — so a settled turn silently lost its Worklog and
+  // the lifecycle gate saw `anchor scene requests: []`. Ownership is only lost
+  // when a DIFFERENT stream id owns the pane.
+  function _streamPaneOwnershipLost(){
+    return _isActiveSession() && !!S.activeStreamId && S.activeStreamId!==streamId;
+  }
   function _ownsActiveStreamOrBackground(){
-    return !_isActiveSession() || S.activeStreamId===streamId;
+    return !_streamPaneOwnershipLost();
   }
   function _bailOutOfTerminalEventsFromStaleStream(source){
     const live=LIVE_STREAMS[activeSid];
@@ -2670,6 +2682,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // This stale stream no longer owns the session — schedule cleanup of ITS own
     // anchor registry (identity-guarded, so it can't clobber the newer stream's
     // registry for the same session) before closing. (Codex leak catch.)
+    _noteAnchorSceneOutcome('terminal-event-dropped:stale-stream',{
+      owns_transport:!!ownsTransport,
+      active_stream_id:(S&&S.activeStreamId)||null,
+    });
     _scheduleAnchorRegistryCleanup(120000);
     _closeSource(source);
     return true;
@@ -2855,6 +2871,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(_isActiveSession()){
       S.activeStreamId=null;
       clearLiveToolCards();if(!assistantText)removeThinking();
+      // HWEB-80: this is a real settlement exit (stream_end with no done and no
+      // settled snapshot to restore). It cleared the live Worklog without ever
+      // attaching or persisting the projected scene, so the turn lost its Worklog
+      // on the next reload. Mirror the _handleStreamError terminal path.
+      _attachProjectedAnchorSceneToLastAssistant(S.messages);
       renderMessages({preserveScroll:true});
     }
     renderSessionList();
@@ -3151,6 +3172,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _anchorReasoningFlushed=false;
   let _anchorLocalSeq=0;
   if(_anchorRegistryMap&&_anchorRegistry) _anchorRegistryMap.set(streamId,_anchorRegistry);
+  // HWEB-80: every decision NOT to persist a settled Anchor scene used to be
+  // silent, so a failure could only report `anchor scene requests: []` with no
+  // way to tell which guard fired. Record the reason on a bounded ring the
+  // lifecycle gate (and a human in devtools) can read back. Returns false so a
+  // skip site can `return _noteAnchorSceneOutcome(...)` in one line.
+  function _noteAnchorSceneOutcome(reason, detail){
+    if(typeof window==='undefined') return false;
+    const trace=window.__anchorScenePersistTrace=window.__anchorScenePersistTrace||[];
+    trace.push({at:Date.now(),reason,session_id:activeSid,stream_id:streamId,...(detail||{})});
+    if(trace.length>40) trace.splice(0,trace.length-40);
+    return false;
+  }
   function _scheduleAnchorRegistryCleanup(delayMs=30000){
     if(!_anchorRegistryMap||!_anchorRegistry) return;
     setTimeout(()=>{
@@ -4182,7 +4215,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return idx+(Number.isFinite(off)&&off>0?Math.floor(off):0);
   }
   function _persistSettledAnchorScene(message, scene, messageIndex){
-    if(!activeSid||!message||!scene||typeof api!=='function') return;
+    if(!activeSid||!message||!scene||typeof api!=='function'){
+      return _noteAnchorSceneOutcome('persist-skipped:missing-input',{
+        has_session:!!activeSid,has_message:!!message,has_scene:!!scene,has_api:typeof api==='function',
+      });
+    }
+    _noteAnchorSceneOutcome('persist-requested',{message_index:messageIndex});
     try{
       const messageOffset=_anchorSceneMessageOffsetForPersist();
       api('/api/session/anchor-scene',{
@@ -4350,11 +4388,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
   }
   function _attachProjectedAnchorSceneToLastAssistant(messages, targetMessage=null, targetIndex=null){
-    if(!_anchorRegistry||!Array.isArray(messages)) return false;
+    if(!_anchorRegistry||!Array.isArray(messages)){
+      return _noteAnchorSceneOutcome('attach-skipped:no-registry',{has_registry:!!_anchorRegistry});
+    }
     let lastAsst=targetMessage;
     let lastAsstIndex=Number.isInteger(targetIndex)?targetIndex:-1;
     if(lastAsst){
-      if(lastAsstIndex<0||messages[lastAsstIndex]!==lastAsst) return false;
+      if(lastAsstIndex<0||messages[lastAsstIndex]!==lastAsst){
+        return _noteAnchorSceneOutcome('attach-skipped:target-replaced',{target_index:targetIndex});
+      }
     }else{
       for(let i=messages.length-1;i>=0;i--){
         const candidate=messages[i];
@@ -4365,7 +4407,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
       }
     }
-    if(!lastAsst) return false;
+    if(!lastAsst) return _noteAnchorSceneOutcome('attach-skipped:no-assistant-message');
     const projectedScene=_projectLiveAnchorActivityScene();
     const fullScene=_prepareSettledAnchorScene(
       _completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene)
@@ -4375,21 +4417,33 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(scene&&Array.isArray(scene.activity_rows)&&(scene.activity_rows.length||hasOwnedOutcomes)){
       const hasWorklogRows=_anchorSceneHasWorklogWorthyRows(scene);
       const shouldPersistScene=hasWorklogRows||scene.mode==='hide_all_activity'||hasOwnedOutcomes;
-      if(!shouldPersistScene) return false;
+      if(!shouldPersistScene){
+        return _noteAnchorSceneOutcome('attach-skipped:not-worklog-worthy',{
+          mode:scene.mode||null,row_count:scene.activity_rows.length,
+        });
+      }
       let sceneKey='';
       try{ sceneKey=JSON.stringify(scene); }catch(_){ sceneKey=''; }
       if(
         sceneKey &&
         lastAsst._anchor_stream_id===streamId &&
         lastAsst._anchor_scene_persist_key===sceneKey
-      ) return hasWorklogRows;
+      ){
+        // Idempotent re-settlement: the identical scene is already persisted for
+        // this stream, so re-POSTing on every render would be pure noise.
+        _noteAnchorSceneOutcome('attach-skipped:already-persisted');
+        return hasWorklogRows;
+      }
       lastAsst._anchor_stream_id=streamId;
       lastAsst._anchor_activity_scene=scene;
       lastAsst._anchor_scene_persist_key=sceneKey;
       _persistSettledAnchorScene(lastAsst, fullScene, lastAsstIndex);
       return hasWorklogRows;
     }
-    return false;
+    return _noteAnchorSceneOutcome('attach-skipped:empty-scene',{
+      has_scene:!!scene,
+      row_count:(scene&&Array.isArray(scene.activity_rows))?scene.activity_rows.length:null,
+    });
   }
   function _settledAnchorRetryOwnerKey(messages, targetIndex, retryStreamId){
     if(!Array.isArray(messages)||!Number.isInteger(targetIndex)) return '';
@@ -4444,15 +4498,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
   }
   function _retrySettledAnchorScene(targetMessage, targetIndex, retryStreamId, retryRegistry, retryOwnerKey){
-    if(!targetMessage||!Number.isInteger(targetIndex)) return false;
-    if(!S.session||S.session.session_id!==activeSid) return false;
-    if(S.activeStreamId&&S.activeStreamId!==retryStreamId) return false;
-    if(!_anchorRegistryMap||_anchorRegistryMap.get(retryStreamId)!==retryRegistry) return false;
-    if(!Array.isArray(S.messages)) return false;
+    if(!targetMessage||!Number.isInteger(targetIndex)) return _noteAnchorSceneOutcome('retry-skipped:no-target');
+    if(!S.session||S.session.session_id!==activeSid) return _noteAnchorSceneOutcome('retry-skipped:session-switched');
+    if(S.activeStreamId&&S.activeStreamId!==retryStreamId) return _noteAnchorSceneOutcome('retry-skipped:newer-stream');
+    if(!_anchorRegistryMap||_anchorRegistryMap.get(retryStreamId)!==retryRegistry) return _noteAnchorSceneOutcome('retry-skipped:registry-replaced');
+    if(!Array.isArray(S.messages)) return _noteAnchorSceneOutcome('retry-skipped:no-messages');
     const currentTarget=S.messages[targetIndex];
     if(currentTarget!==targetMessage){
       const currentOwnerKey=_settledAnchorRetryOwnerKey(S.messages,targetIndex,retryStreamId);
-      if(!retryOwnerKey||!currentOwnerKey||currentOwnerKey!==retryOwnerKey) return false;
+      if(!retryOwnerKey||!currentOwnerKey||currentOwnerKey!==retryOwnerKey) return _noteAnchorSceneOutcome('retry-skipped:owner-mismatch');
       if(targetMessage._anchor_stream_id===retryStreamId){
         if(currentTarget._anchor_stream_id==null) currentTarget._anchor_stream_id=targetMessage._anchor_stream_id;
         if(currentTarget._anchor_scene_persist_key==null) currentTarget._anchor_scene_persist_key=targetMessage._anchor_scene_persist_key;
@@ -7021,6 +7075,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(!lastAsst&&d.session&&Array.isArray(d.session.messages)){
           lastAsst=[...d.session.messages].reverse().find(m=>m&&m.role==='assistant')||null;
         }
+        // ponytail: a turn that settles while the reader has switched away keeps
+        // no durable Anchor scene. Persisting from here is not a one-liner —
+        // _persistSettledAnchorScene derives its absolute message_index from
+        // _oldestIdx, which describes the PANE's window, not this background
+        // session's — so it would write a wrong index. Out of scope for HWEB-80;
+        // reopening the session rebuilds the scene from the durable endpoint.
+        if(!isActiveSession) _noteAnchorSceneOutcome('attach-skipped:session-not-in-pane');
         if(isActiveSession&&_pendingGoalContinuation&&typeof queueSessionMessage==='function'){
           const _goalNext=_pendingGoalContinuation;
           _pendingGoalContinuation=null;
@@ -7653,7 +7714,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   async function _restoreSettledSession(source, options=null){
     const returnStatus=!!(options&&options.status);
     const preserveVisibleOnShorterTerminalSnapshot=!!(options&&options.preserveVisibleOnShorterTerminalSnapshot);
-    if(_isActiveSession() && S.activeStreamId!==streamId){
+    if(_streamPaneOwnershipLost()){
       _closeSource(source);
       return returnStatus?'stale':false;
     }
@@ -7754,7 +7815,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _handleStreamError(source){
-    if(_isActiveSession() && S.activeStreamId!==streamId){
+    if(_streamPaneOwnershipLost()){
+      _noteAnchorSceneOutcome('terminal-event-dropped:stream-error-not-owner');
       _closeSource(source);
       return;
     }
