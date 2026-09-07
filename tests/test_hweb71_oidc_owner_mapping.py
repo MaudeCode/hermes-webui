@@ -355,6 +355,63 @@ def test_non_mapping_operator_config_is_a_read_failure(monkeypatch, tmp_path):
     assert auth_oidc._resolve_oidc_config()["config_read_failed"] is True
 
 
+def test_a_repaired_config_is_returned_rather_than_the_stale_empty_read(monkeypatch, tmp_path):
+    """The dict returned and the failure verdict come from the same read."""
+    import api.auth_oidc as auth_oidc
+    import api.profiles as profiles
+
+    _configure(monkeypatch, owner_claim=None, owner_values=None)
+    monkeypatch.setattr(auth_oidc, "_load_operator_config", _REAL_LOAD_OPERATOR_CONFIG)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"webui_oidc:\n  owner_claim: groups\n  owner_values: [{OWNER_GROUP}]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_CONFIG_PATH", str(config_path))
+    # Model a transient first-read failure: the shared loader reports empty
+    # while the file on disk is intact.
+    monkeypatch.setattr(auth_oidc, "_load_yaml_config_file", lambda _path: {}, raising=False)
+    monkeypatch.setattr("api.config._load_yaml_config_file", lambda _path: {})
+
+    cfg = auth_oidc._resolve_oidc_config()
+
+    assert cfg["config_read_failed"] is False
+    assert cfg["owner_policy_configured"] is True
+    assert cfg["owner_values"] == [OWNER_GROUP]
+
+
+def test_owner_check_reconciles_against_the_snapshot_that_chose_the_branch(monkeypatch):
+    """A policy removed and restored between two reads must not pass the check."""
+    import api.auth_oidc as auth_oidc
+
+    private_key, token = _configure(monkeypatch)
+    result = _login(monkeypatch, private_key, token, {
+        "email": "user@example.com", "groups": ["users"],
+    })
+    session_info = {
+        "auth_type": "oidc",
+        "bound_profile": None,
+        "oidc_mapping_fingerprint": result["oidc_binding"]["mapping_fingerprint"],
+        "oidc_profile_identity": result["oidc_binding"]["profile_identity"],
+    }
+
+    # The snapshot that selects the legacy branch is the one validated against,
+    # so a concurrent restore cannot make the policy-era fingerprint match.
+    reads = []
+    real_resolve = auth_oidc._resolve_oidc_config
+
+    def _flapping():
+        reads.append(len(reads))
+        cfg = real_resolve()
+        if len(reads) == 1:
+            cfg = {**cfg, "owner_claim": "", "owner_values": [], "owner_policy_configured": False}
+        return cfg
+
+    monkeypatch.setattr(auth_oidc, "_resolve_oidc_config", _flapping)
+
+    assert auth_oidc.oidc_session_can_manage_server(session_info) is False
+
+
 def test_startup_warning_explains_an_unresolved_operator_config(monkeypatch, tmp_path):
     """A denied-owner state must be diagnosable, not a silent lockout."""
     import api.auth as auth

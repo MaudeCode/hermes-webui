@@ -502,38 +502,46 @@ def _load_operator_config() -> dict[str, Any]:
     configured_path = str(_INITIAL_HERMES_CONFIG_PATH or "").strip()
     path = Path(configured_path).expanduser() if configured_path else get_hermes_home_for_profile("default") / "config.yaml"
     loaded = _load_yaml_config_file(path)
-    if not loaded:
-        # api.config's loader flattens missing, empty, unreadable, and malformed
-        # files into {}. A caller that gates privilege on this config must not
-        # read "unknown" as "nothing configured", so surface the last two.
-        _raise_if_operator_config_is_unreadable(path)
-    return loaded
+    if loaded:
+        return loaded
+    # api.config's loader flattens missing, empty, unreadable, and malformed
+    # files into {}. A caller that gates privilege on this config must not read
+    # "unknown" as "nothing configured", so resolve it once more, and return
+    # what that read saw rather than the empty result it supersedes.
+    return _reresolve_operator_config(path)
 
 
-def _raise_if_operator_config_is_unreadable(path: Path) -> None:
-    """Raise when the file exists but its contents could not be resolved.
+def _reresolve_operator_config(path: Path) -> dict[str, Any]:
+    """Resolve the operator config from one read, raising on a real failure.
 
-    api.config's loader returns {} for a missing, empty, unreadable, or
-    malformed file alike. Re-parsing here separates them by outcome rather than
-    by guessing from the text: an empty document, an explicit ``{}``, and a
+    This is the authoritative outcome for the empty case: the dict returned and
+    the success/failure decision come from the same read, so a file repaired or
+    broken between two reads cannot leave the caller with data from one and a
+    verdict from the other. An empty document, an explicit ``{}``, and a
     comments-only file are all legitimately "nothing configured".
     """
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return
+        return {}
     except OSError as exc:
         raise OIDCConfigError(f"Operator config at {path} could not be read") from exc
     try:
         import yaml as _yaml
     except ImportError:
-        return
+        return {}
     try:
         parsed = _yaml.safe_load(text)
     except Exception as exc:
         raise OIDCConfigError(f"Operator config at {path} could not be parsed") from exc
-    if parsed is not None and not isinstance(parsed, dict):
+    if parsed is None:
+        return {}
+    if not isinstance(parsed, dict):
         raise OIDCConfigError(f"Operator config at {path} is not a mapping")
+    from api.config import _expand_env_vars
+
+    expanded = _expand_env_vars(parsed)
+    return expanded if isinstance(expanded, dict) else {}
 
 
 def _resolve_oidc_config() -> dict[str, Any]:
@@ -836,12 +844,23 @@ def _oidc_profile_binding(
     return binding
 
 
-def _oidc_binding_is_current(binding: dict[str, Any] | None, profile: str | None) -> bool:
-    """True when evidence still matches the live policy and the named profile."""
+def _oidc_binding_is_current(
+    binding: dict[str, Any] | None,
+    profile: str | None,
+    cfg: dict[str, Any] | None = None,
+) -> bool:
+    """True when evidence still matches the policy and the named profile.
+
+    Callers that already resolved the policy pass their snapshot in, so one
+    read both selects the decision and validates it; re-reading here would let
+    a policy removed and restored between the two reads pass a check the first
+    read had already routed down the legacy path.
+    """
     if not binding:
         return True
     try:
-        cfg = _require_oidc_config()
+        if cfg is None:
+            cfg = _require_oidc_config()
         expected = _oidc_profile_binding(cfg, str(profile or "").strip() or None)
     except (OSError, OIDCAuthError, OIDCConfigError):
         return False
@@ -852,7 +871,9 @@ def _oidc_binding_is_current(binding: dict[str, Any] | None, profile: str | None
     )
 
 
-def oidc_session_binding_is_current(session_info: dict[str, Any]) -> bool:
+def oidc_session_binding_is_current(
+    session_info: dict[str, Any], cfg: dict[str, Any] | None = None
+) -> bool:
     """Reconcile a persisted OIDC session against the live policy.
 
     Every session that recorded a fingerprint reconciles it, regardless of
@@ -871,7 +892,7 @@ def oidc_session_binding_is_current(session_info: dict[str, Any]) -> bool:
         "mapping_fingerprint": fingerprint,
         "profile_identity": session_info.get("oidc_profile_identity"),
     }
-    if not _oidc_binding_is_current(binding, profile):
+    if not _oidc_binding_is_current(binding, profile, cfg):
         return False
     if owner_evidence and _owner_evidence_expiry(session_info) <= time.time():
         return False
@@ -908,12 +929,12 @@ def oidc_session_can_manage_server(session_info: dict[str, Any]) -> bool:
         # The session may have been minted while a policy was configured; its
         # fingerprint covers that policy, so a session from the policy era
         # cannot be re-read as a legacy owner after the settings disappear.
-        return oidc_session_binding_is_current(session_info)
+        return oidc_session_binding_is_current(session_info, cfg)
     if not session_info.get("oidc_owner"):
         return False
     if _owner_evidence_expiry(session_info) <= time.time():
         return False
-    return oidc_session_binding_is_current(session_info)
+    return oidc_session_binding_is_current(session_info, cfg)
 
 
 def _normalize_text_list(raw: Any) -> list[str]:
