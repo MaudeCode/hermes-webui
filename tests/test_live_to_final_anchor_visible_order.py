@@ -1372,6 +1372,66 @@ console.log(JSON.stringify({{
     }
 
 
+@pytest.mark.skipif(NODE is None, reason="node is required for settlement ownership tests")
+def test_restore_settled_session_reproves_ownership_after_the_fetch():
+    """HWEB-80 / Codex round-2 P1: ownership is checked at entry but used after an await.
+
+    A replacement send can start while `/api/session` is in flight. Settling the
+    idle snapshot then would overwrite the new optimistic S.session/S.messages and
+    clear its busy state, hiding the turn the user just sent.
+    """
+    ownership_lost = _function_body(MESSAGES_JS, "_streamPaneOwnershipLost")
+    restore = _function_body(MESSAGES_JS, "_restoreSettledSession")
+    script = f"""
+const activeSid='sid-A';
+const streamId='stream-A';
+let _sendInProgress=false;
+let _sendInProgressSid=null;
+let _streamFinalized=false;
+let closed=0;
+let startSendDuringFetch=false;
+const S={{session:{{session_id:'sid-A'}},activeStreamId:null,messages:[{{role:'user',content:'live turn'}}]}};
+function _isActiveSession(){{ return !!(S.session&&S.session.session_id===activeSid); }}
+function _streamPaneOwnershipLost(){{{ownership_lost}}}
+function _closeSource(){{ closed+=1; }}
+function _terminalSessionPath(sid){{ return '/api/session?session_id='+sid; }}
+async function api(){{
+  // The replacement send lands while the settlement fetch is in flight.
+  if(startSendDuringFetch){{ _sendInProgress=true; _sendInProgressSid='sid-A'; S.activeStreamId=null; }}
+  return {{session:null}};
+}}
+async function _restoreSettledSession(source, options=null){{{restore}}}
+(async()=>{{
+  // Control: no replacement send — the fetch result is consumed normally.
+  const control=await _restoreSettledSession({{}},{{status:true}});
+  const controlClosed=closed;
+  // Race: the send starts mid-await, after the entry guard already passed.
+  startSendDuringFetch=true;
+  const raced=await _restoreSettledSession({{}},{{status:true}});
+  console.log(JSON.stringify({{
+    control,
+    controlClosed,
+    raced,
+    closedAfterRace:closed,
+    messagesIntact:S.messages.length===1&&S.messages[0].content==='live turn',
+  }}));
+}})();
+"""
+    result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        # No send in flight: the entry guard and the post-fetch guard both pass,
+        # so the empty payload falls through to 'missing' as before.
+        "control": "missing",
+        "controlClosed": 0,
+        # Send started during the await: the post-fetch re-proof catches it.
+        "raced": "stale",
+        "closedAfterRace": 1,
+        "messagesIntact": True,
+    }
+
+
 def test_terminal_recovery_paths_share_one_pane_ownership_predicate():
     """HWEB-80: the same cleared-activeStreamId race must not silence these exits either."""
     restore = _function_body(MESSAGES_JS, "_restoreSettledSession")

@@ -7738,6 +7738,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
       // we were awaiting the network roundtrip, bail out — done already settled.
       if(_streamFinalized) return returnStatus?'restored':true;
+      // HWEB-80 review round 2: ownership is checked at entry but used after an
+      // await, so it must be re-proven at the point of use. A replacement send
+      // (or another stream claiming the pane) can start while this request is in
+      // flight; settling the idle snapshot then would overwrite the new
+      // optimistic S.session/S.messages and clear its busy state.
+      if(_streamPaneOwnershipLost()){
+        _closeSource(source);
+        return returnStatus?'stale':false;
+      }
       const session=data&&data.session;
       if(!session) return returnStatus?'missing':false;
       if(session.active_stream_id||session.pending_user_message) return returnStatus?'active':false;
