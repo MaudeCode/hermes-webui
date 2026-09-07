@@ -622,27 +622,28 @@ def reload_config() -> None:
 
 
 # Memoized parse cache for _load_yaml_config_file, keyed on (resolved path,
-# st_mtime_ns, st_size). yaml.safe_load on an ~800-line / 24KB config.yaml costs
-# ~125ms of pure-Python parsing, and hot read paths (e.g. GET /api/reasoning ->
-# get_reasoning_status) call this on every request. Without a cache, a UI sync
+# st_mtime_ns, st_size, st_ino, st_ctime_ns). yaml.safe_load on an ~800-line /
+# 24KB config.yaml costs ~125ms of pure-Python parsing, and hot read paths
+# (e.g. GET /api/reasoning -> get_reasoning_status) call this on every request. Without a cache, a UI sync
 # storm turns into a YAML-reparse storm (#4650). We cache the RAW parsed dict and
 # re-run _expand_env_vars() on every call: env expansion is cheap, always returns
 # a fresh structure (so callers that read-modify-save the result never corrupt the
 # cache), and keeps ${VAR} references live against the current os.environ. The
-# (mtime_ns, size) key means any on-disk edit (including by _save_yaml_config_file)
-# is picked up on the next read.
+# stat key means any on-disk edit (including by _save_yaml_config_file) is picked
+# up on the next read, and a same-size replacement with a restored mtime is too
+# because it lands on a new inode.
 _yaml_file_cache: dict[str, tuple] = {}
 _yaml_file_cache_lock = threading.Lock()
 
 
 def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict:
     """Return the RAW (un-env-expanded) parsed config dict, memoized on
-    (resolved path, st_mtime_ns, st_size). Shared parse core for
-    _load_yaml_config_file() and reload_config(): the former runs the helper's
-    own per-call env expansion on the result; the latter must run expansion
+    (resolved path, st_mtime_ns, st_size, st_ino, st_ctime_ns). Shared parse
+    core for _load_yaml_config_file() and reload_config(): the former runs the
+    helper's own per-call env expansion on the result; the latter must run expansion
     under its own process-env-pinned thread context (#798), so it takes the raw
     dict and expands it itself. Either way the file is parsed at most once per
-    (mtime, size) — a UI sync storm can't turn into a YAML-reparse storm (#4650),
+    stat identity — a UI sync storm can't turn into a YAML-reparse storm (#4650),
     and an unchanged config.yaml isn't reparsed on the profile-switch hot path
     (#4662 Phase 2).
 
@@ -663,7 +664,16 @@ def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict
         return {}
 
     cache_key = str(config_path)
-    stat_key = (st.st_mtime_ns, st.st_size)
+    # st_ino/st_ctime_ns are part of the key because an atomic replace that
+    # restores mtime and keeps the byte length (rsync -a, cp -p, config
+    # management that puts metadata back) leaves (mtime_ns, size) identical and
+    # would otherwise serve the previous parse forever — including the
+    # webui_oidc policy that decides owner authority (HWEB-81). Both change when
+    # the directory entry is repointed at a new inode, and both come from the
+    # stat() we already do. Both are stable per file on Linux, macOS and
+    # Windows, and a platform that reports a constant st_ino (some network
+    # mounts) simply degrades to the old key rather than reparsing repeatedly.
+    stat_key = (st.st_mtime_ns, st.st_size, st.st_ino, st.st_ctime_ns)
     with _yaml_file_cache_lock:
         cached = _yaml_file_cache.get(cache_key)
         if cached is not None and cached[0] == stat_key:

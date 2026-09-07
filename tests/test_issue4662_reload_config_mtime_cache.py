@@ -184,3 +184,46 @@ def test_reload_config_empty_dict_config_does_not_spin(tmp_path, monkeypatch):
     cfg.get_config()
     assert reloads["n"] == 0, f"get_config() re-entered reload_config() {reloads['n']}x on a stable {{}} config (spin)"
 
+
+
+def test_reload_config_busts_on_preserved_mtime_replace(tmp_path, monkeypatch):
+    """HWEB-81: reload_config() shares the same cache, so a same-size atomic
+    replace with a restored mtime must reach it too — while an unchanged file
+    still costs zero reparses (the Phase 2 guarantee above)."""
+    import api.config as cfg
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("providers:\n  openai:\n    models: [model-aaa]\n", encoding="utf-8")
+    monkeypatch.setattr(cfg, "_get_config_path", lambda: config_path)
+
+    parse_calls = {"n": 0}
+    real_safe_load = _yaml.safe_load
+
+    def _counting_safe_load(s):
+        parse_calls["n"] += 1
+        return real_safe_load(s)
+
+    monkeypatch.setattr(_yaml, "safe_load", _counting_safe_load)
+    with cfg._yaml_file_cache_lock:
+        cfg._yaml_file_cache.clear()
+
+    cfg.reload_config()
+    assert (cfg.get_config()["providers"]["openai"]["models"]) == ["model-aaa"]
+    original = config_path.stat()
+    after_first = parse_calls["n"]
+
+    replacement = tmp_path / "config.yaml.new"
+    replacement.write_text("providers:\n  openai:\n    models: [model-bbb]\n", encoding="utf-8")
+    assert replacement.stat().st_size == original.st_size, "test setup: sizes must match"
+    os.replace(replacement, config_path)
+    os.utime(config_path, ns=(original.st_atime_ns, original.st_mtime_ns))
+    assert config_path.stat().st_mtime_ns == original.st_mtime_ns, "test setup: mtime not restored"
+
+    cfg.reload_config()
+    assert (cfg.get_config()["providers"]["openai"]["models"]) == ["model-bbb"], (
+        "reload_config served the stale parse after a preserved-mtime replace"
+    )
+    assert parse_calls["n"] == after_first + 1, "the replacement must cost exactly one reparse"
+
+    cfg.reload_config()
+    assert parse_calls["n"] == after_first + 1, "an unchanged config.yaml was reparsed"
