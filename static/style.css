@@ -2075,6 +2075,12 @@
   .clarify-choice-text{flex:1;line-height:1.45;min-width:0;}
   .clarify-choice.other{border-color:var(--accent-bg-strong);color:var(--accent-text);background:var(--accent-bg);}
   .clarify-choice.other:hover{background:var(--accent-bg-strong);border-color:var(--accent);}
+  .clarify-questions{display:flex;flex-direction:column;gap:16px;margin-bottom:12px;}
+  .clarify-questions[hidden]{display:none;}
+  .clarify-q{display:flex;flex-direction:column;gap:8px;}
+  .clarify-q .clarify-question,.clarify-q .clarify-choices{margin-bottom:0;}
+  .clarify-choice[aria-pressed="true"]{background:var(--accent-bg-strong);border-color:var(--accent);}
+  .clarify-input[hidden]{display:none;}
   .clarify-response{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
   .clarify-input{flex:1;min-width:220px;padding:10px 12px;border-radius:8px;border:1px solid var(--border2);background:var(--input-bg);color:var(--text);font:inherit;outline:none;transition:all .15s;}
   .clarify-input:focus{border-color:var(--accent-bg);box-shadow:0 0 0 3px var(--accent-bg);background:var(--hover-bg);}
@@ -2087,7 +2093,7 @@
   .clarify-card.collapsed{max-height:56px;bottom:8px;}
   .clarify-card.collapsed .clarify-inner{max-height:48px;overflow:hidden;padding:10px 14px;}
   .clarify-card.collapsed .clarify-header{margin-bottom:0;}
-  .clarify-card.collapsed .clarify-question,.clarify-card.collapsed .clarify-choices,.clarify-card.collapsed .clarify-response,.clarify-card.collapsed .clarify-hint{display:none;}
+  .clarify-card.collapsed .clarify-question,.clarify-card.collapsed .clarify-choices,.clarify-card.collapsed .clarify-questions,.clarify-card.collapsed .clarify-response,.clarify-card.collapsed .clarify-hint{display:none;}
   /* Left rail (desktop primary navigation) */
   .rail{display:none;width:48px;flex-shrink:0;flex-direction:column;align-items:center;gap:4px;padding:8px 0;background:var(--sidebar);border-right:1px solid var(--border);}
   .rail-btn{width:36px;height:36px;border-radius:8px;border:none;background:none;color:var(--muted);cursor:pointer;display:flex;align-items:center;justify-content:center;position:relative;transition:color .15s,background .15s;flex-shrink:0;padding:0;}
