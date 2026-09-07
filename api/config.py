@@ -337,6 +337,11 @@ def _expand_env_vars(obj):
 _cfg_cache = {}
 _cfg_lock = threading.Lock()
 _cfg_mtime: float = 0.0  # last known mtime of config.yaml; 0 = never loaded
+# Full identity of the config.yaml behind _cfg_cache, matching the parse cache's
+# key. st_mtime alone cannot see an atomic replace that restores mtime and keeps
+# the byte length, so the guards below would keep serving process-global settings
+# (providers, models, gateway) from a file that no longer exists (HWEB-81).
+_cfg_stat_identity: tuple = ()  # () = never loaded
 _cfg_path: Path | None = None  # active config.yaml path for the disk-loaded cache
 _cfg_fingerprint: str | None = None  # serialized snapshot from the last disk load
 
@@ -444,17 +449,40 @@ def _apply_config_defaults(config_data: dict) -> None:
         experimental.setdefault(key, value)
 
  
+def _config_stat_state(config_path) -> tuple[float, tuple]:
+    """Return (st_mtime, file identity) for *config_path* from one stat().
+
+    The identity is the same tuple the YAML parse cache keys on, so the
+    process-global staleness guards and that cache agree about what "the same
+    file" means. A missing or unstattable file yields the never-loaded values.
+    """
+    try:
+        st = Path(config_path).stat()
+    except OSError:
+        return 0.0, ()
+    return st.st_mtime, (st.st_mtime_ns, st.st_size, st.st_ino, st.st_ctime_ns)
+
+
+def _config_is_stale(current_mtime: float, current_identity: tuple) -> bool:
+    """True when the on-disk config differs from what _cfg_cache was built from.
+
+    Both halves matter: tests and callers pin _cfg_mtime directly to declare the
+    cache fresh, and the identity catches a same-size, mtime-restored replace
+    that the mtime comparison cannot see.
+    """
+    if current_mtime != _cfg_mtime:
+        return True
+    return bool(_cfg_stat_identity) and current_identity != _cfg_stat_identity
+
+
 def reload_config_if_stale() -> None:
     """Refresh config.yaml once for concurrent stale read paths."""
     global cfg
     with _cfg_lock:
-        try:
-            config_path = _get_config_path()
-            current_mtime = config_path.stat().st_mtime
-        except OSError:
-            current_mtime = 0.0
+        config_path = _get_config_path()
+        current_mtime, current_identity = _config_stat_state(config_path)
         path_changed = _cfg_path != config_path
-        mtime_stale = current_mtime != _cfg_mtime
+        mtime_stale = _config_is_stale(current_mtime, current_identity)
         if not _cfg_cache or path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
             _refresh_config_cache(config_path)
             if path_changed:
@@ -464,12 +492,9 @@ def reload_config_if_stale() -> None:
 def get_config() -> dict:
     """Return the cached config dict, loading from disk if needed."""
     config_path = _get_config_path()
-    try:
-        current_mtime = config_path.stat().st_mtime
-    except OSError:
-        current_mtime = 0.0
+    current_mtime, current_identity = _config_stat_state(config_path)
     path_changed = _cfg_path != config_path
-    mtime_stale = current_mtime != _cfg_mtime
+    mtime_stale = _config_is_stale(current_mtime, current_identity)
     if not _cfg_cache or path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
         reload_config_if_stale()
     # When a test (or runtime caller) has rebound ``cfg`` to a different dict
@@ -489,12 +514,9 @@ def get_config_snapshot() -> dict:
     """Return a request-owned config snapshot captured under the cache lock."""
     with _cfg_lock:
         config_path = _get_config_path()
-        try:
-            current_mtime = config_path.stat().st_mtime
-        except OSError:
-            current_mtime = 0.0
+        current_mtime, current_identity = _config_stat_state(config_path)
         path_changed = _cfg_path != config_path
-        mtime_stale = current_mtime != _cfg_mtime
+        mtime_stale = _config_is_stale(current_mtime, current_identity)
         if not _cfg_cache or path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
             _refresh_config_cache(config_path)
         try:
@@ -545,7 +567,7 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
     Callers must hold _cfg_lock when invoking this helper because it mutates
     shared state.
     """
-    global _cfg_mtime, _cfg_path, _cfg_fingerprint
+    global _cfg_mtime, _cfg_stat_identity, _cfg_path, _cfg_fingerprint
     if config_path is None:
         config_path = _get_config_path()
     _cfg_cache.clear()
@@ -554,6 +576,7 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
     _old_cfg_mtime = _cfg_mtime
     _cfg_path = config_path
     _cfg_mtime = 0.0
+    _cfg_stat_identity = ()
     try:
         if config_path.exists():
             # Route the parse through the mtime-keyed cache (#4652) so an
@@ -598,10 +621,7 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
                 # This matches master's pre-#4662 behavior (it entered the block for
                 # {} and set the mtime); the inner `if loaded:` only gates the no-op
                 # cache update, not the mtime stamp.
-                try:
-                    _cfg_mtime = Path(config_path).stat().st_mtime
-                except OSError:
-                    _cfg_mtime = 0.0
+                _cfg_mtime, _cfg_stat_identity = _config_stat_state(config_path)
     except Exception:
         logger.debug("Failed to load yaml config from %s", config_path)
     _apply_config_defaults(_cfg_cache)
@@ -7194,14 +7214,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _cache_build_cv
     # Config mtime check — must come before any config reads.
     # (Test #585 verifies _current_mtime appears before active_provider = None)
-    try:
-        _current_path = _get_config_path()
-        _current_mtime = _current_path.stat().st_mtime
-    except OSError:
-        _current_path = _get_config_path()
-        _current_mtime = 0.0
+    _current_path = _get_config_path()
+    _current_mtime, _current_identity = _config_stat_state(_current_path)
     path_changed = _current_path != _cfg_path
-    mtime_stale = _current_mtime != _cfg_mtime
+    mtime_stale = _config_is_stale(_current_mtime, _current_identity)
     if path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
         reload_config_if_stale()
     # ── COLD PATH helper ─────────────────────────────────────────────────────
@@ -8680,11 +8696,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
     # Check config mtime OUTSIDE the lock so this cheap check doesn't serialize
     # concurrent requests.  Must come before any config reads in the cold path.
-    try:
-        _current_mtime = Path(_get_config_path()).stat().st_mtime
-    except OSError:
-        _current_mtime = 0.0
-    _cfg_changed = _current_mtime != _cfg_mtime
+    _current_mtime, _current_identity = _config_stat_state(_get_config_path())
+    _cfg_changed = _config_is_stale(_current_mtime, _current_identity)
 
     # Disk load BEFORE lock: ~0.1ms, lets concurrent requests skip entirely.
     # Then acquire lock and check memory cache.  Cold path runs inside the lock

@@ -227,3 +227,57 @@ def test_reload_config_busts_on_preserved_mtime_replace(tmp_path, monkeypatch):
 
     cfg.reload_config()
     assert parse_calls["n"] == after_first + 1, "an unchanged config.yaml was reparsed"
+
+
+def test_get_config_busts_on_preserved_mtime_replace(tmp_path, monkeypatch):
+    """HWEB-81 (Codex P1): the parse cache is only reached when the top-level
+    guards decide _cfg_cache is stale, and those compared st_mtime alone. Read
+    through the normal accessor, not reload_config(), so a same-size replace
+    with a restored mtime has to travel the whole path."""
+    import api.config as cfg
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("providers:\n  openai:\n    models: [model-aaa]\n", encoding="utf-8")
+    monkeypatch.setattr(cfg, "_get_config_path", lambda: config_path)
+    with cfg._yaml_file_cache_lock:
+        cfg._yaml_file_cache.clear()
+
+    assert cfg.get_config()["providers"]["openai"]["models"] == ["model-aaa"]
+    original = config_path.stat()
+
+    replacement = tmp_path / "config.yaml.new"
+    replacement.write_text("providers:\n  openai:\n    models: [model-bbb]\n", encoding="utf-8")
+    assert replacement.stat().st_size == original.st_size, "test setup: sizes must match"
+    os.replace(replacement, config_path)
+    os.utime(config_path, ns=(original.st_atime_ns, original.st_mtime_ns))
+    assert config_path.stat().st_mtime == original.st_mtime, "test setup: mtime not restored"
+
+    assert cfg.get_config()["providers"]["openai"]["models"] == ["model-bbb"], (
+        "get_config() served process-global settings from a file that no longer exists"
+    )
+    assert cfg.get_config_snapshot()["providers"]["openai"]["models"] == ["model-bbb"]
+
+
+def test_get_config_does_not_reload_an_unchanged_file(tmp_path, monkeypatch):
+    """The identity check must not turn every get_config() into a reload."""
+    import api.config as cfg
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("providers:\n  openai: {}\n", encoding="utf-8")
+    monkeypatch.setattr(cfg, "_get_config_path", lambda: config_path)
+    with cfg._yaml_file_cache_lock:
+        cfg._yaml_file_cache.clear()
+
+    cfg.get_config()
+
+    reloads = {"n": 0}
+    real_refresh = cfg._refresh_config_cache
+
+    def _counting_refresh(path=None):
+        reloads["n"] += 1
+        return real_refresh(path)
+
+    monkeypatch.setattr(cfg, "_refresh_config_cache", _counting_refresh)
+    for _ in range(5):
+        cfg.get_config()
+    assert reloads["n"] == 0, f"an unchanged config.yaml triggered {reloads['n']} reload(s)"
