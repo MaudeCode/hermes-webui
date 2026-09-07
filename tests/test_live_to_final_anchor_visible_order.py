@@ -1015,7 +1015,9 @@ def test_deferred_application_error_retry_is_owner_fenced_and_idempotent():
     message_ref = _function_body(MESSAGES_JS, "_anchorSceneMessageRef")
     owner_key = _function_body(MESSAGES_JS, "_settledAnchorRetryOwnerKey")
     retry = _function_body(MESSAGES_JS, "_retrySettledAnchorScene")
+    note = _function_body(MESSAGES_JS, "_noteAnchorSceneOutcome")
     script = f"""
+function _noteAnchorSceneOutcome(reason,detail){{{note}}}
 const activeSid='sid-A';
 const streamId='stream-A';
 const _anchorRegistry={{generation:'A'}};
@@ -1174,6 +1176,282 @@ console.log(JSON.stringify({{
     assert data["streamState"] == {"result": False, "persisted": 3}
     assert data["registryState"] == {"result": False, "persisted": 3}
     assert data["sessionState"] == {"result": False, "persisted": 3}
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for stream ownership tests")
+def test_terminal_events_survive_sidebar_idle_reconciliation():
+    """HWEB-80: a cleared S.activeStreamId must not discard this stream's terminal event.
+
+    The sidebar poll's `_reconcileActiveSessionIdleStateFromList` nulls
+    `S.activeStreamId` as soon as the server row reports the run finished, which
+    can land before the browser processes this stream's own `done`. Treating that
+    as a stale stream dropped the whole terminal event — and with it the only copy
+    of the projected Anchor scene — so the lifecycle gate saw zero
+    /api/session/anchor-scene requests. Ownership is lost only when a DIFFERENT
+    stream id owns the pane.
+    """
+    ownership_lost = _function_body(MESSAGES_JS, "_streamPaneOwnershipLost")
+    owns_active = _function_body(MESSAGES_JS, "_ownsActiveStreamOrBackground")
+    bail = _function_body(MESSAGES_JS, "_bailOutOfTerminalEventsFromStaleStream")
+    note = _function_body(MESSAGES_JS, "_noteAnchorSceneOutcome")
+    script = f"""
+const activeSid='sid-A';
+const streamId='stream-A';
+const _streamOwnerGeneration=1;
+const source={{name:'source-A'}};
+const S={{session:{{session_id:'sid-A'}},activeStreamId:'stream-A',busy:true}};
+const LIVE_STREAMS={{'sid-A':{{source,ownerGeneration:1}}}};
+let cleanups=[];
+let closed=0;
+function _noteAnchorSceneOutcome(reason,detail){{{note}}}
+function _ownsStreamLifecycle(){{ return true; }}
+function _scheduleAnchorRegistryCleanup(delayMs){{ cleanups.push(delayMs); }}
+function _closeSource(){{ closed+=1; }}
+function _isActiveSession(){{ return !!(S.session&&S.session.session_id===activeSid); }}
+function _streamPaneOwnershipLost(){{{ownership_lost}}}
+function _ownsActiveStreamOrBackground(){{{owns_active}}}
+function _bailOutOfTerminalEventsFromStaleStream(source){{{bail}}}
+const owned=_bailOutOfTerminalEventsFromStaleStream(source);
+S.activeStreamId=null; S.busy=false;  // sidebar idle reconciliation beat the done event
+const afterIdleReconcile=_bailOutOfTerminalEventsFromStaleStream(source);
+S.activeStreamId='stream-B';  // a genuinely newer stream owns the pane
+const afterNewerStream=_bailOutOfTerminalEventsFromStaleStream(source);
+S.activeStreamId=null;
+S.session={{session_id:'sid-B'}};  // reader switched away; background turn may finish
+const afterSessionSwitch=_bailOutOfTerminalEventsFromStaleStream(source);
+console.log(JSON.stringify({{
+  owned,
+  afterIdleReconcile,
+  afterNewerStream,
+  afterSessionSwitch,
+  cleanups,
+  closed,
+}}));
+"""
+    result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "owned": False,
+        "afterIdleReconcile": False,
+        "afterNewerStream": True,
+        "afterSessionSwitch": False,
+        "cleanups": [120000],
+        "closed": 1,
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for anchor persistence trace tests")
+def test_skipped_anchor_scene_persistence_records_a_diagnosable_reason():
+    """HWEB-80: every decision not to persist names itself on window.__anchorScenePersistTrace."""
+    attach = _function_body(MESSAGES_JS, "_attachProjectedAnchorSceneToLastAssistant")
+    note = _function_body(MESSAGES_JS, "_noteAnchorSceneOutcome")
+    script = f"""
+const window={{}};
+const activeSid='sid-A';
+const streamId='stream-A';
+let _anchorRegistry={{generation:'A'}};
+let scene={{version:'activity_scene_v1',mode:'compact_worklog',activity_rows:[]}};
+let worklogWorthy=false;
+let persisted=0;
+function _noteAnchorSceneOutcome(reason,detail){{{note}}}
+function _projectLiveAnchorActivityScene(){{ return scene; }}
+function _completeSettledAnchorSceneForTurn(messages,index,projected){{ return projected; }}
+function _prepareSettledAnchorScene(projected){{ return projected; }}
+function _settledAnchorScenePreview(projected){{ return projected; }}
+function _anchorSceneHasOwnedOutcomes(){{ return false; }}
+function _anchorSceneHasWorklogWorthyRows(){{ return worklogWorthy; }}
+function _persistSettledAnchorScene(){{ persisted+=1; }}
+function _attachProjectedAnchorSceneToLastAssistant(messages,targetMessage=null,targetIndex=null){{{attach}}}
+const asst={{role:'assistant',content:'answer'}};
+const messages=[{{role:'user',content:'ask'}},asst];
+_attachProjectedAnchorSceneToLastAssistant(messages);            // empty scene
+scene={{version:'activity_scene_v1',mode:'compact_worklog',activity_rows:[{{role:'prose'}}]}};
+_attachProjectedAnchorSceneToLastAssistant(messages);            // prose only
+worklogWorthy=true;
+scene={{version:'activity_scene_v1',mode:'compact_worklog',activity_rows:[{{role:'tool'}}]}};
+_attachProjectedAnchorSceneToLastAssistant(messages);            // persists
+_attachProjectedAnchorSceneToLastAssistant(messages);            // idempotent repeat
+_attachProjectedAnchorSceneToLastAssistant(messages,asst,0);     // target replaced
+_anchorRegistry=null;
+_attachProjectedAnchorSceneToLastAssistant(messages);            // no registry
+console.log(JSON.stringify({{
+  persisted,
+  reasons:(window.__anchorScenePersistTrace||[]).map(entry=>entry.reason),
+  tagged:(window.__anchorScenePersistTrace||[]).every(
+    entry=>entry.session_id==='sid-A'&&entry.stream_id==='stream-A'&&typeof entry.at==='number'
+  ),
+}}));
+"""
+    result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "persisted": 1,
+        "reasons": [
+            "attach-skipped:empty-scene",
+            "attach-skipped:not-worklog-worthy",
+            "attach-skipped:already-persisted",
+            "attach-skipped:target-replaced",
+            "attach-skipped:no-registry",
+        ],
+        "tagged": True,
+    }
+
+
+def test_stream_end_fallback_traces_instead_of_misfiling_the_scene():
+    """HWEB-80 / Codex P1: the current turn's assistant is not in S.messages here.
+
+    `_handleStreamError` materializes one via `_ensureSingleTerminalStreamErrorMarker`
+    before it attaches. `_finalizeStreamEndFallback` has no such target, so an
+    unqualified attach would select the PREVIOUS turn's assistant and
+    `_completeSettledAnchorSceneForTurn` would rewrite final_answer /
+    final_message_ref from it — durably filing this run's activity under the prior
+    answer. The exit must record a reason rather than persist.
+    """
+    fallback = _function_body(MESSAGES_JS, "_finalizeStreamEndFallback")
+    stream_error = _function_body(MESSAGES_JS, "_handleStreamError")
+
+    assert "_attachProjectedAnchorSceneToLastAssistant" not in fallback
+    trace_idx = fallback.index("attach-skipped:no-settled-target-on-stream-end")
+    render_idx = fallback.index("renderMessages({preserveScroll:true});", trace_idx)
+    assert trace_idx < render_idx
+
+    # The path that DOES attach must keep materializing its own target first.
+    marker_idx = stream_error.index("_ensureSingleTerminalStreamErrorMarker(S.messages);")
+    attach_idx = stream_error.index("_attachProjectedAnchorSceneToLastAssistant(S.messages);")
+    assert marker_idx < attach_idx
+
+
+def test_pane_ownership_is_not_stolen_from_a_replacement_turn():
+    """HWEB-80 / Codex P1 (rounds 1 and 3): a replacement turn owns the pane.
+
+    Both send() and startRegeneration() mark the pane busy and then leave
+    S.activeStreamId null across their /api/chat/start round-trip. A delayed
+    terminal event from the previous stream must not settle its stale transcript
+    over the claimant's optimistic messages during that window. startRegeneration
+    never sets _sendInProgress, which is why `S.busy` — not a per-caller flag —
+    is the discriminator.
+    """
+    ownership_lost = _function_body(MESSAGES_JS, "_streamPaneOwnershipLost")
+    script = f"""
+const activeSid='sid-A';
+const streamId='stream-A';
+let _sendInProgress=false;
+let _sendInProgressSid=null;
+const S={{session:{{session_id:'sid-A'}},activeStreamId:'stream-A',busy:true}};
+function _isActiveSession(){{ return !!(S.session&&S.session.session_id===activeSid); }}
+function _streamPaneOwnershipLost(){{{ownership_lost}}}
+const owned=_streamPaneOwnershipLost();
+// The sidebar reconciler clears busy AND the stream id together.
+S.activeStreamId=null; S.busy=false;
+const afterIdleReconcile=_streamPaneOwnershipLost();
+// send(): setBusy(true) runs BEFORE the id is nulled for the start round-trip.
+S.busy=true; _sendInProgress=true; _sendInProgressSid='sid-A';
+const duringReplacementSend=_streamPaneOwnershipLost();
+// startRegeneration(): same shape, but it never touches _sendInProgress.
+_sendInProgress=false; _sendInProgressSid=null;
+const duringRegeneration=_streamPaneOwnershipLost();
+// A send into a DIFFERENT session must not steal this pane.
+S.busy=false; _sendInProgress=true; _sendInProgressSid='sid-B';
+const duringOtherSessionSend=_streamPaneOwnershipLost();
+_sendInProgress=false; _sendInProgressSid=null;
+S.activeStreamId='stream-B';
+const afterNewerStream=_streamPaneOwnershipLost();
+S.session={{session_id:'sid-B'}};      // reader switched away
+const afterSessionSwitch=_streamPaneOwnershipLost();
+console.log(JSON.stringify({{
+  owned,
+  afterIdleReconcile,
+  duringReplacementSend,
+  duringRegeneration,
+  duringOtherSessionSend,
+  afterNewerStream,
+  afterSessionSwitch,
+}}));
+"""
+    result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "owned": False,
+        "afterIdleReconcile": False,
+        "duringReplacementSend": True,
+        "duringRegeneration": True,
+        "duringOtherSessionSend": False,
+        "afterNewerStream": True,
+        "afterSessionSwitch": False,
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for settlement ownership tests")
+def test_restore_settled_session_reproves_ownership_after_the_fetch():
+    """HWEB-80 / Codex round-2 P1: ownership is checked at entry but used after an await.
+
+    A replacement send can start while `/api/session` is in flight. Settling the
+    idle snapshot then would overwrite the new optimistic S.session/S.messages and
+    clear its busy state, hiding the turn the user just sent.
+    """
+    ownership_lost = _function_body(MESSAGES_JS, "_streamPaneOwnershipLost")
+    restore = _function_body(MESSAGES_JS, "_restoreSettledSession")
+    script = f"""
+const activeSid='sid-A';
+const streamId='stream-A';
+let _sendInProgress=false;
+let _sendInProgressSid=null;
+let _streamFinalized=false;
+let closed=0;
+let startSendDuringFetch=false;
+const S={{session:{{session_id:'sid-A'}},activeStreamId:null,messages:[{{role:'user',content:'live turn'}}]}};
+function _isActiveSession(){{ return !!(S.session&&S.session.session_id===activeSid); }}
+function _streamPaneOwnershipLost(){{{ownership_lost}}}
+function _closeSource(){{ closed+=1; }}
+function _terminalSessionPath(sid){{ return '/api/session?session_id='+sid; }}
+async function api(){{
+  // The replacement send lands while the settlement fetch is in flight.
+  if(startSendDuringFetch){{ _sendInProgress=true; _sendInProgressSid='sid-A'; S.activeStreamId=null; }}
+  return {{session:null}};
+}}
+async function _restoreSettledSession(source, options=null){{{restore}}}
+(async()=>{{
+  // Control: no replacement send — the fetch result is consumed normally.
+  const control=await _restoreSettledSession({{}},{{status:true}});
+  const controlClosed=closed;
+  // Race: the send starts mid-await, after the entry guard already passed.
+  startSendDuringFetch=true;
+  const raced=await _restoreSettledSession({{}},{{status:true}});
+  console.log(JSON.stringify({{
+    control,
+    controlClosed,
+    raced,
+    closedAfterRace:closed,
+    messagesIntact:S.messages.length===1&&S.messages[0].content==='live turn',
+  }}));
+}})();
+"""
+    result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        # No send in flight: the entry guard and the post-fetch guard both pass,
+        # so the empty payload falls through to 'missing' as before.
+        "control": "missing",
+        "controlClosed": 0,
+        # Send started during the await: the post-fetch re-proof catches it.
+        "raced": "stale",
+        "closedAfterRace": 1,
+        "messagesIntact": True,
+    }
+
+
+def test_terminal_recovery_paths_share_one_pane_ownership_predicate():
+    """HWEB-80: the same cleared-activeStreamId race must not silence these exits either."""
+    restore = _function_body(MESSAGES_JS, "_restoreSettledSession")
+    stream_error = _function_body(MESSAGES_JS, "_handleStreamError")
+
+    for body in (restore, stream_error):
+        assert "_streamPaneOwnershipLost()" in body
+        assert "S.activeStreamId!==streamId" not in body
 
 
 @pytest.mark.skipif(NODE is None, reason="node is required for settlement retry tests")

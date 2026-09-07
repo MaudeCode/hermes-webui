@@ -15,8 +15,9 @@ MESSAGES_JS = (ROOT / "static/messages.js").read_text(encoding="utf-8")
 
 
 def _function_source(source, name):
-    marker = f"async function {name}("
-    start = source.index(marker)
+    start = source.find(f"async function {name}(")
+    if start == -1:
+        start = source.index(f"function {name}(")
     opening = source.index("{", start)
     depth = 0
     for index in range(opening, len(source)):
@@ -163,6 +164,8 @@ def test_missing_artifact_path_stays_blocked(browser):
 def test_restore_settled_session_projects_through_production_path(browser):
     page = _page(browser)
     try:
+        ownership_source = _function_source(MESSAGES_JS, "_streamPaneOwnershipLost")
+        page.add_script_tag(content=ownership_source)
         restore_source = _function_source(MESSAGES_JS, "_restoreSettledSession").replace(
             "catch(_){\n      return returnStatus?'error':false;",
             "catch(error){\n      window.restoreError=String(error);\n      return returnStatus?'error':false;",

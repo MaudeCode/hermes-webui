@@ -210,6 +210,13 @@ def _anchor_projection_snapshot(page) -> dict:
     )
 
 
+def _anchor_scene_persist_trace(page) -> list:
+    try:
+        return page.evaluate("() => (window.__anchorScenePersistTrace || []).slice()")
+    except Exception as exc:  # pragma: no cover - diagnostics only
+        return [{"error": f"{type(exc).__name__}: {exc}"}]
+
+
 def _wait_for_live_anchor_projection(page) -> dict:
     try:
         page.wait_for_function(
@@ -1489,6 +1496,10 @@ def main() -> int:
                         "browser_errors": errors,
                         "anchor_scene_requests": anchor_scene_requests,
                         "anchor_projection": _anchor_projection_snapshot(page),
+                        # HWEB-80: names the guard that decided not to persist, so
+                        # a repeat failure explains itself instead of reporting an
+                        # empty `anchor_scene_requests` with no cause.
+                        "anchor_scene_persist_trace": _anchor_scene_persist_trace(page),
                         "gateway_events": gateway.emitted_events,
                         "dom": _activity_snapshot(page),
                     }, indent=2),

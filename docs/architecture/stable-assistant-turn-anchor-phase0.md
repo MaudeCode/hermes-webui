@@ -296,6 +296,16 @@ state. The original live Compact Worklog handoff did not by itself cover
 Transparent Stream or durable reload; those require explicit settled-scene
 persistence or read-side hydration slices.
 
+The `attachLiveStream()` closure that fed the registry owns settling and
+persisting that scene, and it keeps that ownership until a *different* stream id
+takes the pane. `S.activeStreamId` is a pane-state projection, not the ownership
+record: the sidebar poll's idle reconciliation clears it as soon as the server row
+reports the run finished, which routinely lands before the browser processes the
+same turn's terminal SSE event. Terminal handlers therefore treat a cleared
+`S.activeStreamId` as still-owned; only `S.activeStreamId === <another stream id>`
+is stale. Every decision not to persist records its reason on the bounded
+`window.__anchorScenePersistTrace` ring so a missing scene names its own cause.
+
 Settled mixed `content[]` assistant messages now bridge into the same
 `activity_scene_v1` ownership. When the final assistant message interleaves text
 parts with `tool_use` parts, settlement and read-side hydration promote those
