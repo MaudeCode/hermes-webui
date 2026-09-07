@@ -607,6 +607,81 @@ def test_an_unset_placeholder_stays_literal_and_matches_nothing(monkeypatch, tmp
     assert auth_oidc._resolve_owner_permission(cfg, {"groups": [""]}) is False
 
 
+def test_an_unresolved_login_allowlist_admits_nobody(monkeypatch, tmp_path):
+    """An unresolvable admission policy disables login, it does not admit the
+    identity that can present the literal placeholder."""
+    import api.auth_oidc as auth_oidc
+    import api.profiles as profiles
+
+    _configure(monkeypatch, owner_claim=None, owner_values=None)
+    monkeypatch.delenv("HERMES_WEBUI_OIDC_ALLOW_VALUES", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_OIDC_ALLOW_CLAIM", raising=False)
+    monkeypatch.setattr(auth_oidc, "_load_operator_config", _REAL_LOAD_OPERATOR_CONFIG)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "webui_oidc:\n"
+        "  issuer: https://issuer.example\n"
+        "  client_id: webui-client\n"
+        "  allow_claim: email\n"
+        '  allow_values: ["${OIDC_ALLOWED}"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_CONFIG_PATH", str(config_path))
+    monkeypatch.delenv("OIDC_ALLOWED", raising=False)
+
+    cfg = auth_oidc._resolve_oidc_config()
+
+    assert cfg["allow_values"] == []
+    assert auth_oidc.is_oidc_enabled() is False
+    with pytest.raises(auth_oidc.OIDCConfigError):
+        auth_oidc._require_oidc_config()
+
+
+def test_an_unresolved_claim_path_is_blanked(monkeypatch):
+    import api.auth_oidc as auth_oidc
+
+    _configure(monkeypatch, owner_claim=None, owner_values=None)
+    monkeypatch.setenv("HERMES_WEBUI_OIDC_ALLOW_CLAIM", "${OIDC_CLAIM}")
+    monkeypatch.setenv("HERMES_WEBUI_OIDC_PROFILE_CLAIM", "${OIDC_CLAIM}")
+
+    cfg = auth_oidc._resolve_oidc_config()
+
+    assert cfg["allow_claim"] == ""
+    assert cfg["profile_claim"] == ""
+    assert auth_oidc.is_oidc_enabled() is False
+
+
+def test_a_cached_config_snapshot_is_not_trusted_once_unreadable(monkeypatch, tmp_path):
+    """api.config memoizes on (mtime, size), so a chmod alone keeps the cache warm."""
+    import api.auth as auth
+    import api.auth_oidc as auth_oidc
+    import api.profiles as profiles
+
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses file permissions")
+
+    _configure(monkeypatch, owner_claim=None, owner_values=None)
+    monkeypatch.setattr(auth_oidc, "_load_operator_config", _REAL_LOAD_OPERATOR_CONFIG)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("webui_oidc:\n  profile_claim: sub\n", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_CONFIG_PATH", str(config_path))
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    legacy = auth.create_session()
+
+    try:
+        # Warm the shared parse cache, then revoke read without touching
+        # mtime or size.
+        assert auth_oidc._resolve_oidc_config()["config_read_failed"] is False
+        assert auth.session_can_manage_server(auth.get_session_info(legacy)) is True
+
+        config_path.chmod(0o000)
+        assert auth_oidc._resolve_oidc_config()["config_read_failed"] is True
+        assert auth.session_can_manage_server(auth.get_session_info(legacy)) is False
+    finally:
+        config_path.chmod(0o600)
+        auth.invalidate_session(legacy)
+
+
 def test_profile_dotenv_cannot_supply_an_interpolated_login_allowlist(monkeypatch, tmp_path):
     """The same protection covers the settings that predate the owner policy."""
     import api.auth_oidc as auth_oidc
@@ -631,7 +706,9 @@ def test_profile_dotenv_cannot_supply_an_interpolated_login_allowlist(monkeypatc
     (profile_home / ".env").write_text("OIDC_ALLOWED=attacker@example.com\n", encoding="utf-8")
     profiles._reload_dotenv(profile_home)
     try:
-        assert auth_oidc._resolve_oidc_config()["allow_values"] == ["${OIDC_ALLOWED}"]
+        # The profile value is ignored and the unresolved reference is not a
+        # value either, so the allowlist admits nobody.
+        assert auth_oidc._resolve_oidc_config()["allow_values"] == []
     finally:
         profiles._reload_dotenv(tmp_path)
 

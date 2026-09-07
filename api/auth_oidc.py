@@ -516,6 +516,11 @@ def _load_operator_config() -> dict[str, Any]:
     # its placeholders must resolve against the operator environment, not the
     # one a profile .env has written into. The raw parse stays memoized.
     raw_config = _load_yaml_config_file_raw(path, _copy=False)
+    if raw_config and not os.access(path, os.R_OK):
+        # api.config memoizes on (mtime, size), so a permission change alone
+        # keeps serving the cached parse without reopening the file. A snapshot
+        # we can no longer read is unverified, and unverified is not authority.
+        raise OIDCConfigError(f"Operator config at {path} could not be read")
     loaded = _expand_operator_env(raw_config) if raw_config else {}
     if isinstance(loaded, dict) and loaded:
         return loaded
@@ -666,10 +671,14 @@ def _resolve_oidc_config() -> dict[str, Any]:
         "client_secret": str(pick("client_secret", "HERMES_WEBUI_OIDC_CLIENT_SECRET") or "").strip(),
         "redirect_uri": str(pick("redirect_uri", "HERMES_WEBUI_OIDC_REDIRECT_URI") or "").strip(),
         "scopes": scopes,
-        "allow_claim": str(pick("allow_claim", "HERMES_WEBUI_OIDC_ALLOW_CLAIM") or "").strip(),
+        "allow_claim": _reject_unresolved(
+            str(pick("allow_claim", "HERMES_WEBUI_OIDC_ALLOW_CLAIM") or "").strip()
+        ),
         "allow_values": allow_values,
         "trusted_private_hosts": trusted_private_hosts,
-        "profile_claim": str(pick("profile_claim", "HERMES_WEBUI_OIDC_PROFILE_CLAIM") or "sub").strip(),
+        "profile_claim": _reject_unresolved(
+            str(pick("profile_claim", "HERMES_WEBUI_OIDC_PROFILE_CLAIM") or "sub").strip()
+        ),
         "profile_map": profile_map,
         "profile_map_configured": profile_map_configured,
         "profile_map_error": profile_map_error,
@@ -679,6 +688,11 @@ def _resolve_oidc_config() -> dict[str, Any]:
         "owner_policy_error": owner_policy_error,
         "config_read_failed": config_read_failed,
     }
+
+
+def _reject_unresolved(value: str) -> str:
+    """Blank a claim path that still contains an unexpanded ``${VAR}``."""
+    return "" if _UNRESOLVED_PLACEHOLDER_RE.search(value) else value
 
 
 def _require_oidc_config() -> dict[str, Any]:
@@ -723,9 +737,16 @@ def _normalize_allow_values(raw: Any) -> list[str]:
     if raw is None:
         return []
     if isinstance(raw, (list, tuple, set)):
-        return [value for value in (str(item).strip() for item in raw) if value]
-    text = str(raw).replace("\n", ",")
-    return [part.strip() for part in text.split(",") if part.strip()]
+        values = [value for value in (str(item).strip() for item in raw) if value]
+    else:
+        text = str(raw).replace("\n", ",")
+        values = [part.strip() for part in text.split(",") if part.strip()]
+    # A reference that was never resolved is not a value an identity may hold.
+    # Emptying the list disables OIDC login rather than admitting whoever can
+    # present a claim equal to the literal placeholder.
+    if any(_UNRESOLVED_PLACEHOLDER_RE.search(value) for value in values):
+        return []
+    return values
 
 
 def _normalize_trusted_private_hosts(raw: Any) -> list[str]:
