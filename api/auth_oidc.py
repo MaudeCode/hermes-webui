@@ -103,6 +103,8 @@ class OIDCAuthError(Exception):
 
 def is_oidc_enabled() -> bool:
     cfg = _resolve_oidc_config()
+    if cfg.get("config_read_failed"):
+        return False
     return bool(
         cfg.get("issuer")
         and cfg.get("client_id")
@@ -598,17 +600,20 @@ def _operator_env_value(name: str, placeholder: str) -> str:
     try:
         from api import profiles
 
+        # The startup snapshot owns any name the operator set, whichever
+        # profile is active now: _reload_dotenv both overwrites a shadowed
+        # value and pops it again on the next switch, so the live environment
+        # is not a reliable source for this file.
+        startup = getattr(profiles, "_INITIAL_PROCESS_ENV", None) or {}
+        if env_name in startup:
+            return str(startup[env_name])
         if env_name in (getattr(profiles, "_loaded_profile_env_keys", None) or set()):
-            # A profile .env overwrote the live value. Recover the operator's
-            # own value from the startup snapshot rather than discarding it --
-            # rejecting the profile value must not lock the operator out.
-            startup = getattr(profiles, "_INITIAL_PROCESS_ENV", None) or {}
             logger.warning(
                 "Ignoring profile-supplied %s while expanding the operator config; "
                 "operator authentication policy is not profile-controlled",
                 env_name,
             )
-            return startup.get(env_name, placeholder)
+            return placeholder
     except Exception:
         logger.debug("Failed to inspect profile-supplied env keys", exc_info=True)
         return placeholder
@@ -651,6 +656,15 @@ def _resolve_oidc_config() -> dict[str, Any]:
         _pick_owner_setting(raw, "owner_claim", "HERMES_WEBUI_OIDC_OWNER_CLAIM"),
         _pick_owner_setting(raw, "owner_values", "HERMES_WEBUI_OIDC_OWNER_VALUES"),
     )
+    raw_profile_claim = str(pick("profile_claim", "HERMES_WEBUI_OIDC_PROFILE_CLAIM") or "sub").strip()
+    profile_claim = _reject_unresolved(raw_profile_claim)
+    if not profile_claim:
+        # Falling through to the "sub" default would bind identities through a
+        # claim path the operator did not configure.
+        profile_map_error = profile_map_error or (
+            "webui_oidc.profile_claim could not be resolved; it still contains an "
+            "unexpanded ${...} reference"
+        )
     if owner_policy_error:
         global _warned_owner_policy
         if not _warned_owner_policy:
@@ -676,9 +690,7 @@ def _resolve_oidc_config() -> dict[str, Any]:
         ),
         "allow_values": allow_values,
         "trusted_private_hosts": trusted_private_hosts,
-        "profile_claim": _reject_unresolved(
-            str(pick("profile_claim", "HERMES_WEBUI_OIDC_PROFILE_CLAIM") or "sub").strip()
-        ),
+        "profile_claim": profile_claim,
         "profile_map": profile_map,
         "profile_map_configured": profile_map_configured,
         "profile_map_error": profile_map_error,
@@ -697,6 +709,15 @@ def _reject_unresolved(value: str) -> str:
 
 def _require_oidc_config() -> dict[str, Any]:
     cfg = _resolve_oidc_config()
+    if cfg.get("config_read_failed"):
+        # The profile map lives in that file. Minting an unbound session while
+        # it is unresolved would hand the identity the profile access the map
+        # exists to withhold, so login waits for the config rather than
+        # guessing at the policy.
+        raise OIDCConfigError(
+            "The operator config could not be resolved; OIDC login is unavailable "
+            "until it is readable"
+        )
     if not cfg.get("issuer") or not cfg.get("client_id"):
         raise OIDCConfigError("Native OIDC login is not configured")
     if not cfg.get("allow_claim") or not cfg.get("allow_values"):

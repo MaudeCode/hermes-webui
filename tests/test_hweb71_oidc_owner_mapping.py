@@ -637,6 +637,69 @@ def test_an_unresolved_login_allowlist_admits_nobody(monkeypatch, tmp_path):
         auth_oidc._require_oidc_config()
 
 
+def test_an_unresolved_config_blocks_oidc_login_not_just_ownership(monkeypatch, tmp_path):
+    """The profile map lives in that file; an unbound session is not a safe guess."""
+    import api.auth_oidc as auth_oidc
+    import api.profiles as profiles
+
+    private_key, token = _configure(monkeypatch, owner_claim=None, owner_values=None)
+    monkeypatch.setattr(auth_oidc, "_load_operator_config", _REAL_LOAD_OPERATOR_CONFIG)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("webui_oidc: [not, a, mapping\n", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_CONFIG_PATH", str(config_path))
+
+    assert auth_oidc.is_oidc_enabled() is False
+    with pytest.raises(auth_oidc.OIDCConfigError, match="could not be resolved"):
+        auth_oidc._require_oidc_config()
+    with pytest.raises(auth_oidc.OIDCConfigError):
+        _login(monkeypatch, private_key, token, {"email": "user@example.com"})
+
+
+def test_an_unresolved_profile_claim_does_not_fall_back_to_sub(monkeypatch):
+    """Binding through a claim path the operator did not configure is not a default."""
+    import api.auth_oidc as auth_oidc
+
+    _configure(
+        monkeypatch, owner_claim=None, owner_values=None,
+        profile_map={"synthetic-user": "default"},
+    )
+    monkeypatch.setenv("HERMES_WEBUI_OIDC_PROFILE_CLAIM", "${OIDC_PROFILE_CLAIM}")
+
+    cfg = auth_oidc._resolve_oidc_config()
+    assert cfg["profile_claim"] == ""
+    assert "profile_claim could not be resolved" in (cfg["profile_map_error"] or "")
+    with pytest.raises(auth_oidc.OIDCConfigError, match="profile_claim"):
+        auth_oidc._require_oidc_config()
+
+
+def test_startup_values_survive_leaving_a_shadowing_profile(monkeypatch, tmp_path):
+    """_reload_dotenv pops the shadowed name on the next switch."""
+    import api.auth_oidc as auth_oidc
+    import api.profiles as profiles
+
+    _configure(monkeypatch, owner_claim=None, owner_values=None)
+    _operator_config_with_interpolated_owner(monkeypatch, tmp_path)
+    monkeypatch.setitem(profiles._INITIAL_PROCESS_ENV, "OIDC_OWNER_GROUP", OWNER_GROUP)
+    monkeypatch.setenv("OIDC_OWNER_GROUP", OWNER_GROUP)
+
+    shadowing = tmp_path / "profile-a"
+    shadowing.mkdir()
+    (shadowing / ".env").write_text("OIDC_OWNER_GROUP=attackers\n", encoding="utf-8")
+    plain = tmp_path / "profile-b"
+    plain.mkdir()
+
+    try:
+        profiles._reload_dotenv(shadowing)
+        assert auth_oidc._resolve_oidc_config()["owner_values"] == [OWNER_GROUP]
+
+        # Switching away pops the name from os.environ entirely.
+        profiles._reload_dotenv(plain)
+        assert "OIDC_OWNER_GROUP" not in os.environ
+        assert auth_oidc._resolve_oidc_config()["owner_values"] == [OWNER_GROUP]
+    finally:
+        profiles._reload_dotenv(tmp_path)
+
+
 def test_an_unresolved_claim_path_is_blanked(monkeypatch):
     import api.auth_oidc as auth_oidc
 
