@@ -67,6 +67,8 @@ function installRuntimeHelpers() {
     "_applyTerminalMessageWindowMetadata",
     "_isTerminalStreamErrorMarkerMessage",
     "_ensureSingleTerminalStreamErrorMarker",
+    "_noteAnchorSceneOutcome",
+    "_streamPaneOwnershipLost",
     "_restoreSettledSession",
     "_handleStreamError",
   ];
