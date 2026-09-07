@@ -1199,7 +1199,7 @@ const activeSid='sid-A';
 const streamId='stream-A';
 const _streamOwnerGeneration=1;
 const source={{name:'source-A'}};
-const S={{session:{{session_id:'sid-A'}},activeStreamId:'stream-A'}};
+const S={{session:{{session_id:'sid-A'}},activeStreamId:'stream-A',busy:true}};
 const LIVE_STREAMS={{'sid-A':{{source,ownerGeneration:1}}}};
 let cleanups=[];
 let closed=0;
@@ -1212,7 +1212,7 @@ function _streamPaneOwnershipLost(){{{ownership_lost}}}
 function _ownsActiveStreamOrBackground(){{{owns_active}}}
 function _bailOutOfTerminalEventsFromStaleStream(source){{{bail}}}
 const owned=_bailOutOfTerminalEventsFromStaleStream(source);
-S.activeStreamId=null;  // sidebar idle reconciliation beat the done event
+S.activeStreamId=null; S.busy=false;  // sidebar idle reconciliation beat the done event
 const afterIdleReconcile=_bailOutOfTerminalEventsFromStaleStream(source);
 S.activeStreamId='stream-B';  // a genuinely newer stream owns the pane
 const afterNewerStream=_bailOutOfTerminalEventsFromStaleStream(source);
@@ -1323,11 +1323,15 @@ def test_stream_end_fallback_traces_instead_of_misfiling_the_scene():
     assert marker_idx < attach_idx
 
 
-def test_pane_ownership_is_not_stolen_from_a_replacement_send():
-    """HWEB-80 / Codex P1: send() nulls S.activeStreamId across /api/chat/start.
+def test_pane_ownership_is_not_stolen_from_a_replacement_turn():
+    """HWEB-80 / Codex P1 (rounds 1 and 3): a replacement turn owns the pane.
 
-    A delayed terminal event from the previous stream must not settle its stale
-    transcript over the new optimistic turn during that window.
+    Both send() and startRegeneration() mark the pane busy and then leave
+    S.activeStreamId null across their /api/chat/start round-trip. A delayed
+    terminal event from the previous stream must not settle its stale transcript
+    over the claimant's optimistic messages during that window. startRegeneration
+    never sets _sendInProgress, which is why `S.busy` — not a per-caller flag —
+    is the discriminator.
     """
     ownership_lost = _function_body(MESSAGES_JS, "_streamPaneOwnershipLost")
     script = f"""
@@ -1335,15 +1339,21 @@ const activeSid='sid-A';
 const streamId='stream-A';
 let _sendInProgress=false;
 let _sendInProgressSid=null;
-const S={{session:{{session_id:'sid-A'}},activeStreamId:'stream-A'}};
+const S={{session:{{session_id:'sid-A'}},activeStreamId:'stream-A',busy:true}};
 function _isActiveSession(){{ return !!(S.session&&S.session.session_id===activeSid); }}
 function _streamPaneOwnershipLost(){{{ownership_lost}}}
 const owned=_streamPaneOwnershipLost();
-S.activeStreamId=null;                 // sidebar idle reconciliation
+// The sidebar reconciler clears busy AND the stream id together.
+S.activeStreamId=null; S.busy=false;
 const afterIdleReconcile=_streamPaneOwnershipLost();
-_sendInProgress=true; _sendInProgressSid='sid-A';   // replacement send in flight
+// send(): setBusy(true) runs BEFORE the id is nulled for the start round-trip.
+S.busy=true; _sendInProgress=true; _sendInProgressSid='sid-A';
 const duringReplacementSend=_streamPaneOwnershipLost();
-_sendInProgressSid='sid-B';            // a send into a DIFFERENT session
+// startRegeneration(): same shape, but it never touches _sendInProgress.
+_sendInProgress=false; _sendInProgressSid=null;
+const duringRegeneration=_streamPaneOwnershipLost();
+// A send into a DIFFERENT session must not steal this pane.
+S.busy=false; _sendInProgress=true; _sendInProgressSid='sid-B';
 const duringOtherSessionSend=_streamPaneOwnershipLost();
 _sendInProgress=false; _sendInProgressSid=null;
 S.activeStreamId='stream-B';
@@ -1354,6 +1364,7 @@ console.log(JSON.stringify({{
   owned,
   afterIdleReconcile,
   duringReplacementSend,
+  duringRegeneration,
   duringOtherSessionSend,
   afterNewerStream,
   afterSessionSwitch,
@@ -1366,6 +1377,7 @@ console.log(JSON.stringify({{
         "owned": False,
         "afterIdleReconcile": False,
         "duringReplacementSend": True,
+        "duringRegeneration": True,
         "duringOtherSessionSend": False,
         "afterNewerStream": True,
         "afterSessionSwitch": False,

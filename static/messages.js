@@ -2672,12 +2672,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!_isActiveSession()) return false;
     // A set id is authoritative: whoever claimed the pane owns it.
     if(S.activeStreamId) return S.activeStreamId!==streamId;
-    // A null id normally means nobody took over — EXCEPT during a replacement
-    // send, which deliberately nulls it for the whole /api/chat/start
-    // round-trip (see send(): "will be set after stream starts"). A delayed
-    // terminal event from the previous stream must not settle its stale
-    // transcript over the new optimistic turn or clear its busy state. Same
-    // fence sessions.js:_reconcileActiveSessionIdleStateFromList already uses.
+    // A null id normally means nobody took over — EXCEPT while a replacement
+    // turn is claiming the pane across its /api/chat/start round-trip, which
+    // deliberately leaves the id null (send(): "will be set after stream
+    // starts"; startRegeneration() likewise sets it only from the response).
+    // A delayed terminal event from the previous stream must not settle its
+    // stale transcript over the claimant's optimistic messages or clear its
+    // busy state.
+    //
+    // `S.busy` is the discriminator rather than a per-caller flag: every
+    // claimant marks the pane busy BEFORE nulling/awaiting the stream id, while
+    // sessions.js:_reconcileActiveSessionIdleStateFromList — the race this
+    // predicate exists to survive — clears `S.busy` and `S.activeStreamId`
+    // together. So "null id + busy" means a new turn owns the pane and "null id
+    // + idle" means the sidebar simply observed the run finish. This covers
+    // send(), startRegeneration(), and any future claimant without enumerating
+    // them. `_sendInProgress` stays as a fail-closed backstop for the window
+    // where a send is in flight but something else cleared busy.
+    if(S.busy) return true;
     return !!(typeof _sendInProgress!=='undefined'&&_sendInProgress&&_sendInProgressSid===activeSid);
   }
   function _ownsActiveStreamOrBackground(){
