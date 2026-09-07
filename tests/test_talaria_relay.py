@@ -420,6 +420,7 @@ def test_profile_bound_session_can_enroll_without_operator_access(monkeypatch):
     from api import auth, routes
     from api import talaria_relay
 
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
     monkeypatch.setattr(auth, "ensure_trusted_auth_session", lambda _handler: {"bound_profile": "work"})
     handler = type("Handler", (), {"headers": {}})()
     responses = []

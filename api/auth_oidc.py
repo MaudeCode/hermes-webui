@@ -32,6 +32,11 @@ _CLOCK_SKEW_SECONDS = 60
 _CACHE_TTL_SECONDS = 300
 _NATIVE_FLOW_TTL_SECONDS = 600
 _NATIVE_EXCHANGE_TTL_SECONDS = 60
+# Owner privilege granted by an OIDC claim is deliberately short-lived: the
+# only evidence we hold is the claim set validated at login, and the session
+# TTL (30 days by default) is far too broad to stand in for "still in the
+# admin group". Re-login is what refreshes it.
+_OWNER_EVIDENCE_TTL_SECONDS = 3600
 _NATIVE_CALLBACK_HOST = "oidc-callback"
 _NATIVE_CALLBACK_SCHEMES = {"talaria", "talaria-branch"}
 _NATIVE_VALUE_RE = re.compile(r"^[A-Za-z0-9._~-]{16,256}$")
@@ -60,6 +65,26 @@ _ALLOW_VALUES_WHITESPACE_WARNING = (
     "If this is one intentional multi-word group, it is already correct and no action is needed."
 )
 
+_OWNER_POLICY_ERROR = (
+    "webui_oidc.owner_claim (HERMES_WEBUI_OIDC_OWNER_CLAIM) and webui_oidc.owner_values "
+    "(HERMES_WEBUI_OIDC_OWNER_VALUES) must both be set to a non-empty claim path and a "
+    "non-empty list of exact string values. The selective owner policy is active but "
+    "matches nothing, so no OIDC identity can perform owner operations."
+)
+
+_warned_owner_policy = False
+
+# Distinguishes "the operator did not write this key" from "the operator wrote
+# it with no value". YAML resolves the latter to None, which .get() cannot tell
+# apart from absence -- and the two must not mean the same thing for a setting
+# that gates privilege.
+_UNSET = object()
+
+# A ``${VAR}`` that survived expansion was never resolved. In a policy that
+# grants privilege it is a configuration error, not a group name an identity
+# may be issued.
+_UNRESOLVED_PLACEHOLDER_RE = re.compile(r"\${[^}]+}")
+
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
@@ -77,7 +102,21 @@ class OIDCAuthError(Exception):
 
 
 def is_oidc_enabled() -> bool:
+    """True when OIDC login is configured for this deployment.
+
+    An unresolved config reports True rather than False. api.auth's global auth
+    gate is the OR of the configured methods, so answering "not configured" for
+    a config we simply could not read would drop a deployment whose settings
+    live in that file into no-auth mode and serve every non-public request
+    without a session. Unknown must mean "still gated": login is refused by
+    _require_oidc_config, so SSO is unavailable while authentication stays
+    required. An operator config that cannot be read leaves the rest of Hermes
+    without its settings anyway, so this trades a broken install for a locked
+    one rather than an open one.
+    """
     cfg = _resolve_oidc_config()
+    if cfg.get("config_read_failed"):
+        return True
     return bool(
         cfg.get("issuer")
         and cfg.get("client_id")
@@ -170,7 +209,9 @@ def complete_authorization_code_flow(
             allow_values=cfg.get("allow_values") or [],
         )
         bound_profile = _resolve_bound_profile(cfg, claims)
-        oidc_binding = _oidc_profile_binding(cfg, bound_profile)
+        oidc_binding = _oidc_profile_binding(
+            cfg, bound_profile, owner=_resolve_owner_permission(cfg, claims)
+        )
         return {
             "next_path": pending["next_path"],
             "native_flow_id": pending.get("native_flow_id"),
@@ -327,6 +368,10 @@ def exchange_native_authorization(
     challenge = _b64u(hashlib.sha256(verifier.encode("ascii")).digest())
     if not _constant_time_equal(challenge, exchange["code_challenge"]):
         raise OIDCAuthError("Native OIDC PKCE verifier did not match", status_code=401)
+    # A policy edit between the browser login and this exchange must not mint a
+    # session -- least of all an elevated one -- from pre-change evidence.
+    if not _oidc_binding_is_current(exchange.get("oidc_binding"), exchange.get("bound_profile")):
+        raise OIDCAuthError("OIDC policy changed; sign in again", status_code=401)
     result = {
         "subject": exchange["subject"],
         "email": exchange["email"],
@@ -474,24 +519,136 @@ def _trim_state_map(values: dict[str, dict[str, Any]], maximum: int) -> None:
 
 def _load_operator_config() -> dict[str, Any]:
     try:
-        from api.config import _load_yaml_config_file
+        from api.config import _load_yaml_config_file_raw
         from api.profiles import _INITIAL_HERMES_CONFIG_PATH, get_hermes_home_for_profile
     except ImportError:
         return get_config()
 
     configured_path = str(_INITIAL_HERMES_CONFIG_PATH or "").strip()
     path = Path(configured_path).expanduser() if configured_path else get_hermes_home_for_profile("default") / "config.yaml"
-    return _load_yaml_config_file(path)
+    # Expand this file ourselves rather than through _load_yaml_config_file:
+    # its placeholders must resolve against the operator environment, not the
+    # one a profile .env has written into. The raw parse stays memoized.
+    raw_config = _load_yaml_config_file_raw(path, _copy=False)
+    if raw_config and not os.access(path, os.R_OK):
+        # api.config memoizes on (mtime, size), so a permission change alone
+        # keeps serving the cached parse without reopening the file. A snapshot
+        # we can no longer read is unverified, and unverified is not authority.
+        raise OIDCConfigError(f"Operator config at {path} could not be read")
+    loaded = _expand_operator_env(raw_config) if raw_config else {}
+    if isinstance(loaded, dict) and loaded:
+        return loaded
+    # api.config's loader flattens missing, empty, unreadable, and malformed
+    # files into {}. A caller that gates privilege on this config must not read
+    # "unknown" as "nothing configured", so resolve it once more, and return
+    # what that read saw rather than the empty result it supersedes.
+    return _reresolve_operator_config(path)
+
+
+def _reresolve_operator_config(path: Path) -> dict[str, Any]:
+    """Resolve the operator config from one read, raising on a real failure.
+
+    This is the authoritative outcome for the empty case: the dict returned and
+    the success/failure decision come from the same read, so a file repaired or
+    broken between two reads cannot leave the caller with data from one and a
+    verdict from the other. An empty document, an explicit ``{}``, and a
+    comments-only file are all legitimately "nothing configured".
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise OIDCConfigError(f"Operator config at {path} could not be read") from exc
+    try:
+        import yaml as _yaml
+    except ImportError:
+        return {}
+    try:
+        parsed = _yaml.safe_load(text)
+    except Exception as exc:
+        raise OIDCConfigError(f"Operator config at {path} could not be parsed") from exc
+    if parsed is None:
+        return {}
+    if not isinstance(parsed, dict):
+        raise OIDCConfigError(f"Operator config at {path} is not a mapping")
+    expanded = _expand_operator_env(parsed)
+    return expanded if isinstance(expanded, dict) else {}
+
+
+def _expand_operator_env(obj: Any) -> Any:
+    """Expand ``${VAR}`` in the operator config against the operator environment.
+
+    api.config's expansion resolves placeholders thread-local-first and then
+    from the live process environment, which ``_reload_dotenv`` writes a
+    profile's own ``.env`` into. That is correct for a profile's config and
+    wrong for this one: the operator config decides authentication policy, so a
+    contained profile must not get to supply the value behind
+    ``owner_values: ["${GROUP}"]``. Protecting the two setting names is not
+    enough, because the indirection can name any variable.
+    """
+    if isinstance(obj, str):
+        return re.sub(
+            r"\${([^}]+)}",
+            lambda m: _operator_env_value(m.group(1), m.group(0)),
+            obj,
+        )
+    if isinstance(obj, dict):
+        return {key: _expand_operator_env(value) for key, value in obj.items()}
+    if isinstance(obj, list):
+        return [_expand_operator_env(item) for item in obj]
+    return obj
+
+
+def _operator_env_value(name: str, placeholder: str) -> str:
+    """Resolve one placeholder, ignoring anything a profile .env supplied.
+
+    An unresolvable reference stays literal, so it matches no claim value and
+    no profile rather than silently becoming an empty string.
+    """
+    env_name = str(name or "").strip()
+    if not env_name:
+        return placeholder
+    try:
+        from api import profiles
+
+        # The startup snapshot owns any name the operator set, whichever
+        # profile is active now: _reload_dotenv both overwrites a shadowed
+        # value and pops it again on the next switch, so the live environment
+        # is not a reliable source for this file.
+        startup = getattr(profiles, "_INITIAL_PROCESS_ENV", None) or {}
+        if env_name in startup:
+            return str(startup[env_name])
+        if env_name in (getattr(profiles, "_loaded_profile_env_keys", None) or set()):
+            logger.warning(
+                "Ignoring profile-supplied %s while expanding the operator config; "
+                "operator authentication policy is not profile-controlled",
+                env_name,
+            )
+            return placeholder
+    except Exception:
+        logger.debug("Failed to inspect profile-supplied env keys", exc_info=True)
+        return placeholder
+    return os.environ.get(env_name, placeholder)
 
 
 def _resolve_oidc_config() -> dict[str, Any]:
     raw = {}
+    config_read_failed = False
     try:
         cfg = _load_operator_config()
         value = cfg.get("webui_oidc") if isinstance(cfg, dict) else None
         if isinstance(value, dict):
             raw.update(value)
+        elif value is not None:
+            # The section parsed but is not a mapping (``webui_oidc: []``, or a
+            # scalar). Silently discarding it would present a policy the
+            # operator did write as one they never wrote.
+            raise OIDCConfigError("webui_oidc must be a mapping")
     except Exception:
+        # An unreadable config is "unknown", not "unset". Callers that gate
+        # privilege on the resolved policy must be able to tell them apart.
+        config_read_failed = True
         logger.debug("Failed to read webui_oidc config", exc_info=True)
 
     def pick(name: str, env_name: str) -> Any:
@@ -507,6 +664,24 @@ def _resolve_oidc_config() -> dict[str, Any]:
     profile_map, profile_map_error, profile_map_configured = _normalize_profile_map(
         pick("profile_map", "HERMES_WEBUI_OIDC_PROFILE_MAP")
     )
+    owner_claim, owner_values, owner_policy_error, owner_policy_configured = _normalize_owner_policy(
+        _pick_owner_setting(raw, "owner_claim", "HERMES_WEBUI_OIDC_OWNER_CLAIM"),
+        _pick_owner_setting(raw, "owner_values", "HERMES_WEBUI_OIDC_OWNER_VALUES"),
+    )
+    raw_profile_claim = str(pick("profile_claim", "HERMES_WEBUI_OIDC_PROFILE_CLAIM") or "sub").strip()
+    profile_claim = _reject_unresolved(raw_profile_claim)
+    if not profile_claim:
+        # Falling through to the "sub" default would bind identities through a
+        # claim path the operator did not configure.
+        profile_map_error = profile_map_error or (
+            "webui_oidc.profile_claim could not be resolved; it still contains an "
+            "unexpanded ${...} reference"
+        )
+    if owner_policy_error:
+        global _warned_owner_policy
+        if not _warned_owner_policy:
+            _warned_owner_policy = True
+            logger.warning(owner_policy_error)
     if (
         raw_allow is not None
         and not isinstance(raw_allow, (list, tuple, set))
@@ -522,18 +697,39 @@ def _resolve_oidc_config() -> dict[str, Any]:
         "client_secret": str(pick("client_secret", "HERMES_WEBUI_OIDC_CLIENT_SECRET") or "").strip(),
         "redirect_uri": str(pick("redirect_uri", "HERMES_WEBUI_OIDC_REDIRECT_URI") or "").strip(),
         "scopes": scopes,
-        "allow_claim": str(pick("allow_claim", "HERMES_WEBUI_OIDC_ALLOW_CLAIM") or "").strip(),
+        "allow_claim": _reject_unresolved(
+            str(pick("allow_claim", "HERMES_WEBUI_OIDC_ALLOW_CLAIM") or "").strip()
+        ),
         "allow_values": allow_values,
         "trusted_private_hosts": trusted_private_hosts,
-        "profile_claim": str(pick("profile_claim", "HERMES_WEBUI_OIDC_PROFILE_CLAIM") or "sub").strip(),
+        "profile_claim": profile_claim,
         "profile_map": profile_map,
         "profile_map_configured": profile_map_configured,
         "profile_map_error": profile_map_error,
+        "owner_claim": owner_claim,
+        "owner_values": owner_values,
+        "owner_policy_configured": owner_policy_configured,
+        "owner_policy_error": owner_policy_error,
+        "config_read_failed": config_read_failed,
     }
+
+
+def _reject_unresolved(value: str) -> str:
+    """Blank a claim path that still contains an unexpanded ``${VAR}``."""
+    return "" if _UNRESOLVED_PLACEHOLDER_RE.search(value) else value
 
 
 def _require_oidc_config() -> dict[str, Any]:
     cfg = _resolve_oidc_config()
+    if cfg.get("config_read_failed"):
+        # The profile map lives in that file. Minting an unbound session while
+        # it is unresolved would hand the identity the profile access the map
+        # exists to withhold, so login waits for the config rather than
+        # guessing at the policy.
+        raise OIDCConfigError(
+            "The operator config could not be resolved; OIDC login is unavailable "
+            "until it is readable"
+        )
     if not cfg.get("issuer") or not cfg.get("client_id"):
         raise OIDCConfigError("Native OIDC login is not configured")
     if not cfg.get("allow_claim") or not cfg.get("allow_values"):
@@ -574,9 +770,16 @@ def _normalize_allow_values(raw: Any) -> list[str]:
     if raw is None:
         return []
     if isinstance(raw, (list, tuple, set)):
-        return [value for value in (str(item).strip() for item in raw) if value]
-    text = str(raw).replace("\n", ",")
-    return [part.strip() for part in text.split(",") if part.strip()]
+        values = [value for value in (str(item).strip() for item in raw) if value]
+    else:
+        text = str(raw).replace("\n", ",")
+        values = [part.strip() for part in text.split(",") if part.strip()]
+    # A reference that was never resolved is not a value an identity may hold.
+    # Emptying the list disables OIDC login rather than admitting whoever can
+    # present a claim equal to the literal placeholder.
+    if any(_UNRESOLVED_PLACEHOLDER_RE.search(value) for value in values):
+        return []
+    return values
 
 
 def _normalize_trusted_private_hosts(raw: Any) -> list[str]:
@@ -632,6 +835,88 @@ def _normalize_profile_map(raw: Any) -> tuple[dict[str, str] | None, str | None,
     return mapping, None, True
 
 
+def _normalize_owner_policy(
+    raw_claim: Any, raw_values: Any
+) -> tuple[str, list[str], str | None, bool]:
+    """Resolve the opt-in owner allowlist into (claim, values, error, configured).
+
+    Absent (unset or blank) on both settings means the policy is off and legacy
+    OIDC owner behaviour applies. Once either setting is present the policy is
+    configured, and anything short of a usable claim path plus a non-empty list
+    of exact strings resolves to an empty allowlist that matches nothing --
+    never to the legacy fallback. Values are not coerced: a number, boolean, or
+    object in the list is a configuration error, not a group name.
+    """
+    configured = _owner_setting_present(raw_claim) or _owner_setting_present(raw_values)
+    if not configured:
+        return "", [], None, False
+    claim = raw_claim.strip() if isinstance(raw_claim, str) else ""
+    values = _normalize_owner_values(raw_values)
+    if not claim or not values or _UNRESOLVED_PLACEHOLDER_RE.search(claim):
+        return claim, [], _OWNER_POLICY_ERROR, True
+    return claim, values, None, True
+
+
+def _pick_owner_setting(raw: dict[str, Any], name: str, env_name: str) -> Any:
+    """Resolve one owner setting, preserving whether it was supplied at all."""
+    env_value = os.getenv(env_name)
+    if env_value is not None:
+        return env_value
+    return raw[name] if name in raw else _UNSET
+
+
+def _owner_setting_present(raw: Any) -> bool:
+    """True when the operator supplied the key, even with an unusable value.
+
+    Only a key the operator never wrote is absent. An explicitly blank value --
+    a templated ``HERMES_WEBUI_OIDC_OWNER_CLAIM=""``, or a bare ``owner_claim:``
+    in YAML -- is security configuration they meant to supply, so it activates
+    the match-nobody path instead of restoring legacy owner access.
+    """
+    return raw is not _UNSET
+
+
+def _normalize_owner_values(raw: Any) -> list[str]:
+    """Strictly normalize the owner allowlist; anything non-string yields []."""
+    if isinstance(raw, str):
+        values = [part.strip() for part in raw.replace("\n", ",").split(",")]
+    elif isinstance(raw, (list, tuple)):
+        # An explicitly authored list must contain only non-empty strings; a
+        # blank entry is a malformed policy, not a value to quietly drop.
+        if not all(isinstance(item, str) and item.strip() for item in raw):
+            return []
+        values = [item.strip() for item in raw]
+    else:
+        return []
+    values = [value for value in values if value]
+    if any(_UNRESOLVED_PLACEHOLDER_RE.search(value) for value in values):
+        return []
+    return values
+
+
+def _resolve_owner_permission(cfg: dict[str, Any], claims: dict[str, Any]) -> bool:
+    """True when the validated claims match the configured owner allowlist.
+
+    Exact, case-sensitive comparison against a string claim or an array of
+    strings. Any other claim shape -- object, number, boolean, mixed array --
+    grants nothing.
+    """
+    if not cfg.get("owner_policy_configured"):
+        return False
+    allowed = cfg.get("owner_values") or []
+    claim_path = str(cfg.get("owner_claim") or "")
+    if not allowed or not claim_path:
+        return False
+    value = _get_claim_path(claims, claim_path)
+    if isinstance(value, str):
+        present = [value]
+    elif isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value):
+        present = list(value)
+    else:
+        return False
+    return any(item in allowed for item in present)
+
+
 def _resolve_bound_profile(cfg: dict[str, Any], claims: dict[str, Any]) -> str | None:
     if not cfg.get("profile_map_configured"):
         return None
@@ -651,13 +936,20 @@ def _resolve_bound_profile(cfg: dict[str, Any], claims: dict[str, Any]) -> str |
     return profile
 
 
-def _oidc_profile_binding(cfg: dict[str, Any], profile: str | None) -> dict[str, str] | None:
-    if not profile:
-        return None
-    from api.profiles import get_hermes_home_for_profile
+def _oidc_profile_binding(
+    cfg: dict[str, Any],
+    profile: str | None,
+    *,
+    owner: bool = False,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Server-side evidence for one OIDC session.
 
-    home = get_hermes_home_for_profile(profile)
-    stat = home.stat()
+    The fingerprint covers every policy input that decides admission, profile
+    binding, and owner permission, so changing any of them invalidates existing
+    sessions at their next authorization check. ``profile_identity`` is empty
+    for an unbound session; owner evidence carries a deadline fixed at login.
+    """
     mapping_payload = {
         "issuer": str(cfg.get("issuer") or ""),
         "client_id": str(cfg.get("client_id") or ""),
@@ -665,34 +957,123 @@ def _oidc_profile_binding(cfg: dict[str, Any], profile: str | None) -> dict[str,
         "allow_values": sorted(str(value) for value in (cfg.get("allow_values") or [])),
         "profile_claim": str(cfg.get("profile_claim") or "sub"),
         "profile_map": cfg.get("profile_map") or {},
+        # An explicitly empty map admits nobody, which is a different policy
+        # from having no map at all even though both normalize to {}.
+        "profile_map_configured": bool(cfg.get("profile_map_configured")),
+        "owner_claim": str(cfg.get("owner_claim") or ""),
+        "owner_values": sorted(str(value) for value in (cfg.get("owner_values") or [])),
+        "owner_policy_configured": bool(cfg.get("owner_policy_configured")),
     }
     mapping_fingerprint = hashlib.sha256(
         json.dumps(mapping_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
-    return {
+    profile_identity = ""
+    if profile:
+        from api.profiles import get_hermes_home_for_profile
+
+        stat = get_hermes_home_for_profile(profile).stat()
+        profile_identity = f"{stat.st_dev}:{stat.st_ino}"
+    binding: dict[str, Any] = {
         "mapping_fingerprint": mapping_fingerprint,
-        "profile_identity": f"{stat.st_dev}:{stat.st_ino}",
+        "profile_identity": profile_identity,
     }
+    if owner:
+        binding["owner"] = True
+        binding["owner_expiry"] = (time.time() if now is None else now) + _OWNER_EVIDENCE_TTL_SECONDS
+    return binding
 
 
-def oidc_session_binding_is_current(session_info: dict[str, Any]) -> bool:
+def _oidc_binding_is_current(
+    binding: dict[str, Any] | None,
+    profile: str | None,
+    cfg: dict[str, Any] | None = None,
+) -> bool:
+    """True when evidence still matches the policy and the named profile.
+
+    Callers that already resolved the policy pass their snapshot in, so one
+    read both selects the decision and validates it; re-reading here would let
+    a policy removed and restored between the two reads pass a check the first
+    read had already routed down the legacy path.
+    """
+    if not binding:
+        return True
     try:
-        cfg = _require_oidc_config()
-        profile = str(session_info.get("bound_profile") or "").strip()
-        expected = _oidc_profile_binding(cfg, profile)
+        if cfg is None:
+            cfg = _require_oidc_config()
+        expected = _oidc_profile_binding(cfg, str(profile or "").strip() or None)
     except (OSError, OIDCAuthError, OIDCConfigError):
         return False
-    return bool(
-        expected
-        and secrets.compare_digest(
-            str(session_info.get("oidc_mapping_fingerprint") or ""),
-            expected["mapping_fingerprint"],
-        )
-        and secrets.compare_digest(
-            str(session_info.get("oidc_profile_identity") or ""),
-            expected["profile_identity"],
-        )
+    return secrets.compare_digest(
+        str(binding.get("mapping_fingerprint") or ""), expected["mapping_fingerprint"]
+    ) and secrets.compare_digest(
+        str(binding.get("profile_identity") or ""), expected["profile_identity"]
     )
+
+
+def oidc_session_binding_is_current(
+    session_info: dict[str, Any], cfg: dict[str, Any] | None = None
+) -> bool:
+    """Reconcile a persisted OIDC session against the live policy.
+
+    Every session that recorded a fingerprint reconciles it, regardless of
+    privilege: dropping an identity from the login allowlist or changing the
+    issuer must end ordinary access too, not only owner access. Only a legacy
+    record with no fingerprint, no profile, and no owner evidence has nothing
+    to check. Expired owner evidence invalidates the elevated session rather
+    than silently demoting it.
+    """
+    profile = str(session_info.get("bound_profile") or "").strip()
+    owner_evidence = bool(session_info.get("oidc_owner"))
+    fingerprint = str(session_info.get("oidc_mapping_fingerprint") or "")
+    if not fingerprint and not profile and not owner_evidence:
+        return True
+    binding = {
+        "mapping_fingerprint": fingerprint,
+        "profile_identity": session_info.get("oidc_profile_identity"),
+    }
+    if not _oidc_binding_is_current(binding, profile, cfg):
+        return False
+    if owner_evidence and _owner_evidence_expiry(session_info) <= time.time():
+        return False
+    return True
+
+
+def _owner_evidence_expiry(session_info: dict[str, Any]) -> float:
+    try:
+        return float(session_info.get("oidc_owner_expiry") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def oidc_session_can_manage_server(session_info: dict[str, Any]) -> bool:
+    """True when an OIDC session may perform owner-only operations.
+
+    With no owner policy configured this preserves the legacy contract: an
+    unbound OIDC session is the owner. Once a policy exists, only explicit
+    server-created owner evidence counts -- an unbound session inherits nothing.
+    A policy we could not resolve is neither: it denies.
+    """
+    try:
+        cfg = _require_oidc_config()
+    except (OIDCAuthError, OIDCConfigError):
+        return False
+    if cfg.get("config_read_failed"):
+        # The owner policy may live in the config we could not read, so its
+        # absence here is unknown, not disabled. Unknown is not authority --
+        # base settings arriving from the environment do not change that.
+        return False
+    if not cfg.get("owner_policy_configured"):
+        if str(session_info.get("bound_profile") or "").strip():
+            return False
+        # The session may have been minted while a policy was configured; its
+        # fingerprint covers that policy, so a session from the policy era
+        # cannot be re-read as a legacy owner after the settings disappear.
+        return oidc_session_binding_is_current(session_info, cfg)
+    if not session_info.get("oidc_owner"):
+        return False
+    if _owner_evidence_expiry(session_info) <= time.time():
+        return False
+    return oidc_session_binding_is_current(session_info, cfg)
 
 
 def _normalize_text_list(raw: Any) -> list[str]:

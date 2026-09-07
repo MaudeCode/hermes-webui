@@ -286,7 +286,7 @@ def test_first_password_setup_allows_genuine_loopback_client(monkeypatch):
     monkeypatch.setattr("api.auth.is_auth_enabled", lambda: auth_state["enabled"])
     monkeypatch.setattr("api.auth.parse_cookie", lambda handler: "")
     monkeypatch.setattr("api.auth.verify_session", lambda cookie: False)
-    monkeypatch.setattr("api.auth.create_session", lambda: "new-session")
+    monkeypatch.setattr("api.auth.create_session", lambda **_kwargs: "new-session")
     monkeypatch.delenv("HERMES_WEBUI_PASSWORD", raising=False)
     monkeypatch.delenv("HERMES_WEBUI_ONBOARDING_OPEN", raising=False)
     monkeypatch.delenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", raising=False)
@@ -349,7 +349,7 @@ def test_first_password_setup_allows_public_client_with_open_onboarding(monkeypa
     monkeypatch.setattr("api.auth.is_auth_enabled", lambda: auth_state["enabled"])
     monkeypatch.setattr("api.auth.parse_cookie", lambda handler: "")
     monkeypatch.setattr("api.auth.verify_session", lambda cookie: False)
-    monkeypatch.setattr("api.auth.create_session", lambda: "new-session")
+    monkeypatch.setattr("api.auth.create_session", lambda **_kwargs: "new-session")
     monkeypatch.delenv("HERMES_WEBUI_PASSWORD", raising=False)
     monkeypatch.setenv("HERMES_WEBUI_ONBOARDING_OPEN", "1")
 

@@ -169,13 +169,28 @@ def test_get_settings_password_env_var_false_when_env_blank(monkeypatch):
 # ── Backend: POST /api/settings returns 409 when env var shadows ─────────────
 
 def _post_settings(body_dict, cookie=""):
-    """Helper: POST a JSON body to /api/settings via handle_post."""
+    """Helper: POST a JSON body to /api/settings via handle_post.
+
+    These cases call handle_post directly, past check_auth. Changing owner
+    credentials requires an owner session, so model one unless the case
+    supplies its own cookie.
+    """
+    from api.auth import COOKIE_NAME, create_session, invalidate_session
     from api.routes import handle_post
-    raw = json.dumps(body_dict).encode("utf-8")
-    handler = _FakeHandler(body_bytes=raw, cookie=cookie)
-    parsed = urlparse("http://example.com/api/settings")
-    handle_post(handler, parsed)
-    return handler
+
+    owner_cookie = "" if cookie else create_session()
+    try:
+        raw = json.dumps(body_dict).encode("utf-8")
+        handler = _FakeHandler(
+            body_bytes=raw,
+            cookie=cookie or f"{COOKIE_NAME}={owner_cookie}",
+        )
+        parsed = urlparse("http://example.com/api/settings")
+        handle_post(handler, parsed)
+        return handler
+    finally:
+        if owner_cookie:
+            invalidate_session(owner_cookie)
 
 
 def test_post_set_password_returns_409_when_env_var_set(monkeypatch):

@@ -127,7 +127,12 @@ def test_oidc_callback_exchanges_code_and_sets_existing_session_cookie(monkeypat
         "api.auth_oidc.complete_authorization_code_flow",
         fake_complete_authorization_code_flow,
     )
-    monkeypatch.setattr(auth, "create_session", lambda: "session-token.signature")
+    created = {}
+    monkeypatch.setattr(
+        auth,
+        "create_session",
+        lambda **kwargs: created.update(kwargs) or "session-token.signature",
+    )
 
     handler = RouteFakeHandler()
     routes.handle_get(
@@ -145,6 +150,8 @@ def test_oidc_callback_exchanges_code_and_sets_existing_session_cookie(monkeypat
         "code": "code-token",
     }
     assert handler.header_values("Location") == ["/chat/123"]
+    # Unbound OIDC sessions are typed so owner permission can be policy-driven.
+    assert created == {"auth_type": "oidc", "username": "", "oidc_binding": None}
     cookie_headers = handler.header_values("Set-Cookie")
     assert len(cookie_headers) == 1
     assert auth.COOKIE_NAME in cookie_headers[0]

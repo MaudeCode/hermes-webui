@@ -72,12 +72,25 @@ class _FakeHandler:
 
 
 def _post_settings(body_dict, cookie=""):
+    from api.auth import COOKIE_NAME, create_session, invalidate_session
     from api.routes import handle_post
-    raw = json.dumps(body_dict).encode("utf-8")
-    handler = _FakeHandler(body_bytes=raw, cookie=cookie)
-    parsed = urlparse("http://example.com/api/settings")
-    handle_post(handler, parsed)
-    return handler
+
+    # These cases call handle_post directly, past check_auth. Changing owner
+    # credentials requires an owner session, so model one unless the case
+    # supplies its own cookie (the bound-session and bootstrap cases do).
+    owner_cookie = "" if cookie else create_session()
+    try:
+        raw = json.dumps(body_dict).encode("utf-8")
+        handler = _FakeHandler(
+            body_bytes=raw,
+            cookie=cookie or f"{COOKIE_NAME}={owner_cookie}",
+        )
+        parsed = urlparse("http://example.com/api/settings")
+        handle_post(handler, parsed)
+        return handler
+    finally:
+        if owner_cookie:
+            invalidate_session(owner_cookie)
 
 
 def _get_settings():
@@ -192,7 +205,7 @@ class TestFirstTimePasswordNoCurrentRequired:
                 f"{auth.COOKIE_NAME}={cookie}",
             )
             assert handler.status == 403
-            assert "profile-bound" in handler.json_body()["error"].lower()
+            assert "owner session is required" in handler.json_body()["error"].lower()
         finally:
             auth.invalidate_session(cookie)
             _clear_password_raw()

@@ -525,14 +525,23 @@ def is_oidc_auth_enabled() -> bool:
 def get_oidc_startup_warning() -> str | None:
     """Return a startup warning when OIDC auth is only partially configured,
     or when allow_values uses whitespace that is no longer a separator."""
+    operator_config_error = None
     try:
         from api.auth_oidc import _load_operator_config
 
         cfg = _load_operator_config()
         raw = cfg.get("webui_oidc") if isinstance(cfg, dict) else {}
-        if not isinstance(raw, dict):
+        if raw is None:
             raw = {}
-    except Exception:
+        if not isinstance(raw, dict):
+            # Same shape check the runtime resolver makes, so a section that
+            # denies every owner operation is also diagnosed at startup.
+            raise ValueError("webui_oidc must be a mapping")
+    except Exception as exc:
+        # Authorization denies every OIDC owner operation while the config is
+        # unresolved, so say so at startup instead of leaving the operator with
+        # an unexplained management lockout.
+        operator_config_error = str(exc).strip() or "The operator config could not be read"
         logger.debug("Failed to read webui_oidc config", exc_info=True)
         raw = {}
 
@@ -568,10 +577,30 @@ def get_oidc_startup_warning() -> str | None:
     except Exception:
         logger.debug("Failed to normalize OIDC profile_map", exc_info=True)
 
-    if not any((issuer, client_id, allow_claim, allow_values, profile_map_configured)):
+    owner_policy_error = None
+    owner_policy_configured = False
+    try:
+        from api import auth_oidc
+
+        _, _, owner_policy_error, owner_policy_configured = auth_oidc._normalize_owner_policy(
+            auth_oidc._pick_owner_setting(raw, "owner_claim", "HERMES_WEBUI_OIDC_OWNER_CLAIM"),
+            auth_oidc._pick_owner_setting(raw, "owner_values", "HERMES_WEBUI_OIDC_OWNER_VALUES"),
+        )
+    except Exception:
+        logger.debug("Failed to normalize OIDC owner policy", exc_info=True)
+
+    if not any((
+        issuer, client_id, allow_claim, allow_values,
+        profile_map_configured, owner_policy_configured, operator_config_error,
+    )):
         return None
 
     warnings = []
+    if operator_config_error:
+        warnings.append(
+            f"{operator_config_error}. OIDC owner operations are denied until it is "
+            "readable, because an unresolved owner policy is not treated as an absent one."
+        )
 
     if not (issuer and client_id and allow_claim and allow_values):
         missing = []
@@ -590,6 +619,8 @@ def get_oidc_startup_warning() -> str | None:
         )
     if profile_map_error:
         warnings.append(profile_map_error)
+    if owner_policy_error:
+        warnings.append(owner_policy_error)
 
     # Detect whitespace-only allow_values scalar that may contain multiple intended values.
     # Runs unconditionally so the warning reaches startup even when other auth methods
@@ -667,6 +698,11 @@ def create_session(
         if oidc_binding:
             record['oidc_mapping_fingerprint'] = oidc_binding.get('mapping_fingerprint')
             record['oidc_profile_identity'] = oidc_binding.get('profile_identity')
+            if oidc_binding.get('owner'):
+                # Owner evidence is server-created and expires on the deadline
+                # fixed at login; nothing downstream may extend it.
+                record['oidc_owner'] = True
+                record['oidc_owner_expiry'] = min(expiry, float(oidc_binding.get('owner_expiry') or 0))
     else:
         record = expiry
     with _SESSIONS_LOCK:
@@ -948,7 +984,7 @@ def ensure_trusted_auth_session(handler) -> dict | None:
     cookie_value = parse_cookie(handler)
     info = get_session_info(cookie_value) if cookie_value and verify_session(cookie_value) else None
     if info and info.get('auth_type') != 'trusted':
-        if info.get('auth_type') == 'oidc' and info.get('bound_profile'):
+        if info.get('auth_type') == 'oidc':
             from api.auth_oidc import oidc_session_binding_is_current
 
             if not oidc_session_binding_is_current(info):
@@ -1165,18 +1201,61 @@ def is_public_path(path: str) -> bool:
     )
 
 
+def oidc_owner_policy_is_configured() -> bool:
+    """True when the selective OIDC owner policy is configured, or unknown.
+
+    Fails closed: a temporarily missing, unreadable, or malformed operator
+    config resolves to "unknown", and unknown must not restore owner authority
+    to sessions whose provenance we cannot establish.
+    """
+    try:
+        from api.auth_oidc import _resolve_oidc_config
+
+        cfg = _resolve_oidc_config()
+        return bool(cfg.get("owner_policy_configured") or cfg.get("config_read_failed"))
+    except Exception:
+        logger.debug("Failed to inspect the OIDC owner policy", exc_info=True)
+        return True
+
+
 def session_can_manage_server(session_info) -> bool:
     """True when the caller may perform owner-only operations (OPERATOR_ONLY_PATHS).
 
     Auth disabled means every caller is the owner. With auth enabled, only an
     authenticated session that is not profile-bound qualifies; an absent
     session or any bound profile (including ``default``) is not an owner.
+
+    OIDC sessions defer to the OIDC owner policy: with an explicit owner
+    allowlist configured they need server-created owner evidence, so being
+    unbound is not enough, and a session whose provenance is unknown (an
+    untyped record from before typed logins) is not an owner either.
     """
     if not is_auth_enabled():
         return True
     if not session_info:
         return False
+    auth_type = str(session_info.get('auth_type') or '')
+    if auth_type == 'oidc':
+        from api.auth_oidc import oidc_session_can_manage_server
+
+        return oidc_session_can_manage_server(session_info)
+    if not auth_type and oidc_owner_policy_is_configured():
+        # An untyped record predates typed logins, so it may be an unbound OIDC
+        # session minted before the owner policy existed. Unknown provenance is
+        # not owner authority while a selective policy is active; the operator
+        # signs in again once to get a typed session.
+        return False
     return not str(session_info.get('bound_profile') or '').strip()
+
+
+def request_can_manage_server(handler) -> bool:
+    """session_can_manage_server() for the current request's session.
+
+    The single seam every owner-administration guard should use, so route-level
+    checks (credentials, profile administration, relay publisher registration)
+    and /api/auth/status can never disagree about who the owner is.
+    """
+    return session_can_manage_server(ensure_trusted_auth_session(handler))
 
 
 def check_auth(handler, parsed) -> bool:
