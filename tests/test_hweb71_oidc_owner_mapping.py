@@ -639,6 +639,7 @@ def test_an_unresolved_login_allowlist_admits_nobody(monkeypatch, tmp_path):
 
 def test_an_unresolved_config_blocks_oidc_login_not_just_ownership(monkeypatch, tmp_path):
     """The profile map lives in that file; an unbound session is not a safe guess."""
+    import api.auth as auth
     import api.auth_oidc as auth_oidc
     import api.profiles as profiles
 
@@ -648,7 +649,10 @@ def test_an_unresolved_config_blocks_oidc_login_not_just_ownership(monkeypatch, 
     config_path.write_text("webui_oidc: [not, a, mapping\n", encoding="utf-8")
     monkeypatch.setattr(profiles, "_INITIAL_HERMES_CONFIG_PATH", str(config_path))
 
-    assert auth_oidc.is_oidc_enabled() is False
+    # Login is refused, but the deployment must not fall out of auth entirely:
+    # is_auth_enabled() is the OR of the configured methods.
+    assert auth_oidc.is_oidc_enabled() is True
+    assert auth.is_auth_enabled() is True
     with pytest.raises(auth_oidc.OIDCConfigError, match="could not be resolved"):
         auth_oidc._require_oidc_config()
     with pytest.raises(auth_oidc.OIDCConfigError):
@@ -711,6 +715,8 @@ def test_an_unresolved_claim_path_is_blanked(monkeypatch):
 
     assert cfg["allow_claim"] == ""
     assert cfg["profile_claim"] == ""
+    # No usable allow_claim means OIDC is genuinely not configured, which is a
+    # different state from a config we could not read.
     assert auth_oidc.is_oidc_enabled() is False
 
 

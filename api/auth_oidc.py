@@ -102,9 +102,15 @@ class OIDCAuthError(Exception):
 
 
 def is_oidc_enabled() -> bool:
+    """True when OIDC login is configured for this deployment.
+
+    Deliberately does NOT consult ``config_read_failed``: api.auth's global
+    auth gate is the OR of the configured methods, so reporting False here
+    would drop an OIDC-only deployment into no-auth mode the moment its config
+    became unreadable. Login is refused by _require_oidc_config instead, which
+    keeps authentication required while SSO is unavailable.
+    """
     cfg = _resolve_oidc_config()
-    if cfg.get("config_read_failed"):
-        return False
     return bool(
         cfg.get("issuer")
         and cfg.get("client_id")
