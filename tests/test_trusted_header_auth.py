@@ -356,6 +356,10 @@ def test_profile_switch_accepts_bound_profile(monkeypatch):
 
 @pytest.mark.parametrize("path", ["/api/profile/create", "/api/profile/delete"])
 def test_profile_admin_rejects_bound_oidc_session(monkeypatch, path):
+    import api.auth_oidc as auth_oidc
+
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(auth_oidc, "oidc_session_binding_is_current", lambda _info: True)
     cookie = auth.create_session(
         auth_type="oidc",
         username="alice@example.com",
@@ -381,7 +385,7 @@ def test_profile_admin_rejects_bound_oidc_session(monkeypatch, path):
     routes.handle_post(handler, SimpleNamespace(path=path, query=""))
 
     assert handler.status == 403
-    assert "profile-bound" in handler.json_body()["error"].lower()
+    assert "owner session is required" in handler.json_body()["error"].lower()
 
 
 @pytest.mark.parametrize(

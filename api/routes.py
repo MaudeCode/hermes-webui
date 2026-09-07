@@ -14274,7 +14274,13 @@ def handle_get(handler, parsed) -> bool:
                 invalidate_session(cookie_val)
                 return j(handler, {"error": "Failed to establish OIDC profile session"}, status=500)
         else:
-            cookie_val = create_session()
+            # Unbound OIDC sessions are still typed and policy-bound: owner
+            # permission must come from evidence, never from an empty profile.
+            cookie_val = create_session(
+                auth_type="oidc",
+                username=str(result.get("email") or result.get("subject") or "").strip(),
+                oidc_binding=result.get("oidc_binding"),
+            )
             profile_cookie = None
         handler.send_response(302)
         handler.send_header(
@@ -16191,12 +16197,6 @@ def handle_get(handler, parsed) -> bool:
 
 # ── POST auth helpers
 
-def _request_bound_profile(handler) -> str | None:
-    from api.auth import parse_cookie, session_bound_profile
-
-    return session_bound_profile(parse_cookie(handler))
-
-
 def _require_passkey_management_auth(handler) -> tuple[bool, str, int]:
     """Require auth, or the existing local-only first-run bootstrap gate.
 
@@ -16204,7 +16204,7 @@ def _require_passkey_management_auth(handler) -> tuple[bool, str, int]:
     can still bootstrap a passkey-only instance, but only through the same
     local/private-network onboarding gate used for first password setup.
     """
-    from api.auth import is_auth_enabled, parse_cookie, verify_session
+    from api.auth import is_auth_enabled, parse_cookie, request_can_manage_server, verify_session
 
     auth_enabled = is_auth_enabled()
     if not auth_enabled:
@@ -16214,8 +16214,8 @@ def _require_passkey_management_auth(handler) -> tuple[bool, str, int]:
     cookie_val = parse_cookie(handler)
     if not cookie_val or not verify_session(cookie_val):
         return False, "Authentication required", 401
-    if _request_bound_profile(handler):
-        return False, "Profile-bound sessions cannot manage owner authentication credentials", 403
+    if not request_can_manage_server(handler):
+        return False, "An owner session is required to manage owner authentication credentials", 403
     return True, "", 200
 
 def _validate_session_toolsets_shape(toolsets):
@@ -16360,7 +16360,7 @@ def handle_post(handler, parsed) -> bool:
         return True
 
     if parsed.path == "/api/talaria/relay/pair":
-        from api.auth import ensure_trusted_auth_session
+        from api.auth import ensure_trusted_auth_session, session_can_manage_server
         from api.talaria_relay import RelayPairingError, pair_talaria_relay
 
         relay_session = ensure_trusted_auth_session(handler)
@@ -16370,8 +16370,10 @@ def handle_post(handler, parsed) -> bool:
                 handler,
                 pair_talaria_relay(
                     body,
+                    # Owner permission authorizes publisher registration; it
+                    # never widens which profile's data the caller reaches.
                     profile=bound_profile or _get_active_profile_name(),
-                    operator=bound_profile is None,
+                    operator=session_can_manage_server(relay_session),
                 ),
             )
         except RelayPairingError as exc:
@@ -18183,8 +18185,10 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e), 409)
 
     if parsed.path == "/api/profile/create":
-        if _request_bound_profile(handler):
-            return bad(handler, "Profile-bound sessions cannot manage profiles", 403)
+        from api.auth import request_can_manage_server
+
+        if not request_can_manage_server(handler):
+            return bad(handler, "An owner session is required to manage profiles", 403)
         name = body.get("name", "").strip()
         if not name:
             return bad(handler, "name is required")
@@ -18225,8 +18229,10 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
 
     if parsed.path == "/api/profile/delete":
-        if _request_bound_profile(handler):
-            return bad(handler, "Profile-bound sessions cannot manage profiles", 403)
+        from api.auth import request_can_manage_server
+
+        if not request_can_manage_server(handler):
+            return bad(handler, "An owner session is required to manage profiles", 403)
         name = body.get("name", "").strip()
         if not name:
             return bad(handler, "name is required")
@@ -18250,6 +18256,7 @@ def handle_post(handler, parsed) -> bool:
             get_password_hash,
             is_auth_enabled,
             parse_cookie,
+            request_can_manage_server,
             set_auth_cookie,
             verify_password,
             verify_session,
@@ -18271,10 +18278,10 @@ def handle_post(handler, parsed) -> bool:
         if requested_passwordless:
             body["_clear_password"] = True
 
-        if (requested_password or requested_clear_password) and _request_bound_profile(handler):
+        if (requested_password or requested_clear_password) and not request_can_manage_server(handler):
             return bad(
                 handler,
-                "Profile-bound sessions cannot manage owner authentication credentials",
+                "An owner session is required to manage owner authentication credentials",
                 403,
             )
 

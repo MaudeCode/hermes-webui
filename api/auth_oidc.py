@@ -32,6 +32,11 @@ _CLOCK_SKEW_SECONDS = 60
 _CACHE_TTL_SECONDS = 300
 _NATIVE_FLOW_TTL_SECONDS = 600
 _NATIVE_EXCHANGE_TTL_SECONDS = 60
+# Owner privilege granted by an OIDC claim is deliberately short-lived: the
+# only evidence we hold is the claim set validated at login, and the session
+# TTL (30 days by default) is far too broad to stand in for "still in the
+# admin group". Re-login is what refreshes it.
+_OWNER_EVIDENCE_TTL_SECONDS = 3600
 _NATIVE_CALLBACK_HOST = "oidc-callback"
 _NATIVE_CALLBACK_SCHEMES = {"talaria", "talaria-branch"}
 _NATIVE_VALUE_RE = re.compile(r"^[A-Za-z0-9._~-]{16,256}$")
@@ -59,6 +64,15 @@ _ALLOW_VALUES_WHITESPACE_WARNING = (
     'Use a comma-delimited scalar (e.g. "value1,value2") or a YAML array. '
     "If this is one intentional multi-word group, it is already correct and no action is needed."
 )
+
+_OWNER_POLICY_ERROR = (
+    "webui_oidc.owner_claim (HERMES_WEBUI_OIDC_OWNER_CLAIM) and webui_oidc.owner_values "
+    "(HERMES_WEBUI_OIDC_OWNER_VALUES) must both be set to a non-empty claim path and a "
+    "non-empty list of exact string values. The selective owner policy is active but "
+    "matches nothing, so no OIDC identity can perform owner operations."
+)
+
+_warned_owner_policy = False
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -170,7 +184,9 @@ def complete_authorization_code_flow(
             allow_values=cfg.get("allow_values") or [],
         )
         bound_profile = _resolve_bound_profile(cfg, claims)
-        oidc_binding = _oidc_profile_binding(cfg, bound_profile)
+        oidc_binding = _oidc_profile_binding(
+            cfg, bound_profile, owner=_resolve_owner_permission(cfg, claims)
+        )
         return {
             "next_path": pending["next_path"],
             "native_flow_id": pending.get("native_flow_id"),
@@ -327,6 +343,10 @@ def exchange_native_authorization(
     challenge = _b64u(hashlib.sha256(verifier.encode("ascii")).digest())
     if not _constant_time_equal(challenge, exchange["code_challenge"]):
         raise OIDCAuthError("Native OIDC PKCE verifier did not match", status_code=401)
+    # A policy edit between the browser login and this exchange must not mint a
+    # session -- least of all an elevated one -- from pre-change evidence.
+    if not _oidc_binding_is_current(exchange.get("oidc_binding"), exchange.get("bound_profile")):
+        raise OIDCAuthError("OIDC policy changed; sign in again", status_code=401)
     result = {
         "subject": exchange["subject"],
         "email": exchange["email"],
@@ -507,6 +527,15 @@ def _resolve_oidc_config() -> dict[str, Any]:
     profile_map, profile_map_error, profile_map_configured = _normalize_profile_map(
         pick("profile_map", "HERMES_WEBUI_OIDC_PROFILE_MAP")
     )
+    owner_claim, owner_values, owner_policy_error, owner_policy_configured = _normalize_owner_policy(
+        pick("owner_claim", "HERMES_WEBUI_OIDC_OWNER_CLAIM"),
+        pick("owner_values", "HERMES_WEBUI_OIDC_OWNER_VALUES"),
+    )
+    if owner_policy_error:
+        global _warned_owner_policy
+        if not _warned_owner_policy:
+            _warned_owner_policy = True
+            logger.warning(owner_policy_error)
     if (
         raw_allow is not None
         and not isinstance(raw_allow, (list, tuple, set))
@@ -529,6 +558,10 @@ def _resolve_oidc_config() -> dict[str, Any]:
         "profile_map": profile_map,
         "profile_map_configured": profile_map_configured,
         "profile_map_error": profile_map_error,
+        "owner_claim": owner_claim,
+        "owner_values": owner_values,
+        "owner_policy_configured": owner_policy_configured,
+        "owner_policy_error": owner_policy_error,
     }
 
 
@@ -632,6 +665,72 @@ def _normalize_profile_map(raw: Any) -> tuple[dict[str, str] | None, str | None,
     return mapping, None, True
 
 
+def _normalize_owner_policy(
+    raw_claim: Any, raw_values: Any
+) -> tuple[str, list[str], str | None, bool]:
+    """Resolve the opt-in owner allowlist into (claim, values, error, configured).
+
+    Absent (unset or blank) on both settings means the policy is off and legacy
+    OIDC owner behaviour applies. Once either setting is present the policy is
+    configured, and anything short of a usable claim path plus a non-empty list
+    of exact strings resolves to an empty allowlist that matches nothing --
+    never to the legacy fallback. Values are not coerced: a number, boolean, or
+    object in the list is a configuration error, not a group name.
+    """
+    configured = _owner_setting_present(raw_claim) or _owner_setting_present(raw_values)
+    if not configured:
+        return "", [], None, False
+    claim = raw_claim.strip() if isinstance(raw_claim, str) else ""
+    values = _normalize_owner_values(raw_values)
+    if not claim or not values:
+        return claim, [], _OWNER_POLICY_ERROR, True
+    return claim, values, None, True
+
+
+def _owner_setting_present(raw: Any) -> bool:
+    if raw is None:
+        return False
+    if isinstance(raw, str):
+        return bool(raw.strip())
+    return True
+
+
+def _normalize_owner_values(raw: Any) -> list[str]:
+    """Strictly normalize the owner allowlist; anything non-string yields []."""
+    if isinstance(raw, str):
+        values = [part.strip() for part in raw.replace("\n", ",").split(",")]
+    elif isinstance(raw, (list, tuple)):
+        if not all(isinstance(item, str) for item in raw):
+            return []
+        values = [item.strip() for item in raw]
+    else:
+        return []
+    return [value for value in values if value]
+
+
+def _resolve_owner_permission(cfg: dict[str, Any], claims: dict[str, Any]) -> bool:
+    """True when the validated claims match the configured owner allowlist.
+
+    Exact, case-sensitive comparison against a string claim or an array of
+    strings. Any other claim shape -- object, number, boolean, mixed array --
+    grants nothing.
+    """
+    if not cfg.get("owner_policy_configured"):
+        return False
+    allowed = cfg.get("owner_values") or []
+    claim_path = str(cfg.get("owner_claim") or "")
+    if not allowed or not claim_path:
+        return False
+    value = _get_claim_path(claims, claim_path)
+    if isinstance(value, str):
+        present = [value]
+    elif isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value):
+        present = list(value)
+    else:
+        return False
+    return any(item in allowed for item in present)
+
+
 def _resolve_bound_profile(cfg: dict[str, Any], claims: dict[str, Any]) -> str | None:
     if not cfg.get("profile_map_configured"):
         return None
@@ -651,13 +750,20 @@ def _resolve_bound_profile(cfg: dict[str, Any], claims: dict[str, Any]) -> str |
     return profile
 
 
-def _oidc_profile_binding(cfg: dict[str, Any], profile: str | None) -> dict[str, str] | None:
-    if not profile:
-        return None
-    from api.profiles import get_hermes_home_for_profile
+def _oidc_profile_binding(
+    cfg: dict[str, Any],
+    profile: str | None,
+    *,
+    owner: bool = False,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Server-side evidence for one OIDC session.
 
-    home = get_hermes_home_for_profile(profile)
-    stat = home.stat()
+    The fingerprint covers every policy input that decides admission, profile
+    binding, and owner permission, so changing any of them invalidates existing
+    sessions at their next authorization check. ``profile_identity`` is empty
+    for an unbound session; owner evidence carries a deadline fixed at login.
+    """
     mapping_payload = {
         "issuer": str(cfg.get("issuer") or ""),
         "client_id": str(cfg.get("client_id") or ""),
@@ -665,34 +771,93 @@ def _oidc_profile_binding(cfg: dict[str, Any], profile: str | None) -> dict[str,
         "allow_values": sorted(str(value) for value in (cfg.get("allow_values") or [])),
         "profile_claim": str(cfg.get("profile_claim") or "sub"),
         "profile_map": cfg.get("profile_map") or {},
+        "owner_claim": str(cfg.get("owner_claim") or ""),
+        "owner_values": sorted(str(value) for value in (cfg.get("owner_values") or [])),
+        "owner_policy_configured": bool(cfg.get("owner_policy_configured")),
     }
     mapping_fingerprint = hashlib.sha256(
         json.dumps(mapping_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
-    return {
+    profile_identity = ""
+    if profile:
+        from api.profiles import get_hermes_home_for_profile
+
+        stat = get_hermes_home_for_profile(profile).stat()
+        profile_identity = f"{stat.st_dev}:{stat.st_ino}"
+    binding: dict[str, Any] = {
         "mapping_fingerprint": mapping_fingerprint,
-        "profile_identity": f"{stat.st_dev}:{stat.st_ino}",
+        "profile_identity": profile_identity,
     }
+    if owner:
+        binding["owner"] = True
+        binding["owner_expiry"] = (time.time() if now is None else now) + _OWNER_EVIDENCE_TTL_SECONDS
+    return binding
+
+
+def _oidc_binding_is_current(binding: dict[str, Any] | None, profile: str | None) -> bool:
+    """True when evidence still matches the live policy and the named profile."""
+    if not binding:
+        return True
+    try:
+        cfg = _require_oidc_config()
+        expected = _oidc_profile_binding(cfg, str(profile or "").strip() or None)
+    except (OSError, OIDCAuthError, OIDCConfigError):
+        return False
+    return secrets.compare_digest(
+        str(binding.get("mapping_fingerprint") or ""), expected["mapping_fingerprint"]
+    ) and secrets.compare_digest(
+        str(binding.get("profile_identity") or ""), expected["profile_identity"]
+    )
 
 
 def oidc_session_binding_is_current(session_info: dict[str, Any]) -> bool:
+    """Reconcile a persisted OIDC session against the live policy.
+
+    A session with nothing policy-bound (no profile, no owner evidence) has
+    nothing to reconcile; it simply is not an owner while a selective policy is
+    configured. Anything bound must still match, and expired owner evidence
+    invalidates the elevated session rather than silently demoting it.
+    """
+    profile = str(session_info.get("bound_profile") or "").strip()
+    owner_evidence = bool(session_info.get("oidc_owner"))
+    if not profile and not owner_evidence:
+        return True
+    binding = {
+        "mapping_fingerprint": session_info.get("oidc_mapping_fingerprint"),
+        "profile_identity": session_info.get("oidc_profile_identity"),
+    }
+    if not _oidc_binding_is_current(binding, profile):
+        return False
+    if owner_evidence and _owner_evidence_expiry(session_info) <= time.time():
+        return False
+    return True
+
+
+def _owner_evidence_expiry(session_info: dict[str, Any]) -> float:
+    try:
+        return float(session_info.get("oidc_owner_expiry") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def oidc_session_can_manage_server(session_info: dict[str, Any]) -> bool:
+    """True when an OIDC session may perform owner-only operations.
+
+    With no owner policy configured this preserves the legacy contract: an
+    unbound OIDC session is the owner. Once a policy exists, only explicit
+    server-created owner evidence counts -- an unbound session inherits nothing.
+    """
     try:
         cfg = _require_oidc_config()
-        profile = str(session_info.get("bound_profile") or "").strip()
-        expected = _oidc_profile_binding(cfg, profile)
-    except (OSError, OIDCAuthError, OIDCConfigError):
+    except (OIDCAuthError, OIDCConfigError):
         return False
-    return bool(
-        expected
-        and secrets.compare_digest(
-            str(session_info.get("oidc_mapping_fingerprint") or ""),
-            expected["mapping_fingerprint"],
-        )
-        and secrets.compare_digest(
-            str(session_info.get("oidc_profile_identity") or ""),
-            expected["profile_identity"],
-        )
-    )
+    if not cfg.get("owner_policy_configured"):
+        return not str(session_info.get("bound_profile") or "").strip()
+    if not session_info.get("oidc_owner"):
+        return False
+    if _owner_evidence_expiry(session_info) <= time.time():
+        return False
+    return oidc_session_binding_is_current(session_info)
 
 
 def _normalize_text_list(raw: Any) -> list[str]:

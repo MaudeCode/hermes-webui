@@ -568,7 +568,22 @@ def get_oidc_startup_warning() -> str | None:
     except Exception:
         logger.debug("Failed to normalize OIDC profile_map", exc_info=True)
 
-    if not any((issuer, client_id, allow_claim, allow_values, profile_map_configured)):
+    raw_owner_claim_env = os.getenv("HERMES_WEBUI_OIDC_OWNER_CLAIM")
+    raw_owner_claim = raw_owner_claim_env if raw_owner_claim_env is not None else raw.get("owner_claim")
+    raw_owner_values_env = os.getenv("HERMES_WEBUI_OIDC_OWNER_VALUES")
+    raw_owner_values = raw_owner_values_env if raw_owner_values_env is not None else raw.get("owner_values")
+    owner_policy_error = None
+    owner_policy_configured = False
+    try:
+        from api import auth_oidc
+
+        _, _, owner_policy_error, owner_policy_configured = auth_oidc._normalize_owner_policy(
+            raw_owner_claim, raw_owner_values
+        )
+    except Exception:
+        logger.debug("Failed to normalize OIDC owner policy", exc_info=True)
+
+    if not any((issuer, client_id, allow_claim, allow_values, profile_map_configured, owner_policy_configured)):
         return None
 
     warnings = []
@@ -590,6 +605,8 @@ def get_oidc_startup_warning() -> str | None:
         )
     if profile_map_error:
         warnings.append(profile_map_error)
+    if owner_policy_error:
+        warnings.append(owner_policy_error)
 
     # Detect whitespace-only allow_values scalar that may contain multiple intended values.
     # Runs unconditionally so the warning reaches startup even when other auth methods
@@ -667,6 +684,11 @@ def create_session(
         if oidc_binding:
             record['oidc_mapping_fingerprint'] = oidc_binding.get('mapping_fingerprint')
             record['oidc_profile_identity'] = oidc_binding.get('profile_identity')
+            if oidc_binding.get('owner'):
+                # Owner evidence is server-created and expires on the deadline
+                # fixed at login; nothing downstream may extend it.
+                record['oidc_owner'] = True
+                record['oidc_owner_expiry'] = min(expiry, float(oidc_binding.get('owner_expiry') or 0))
     else:
         record = expiry
     with _SESSIONS_LOCK:
@@ -948,7 +970,7 @@ def ensure_trusted_auth_session(handler) -> dict | None:
     cookie_value = parse_cookie(handler)
     info = get_session_info(cookie_value) if cookie_value and verify_session(cookie_value) else None
     if info and info.get('auth_type') != 'trusted':
-        if info.get('auth_type') == 'oidc' and info.get('bound_profile'):
+        if info.get('auth_type') == 'oidc':
             from api.auth_oidc import oidc_session_binding_is_current
 
             if not oidc_session_binding_is_current(info):
@@ -1171,12 +1193,30 @@ def session_can_manage_server(session_info) -> bool:
     Auth disabled means every caller is the owner. With auth enabled, only an
     authenticated session that is not profile-bound qualifies; an absent
     session or any bound profile (including ``default``) is not an owner.
+
+    OIDC sessions defer to the OIDC owner policy: with an explicit owner
+    allowlist configured they need server-created owner evidence, so being
+    unbound is not enough.
     """
     if not is_auth_enabled():
         return True
     if not session_info:
         return False
+    if str(session_info.get('auth_type') or '') == 'oidc':
+        from api.auth_oidc import oidc_session_can_manage_server
+
+        return oidc_session_can_manage_server(session_info)
     return not str(session_info.get('bound_profile') or '').strip()
+
+
+def request_can_manage_server(handler) -> bool:
+    """session_can_manage_server() for the current request's session.
+
+    The single seam every owner-administration guard should use, so route-level
+    checks (credentials, profile administration, relay publisher registration)
+    and /api/auth/status can never disagree about who the owner is.
+    """
+    return session_can_manage_server(ensure_trusted_auth_session(handler))
 
 
 def check_auth(handler, parsed) -> bool:

@@ -213,19 +213,22 @@ def test_passkey_register_options_handles_base_passkey_errors(monkeypatch):
     monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
     monkeypatch.setattr(auth, "_passkey_feature_flag_enabled", lambda: True)
     monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
-    monkeypatch.setattr(auth, "parse_cookie", lambda handler: "session")
-    monkeypatch.setattr(auth, "verify_session", lambda cookie: True)
 
     def raise_passkey_error(_handler):
         raise passkeys.PasskeyError("plain passkey error")
 
     monkeypatch.setattr(passkeys, "registration_options", raise_passkey_error)
+    cookie = auth.create_session()
     handler = RouteFakeHandler()
+    handler.headers["Cookie"] = f"{auth.COOKIE_NAME}={cookie}"
 
-    routes.handle_post(handler, SimpleNamespace(path="/api/auth/passkey/register/options"))
+    try:
+        routes.handle_post(handler, SimpleNamespace(path="/api/auth/passkey/register/options"))
 
-    assert handler.status == 400
-    assert json.loads(handler.wfile.getvalue())["error"] == "plain passkey error"
+        assert handler.status == 400
+        assert json.loads(handler.wfile.getvalue())["error"] == "plain passkey error"
+    finally:
+        auth.invalidate_session(cookie)
 
 def test_first_passkey_registration_options_rejects_remote_bootstrap(monkeypatch, tmp_path):
     import api.auth as auth
@@ -357,7 +360,7 @@ def test_passkey_registration_rejects_profile_bound_oidc_session(monkeypatch):
     try:
         routes.handle_post(handler, SimpleNamespace(path="/api/auth/passkey/register/options"))
         assert handler.status == 403
-        assert "profile-bound" in json.loads(handler.wfile.getvalue())["error"].lower()
+        assert "owner session is required" in json.loads(handler.wfile.getvalue())["error"].lower()
     finally:
         auth.invalidate_session(cookie)
 
