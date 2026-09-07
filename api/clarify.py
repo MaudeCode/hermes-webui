@@ -200,8 +200,11 @@ def _dedupe_identity(data: dict):
 
     A batch is identified by its whole question set: two batches that differ in
     any single question are different prompts, and answering one would leave
-    the other unanswered. The single-question identity is unchanged, and the
-    two shapes can never compare equal.
+    the other unanswered. ``multi_select`` is part of that identity — the same
+    question asked single- and multi-select expects a scalar in one case and an
+    array in the other, so one answer cannot stand in for both. The
+    single-question identity is unchanged, and the two shapes can never compare
+    equal.
     """
     questions = data.get("questions")
     if questions:
@@ -210,6 +213,7 @@ def _dedupe_identity(data: dict):
                 str(q.get("qid") or ""),
                 str(q.get("question") or ""),
                 tuple(str(c) for c in (q.get("choices") or [])),
+                bool(q.get("multi_select")),
             )
             for q in questions
         )

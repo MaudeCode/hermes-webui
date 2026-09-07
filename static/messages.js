@@ -9475,10 +9475,19 @@ function _clarifyBatchChoiceButton(choice, idx) {
   return btn;
 }
 
+function _clarifyClearBatchPicks(block) {
+  block.querySelectorAll('.clarify-choice').forEach(btn => btn.setAttribute('aria-pressed', 'false'));
+}
+
 function _toggleClarifyBatchChoice(block, btn) {
   const pressed = btn.getAttribute('aria-pressed') === 'true';
   if (!block.dataset.multi) {
-    block.querySelectorAll('.clarify-choice').forEach(other => other.setAttribute('aria-pressed', 'false'));
+    _clarifyClearBatchPicks(block);
+    // A single-select question has one answer and two ways to give it. Last
+    // action wins, visibly: picking clears a typed override exactly as typing
+    // clears the pick, so what gets submitted is always what is on screen.
+    const field = block.querySelector('.clarify-q-input');
+    if (field && !pressed) field.value = '';
   }
   btn.setAttribute('aria-pressed', pressed ? 'false' : 'true');
 }
@@ -9493,7 +9502,12 @@ function _renderClarifyBatch(container, questions) {
     block.dataset.multi = entry.multi_select ? '1' : '';
     const text = document.createElement('div');
     text.className = 'clarify-question';
+    text.id = 'clarifyQ-' + block.dataset.qid + '-label';
     text.textContent = String(entry.question || '');
+    // Name the whole question — choices included — so a screen reader tabbing
+    // between fields says which question it is answering, not just "edit text".
+    block.setAttribute('role', 'group');
+    block.setAttribute('aria-labelledby', text.id);
     block.appendChild(text);
     const choices = Array.isArray(entry.choices) ? entry.choices : [];
     if (choices.length) {
@@ -9511,7 +9525,11 @@ function _renderClarifyBatch(container, questions) {
     input.className = 'clarify-input clarify-q-input';
     input.autocomplete = 'off';
     input.setAttribute('data-i18n-placeholder', 'clarify_input_placeholder');
+    input.setAttribute('aria-labelledby', text.id);
     input.placeholder = (typeof t === 'function' && t('clarify_input_placeholder')) || 'Type your response…';
+    input.oninput = () => {
+      if (!block.dataset.multi) _clarifyClearBatchPicks(block);
+    };
     input.onkeydown = (e) => {
       if (e.key === 'Enter') { e.preventDefault(); respondClarify(); }
     };

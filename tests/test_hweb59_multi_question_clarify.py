@@ -187,6 +187,15 @@ def test_batch_and_single_identities_never_collide():
     assert clarify._dedupe_identity(single) != clarify._dedupe_identity(batch)
 
 
+def test_batch_differing_only_in_multi_select_is_not_deduped():
+    """A scalar answer cannot stand in for an array one (codex P2)."""
+    single = [{"question": "Which files?", "choices": ["a", "b"]}]
+    multi = [{"question": "Which files?", "choices": ["a", "b"], "multi_select": True}]
+
+    assert _submit_batch("s-mode", single) is not _submit_batch("s-mode", multi)
+    assert clarify.pending_count("s-mode") == 2
+
+
 def test_callback_advertises_the_questions_keyword():
     """clarify_tool._callback_accepts_questions inspects the signature."""
     assert "lambda question, choices, questions=None: _clarify_callback_impl(" in STREAMING_PY
@@ -235,6 +244,8 @@ class El {
     this.autocomplete = '';
     this.type = '';
   }
+  set id(v) { this.attrs.id = String(v); }
+  get id() { return this.attrs.id || ''; }
   set className(v) { this.classNameValue = String(v); }
   get className() { return this.classNameValue; }
   set textContent(v) { this._text = String(v); this.children = []; }
@@ -373,3 +384,79 @@ def test_batch_card_hides_the_shared_single_question_controls():
     # The signature must carry the whole set so a changed batch re-renders.
     assert "questions: batchQuestions," in show
     assert 'card.setAttribute("aria-describedby", isBatch ? "clarifyQuestions clarifyHint"' in show
+
+
+def test_single_select_submits_the_answer_that_is_on_screen():
+    """Typing after picking (or picking after typing) must not hide an answer.
+
+    Both controls stay live until the shared Send, so the losing one has to be
+    cleared visibly rather than silently discarded at submit time (codex P1).
+    """
+    result = _run_clarify_dom_harness("""
+    const container = new El('div');
+    container.className = 'clarify-questions';
+    _els.clarifyQuestions = container;
+    _renderClarifyBatch(container, [
+      {qid: 'q0', question: 'Which branch?', choices: ['main', 'dev']},
+      {qid: 'q1', question: 'Which files?', choices: ['a', 'b'], multi_select: true},
+    ]);
+
+    const blocks = container.querySelectorAll('.clarify-q');
+    const fields = container.querySelectorAll('.clarify-q-input');
+
+    // Pick a choice, then type a custom answer over it.
+    _toggleClarifyBatchChoice(blocks[0], blocks[0].querySelectorAll('.clarify-choice')[0]);
+    fields[0].value = 'a release tag';
+    fields[0].oninput();
+    const typedWins = JSON.parse(_clarifyResolveSubmission().value);
+    const picksAfterTyping = blocks[0]
+      .querySelectorAll('.clarify-choice[aria-pressed="true"]').length;
+
+    // Now pick a choice again: the stale typed answer must clear.
+    _toggleClarifyBatchChoice(blocks[0], blocks[0].querySelectorAll('.clarify-choice')[1]);
+    const pickWins = JSON.parse(_clarifyResolveSubmission().value);
+
+    // Multi-select keeps typing as an extra "Other" answer alongside picks.
+    _toggleClarifyBatchChoice(blocks[1], blocks[1].querySelectorAll('.clarify-choice')[0]);
+    fields[1].value = 'and README';
+    fields[1].oninput();
+    const multi = JSON.parse(_clarifyResolveSubmission().value);
+
+    console.log(JSON.stringify({
+      typedWins, picksAfterTyping, pickWins, typedAfterPick: fields[0].value, multi,
+    }));
+    """)
+
+    assert result["typedWins"] == {"answers": {"q0": "a release tag"}}
+    assert result["picksAfterTyping"] == 0, "typing must clear the single-select pick"
+    assert result["pickWins"] == {"answers": {"q0": "dev"}}
+    assert result["typedAfterPick"] == "", "picking must clear the stale typed answer"
+    assert result["multi"]["answers"]["q1"] == ["a", "and README"]
+
+
+def test_each_batch_field_is_labelled_by_its_own_question():
+    """Screen-reader users tabbing between fields need per-question names."""
+    result = _run_clarify_dom_harness("""
+    const container = new El('div');
+    container.className = 'clarify-questions';
+    _els.clarifyQuestions = container;
+    _renderClarifyBatch(container, [
+      {qid: 'q0', question: 'Which branch?'},
+      {qid: 'q1', question: 'Which runtime?', choices: ['a', 'b']},
+    ]);
+
+    const blocks = container.querySelectorAll('.clarify-q');
+    console.log(JSON.stringify({
+      labelIds: blocks.map(b => b.querySelector('.clarify-question').id),
+      fieldLabels: container.querySelectorAll('.clarify-q-input')
+        .map(i => i.getAttribute('aria-labelledby')),
+      groupRoles: blocks.map(b => b.getAttribute('role')),
+      groupLabels: blocks.map(b => b.getAttribute('aria-labelledby')),
+    }));
+    """)
+
+    assert result["labelIds"] == ["clarifyQ-q0-label", "clarifyQ-q1-label"]
+    assert len(set(result["labelIds"])) == 2, "each question needs a unique label id"
+    assert result["fieldLabels"] == result["labelIds"]
+    assert result["groupRoles"] == ["group", "group"]
+    assert result["groupLabels"] == result["labelIds"]
