@@ -303,6 +303,29 @@ def test_malformed_operator_config_does_not_restore_legacy_owner_access(monkeypa
         auth.invalidate_session(legacy)
 
 
+def test_unreadable_config_denies_ownership_to_a_typed_oidc_session(monkeypatch, tmp_path):
+    """Base settings from the environment do not make a missing policy "disabled"."""
+    import api.auth as auth
+    import api.auth_oidc as auth_oidc
+    import api.profiles as profiles
+
+    _configure(monkeypatch, owner_claim=None, owner_values=None)
+    monkeypatch.setattr(auth_oidc, "_load_operator_config", _REAL_LOAD_OPERATOR_CONFIG)
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    cookie = auth.create_session(auth_type="oidc", username="user@example.com")
+
+    try:
+        assert auth.session_can_manage_server(auth.get_session_info(cookie)) is True
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("webui_oidc: [this is: not, a mapping\n", encoding="utf-8")
+        monkeypatch.setattr(profiles, "_INITIAL_HERMES_CONFIG_PATH", str(config_path))
+
+        assert auth.session_can_manage_server(auth.get_session_info(cookie)) is False
+    finally:
+        auth.invalidate_session(cookie)
+
+
 def test_comments_only_operator_config_is_not_a_read_failure(monkeypatch, tmp_path):
     import api.auth_oidc as auth_oidc
     import api.profiles as profiles

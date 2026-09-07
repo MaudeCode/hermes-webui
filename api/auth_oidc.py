@@ -879,10 +879,16 @@ def oidc_session_can_manage_server(session_info: dict[str, Any]) -> bool:
     With no owner policy configured this preserves the legacy contract: an
     unbound OIDC session is the owner. Once a policy exists, only explicit
     server-created owner evidence counts -- an unbound session inherits nothing.
+    A policy we could not resolve is neither: it denies.
     """
     try:
         cfg = _require_oidc_config()
     except (OIDCAuthError, OIDCConfigError):
+        return False
+    if cfg.get("config_read_failed"):
+        # The owner policy may live in the config we could not read, so its
+        # absence here is unknown, not disabled. Unknown is not authority --
+        # base settings arriving from the environment do not change that.
         return False
     if not cfg.get("owner_policy_configured"):
         if str(session_info.get("bound_profile") or "").strip():
