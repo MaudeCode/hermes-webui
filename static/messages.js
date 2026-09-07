@@ -2689,6 +2689,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // send(), startRegeneration(), and any future claimant without enumerating
     // them. `_sendInProgress` stays as a fail-closed backstop for the window
     // where a send is in flight but something else cleared busy.
+    //
+    // ponytail: `S.busy` over-approximates the claim — manual compression
+    // (commands.js:1049), slash commands and session load set it without
+    // claiming a stream, so a terminal event landing in those windows is still
+    // dropped and its scene still lost. That matches today's behaviour on
+    // master (an incomplete fix, not a regression); an explicit
+    // claim/release around each /api/chat/start round-trip, plus re-proving
+    // ownership after the fade drain in _finishDone, is HWEB-83.
     if(S.busy) return true;
     return !!(typeof _sendInProgress!=='undefined'&&_sendInProgress&&_sendInProgressSid===activeSid);
   }
