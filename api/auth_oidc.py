@@ -74,6 +74,12 @@ _OWNER_POLICY_ERROR = (
 
 _warned_owner_policy = False
 
+# Distinguishes "the operator did not write this key" from "the operator wrote
+# it with no value". YAML resolves the latter to None, which .get() cannot tell
+# apart from absence -- and the two must not mean the same thing for a setting
+# that gates privilege.
+_UNSET = object()
+
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
@@ -577,8 +583,8 @@ def _resolve_oidc_config() -> dict[str, Any]:
         pick("profile_map", "HERMES_WEBUI_OIDC_PROFILE_MAP")
     )
     owner_claim, owner_values, owner_policy_error, owner_policy_configured = _normalize_owner_policy(
-        pick("owner_claim", "HERMES_WEBUI_OIDC_OWNER_CLAIM"),
-        pick("owner_values", "HERMES_WEBUI_OIDC_OWNER_VALUES"),
+        _pick_owner_setting(raw, "owner_claim", "HERMES_WEBUI_OIDC_OWNER_CLAIM"),
+        _pick_owner_setting(raw, "owner_values", "HERMES_WEBUI_OIDC_OWNER_VALUES"),
     )
     if owner_policy_error:
         global _warned_owner_policy
@@ -737,15 +743,23 @@ def _normalize_owner_policy(
     return claim, values, None, True
 
 
-def _owner_setting_present(raw: Any) -> bool:
-    """True when the operator supplied a value, even an unusable one.
+def _pick_owner_setting(raw: dict[str, Any], name: str, env_name: str) -> Any:
+    """Resolve one owner setting, preserving whether it was supplied at all."""
+    env_value = os.getenv(env_name)
+    if env_value is not None:
+        return env_value
+    return raw[name] if name in raw else _UNSET
 
-    Only an unset key or a null resolves to absent. An explicitly blank value
-    -- a templated ``HERMES_WEBUI_OIDC_OWNER_CLAIM=""``, say -- is security
-    configuration the operator meant to supply, so it activates the
-    match-nobody path instead of restoring legacy owner access.
+
+def _owner_setting_present(raw: Any) -> bool:
+    """True when the operator supplied the key, even with an unusable value.
+
+    Only a key the operator never wrote is absent. An explicitly blank value --
+    a templated ``HERMES_WEBUI_OIDC_OWNER_CLAIM=""``, or a bare ``owner_claim:``
+    in YAML -- is security configuration they meant to supply, so it activates
+    the match-nobody path instead of restoring legacy owner access.
     """
-    return raw is not None
+    return raw is not _UNSET
 
 
 def _normalize_owner_values(raw: Any) -> list[str]:

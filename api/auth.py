@@ -531,8 +531,12 @@ def get_oidc_startup_warning() -> str | None:
 
         cfg = _load_operator_config()
         raw = cfg.get("webui_oidc") if isinstance(cfg, dict) else {}
-        if not isinstance(raw, dict):
+        if raw is None:
             raw = {}
+        if not isinstance(raw, dict):
+            # Same shape check the runtime resolver makes, so a section that
+            # denies every owner operation is also diagnosed at startup.
+            raise ValueError("webui_oidc must be a mapping")
     except Exception as exc:
         # Authorization denies every OIDC owner operation while the config is
         # unresolved, so say so at startup instead of leaving the operator with
@@ -573,17 +577,14 @@ def get_oidc_startup_warning() -> str | None:
     except Exception:
         logger.debug("Failed to normalize OIDC profile_map", exc_info=True)
 
-    raw_owner_claim_env = os.getenv("HERMES_WEBUI_OIDC_OWNER_CLAIM")
-    raw_owner_claim = raw_owner_claim_env if raw_owner_claim_env is not None else raw.get("owner_claim")
-    raw_owner_values_env = os.getenv("HERMES_WEBUI_OIDC_OWNER_VALUES")
-    raw_owner_values = raw_owner_values_env if raw_owner_values_env is not None else raw.get("owner_values")
     owner_policy_error = None
     owner_policy_configured = False
     try:
         from api import auth_oidc
 
         _, _, owner_policy_error, owner_policy_configured = auth_oidc._normalize_owner_policy(
-            raw_owner_claim, raw_owner_values
+            auth_oidc._pick_owner_setting(raw, "owner_claim", "HERMES_WEBUI_OIDC_OWNER_CLAIM"),
+            auth_oidc._pick_owner_setting(raw, "owner_values", "HERMES_WEBUI_OIDC_OWNER_VALUES"),
         )
     except Exception:
         logger.debug("Failed to normalize OIDC owner policy", exc_info=True)

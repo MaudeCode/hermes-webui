@@ -434,6 +434,75 @@ def test_non_mapping_webui_oidc_section_is_unresolved_not_absent(monkeypatch, tm
         auth.invalidate_session(cookie)
 
 
+@pytest.mark.parametrize(
+    "section",
+    [
+        "webui_oidc:\n  owner_claim:\n  owner_values:\n",
+        "webui_oidc:\n  owner_claim:\n",
+        "webui_oidc:\n  owner_values:\n",
+    ],
+)
+def test_null_yaml_owner_keys_activate_the_match_nobody_path(monkeypatch, tmp_path, section):
+    """A key written with no value was still written."""
+    import api.auth as auth
+    import api.auth_oidc as auth_oidc
+    import api.profiles as profiles
+
+    _configure(monkeypatch, owner_claim=None, owner_values=None)
+    monkeypatch.setattr(auth_oidc, "_load_operator_config", _REAL_LOAD_OPERATOR_CONFIG)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(section, encoding="utf-8")
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_CONFIG_PATH", str(config_path))
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    cookie = auth.create_session(auth_type="oidc", username="user@example.com")
+
+    try:
+        cfg = auth_oidc._resolve_oidc_config()
+        assert cfg["owner_policy_configured"] is True
+        assert cfg["owner_values"] == []
+        assert auth.session_can_manage_server(auth.get_session_info(cookie)) is False
+        assert auth_oidc._OWNER_POLICY_ERROR in (auth.get_oidc_startup_warning() or "")
+    finally:
+        auth.invalidate_session(cookie)
+
+
+def test_an_absent_owner_section_still_means_legacy(monkeypatch, tmp_path):
+    import api.auth as auth
+    import api.auth_oidc as auth_oidc
+    import api.profiles as profiles
+
+    _configure(monkeypatch, owner_claim=None, owner_values=None)
+    monkeypatch.setattr(auth_oidc, "_load_operator_config", _REAL_LOAD_OPERATOR_CONFIG)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("webui_oidc:\n  profile_claim: sub\n", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_CONFIG_PATH", str(config_path))
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    cookie = auth.create_session(auth_type="oidc", username="user@example.com")
+
+    try:
+        assert auth_oidc._resolve_oidc_config()["owner_policy_configured"] is False
+        assert auth.session_can_manage_server(auth.get_session_info(cookie)) is True
+    finally:
+        auth.invalidate_session(cookie)
+
+
+def test_startup_warning_explains_a_non_mapping_oidc_section(monkeypatch, tmp_path):
+    import api.auth as auth
+    import api.auth_oidc as auth_oidc
+    import api.profiles as profiles
+
+    _configure(monkeypatch, owner_claim=None, owner_values=None)
+    monkeypatch.setattr(auth_oidc, "_load_operator_config", _REAL_LOAD_OPERATOR_CONFIG)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("webui_oidc: []\n", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_CONFIG_PATH", str(config_path))
+
+    warning = auth.get_oidc_startup_warning() or ""
+
+    assert "must be a mapping" in warning
+    assert "owner operations are denied" in warning
+
+
 def test_profile_dotenv_cannot_grant_itself_the_owner_policy(monkeypatch, tmp_path):
     """A contained profile must not be able to name itself the owner group."""
     import api.profiles as profiles
