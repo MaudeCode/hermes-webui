@@ -500,15 +500,19 @@ def _trim_state_map(values: dict[str, dict[str, Any]], maximum: int) -> None:
 
 def _load_operator_config() -> dict[str, Any]:
     try:
-        from api.config import _load_yaml_config_file
+        from api.config import _load_yaml_config_file_raw
         from api.profiles import _INITIAL_HERMES_CONFIG_PATH, get_hermes_home_for_profile
     except ImportError:
         return get_config()
 
     configured_path = str(_INITIAL_HERMES_CONFIG_PATH or "").strip()
     path = Path(configured_path).expanduser() if configured_path else get_hermes_home_for_profile("default") / "config.yaml"
-    loaded = _load_yaml_config_file(path)
-    if loaded:
+    # Expand this file ourselves rather than through _load_yaml_config_file:
+    # its placeholders must resolve against the operator environment, not the
+    # one a profile .env has written into. The raw parse stays memoized.
+    raw_config = _load_yaml_config_file_raw(path, _copy=False)
+    loaded = _expand_operator_env(raw_config) if raw_config else {}
+    if isinstance(loaded, dict) and loaded:
         return loaded
     # api.config's loader flattens missing, empty, unreadable, and malformed
     # files into {}. A caller that gates privilege on this config must not read
@@ -544,10 +548,57 @@ def _reresolve_operator_config(path: Path) -> dict[str, Any]:
         return {}
     if not isinstance(parsed, dict):
         raise OIDCConfigError(f"Operator config at {path} is not a mapping")
-    from api.config import _expand_env_vars
-
-    expanded = _expand_env_vars(parsed)
+    expanded = _expand_operator_env(parsed)
     return expanded if isinstance(expanded, dict) else {}
+
+
+def _expand_operator_env(obj: Any) -> Any:
+    """Expand ``${VAR}`` in the operator config against the operator environment.
+
+    api.config's expansion resolves placeholders thread-local-first and then
+    from the live process environment, which ``_reload_dotenv`` writes a
+    profile's own ``.env`` into. That is correct for a profile's config and
+    wrong for this one: the operator config decides authentication policy, so a
+    contained profile must not get to supply the value behind
+    ``owner_values: ["${GROUP}"]``. Protecting the two setting names is not
+    enough, because the indirection can name any variable.
+    """
+    if isinstance(obj, str):
+        return re.sub(
+            r"\${([^}]+)}",
+            lambda m: _operator_env_value(m.group(1), m.group(0)),
+            obj,
+        )
+    if isinstance(obj, dict):
+        return {key: _expand_operator_env(value) for key, value in obj.items()}
+    if isinstance(obj, list):
+        return [_expand_operator_env(item) for item in obj]
+    return obj
+
+
+def _operator_env_value(name: str, placeholder: str) -> str:
+    """Resolve one placeholder, ignoring anything a profile .env supplied.
+
+    An unresolvable reference stays literal, so it matches no claim value and
+    no profile rather than silently becoming an empty string.
+    """
+    env_name = str(name or "").strip()
+    if not env_name:
+        return placeholder
+    try:
+        from api import profiles
+
+        if env_name in (getattr(profiles, "_loaded_profile_env_keys", None) or set()):
+            logger.warning(
+                "Ignoring profile-supplied %s while expanding the operator config; "
+                "operator authentication policy is not profile-controlled",
+                env_name,
+            )
+            return placeholder
+    except Exception:
+        logger.debug("Failed to inspect profile-supplied env keys", exc_info=True)
+        return placeholder
+    return os.environ.get(env_name, placeholder)
 
 
 def _resolve_oidc_config() -> dict[str, Any]:

@@ -506,6 +506,102 @@ def test_activating_an_empty_profile_map_revokes_existing_unbound_sessions(monke
         auth.invalidate_session(cookie)
 
 
+def _operator_config_with_interpolated_owner(monkeypatch, tmp_path):
+    import api.auth_oidc as auth_oidc
+    import api.profiles as profiles
+
+    monkeypatch.setattr(auth_oidc, "_load_operator_config", _REAL_LOAD_OPERATOR_CONFIG)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "webui_oidc:\n"
+        "  owner_claim: groups\n"
+        '  owner_values: ["${OIDC_OWNER_GROUP}"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_CONFIG_PATH", str(config_path))
+    return config_path
+
+
+def test_a_profile_dotenv_cannot_supply_an_interpolated_owner_group(monkeypatch, tmp_path):
+    """Protecting the two setting names is not enough: the indirection can name
+    any variable, so a profile .env must not resolve one either."""
+    import api.auth_oidc as auth_oidc
+    import api.profiles as profiles
+
+    _configure(monkeypatch, owner_claim=None, owner_values=None)
+    _operator_config_with_interpolated_owner(monkeypatch, tmp_path)
+    monkeypatch.delenv("OIDC_OWNER_GROUP", raising=False)
+
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    (profile_home / ".env").write_text("OIDC_OWNER_GROUP=attackers\n", encoding="utf-8")
+    profiles._reload_dotenv(profile_home)
+    try:
+        assert os.environ["OIDC_OWNER_GROUP"] == "attackers"
+
+        cfg = auth_oidc._resolve_oidc_config()
+        assert cfg["owner_values"] == ["${OIDC_OWNER_GROUP}"]
+        assert auth_oidc._resolve_owner_permission(cfg, {"groups": ["attackers"]}) is False
+        assert auth_oidc._resolve_owner_permission(cfg, {"groups": ["${OIDC_OWNER_GROUP}"]}) is True
+    finally:
+        profiles._reload_dotenv(tmp_path)
+
+
+def test_the_operator_environment_still_resolves_an_interpolated_owner_group(monkeypatch, tmp_path):
+    import api.auth_oidc as auth_oidc
+
+    _configure(monkeypatch, owner_claim=None, owner_values=None)
+    _operator_config_with_interpolated_owner(monkeypatch, tmp_path)
+    monkeypatch.setenv("OIDC_OWNER_GROUP", OWNER_GROUP)
+
+    cfg = auth_oidc._resolve_oidc_config()
+
+    assert cfg["owner_values"] == [OWNER_GROUP]
+    assert auth_oidc._resolve_owner_permission(cfg, {"groups": [OWNER_GROUP]}) is True
+
+
+def test_an_unset_placeholder_stays_literal_and_matches_nothing(monkeypatch, tmp_path):
+    import api.auth_oidc as auth_oidc
+
+    _configure(monkeypatch, owner_claim=None, owner_values=None)
+    _operator_config_with_interpolated_owner(monkeypatch, tmp_path)
+    monkeypatch.delenv("OIDC_OWNER_GROUP", raising=False)
+
+    cfg = auth_oidc._resolve_oidc_config()
+
+    assert cfg["owner_values"] == ["${OIDC_OWNER_GROUP}"]
+    assert auth_oidc._resolve_owner_permission(cfg, {"groups": [""]}) is False
+
+
+def test_profile_dotenv_cannot_supply_an_interpolated_login_allowlist(monkeypatch, tmp_path):
+    """The same protection covers the settings that predate the owner policy."""
+    import api.auth_oidc as auth_oidc
+    import api.profiles as profiles
+
+    _configure(monkeypatch, owner_claim=None, owner_values=None)
+    monkeypatch.delenv("HERMES_WEBUI_OIDC_ALLOW_VALUES", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_OIDC_ALLOW_CLAIM", raising=False)
+    monkeypatch.setattr(auth_oidc, "_load_operator_config", _REAL_LOAD_OPERATOR_CONFIG)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "webui_oidc:\n"
+        "  allow_claim: email\n"
+        '  allow_values: ["${OIDC_ALLOWED}"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_CONFIG_PATH", str(config_path))
+    monkeypatch.delenv("OIDC_ALLOWED", raising=False)
+
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    (profile_home / ".env").write_text("OIDC_ALLOWED=attacker@example.com\n", encoding="utf-8")
+    profiles._reload_dotenv(profile_home)
+    try:
+        assert auth_oidc._resolve_oidc_config()["allow_values"] == ["${OIDC_ALLOWED}"]
+    finally:
+        profiles._reload_dotenv(tmp_path)
+
+
 def test_startup_warning_explains_a_non_mapping_oidc_section(monkeypatch, tmp_path):
     import api.auth as auth
     import api.auth_oidc as auth_oidc
