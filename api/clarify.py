@@ -6,6 +6,7 @@ clarification string instead of an approval decision.
 
 from __future__ import annotations
 
+import json
 import queue
 import itertools
 import threading
@@ -18,6 +19,13 @@ from api.session_events import publish_session_list_changed
 
 
 DEFAULT_TIMEOUT_SECONDS = 120
+
+# Mirrors ``tools/clarify_tool.py``: at most five independent questions per
+# batch and at most four choices per question. The agent validates both before
+# it ever reaches the callback, so a payload that breaks either limit means a
+# mismatched build rather than a normal call.
+MAX_QUESTIONS = 5
+MAX_CHOICES = 4
 _lock = threading.Lock()
 _pending: dict[str, dict] = {}
 _gateway_queues: dict[str, list] = {}
@@ -113,6 +121,108 @@ def clear_pending(session_key: str) -> int:
     return len(entries)
 
 
+def _choice_text(choice) -> str:
+    """Coerce one offered choice into its display string.
+
+    Same unwrap order as the agent's ``_flatten_choice``: LLMs sometimes emit
+    dict-shaped choices, and ``str(dict)`` would leak a Python repr into the
+    card and back into the answer.
+    """
+    if isinstance(choice, str):
+        return choice.strip()
+    if isinstance(choice, dict):
+        for key in ("label", "description", "text", "title"):
+            value = choice.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+    if choice is None:
+        return ""
+    return str(choice).strip()
+
+
+def _normalized_choices(raw) -> list[str] | None:
+    if not isinstance(raw, list):
+        return None
+    choices = [text for text in (_choice_text(c) for c in raw) if text]
+    return choices[:MAX_CHOICES] or None
+
+
+def normalize_questions(questions) -> list[dict] | None:
+    """Normalize a batch ``questions`` payload into renderable entries.
+
+    Returns ``None`` when there is no batch to render, which sends the caller
+    back to the single-question path:
+
+    - a non-list, or an empty list — the agent's ``_normalize_questions``
+      returns ``(None, None)`` for an empty array and falls through the same
+      way, so an empty batch is not an error;
+    - more than :data:`MAX_QUESTIONS` items — the agent rejects that batch
+      outright before any surface sees it, so rendering a form it would refuse
+      is worse than not rendering one.
+
+    Otherwise every item yields exactly one entry. An item we cannot read a
+    question out of is surfaced as its raw JSON instead of being dropped: a
+    visibly odd question is recoverable, a silently missing one blocks the run.
+    """
+    if not isinstance(questions, list) or not questions:
+        return None
+    if len(questions) > MAX_QUESTIONS:
+        return None
+
+    normalized = []
+    for index, item in enumerate(questions):
+        if isinstance(item, str):
+            # LLMs send ["Q1?", "Q2?"]; the agent tolerates it, so do we.
+            item = {"question": item}
+        if not isinstance(item, dict):
+            item = {"question": json.dumps(item, ensure_ascii=False, default=str)}
+        text = str(item.get("question") or "").strip()
+        if not text:
+            text = json.dumps(item, ensure_ascii=False, default=str)
+        offered = _normalized_choices(item.get("choices_offered"))
+        choices = _normalized_choices(item.get("choices")) or offered
+        normalized.append({
+            # The wire id the answers are keyed by. A model-supplied ``id`` is
+            # unvalidated text and is only echoed back in the result JSON.
+            "qid": str(item.get("qid") or "").strip() or f"q{index}",
+            "id": str(item.get("id") or "").strip() or None,
+            "question": text,
+            "choices": choices,
+            "choices_offered": offered or choices,
+            "multi_select": bool(item.get("multi_select")) and bool(choices),
+        })
+    return normalized
+
+
+def _dedupe_identity(data: dict):
+    """Identity used to collapse a repeated unresolved clarify prompt.
+
+    A batch is identified by its whole question set: two batches that differ in
+    any single question are different prompts, and answering one would leave
+    the other unanswered. ``multi_select`` is part of that identity — the same
+    question asked single- and multi-select expects a scalar in one case and an
+    array in the other, so one answer cannot stand in for both. The
+    single-question identity is unchanged, and the two shapes can never compare
+    equal.
+    """
+    questions = data.get("questions")
+    if questions:
+        return tuple(
+            (
+                str(q.get("qid") or ""),
+                str(q.get("question") or ""),
+                tuple(str(c) for c in (q.get("choices") or [])),
+                bool(q.get("multi_select")),
+            )
+            for q in questions
+        )
+    return (
+        str(data.get("question", "")),
+        tuple(str(c) for c in (data.get("choices_offered") or [])),
+    )
+
+
 def _with_timeout_metadata(data: dict) -> dict:
     item = dict(data or {})
     requested_at = float(item.get("requested_at") or time.time())
@@ -198,11 +308,7 @@ def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
         # semantically identical, reuse it instead of stacking duplicates.
         if gw_queue:
             last = gw_queue[-1]
-            if (
-                str(last.data.get("question", "")) == str(data.get("question", ""))
-                and list(last.data.get("choices_offered") or [])
-                == list(data.get("choices_offered") or [])
-            ):
+            if _dedupe_identity(last.data) == _dedupe_identity(data):
                 entry = last
                 # Dedup re-uses the existing entry with its original clarify_id.
                 # If a future caller pre-populates clarify_id in data, it is

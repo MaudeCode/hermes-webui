@@ -766,6 +766,64 @@ Run typecheck to confirm, then patch.</pre></div>
     </div>
   </div>
 
+  <div class="doc-card"><span class="doc-label">.clarify-questions — batch clarification, one form for up to 5 questions</span>
+    <div class="clarify-card doc-visible">
+      <div class="clarify-inner">
+        <div class="clarify-header">? Clarification needed</div>
+        <div class="clarify-questions">
+          <div class="clarify-q" role="group" aria-labelledby="doc-clarifyQ-q0-label" data-qid="q0">
+            <div class="clarify-question" id="doc-clarifyQ-q0-label">Which environment should I deploy this to?</div>
+            <div class="clarify-choices">
+              <button class="clarify-choice" aria-pressed="true"><span class="clarify-choice-badge">1</span><span class="clarify-choice-text">Staging (Recommended)</span></button>
+              <button class="clarify-choice" aria-pressed="false"><span class="clarify-choice-badge">2</span><span class="clarify-choice-text">Production EU</span></button>
+            </div>
+            <input class="clarify-input clarify-q-input" type="text" aria-labelledby="doc-clarifyQ-q0-label" placeholder="Type your response…">
+          </div>
+          <div class="clarify-q" role="group" aria-labelledby="doc-clarifyQ-q1-label" data-qid="q1" data-multi="1">
+            <div class="clarify-question" id="doc-clarifyQ-q1-label">Which checks should run first?</div>
+            <div class="clarify-choices">
+              <button class="clarify-choice" aria-pressed="true"><span class="clarify-choice-badge">1</span><span class="clarify-choice-text">Unit tests</span></button>
+              <button class="clarify-choice" aria-pressed="true"><span class="clarify-choice-badge">2</span><span class="clarify-choice-text">Browser smoke</span></button>
+            </div>
+            <input class="clarify-input clarify-q-input" type="text" aria-labelledby="doc-clarifyQ-q1-label" placeholder="Type your response…">
+          </div>
+          <div class="clarify-q" role="group" aria-labelledby="doc-clarifyQ-q2-label" data-qid="q2">
+            <div class="clarify-question" id="doc-clarifyQ-q2-label">Anything else I should know before starting?</div>
+            <input class="clarify-input clarify-q-input" type="text" aria-labelledby="doc-clarifyQ-q2-label" placeholder="Type your response…">
+          </div>
+        </div>
+        <div class="clarify-response">
+          <button class="clarify-submit">Send</button>
+        </div>
+        <div class="clarify-hint">Pick a choice, or type your own answer below.</div>
+      </div>
+    </div>
+    <p style="font-size:12px;color:var(--muted);line-height:1.6;margin:10px 2px 0;">
+      The agent can ask up to five independent questions in one <code>clarify</code>
+      call. Each becomes one <code>.clarify-q</code> group: the question text, its
+      choices when it has any, and its own free-text field. The shared
+      <code>#clarifyQuestion</code>, <code>#clarifyChoices</code> and
+      <code>#clarifyInput</code> of the single-question card are hidden in this mode.
+    </p>
+    <ul style="font-size:12px;color:var(--muted);line-height:1.7;margin:8px 2px 0;padding-left:18px;">
+      <li><strong>Selection modes.</strong> Single-select keeps one choice pressed; multi-select
+        (<code>data-multi</code>) keeps several. Choices are pressed state, not instant submit — nothing
+        is sent until the shared <strong>Send</strong>.</li>
+      <li><strong>One answer per question, visibly.</strong> On a single-select question typing clears the
+        pressed choice and picking a choice clears a typed answer, so what is submitted is what is on
+        screen. On multi-select a typed value is an additional “Other” answer alongside the picks.</li>
+      <li><strong>Partial answers are allowed.</strong> Unanswered questions are omitted from the payload and
+        the agent reports them as a blank response — a deliberate skip. A form with nothing filled in
+        does not submit.</li>
+      <li><strong>Submission.</strong> All answers go in one request, keyed by the wire
+        <code>qid</code> (<code>q0</code>..<code>qN</code>), never by a model-supplied id. The transcript echoes a
+        readable “question → answer” summary rather than the raw payload.</li>
+      <li><strong>Accessibility.</strong> Each question’s text carries a unique id; its input is
+        <code>aria-labelledby</code> that id and the group is labelled by it too, so tabbing between fields
+        names the question instead of repeating one placeholder.</li>
+    </ul>
+  </div>
+
   <div class="doc-card"><span class="doc-label">Reconnect / mid-stream recovery banner</span>
     <div class="reconnect-banner doc-visible">
       <span>⚠ A response may have been in progress when you last left. Reload messages?</span>

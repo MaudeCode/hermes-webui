@@ -10227,8 +10227,16 @@ def _run_agent_streaming(
         except ImportError:
             logger.debug("Clarify module not available, falling back to polling")
 
-        def _clarify_callback_impl(question, choices, sid, cancel_evt, put_event):
-            """Bridge Hermes clarify prompts to the WebUI."""
+        def _clarify_callback_impl(question, choices, sid, cancel_evt, put_event, questions=None):
+            """Bridge Hermes clarify prompts to the WebUI.
+
+            ``questions`` carries a batch clarify (agent issue #18450): the
+            whole set is rendered as one form and the user's answers come back
+            as ``{"answers": {qid: value}}`` JSON, which the agent's
+            ``_run_batch`` parses. Without it the single-question payload is
+            unchanged, so an older agent build sends and renders exactly what
+            it does today.
+            """
             timeout = _clarify_timeout_seconds(_clarify_session_config(sid))
             choices_list = [str(choice) for choice in (choices or [])]
             data = {
@@ -10240,12 +10248,27 @@ def _run_agent_streaming(
                 'timeout_seconds': timeout,
             }
             try:
-                from api.clarify import submit_pending as _submit_clarify_pending, clear_pending as _clear_clarify_pending
+                from api.clarify import (
+                    submit_pending as _submit_clarify_pending,
+                    clear_pending as _clear_clarify_pending,
+                    normalize_questions as _normalize_clarify_questions,
+                )
             except ImportError:
                 return (
                     "The user did not provide a response within the time limit. "
                     "Use your best judgement to make the choice and proceed."
                 )
+
+            batch = _normalize_clarify_questions(questions)
+            if batch:
+                data['questions'] = batch
+            elif isinstance(questions, list) and questions and not data['question']:
+                # A batch the agent itself would reject (over the limit) with no
+                # single question to fall back on. Show the first question
+                # rather than an empty card the user cannot act on.
+                head = _normalize_clarify_questions(questions[:1])
+                if head:
+                    data['question'] = head[0]['question']
 
             entry = _submit_clarify_pending(sid, data)
             response, expired = _await_clarify_response(entry, timeout, cancel_evt)
@@ -11113,8 +11136,11 @@ def _run_agent_streaming(
                 reasoning_callback=on_reasoning,
                 tool_progress_callback=on_tool,
                 clarify_callback=(
-                    lambda question, choices: _clarify_callback_impl(
-                        question, choices, session_id, cancel_event, put
+                    # The ``questions`` keyword is how the agent detects a
+                    # batch-capable surface (clarify_tool._callback_accepts_questions);
+                    # without it every question is looped as its own round-trip.
+                    lambda question, choices, questions=None: _clarify_callback_impl(
+                        question, choices, session_id, cancel_event, put, questions
                     )
                 ),
             )
