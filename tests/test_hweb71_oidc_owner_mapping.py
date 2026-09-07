@@ -653,6 +653,11 @@ def test_an_unresolved_config_blocks_oidc_login_not_just_ownership(monkeypatch, 
     # is_auth_enabled() is the OR of the configured methods.
     assert auth_oidc.is_oidc_enabled() is True
     assert auth.is_auth_enabled() is True
+    for name in ("ISSUER", "CLIENT_ID", "ALLOW_CLAIM", "ALLOW_VALUES"):
+        monkeypatch.delenv(f"HERMES_WEBUI_OIDC_{name}", raising=False)
+    # ... including when every base setting lived in the unreadable file.
+    assert auth_oidc.is_oidc_enabled() is True
+    assert auth.is_auth_enabled() is True
     with pytest.raises(auth_oidc.OIDCConfigError, match="could not be resolved"):
         auth_oidc._require_oidc_config()
     with pytest.raises(auth_oidc.OIDCConfigError):

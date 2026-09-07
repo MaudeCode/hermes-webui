@@ -104,13 +104,19 @@ class OIDCAuthError(Exception):
 def is_oidc_enabled() -> bool:
     """True when OIDC login is configured for this deployment.
 
-    Deliberately does NOT consult ``config_read_failed``: api.auth's global
-    auth gate is the OR of the configured methods, so reporting False here
-    would drop an OIDC-only deployment into no-auth mode the moment its config
-    became unreadable. Login is refused by _require_oidc_config instead, which
-    keeps authentication required while SSO is unavailable.
+    An unresolved config reports True rather than False. api.auth's global auth
+    gate is the OR of the configured methods, so answering "not configured" for
+    a config we simply could not read would drop a deployment whose settings
+    live in that file into no-auth mode and serve every non-public request
+    without a session. Unknown must mean "still gated": login is refused by
+    _require_oidc_config, so SSO is unavailable while authentication stays
+    required. An operator config that cannot be read leaves the rest of Hermes
+    without its settings anyway, so this trades a broken install for a locked
+    one rather than an open one.
     """
     cfg = _resolve_oidc_config()
+    if cfg.get("config_read_failed"):
+        return True
     return bool(
         cfg.get("issuer")
         and cfg.get("client_id")
