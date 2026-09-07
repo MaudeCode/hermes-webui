@@ -840,6 +840,9 @@ def _oidc_profile_binding(
         "allow_values": sorted(str(value) for value in (cfg.get("allow_values") or [])),
         "profile_claim": str(cfg.get("profile_claim") or "sub"),
         "profile_map": cfg.get("profile_map") or {},
+        # An explicitly empty map admits nobody, which is a different policy
+        # from having no map at all even though both normalize to {}.
+        "profile_map_configured": bool(cfg.get("profile_map_configured")),
         "owner_claim": str(cfg.get("owner_claim") or ""),
         "owner_values": sorted(str(value) for value in (cfg.get("owner_values") or [])),
         "owner_policy_configured": bool(cfg.get("owner_policy_configured")),

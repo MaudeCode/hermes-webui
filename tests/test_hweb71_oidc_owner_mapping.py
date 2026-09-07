@@ -486,6 +486,26 @@ def test_an_absent_owner_section_still_means_legacy(monkeypatch, tmp_path):
         auth.invalidate_session(cookie)
 
 
+def test_activating_an_empty_profile_map_revokes_existing_unbound_sessions(monkeypatch):
+    """An empty map admits nobody, which is not the same policy as no map."""
+    import api.auth as auth
+
+    private_key, token = _configure(monkeypatch)
+    cookie = _session(monkeypatch, _login(monkeypatch, private_key, token, {
+        "email": "owner@example.com", "groups": [OWNER_GROUP],
+    }))
+
+    try:
+        assert auth.session_can_manage_server(auth.get_session_info(cookie)) is True
+        monkeypatch.setenv("HERMES_WEBUI_OIDC_PROFILE_CLAIM", "email")
+        monkeypatch.setenv("HERMES_WEBUI_OIDC_PROFILE_MAP", "{}")
+
+        assert auth.session_can_manage_server(auth.get_session_info(cookie)) is False
+        assert auth.ensure_trusted_auth_session(RouteFakeHandler(cookie)) is None
+    finally:
+        auth.invalidate_session(cookie)
+
+
 def test_startup_warning_explains_a_non_mapping_oidc_section(monkeypatch, tmp_path):
     import api.auth as auth
     import api.auth_oidc as auth_oidc
