@@ -412,6 +412,49 @@ def test_owner_check_reconciles_against_the_snapshot_that_chose_the_branch(monke
     assert auth_oidc.oidc_session_can_manage_server(session_info) is False
 
 
+@pytest.mark.parametrize("section", ["[]", '"owner_claim: groups"', "42"])
+def test_non_mapping_webui_oidc_section_is_unresolved_not_absent(monkeypatch, tmp_path, section):
+    """A section the operator did write must not present as one they did not."""
+    import api.auth as auth
+    import api.auth_oidc as auth_oidc
+    import api.profiles as profiles
+
+    _configure(monkeypatch, owner_claim=None, owner_values=None)
+    monkeypatch.setattr(auth_oidc, "_load_operator_config", _REAL_LOAD_OPERATOR_CONFIG)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f"webui_oidc: {section}\n", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_CONFIG_PATH", str(config_path))
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    cookie = auth.create_session(auth_type="oidc", username="user@example.com")
+
+    try:
+        assert auth_oidc._resolve_oidc_config()["config_read_failed"] is True
+        assert auth.session_can_manage_server(auth.get_session_info(cookie)) is False
+    finally:
+        auth.invalidate_session(cookie)
+
+
+def test_profile_dotenv_cannot_grant_itself_the_owner_policy(monkeypatch, tmp_path):
+    """A contained profile must not be able to name itself the owner group."""
+    import api.profiles as profiles
+
+    monkeypatch.setenv("HERMES_WEBUI_OIDC_OWNER_CLAIM", "groups")
+    monkeypatch.setenv("HERMES_WEBUI_OIDC_OWNER_VALUES", OWNER_GROUP)
+    (tmp_path / ".env").write_text(
+        "HERMES_WEBUI_OIDC_OWNER_CLAIM=email\n"
+        "HERMES_WEBUI_OIDC_OWNER_VALUES=attacker@example.com\n",
+        encoding="utf-8",
+    )
+
+    profiles._reload_dotenv(tmp_path)
+    runtime_env = profiles.get_profile_runtime_env(tmp_path)
+
+    assert os.environ["HERMES_WEBUI_OIDC_OWNER_CLAIM"] == "groups"
+    assert os.environ["HERMES_WEBUI_OIDC_OWNER_VALUES"] == OWNER_GROUP
+    assert "HERMES_WEBUI_OIDC_OWNER_CLAIM" not in runtime_env
+    assert "HERMES_WEBUI_OIDC_OWNER_VALUES" not in runtime_env
+
+
 def test_startup_warning_explains_an_unresolved_operator_config(monkeypatch, tmp_path):
     """A denied-owner state must be diagnosable, not a silent lockout."""
     import api.auth as auth

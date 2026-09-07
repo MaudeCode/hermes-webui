@@ -552,6 +552,11 @@ def _resolve_oidc_config() -> dict[str, Any]:
         value = cfg.get("webui_oidc") if isinstance(cfg, dict) else None
         if isinstance(value, dict):
             raw.update(value)
+        elif value is not None:
+            # The section parsed but is not a mapping (``webui_oidc: []``, or a
+            # scalar). Silently discarding it would present a policy the
+            # operator did write as one they never wrote.
+            raise OIDCConfigError("webui_oidc must be a mapping")
     except Exception:
         # An unreadable config is "unknown", not "unset". Callers that gate
         # privilege on the resolved policy must be able to tell them apart.
