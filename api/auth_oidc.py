@@ -80,6 +80,11 @@ _warned_owner_policy = False
 # that gates privilege.
 _UNSET = object()
 
+# A ``${VAR}`` that survived expansion was never resolved. In a policy that
+# grants privilege it is a configuration error, not a group name an identity
+# may be issued.
+_UNRESOLVED_PLACEHOLDER_RE = re.compile(r"\${[^}]+}")
+
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
@@ -789,7 +794,7 @@ def _normalize_owner_policy(
         return "", [], None, False
     claim = raw_claim.strip() if isinstance(raw_claim, str) else ""
     values = _normalize_owner_values(raw_values)
-    if not claim or not values:
+    if not claim or not values or _UNRESOLVED_PLACEHOLDER_RE.search(claim):
         return claim, [], _OWNER_POLICY_ERROR, True
     return claim, values, None, True
 
@@ -825,7 +830,10 @@ def _normalize_owner_values(raw: Any) -> list[str]:
         values = [item.strip() for item in raw]
     else:
         return []
-    return [value for value in values if value]
+    values = [value for value in values if value]
+    if any(_UNRESOLVED_PLACEHOLDER_RE.search(value) for value in values):
+        return []
+    return values
 
 
 def _resolve_owner_permission(cfg: dict[str, Any], claims: dict[str, Any]) -> bool:

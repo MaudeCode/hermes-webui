@@ -199,6 +199,8 @@ def test_absent_owner_policy_is_disabled(monkeypatch):
         ("groups", [OWNER_GROUP, True]),   # nor is a boolean
         ("groups", [OWNER_GROUP, ""]),     # a blank entry is malformed, not droppable
         ("groups", [OWNER_GROUP, "   "]),
+        ("groups", [OWNER_GROUP, "${UNRESOLVED}"]),  # never expanded
+        ("${UNRESOLVED}", OWNER_GROUP),
         ("groups", {"a": OWNER_GROUP}),    # nor is an object
         ("groups", 42),
     ],
@@ -540,9 +542,14 @@ def test_a_profile_dotenv_cannot_supply_an_interpolated_owner_group(monkeypatch,
         assert os.environ["OIDC_OWNER_GROUP"] == "attackers"
 
         cfg = auth_oidc._resolve_oidc_config()
-        assert cfg["owner_values"] == ["${OIDC_OWNER_GROUP}"]
+        # The unresolved reference is a configuration error, not a group name:
+        # the policy is configured and matches nobody, including an identity
+        # whose claim is literally the placeholder.
+        assert cfg["owner_policy_configured"] is True
+        assert cfg["owner_values"] == []
+        assert cfg["owner_policy_error"] == auth_oidc._OWNER_POLICY_ERROR
         assert auth_oidc._resolve_owner_permission(cfg, {"groups": ["attackers"]}) is False
-        assert auth_oidc._resolve_owner_permission(cfg, {"groups": ["${OIDC_OWNER_GROUP}"]}) is True
+        assert auth_oidc._resolve_owner_permission(cfg, {"groups": ["${OIDC_OWNER_GROUP}"]}) is False
     finally:
         profiles._reload_dotenv(tmp_path)
 
@@ -569,7 +576,9 @@ def test_an_unset_placeholder_stays_literal_and_matches_nothing(monkeypatch, tmp
 
     cfg = auth_oidc._resolve_oidc_config()
 
-    assert cfg["owner_values"] == ["${OIDC_OWNER_GROUP}"]
+    assert cfg["owner_policy_configured"] is True
+    assert cfg["owner_values"] == []
+    assert auth_oidc._resolve_owner_permission(cfg, {"groups": ["${OIDC_OWNER_GROUP}"]}) is False
     assert auth_oidc._resolve_owner_permission(cfg, {"groups": [""]}) is False
 
 
