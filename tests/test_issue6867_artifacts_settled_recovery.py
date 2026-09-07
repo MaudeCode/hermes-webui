@@ -164,8 +164,12 @@ def test_missing_artifact_path_stays_blocked(browser):
 def test_restore_settled_session_projects_through_production_path(browser):
     page = _page(browser)
     try:
-        ownership_source = _function_source(MESSAGES_JS, "_streamPaneOwnershipLost")
-        page.add_script_tag(content=ownership_source)
+        page.add_script_tag(
+            content="const _PANE_TURN_START_CLAIMS = new Set();\n"
+            + _function_source(MESSAGES_JS, "_paneTurnStartClaimed")
+            + "\n"
+            + _function_source(MESSAGES_JS, "_streamPaneOwnershipLost")
+        )
         restore_source = _function_source(MESSAGES_JS, "_restoreSettledSession").replace(
             "catch(_){\n      return returnStatus?'error':false;",
             "catch(error){\n      window.restoreError=String(error);\n      return returnStatus?'error':false;",

@@ -1902,6 +1902,9 @@ async function send(){
 
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;
+  // HWEB-80: hold the pane across the /api/chat/start round-trip, during which
+  // S.activeStreamId is intentionally null. Released in the finally below.
+  _claimPaneTurnStart(activeSid);
 
   // Salvage of #4750 (@harryazj): capture the composer text and clear the
   // textarea NOW — immediately after capture and BEFORE the uploadPendingFiles()
@@ -2276,7 +2279,7 @@ async function send(){
   // Open SSE stream and render tokens live
   attachLiveStream(activeSid, streamId, uploadedNames);
 
-  }finally{ _sendInProgress=false; _sendInProgressSid=null; }
+  }finally{ _sendInProgress=false; _sendInProgressSid=null; _releasePaneTurnStart(activeSid); }
 }
 
 async function startRegeneration(sessionId, regenerationRevision){
@@ -2299,6 +2302,9 @@ async function startRegeneration(sessionId, regenerationRevision){
   renderMessages();setBusy(true);
   if(typeof ensureLiveWorklogShell==='function')ensureLiveWorklogShell();
   else if(typeof appendThinking==='function')appendThinking('',{pending:true});
+  // HWEB-80: same pane claim as send() — regeneration also learns its stream id
+  // only from the start response, leaving S.activeStreamId null until then.
+  _claimPaneTurnStart(sid);
   try{
     const response=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
       session_id:sid,regenerate:true,regeneration_revision:regenerationRevision
@@ -2325,7 +2331,30 @@ async function startRegeneration(sessionId, regenerationRevision){
       removeThinking();renderMessages();setBusy(false);setComposerStatus('');
     }
     throw error;
+  }finally{
+    _releasePaneTurnStart(sid);
   }
+}
+
+// HWEB-80: a pane claim held by a replacement turn across its /api/chat/start
+// round-trip, during which S.activeStreamId is deliberately null (send() and
+// startRegeneration() both only learn the id from the response). A terminal
+// event from the PREVIOUS stream must not settle its stale transcript over the
+// claimant's optimistic messages during that window.
+//
+// This is an explicit claim rather than an inference from ambient state:
+// S.busy is set by manual compression, slash commands and session load too, so
+// keying on it would make an unrelated busy operation look like a stream
+// claimant and drop the very terminal event this ticket exists to preserve.
+const _PANE_TURN_START_CLAIMS=new Set();
+function _claimPaneTurnStart(sessionId){
+  if(sessionId) _PANE_TURN_START_CLAIMS.add(String(sessionId));
+}
+function _releasePaneTurnStart(sessionId){
+  if(sessionId) _PANE_TURN_START_CLAIMS.delete(String(sessionId));
+}
+function _paneTurnStartClaimed(sessionId){
+  return !!sessionId && _PANE_TURN_START_CLAIMS.has(String(sessionId));
 }
 
 const LIVE_STREAMS={};
@@ -2680,16 +2709,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // stale transcript over the claimant's optimistic messages or clear its
     // busy state.
     //
-    // `S.busy` is the discriminator rather than a per-caller flag: every
-    // claimant marks the pane busy BEFORE nulling/awaiting the stream id, while
-    // sessions.js:_reconcileActiveSessionIdleStateFromList — the race this
-    // predicate exists to survive — clears `S.busy` and `S.activeStreamId`
-    // together. So "null id + busy" means a new turn owns the pane and "null id
-    // + idle" means the sidebar simply observed the run finish. This covers
-    // send(), startRegeneration(), and any future claimant without enumerating
-    // them. `_sendInProgress` stays as a fail-closed backstop for the window
-    // where a send is in flight but something else cleared busy.
-    if(S.busy) return true;
+    // The claim is explicit (_claimPaneTurnStart), not inferred from S.busy:
+    // manual compression, slash commands and session load all set busy without
+    // claiming a stream, and treating those as a claimant would drop the very
+    // terminal event this ticket exists to preserve.
+    if(_paneTurnStartClaimed(activeSid)) return true;
+    // Fail-closed backstop for a send that somehow reaches its start round-trip
+    // without registering the claim above.
     return !!(typeof _sendInProgress!=='undefined'&&_sendInProgress&&_sendInProgressSid===activeSid);
   }
   function _ownsActiveStreamOrBackground(){
