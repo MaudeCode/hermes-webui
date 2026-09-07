@@ -501,7 +501,27 @@ def _load_operator_config() -> dict[str, Any]:
 
     configured_path = str(_INITIAL_HERMES_CONFIG_PATH or "").strip()
     path = Path(configured_path).expanduser() if configured_path else get_hermes_home_for_profile("default") / "config.yaml"
-    return _load_yaml_config_file(path)
+    loaded = _load_yaml_config_file(path)
+    if not loaded:
+        # api.config's loader flattens missing, empty, unreadable, and malformed
+        # files into {}. A caller that gates privilege on this config must not
+        # read "unknown" as "nothing configured", so surface the last two.
+        _raise_if_operator_config_is_unreadable(path)
+    return loaded
+
+
+def _raise_if_operator_config_is_unreadable(path: Path) -> None:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise OIDCConfigError(f"Operator config at {path} could not be read") from exc
+    if any(
+        line.strip() and not line.lstrip().startswith("#")
+        for line in text.splitlines()
+    ):
+        raise OIDCConfigError(f"Operator config at {path} could not be parsed")
 
 
 def _resolve_oidc_config() -> dict[str, Any]:

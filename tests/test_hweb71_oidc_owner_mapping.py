@@ -12,6 +12,7 @@ and locally patched provider transport. No IdP, credential, or network is used.
 
 import io
 import json
+import os
 import time
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
@@ -19,6 +20,12 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec, utils
+
+import api.auth_oidc as _auth_oidc
+
+# Captured before the autouse fixture stubs it, for the cases that need the
+# real operator-config read against a temporary config.yaml.
+_REAL_LOAD_OPERATOR_CONFIG = _auth_oidc._load_operator_config
 
 ISSUER = "https://issuer.example"
 CLIENT_ID = "webui-client"
@@ -266,6 +273,46 @@ def test_unreadable_operator_config_does_not_restore_legacy_owner_access(monkeyp
         assert _status(monkeypatch, legacy)["can_manage_server"] is False
     finally:
         auth.invalidate_session(legacy)
+
+
+@pytest.mark.parametrize("mode", ["malformed", "unreadable"])
+def test_malformed_operator_config_does_not_restore_legacy_owner_access(monkeypatch, tmp_path, mode):
+    """api.config flattens a broken config to {}; that must not read as "no policy"."""
+    import api.auth as auth
+    import api.auth_oidc as auth_oidc
+    import api.profiles as profiles
+
+    _configure(monkeypatch, owner_claim=None, owner_values=None)
+    monkeypatch.setattr(auth_oidc, "_load_operator_config", _REAL_LOAD_OPERATOR_CONFIG)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("webui_oidc: [this is: not, a mapping\n", encoding="utf-8")
+    if mode == "unreadable":
+        if os.geteuid() == 0:
+            pytest.skip("root bypasses file permissions")
+        config_path.chmod(0o000)
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_CONFIG_PATH", str(config_path))
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    legacy = auth.create_session()
+
+    try:
+        assert auth_oidc._resolve_oidc_config()["config_read_failed"] is True
+        assert auth.oidc_owner_policy_is_configured() is True
+        assert auth.session_can_manage_server(auth.get_session_info(legacy)) is False
+    finally:
+        config_path.chmod(0o600)
+        auth.invalidate_session(legacy)
+
+
+def test_comments_only_operator_config_is_not_a_read_failure(monkeypatch, tmp_path):
+    import api.auth_oidc as auth_oidc
+    import api.profiles as profiles
+
+    monkeypatch.setattr(auth_oidc, "_load_operator_config", _REAL_LOAD_OPERATOR_CONFIG)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("# nothing configured yet\n\n", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_CONFIG_PATH", str(config_path))
+
+    assert auth_oidc._resolve_oidc_config()["config_read_failed"] is False
 
 
 def test_removing_the_policy_does_not_re_elevate_a_policy_era_session(monkeypatch):
