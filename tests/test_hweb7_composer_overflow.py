@@ -200,6 +200,24 @@ def test_dropdown_anchors_require_the_overflow_row_to_be_laid_out():
     assert "_composerOverflowAnchor('composerMobileWorkspaceAction'" in ws, ws
 
 
+def test_a_late_workspace_response_cannot_open_a_detached_dropdown():
+    """Closing the panel while /api/workspaces is in flight must cancel the open:
+    with the panel closed and the footer chip hidden there is no anchor, so the
+    dropdown would land at the footer's left edge with no visible trigger."""
+    panels = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
+    toggle = _function_body(panels, "function toggleComposerWsDropdown()")
+    then_body = toggle[toggle.index("loadWorkspaceList()") :]
+    guard = then_body.index("_composerOverflowAnchor(")
+    assert guard < then_body.index("_setWorkspaceDropdownOpenState(dd,true)"), (
+        "the anchor re-check must run before the dropdown is marked open"
+    )
+
+    position = _function_body(panels, "function _positionComposerWsDropdown()")
+    assert "||mobileAction" not in position and "||chip" not in position, (
+        "falling back to a hidden node re-creates the zero-rect anchor this guards against"
+    )
+
+
 def test_every_profile_label_write_resyncs_the_overflow_row():
     """The panel stays open across a profile switch, so a writer that updates
     #profileChipLabel without resyncing leaves the row showing the old name."""

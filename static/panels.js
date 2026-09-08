@@ -6110,11 +6110,12 @@ function _renderWorkspaceAction(label, meta, iconSvg, onClick){
 function _positionComposerWsDropdown(){
   const dd=$('composerWsDropdown');
   const chip=$('composerWorkspaceGroup')||$('composerWorkspaceChip');
-  const mobileAction=$('composerMobileWorkspaceAction');
   const footer=document.querySelector('.composer-footer');
   // The workspace chip left the footer row in HWEB-7, so the open panel's row is
   // normally the anchor — but only when it is actually laid out.
-  const anchor=_composerOverflowAnchor('composerMobileWorkspaceAction',chip)||mobileAction||chip;
+  // No fallback to a hidden node: anchoring to a zero rect is what puts the
+  // dropdown at the footer's left edge. Same contract as the toolsets path.
+  const anchor=_composerOverflowAnchor('composerMobileWorkspaceAction',chip);
   if(!dd||!anchor||!footer)return;
   const chipRect=anchor.getBoundingClientRect();
   const footerRect=footer.getBoundingClientRect();
@@ -6271,6 +6272,13 @@ function toggleComposerWsDropdown(){
     if(typeof closeModelDropdown==='function') closeModelDropdown();
     if(typeof closeReasoningDropdown==='function') closeReasoningDropdown();
     loadWorkspaceList().then(data=>{
+      // The panel can close while /api/workspaces is in flight. Re-resolving the
+      // anchor is the cancellation check: with the panel closed and the footer
+      // chip hidden at every width (HWEB-7) nothing is laid out, so opening here
+      // would strand the dropdown at the footer's left edge with no trigger. If
+      // the user reopened the panel meanwhile, an anchor exists and opening is
+      // still the right outcome.
+      if(!_composerOverflowAnchor('composerMobileWorkspaceAction',chip)) return;
       renderWorkspaceDropdownInto(dd, data.workspaces, S.session?.workspace||S._profileDefaultWorkspace||data.last||'');
       _setWorkspaceDropdownOpenState(dd,true);
       _positionComposerWsDropdown();
