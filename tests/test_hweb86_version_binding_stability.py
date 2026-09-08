@@ -11,6 +11,7 @@ execution from `git describe --tags --always`, and on CI's tagless checkout that
 falls back to a bare abbreviated SHA whose length git picks from prefix
 ambiguity — so the two instances could disagree by one hex digit.
 """
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -54,21 +55,64 @@ def test_evicting_api_updates_restores_the_original_module():
     assert after_eviction == original.WEBUI_VERSION
 
 
-def test_no_test_evicts_api_updates_without_restoring_it():
-    """`del sys.modules['api.updates']` outside a restoring context is the bug."""
+def test_module_cache_and_package_attribute_agree():
+    """The observable invariant: one module object, referenced consistently.
+
+    A leaked eviction shows up here as `sys.modules` and the `api` package
+    attribute pointing at different objects, whatever spelling caused it.
+    """
+    import api as api_package
+
+    assert sys.modules["api.updates"] is api_package.updates
+    assert sys.modules["api.updates"] is api.updates
+
+    # The route's form must reuse that module rather than executing a second copy.
+    before = sys.modules["api.updates"]
+    from api.updates import WEBUI_VERSION
+
+    assert sys.modules["api.updates"] is before
+    assert api_package.updates is before
+    assert WEBUI_VERSION == before.WEBUI_VERSION
+
+
+def test_no_test_removes_api_updates_from_the_module_cache():
+    """Catch the mutation at its source, in any spelling.
+
+    The identity check above only fires when the leaking test happened to run
+    earlier in the same shard, so this scan is the deterministic half. It covers
+    `del`, `.pop(...)` and `monkeypatch.delitem` rather than one literal form.
+    """
+    # `monkeypatch.delitem(sys.modules, ...)` and `patch.dict(sys.modules)` both
+    # put the entry back at teardown, so they are the sanctioned way to force a
+    # re-import. Only the unscoped spellings leak. Match through an alias
+    # (`import sys as _sys`) by anchoring on `.modules` rather than on `sys.`.
+    patterns = (
+        re.compile(r"\bdel\s+\w+\.modules\["),
+        re.compile(r"\b\w+\.modules\.pop\("),
+    )
     offenders = []
     for path in sorted((ROOT / "tests").glob("test_*.py")):
-        source = path.read_text(encoding="utf-8")
-        if "sys.modules" not in source:
+        if path.name == Path(__file__).name:
             continue
-        for line in source.splitlines():
+        source = path.read_text(encoding="utf-8")
+        if "api.updates" not in source:
+            continue
+        if "patch.dict(sys.modules)" in source:
+            continue  # scoped by patch.dict, which restores the mapping
+        for number, line in enumerate(source.splitlines(), 1):
             stripped = line.strip()
-            if stripped.startswith("del sys.modules[") and "api.updates" in stripped:
-                offenders.append(f"{path.name}: {stripped}")
+            if not any(pattern.search(stripped) for pattern in patterns):
+                continue
+            if "api.updates" not in stripped:
+                continue
+            offenders.append(f"{path.name}:{number}: {stripped}")
     assert not offenders, (
-        "evict api.updates through `with patch.dict(sys.modules):` so the "
-        "original module is restored; leaking a second instance splits "
-        "WEBUI_VERSION across the session (HWEB-86):\n" + "\n".join(offenders)
+        "removing api.updates from sys.modules leaves the next dotted import to "
+        "execute the module a second time, splitting WEBUI_VERSION across the "
+        "session (HWEB-86). `from api import updates` returns the existing "
+        "module anyway, so the eviction buys nothing. Use "
+        "`monkeypatch.delitem(sys.modules, ...)` if you genuinely need a fresh "
+        "import:\n" + "\n".join(offenders)
     )
 
 

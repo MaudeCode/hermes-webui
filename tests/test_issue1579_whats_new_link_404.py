@@ -31,29 +31,20 @@ sys.path.insert(0, str(REPO_ROOT))
 
 @pytest.fixture
 def upd():
-    """Import ``api.updates`` fresh, then put the original module back.
+    """The ``api.updates`` module under test.
 
-    These tests re-import the module so it picks up a stable CWD. Dropping it
-    from ``sys.modules`` without restoring leaves a second module object live
-    for the rest of the session, each with its own ``WEBUI_VERSION`` computed
-    by its own ``git describe`` call. A module that bound the constant at import
-    time then compares a stale value against whatever product code reads later
-    — which is how the tagless CI checkout produced a 7-character version in one
-    place and an 8-character one in the other.
+    This used to drop ``api.updates`` from ``sys.modules`` first, to "import
+    with a stable CWD". That never did anything: ``from api import updates``
+    reads the attribute off the already-imported ``api`` package and hands back
+    the existing module without re-executing it. All the eviction achieved was a
+    hole in ``sys.modules`` that the next *dotted* import — ``from api.updates
+    import WEBUI_VERSION`` in the ``/sw.js`` route — filled by executing the
+    module a second time, giving the session two ``WEBUI_VERSION`` values from
+    two ``git describe`` calls (HWEB-86).
     """
-    import api as api_package
+    from api import updates
 
-    original = sys.modules.get('api.updates')
-    with patch.dict(sys.modules):
-        sys.modules.pop('api.updates', None)
-        try:
-            from api import updates as module
-            yield module
-        finally:
-            # A dotted re-import inside the block would rebind this attribute to
-            # a second module object; patch.dict only restores the mapping.
-            if original is not None:
-                api_package.updates = original
+    return updates
 
 
 # ── 1. Server-side: api.updates._check_repo uses merge-base, not HEAD ──
