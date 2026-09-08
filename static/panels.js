@@ -6036,6 +6036,12 @@ function syncWorkspaceDisplays(){
   // Only show workspace label once boot has finished to prevent
   // flash of "No workspace" before the saved session finishes loading.
   if(composerLabel) composerLabel.textContent=S._bootReady?label:'';
+  // HWEB-1: the new-conversation hero headline names the same resolved workspace.
+  const heroTitle=$('emptyHeroTitle');
+  if(heroTitle){
+    heroTitle.textContent=(S._bootReady&&hasWorkspace)?t('empty_hero_title_workspace',label):t('empty_hero_title');
+    heroTitle.classList.toggle('ready',!!S._bootReady);
+  }
   if(mobileLabel) mobileLabel.textContent=S._bootReady?label:'';
   const composerExpanded=!!(composerDropdown&&composerDropdown.classList.contains('open'));
   if(composerChip){
@@ -9081,10 +9087,6 @@ function _preferencesPayloadFromUi(){
   if(showQuotaChipCb) payload.show_quota_chip=showQuotaChipCb.checked;
   const showConversationOutlineCb=$('settingsShowConversationOutline');
   if(showConversationOutlineCb) payload.show_conversation_outline=showConversationOutlineCb.checked;
-  const hideSuggestionsCb=$('settingsHideSuggestions');
-  if(hideSuggestionsCb) payload.hide_empty_state_suggestions=hideSuggestionsCb.checked;
-  const hideEmptyStatePanelCb=$('settingsHideEmptyStatePanel');
-  if(hideEmptyStatePanelCb) payload.hide_empty_state_panel=hideEmptyStatePanelCb.checked;
   const virtualizeTranscriptCb=$('settingsVirtualizeTranscript');
   if(virtualizeTranscriptCb){
     payload.virtualize_transcript=virtualizeTranscriptCb.checked;
@@ -9269,14 +9271,6 @@ async function _autosavePreferencesSettings(payload){
       window._showTps=!!(saved&&saved.show_tps);
       if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
       if(typeof renderMessages==='function') renderMessages();
-    }
-    if(payload&&payload.hide_empty_state_suggestions!==undefined){
-      window._hideEmptyStateSuggestions=!!(saved&&saved.hide_empty_state_suggestions);
-      if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
-    }
-    if(payload&&payload.hide_empty_state_panel!==undefined){
-      window._hideEmptyStatePanel=!!(saved&&saved.hide_empty_state_panel);
-      if(typeof applyEmptyStatePanelPref==='function') applyEmptyStatePanelPref();
     }
     if(payload&&payload.show_conversation_outline!==undefined){
       window._showConversationOutline=!!(saved&&saved.show_conversation_outline);
@@ -9737,28 +9731,6 @@ async function loadSettingsPanel(){
       showQuotaChipCb.addEventListener('change',()=>{
         window._showQuotaChip=showQuotaChipCb.checked;
         if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
-        _schedulePreferencesAutosave();
-      },{once:false});
-    }
-    const hideSuggestionsCb=$('settingsHideSuggestions');
-    if(hideSuggestionsCb){
-      hideSuggestionsCb.checked=settings.hide_empty_state_suggestions===true;
-      window._hideEmptyStateSuggestions=hideSuggestionsCb.checked;
-      if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
-      hideSuggestionsCb.addEventListener('change',()=>{
-        window._hideEmptyStateSuggestions=hideSuggestionsCb.checked;
-        if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
-        _schedulePreferencesAutosave();
-      },{once:false});
-    }
-    const hideEmptyStatePanelCb=$('settingsHideEmptyStatePanel');
-    if(hideEmptyStatePanelCb){
-      hideEmptyStatePanelCb.checked=settings.hide_empty_state_panel===true;
-      window._hideEmptyStatePanel=hideEmptyStatePanelCb.checked;
-      if(typeof applyEmptyStatePanelPref==='function') applyEmptyStatePanelPref();
-      hideEmptyStatePanelCb.addEventListener('change',()=>{
-        window._hideEmptyStatePanel=hideEmptyStatePanelCb.checked;
-        if(typeof applyEmptyStatePanelPref==='function') applyEmptyStatePanelPref();
         _schedulePreferencesAutosave();
       },{once:false});
     }

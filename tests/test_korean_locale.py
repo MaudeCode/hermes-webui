@@ -100,7 +100,7 @@ def test_korean_locale_includes_representative_translations():
         "tab_chat: '채팅'",
         "tab_tasks: '작업'",
         "tab_profiles: 'Agent 프로필'",
-        "empty_title: '무엇을 도와드릴까요?'",
+        "empty_hero_title: '무엇을 작업할까요?'",
         "onboarding_title: 'Hermes Web UI에 오신 것을 환영합니다'",
     ]
     for entry in expected:

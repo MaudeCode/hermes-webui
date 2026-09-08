@@ -2600,20 +2600,6 @@ $('msg').addEventListener('paste',e=>{
   e.preventDefault();
   _attachLargePastedText(pastedTextFile);
 });
-document.querySelectorAll('.suggestion').forEach(btn=>{
-  btn.onclick=()=>{$('msg').value=btn.dataset.msg;send();};
-});
-
-function applyEmptyStateSuggestionPref(){
-  if(!$('emptyState')) return;
-  $('emptyState').classList.toggle('no-suggestions',window._hideEmptyStateSuggestions===true);
-}
-
-function applyEmptyStatePanelPref(){
-  if(!$('emptyState')) return;
-  $('emptyState').classList.toggle('no-welcome',window._hideEmptyStatePanel===true);
-}
-
 window.addEventListener('resize',()=>{
   _syncWorkspacePanelInlineWidth();
   syncWorkspacePanelState();
@@ -3305,10 +3291,6 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._showConversationOutline=s.show_conversation_outline===true;
     document.documentElement.dataset.conversationOutline=window._showConversationOutline?'enabled':'disabled';
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
-    window._hideEmptyStateSuggestions=s.hide_empty_state_suggestions===true;
-    applyEmptyStateSuggestionPref();
-    window._hideEmptyStatePanel=s.hide_empty_state_panel===true;
-    applyEmptyStatePanelPref();
     // #4343: transcript virtualization is EXPERIMENTAL/opt-IN (default OFF).
     // #4346 Phase B (footer-jitter suppression during virtual-scroll
     // measurement re-renders) resolved the scroll-up flicker root cause,
@@ -3469,10 +3451,6 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._showConversationOutline=false;
     document.documentElement.dataset.conversationOutline='disabled';
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
-    window._hideEmptyStateSuggestions=false;
-    applyEmptyStateSuggestionPref();
-    window._hideEmptyStatePanel=false;
-    applyEmptyStatePanelPref();
     window._virtualizeTranscript=false;  // settings-load failed: default-OFF (experimental/opt-in) (#4343)
     window._showTps=false;
     window._fadeTextEffect=false;

@@ -30,6 +30,21 @@ function showConversationEmptyState(){
   try{ delete document.documentElement.dataset.sessionBoot; }catch(_){}
   const empty=$('emptyState');
   if(empty) empty.style.display='';
+  _setComposerHero(true);
+  // Re-resolve the workspace-aware headline for the conversation we just landed on.
+  if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
+}
+// The one place the empty state is taken down. Every caller that starts painting
+// a transcript row goes through here so the hero layout is released with it
+// (HWEB-1) — a direct style.display='none' would leave the composer centered.
+function hideConversationEmptyState(){
+  const empty=$('emptyState');
+  if(empty) empty.style.display='none';
+  _setComposerHero(false);
+}
+function _setComposerHero(on){
+  const chat=$('mainChat');
+  if(chat) chat.classList.toggle('composer-hero',!!on);
 }
 const OFFLINE_RECHECK_MS=2500;
 const OFFLINE_HEALTH_TIMEOUT_MS=10000;
@@ -14825,7 +14840,7 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   if(!S.session||!S.activeStreamId) return false;
   if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
   if(streamId&&S.activeStreamId!==streamId) return false;
-  $('emptyState').style.display='none';
+  hideConversationEmptyState();
   let turn=$('liveAssistantTurn');
   if(!turn){
     turn=_createAssistantTurn();
@@ -14922,7 +14937,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   if(!S.session||!S.activeStreamId) return false;
   if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
   if(streamId&&S.activeStreamId!==streamId) return false;
-  $('emptyState').style.display='none';
+  hideConversationEmptyState();
   let turn=$('liveAssistantTurn');
   if(!turn){
     turn=_createAssistantTurn();
@@ -18032,7 +18047,7 @@ function renderMessages(options){
 
   const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);
   const visWithIdx=_getVisibleMessagesWithIdx();
-  if(visWithIdx.length||preservedCompressionTaskMessages.length) $('emptyState').style.display='none';
+  if(visWithIdx.length||preservedCompressionTaskMessages.length) hideConversationEmptyState();
   else showConversationEmptyState();
   const virtualWindow=virtualFallback
     ? {virtualized:false,start:0,end:visWithIdx.length,topPad:0,bottomPad:0,total:visWithIdx.length,tailStart:visWithIdx.length}
@@ -20728,7 +20743,7 @@ function ensureLiveWorklogShell(){
     _dedupeLiveProcessedWorklogAnchors($('liveAssistantTurn'));
     return $('liveAssistantTurn');
   }
-  $('emptyState').style.display='none';
+  hideConversationEmptyState();
   const compactWorklog=typeof isCompactWorklogMode==='function'&&isCompactWorklogMode();
   if(!compactWorklog&&!isSimplifiedToolCalling()){
     appendThinking();
@@ -21739,8 +21754,7 @@ function appendThinking(text='', options){
     _renderLiveAnchorActivitySceneForStream(S.activeStreamId, S.session.session_id);
     return;
   }
-  const empty=$('emptyState');
-  if(empty) empty.style.display='none';
+  hideConversationEmptyState();
   if(!isSimplifiedToolCalling()){
     let row=$('thinkingRow');
     if(!row){
