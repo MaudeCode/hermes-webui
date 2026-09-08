@@ -11441,13 +11441,15 @@ async function _waitForServerThenReload(opts){
     return normalizedIdentity.serverStartedAt===null&&normalizedIdentity.uptimeSeconds===null ? null : normalizedIdentity;
   })();
   window._restartingForUpdate=true;
-  publishChatRuntimeNotice({
-    kind:'reconnect',
-    runId:'restart',
-    tone:'info',
-    title:'Restarting…',
-    detail:'\u23f3 Restarting… please wait',
-  });
+  // The restart message reuses the reconnect slot under its own run id, so a
+  // previously dismissed reconnect prompt cannot suppress it. Guarded because
+  // tests extract this function on its own, the same way the sidebar-SSE and
+  // refreshSession calls elsewhere in this file are guarded.
+  const _publishRestartNotice=(title,detail)=>{
+    if(typeof publishChatRuntimeNotice!=='function') return;
+    publishChatRuntimeNotice({kind:'reconnect',runId:'restart',tone:'info',title,detail});
+  };
+  _publishRestartNotice('Restarting…','\u23f3 Restarting… please wait');
   const deadline=Date.now()+maxMs;
   // Track restart-outage evidence. An outage (failed or non-OK /health probes)
   // followed by a healthy response is a reliable new-instance signal even when
@@ -11545,7 +11547,7 @@ async function _waitForServerThenReload(opts){
     }catch(_){ _consecutiveOutages++; /* socket closed during restart — retry */ }
     await new Promise(r=>setTimeout(r, interval));
   }
-  if(msgEl) msgEl.textContent='⚠️ Server is taking longer than expected — click Reload when ready';
+  _publishRestartNotice('Server is taking longer than expected','\u26a0\ufe0f Server is taking longer than expected — click Reload when ready');
 }
 
 function _pendingCurrentTailUserMessage(messages){

@@ -115,6 +115,63 @@ def test_every_condition_publishes_into_the_shared_stack():
     assert "clearChatRuntimeNotice('thread_error',sid);" in UI_JS
 
 
+def test_restart_wait_publishes_both_messages_without_a_dangling_dom_reference():
+    """The restart poller no longer pokes #reconnectMsg, including on timeout.
+
+    Regression guard: consolidating the banner deleted the `msgEl` binding, and
+    the timeout branch still referenced it — a ReferenceError on the one path
+    nothing else covers. It also calls into the notice layer, so the call must
+    be guarded the way the sibling `reconnectSidebarSSE`/`refreshSession` calls
+    in this file are, since the function is extracted and run on its own.
+    """
+    start = UI_JS.index("async function _waitForServerThenReload(")
+    end = UI_JS.index("function _topbarMessageMetaText(")
+    body = UI_JS[start:end]
+    assert "msgEl" not in body, "restart poller still references the removed #reconnectMsg node"
+    assert "if(typeof publishChatRuntimeNotice!=='function') return;" in body
+    assert "_publishRestartNotice('Restarting…'" in body
+    assert "_publishRestartNotice('Server is taking longer than expected'" in body
+
+
+def test_restart_wait_timeout_path_runs_without_throwing():
+    """Drive the extracted poller to its deadline with no healthy response."""
+    if shutil.which("node") is None:
+        pytest.skip("Node.js is required for the restart-poller harness")
+    wait_fn = UI_JS[
+        UI_JS.index("async function _waitForServerThenReload(") : UI_JS.index(
+            "function _topbarMessageMetaText("
+        )
+    ]
+    for helper in ("_normalizeHealthServerIdentity", "_healthResponseServerIdentity"):
+        h_start = UI_JS.index(f"function {helper}(")
+        h_end = UI_JS.index("\nfunction ", h_start + 1)
+        wait_fn = UI_JS[h_start:h_end] + "\n" + wait_fn
+    script = textwrap.dedent(
+        """\
+        let now = 0, reloads = 0, published = [];
+        global.window = {};
+        global.document = { baseURI: 'http://127.0.0.1:8788/' };
+        global.location = { reload: () => { reloads += 1; } };
+        global.Date = { now: () => now };
+        global.setTimeout = (cb, ms) => { now += ms || 0; cb(); return 0; };
+        global.fetch = async () => { throw new Error('server down'); };
+        global.publishChatRuntimeNotice = rec => { published.push(rec.title); };
+        """
+    ) + wait_fn + textwrap.dedent(
+        """
+        (async () => {
+          await _waitForServerThenReload({ interval: 1, maxMs: 5 });
+          process.stdout.write(JSON.stringify({reloads, published}) + '\\n');
+        })().catch(err => { console.error(err.stack || err.message); process.exit(1); });
+        """
+    )
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=15)
+    assert proc.returncode == 0, f"restart poller threw: {proc.stderr[:400]}"
+    result = json.loads(proc.stdout.strip())
+    assert result["reloads"] == 0
+    assert result["published"] == ["Restarting…", "Server is taking longer than expected"]
+
+
 def test_cancelled_and_interrupted_turns_raise_no_failure_notice():
     idx = MESSAGES_JS.index("_isProviderFailure")
     guard = MESSAGES_JS[MESSAGES_JS.rindex("if(", 0, idx) : idx]
