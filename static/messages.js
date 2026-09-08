@@ -7380,7 +7380,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // (session, stream) so a retry of the same turn coalesces and setBusy()
           // can clear it when the next turn starts.
           if(!isCancelled&&!isInterrupted&&!isRecoveryControlMessage&&typeof publishChatRuntimeNotice==='function'){
-            const _isProviderFailure=isRateLimit||isQuotaExhausted||isAuthMismatch||isGatewayAuthError||isModelNotFound||isNoResponse;
+            // The backend emits more provider-side types than the terminal-label
+            // list above names — api/gateway_chat.py adds gateway_http_error,
+            // gateway_empty_response and gateway_error, and api/models.py adds
+            // credential_pool_empty. Matching the gateway_/provider_ families by
+            // prefix keeps a newly added sibling classified as a provider failure
+            // instead of silently falling through to thread_error, which outranks
+            // offline and would put a provider outage above a lost connection.
+            const _errType=String(d.type||'');
+            const _isProviderFailure=isRateLimit||isQuotaExhausted||isAuthMismatch||isGatewayAuthError
+              ||isModelNotFound||isNoResponse||_errType==='credential_pool_empty'
+              ||/^(gateway|provider)_/.test(_errType);
             publishChatRuntimeNotice({
               kind:_isProviderFailure?'provider_failure':'thread_error',
               // Compression rotation assigns S.session=d.session further down, so

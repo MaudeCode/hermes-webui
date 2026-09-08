@@ -1736,6 +1736,10 @@ function _teardownDeletedSessionBrowserOwners(sid){
   if(typeof _clearHandoffStorageForSession==='function') _clearHandoffStorageForSession(sid);
   if(typeof _clearStreamHidden==='function') _clearStreamHidden(sid);
   if(typeof _clearStreamNotificationBackground==='function') _clearStreamNotificationBackground(sid);
+  if(typeof clearChatRuntimeNotice==='function'){
+    clearChatRuntimeNotice('provider_failure',sid);
+    clearChatRuntimeNotice('thread_error',sid);
+  }
   if(typeof _approvalPendingBySession!=='undefined'&&_approvalPendingBySession) _approvalPendingBySession.delete(sid);
   if(typeof _clarifyPendingBySession!=='undefined'&&_clarifyPendingBySession) _clarifyPendingBySession.delete(sid);
   if((isActive||(typeof _approvalPollingSessionId!=='undefined'&&_approvalPollingSessionId===sid))&&typeof stopApprovalPolling==='function') stopApprovalPolling();

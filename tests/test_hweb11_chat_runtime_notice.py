@@ -22,6 +22,7 @@ UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 INDEX_HTML = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
 STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
+SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +188,40 @@ def test_restart_wait_timeout_path_runs_without_throwing():
     ]
     # In-progress carries no action; the timeout state offers the Reload it asks for.
     assert result["actions"] == [[], ["Reload"]]
+
+
+def test_deleting_a_session_releases_its_notices_in_the_shared_teardown():
+    """Both delete paths route through _teardownDeletedSessionBrowserOwners().
+
+    The no-sessions-left branch writes the topbar directly instead of calling
+    syncTopbar(), so the render predicate never fires on its own: a deleted
+    chat's error would stay on screen with its record and dismissal retained.
+    Notices are released alongside every other per-session owner instead.
+    """
+    start = SESSIONS_JS.index("function _teardownDeletedSessionBrowserOwners(sid){")
+    body = SESSIONS_JS[start : SESSIONS_JS.index("\nfunction ", start + 1)]
+    assert "clearChatRuntimeNotice('provider_failure',sid);" in body
+    assert "clearChatRuntimeNotice('thread_error',sid);" in body
+    # Both deletion paths must reach that teardown.
+    assert SESSIONS_JS.count("_teardownDeletedSessionBrowserOwners(sid)") >= 1
+    assert "deletedIds.forEach(_teardownDeletedSessionBrowserOwners)" in SESSIONS_JS
+
+
+def test_every_emitted_provider_error_type_is_classified_as_a_provider_failure():
+    """A provider outage must not fall through to thread_error.
+
+    thread_error outranks offline, so a misclassified provider failure would take
+    the expanded top row from a lost connection — inverting the declared ladder.
+    """
+    idx = MESSAGES_JS.index("const _isProviderFailure=")
+    expr = MESSAGES_JS[idx : MESSAGES_JS.index(";", idx)]
+    assert "credential_pool_empty" in expr
+    # Prefix-matched so a newly added gateway_*/provider_* sibling stays classified.
+    assert "/^(gateway|provider)_/.test(_errType)" in expr
+    api_src = (REPO_ROOT / "api" / "gateway_chat.py").read_text(encoding="utf-8")
+    for emitted in ("gateway_http_error", "gateway_empty_response", "gateway_error"):
+        assert f'"{emitted}"' in api_src, f"{emitted} no longer emitted; revisit the classifier"
+        assert emitted.startswith("gateway_")
 
 
 def test_rotated_session_error_is_keyed_to_the_continuation_session():
