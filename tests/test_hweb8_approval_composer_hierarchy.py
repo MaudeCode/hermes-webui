@@ -79,6 +79,41 @@ def test_overflow_menu_is_closed_by_default_in_css():
     assert ".approval-more-menu[hidden]{display:none;}" in STYLE_CSS
 
 
+@pytest.mark.skipif(NODE is None, reason="node not available")
+def test_enter_on_a_card_control_activates_it_instead_of_approving():
+    # The Allow-once accelerator must not fire for Deny, More options, collapse
+    # or dismiss — activating any of those would silently approve the command.
+    start = BOOT_JS.index("// Enter is the Allow-once accelerator")
+    handler = BOOT_JS[start : BOOT_JS.index("if((e.metaKey||e.ctrlKey)&&e.key==='k')", start)]
+    script = "\n".join([
+        "const out=[]; let active=null;",
+        "const card={classList:{contains:v=>v==='visible'},contains:node=>node&&node.inCard};",
+        "const document={get activeElement(){return active;}};",
+        "const $=id=>(id==='approvalCard'?card:null);",
+        "const respondApproval=choice=>{out.push('respondApproval:'+choice);};",
+        "function press(label,el){active=el;let prevented=false;",
+        " const e={key:'Enter',preventDefault(){prevented=true;}};",
+        " (function(e){" + handler + "})(e);",
+        " out.push([label,prevented]);}",
+        "press('deny-button',{tagName:'BUTTON',inCard:true});",
+        "press('more-button',{tagName:'BUTTON',inCard:true});",
+        "press('composer-textarea',{tagName:'TEXTAREA',inCard:false});",
+        "press('nothing-focused',null);",
+        "press('body',{tagName:'BODY',inCard:false});",
+        "process.stdout.write(JSON.stringify(out));",
+    ])
+    assert _run_node(script) == [
+        ["deny-button", False],
+        ["more-button", False],
+        ["composer-textarea", False],
+        # focus outside the card's controls still gets the accelerator
+        "respondApproval:once",
+        ["nothing-focused", True],
+        "respondApproval:once",
+        ["body", True],
+    ]
+
+
 def test_escape_closes_the_menu_before_any_surface_behind_it():
     start = BOOT_JS.index("if(e.key==='Escape'){", BOOT_JS.index("// Close onboarding overlay if open") - 400)
     escape_block = BOOT_JS[start:][:1200]
@@ -242,6 +277,27 @@ def test_clarify_card_renders_the_queue_position_it_was_handed():
     out = _run_node(script)
     assert out["queued"] == {"text": "approval_pending_count:3", "display": ""}
     assert out["single"]["display"] == "none"
+
+
+def test_live_clarify_callback_carries_the_queue_depth():
+    # The live path (streaming.py::_clarify_notify_cb -> SSE "clarify") forwards
+    # this payload verbatim, so the count has to be on it — the poll is slower
+    # and a queued question can be answered before the first poll lands.
+    import api.clarify as clarify_mod
+
+    sid = "hweb8-live-clarify"
+    seen = []
+    clarify_mod.register_gateway_notify(sid, seen.append)
+    try:
+        clarify_mod.submit_pending(sid, {"question": "first?"})
+        clarify_mod.submit_pending(sid, {"question": "second?"})
+    finally:
+        clarify_mod.unregister_gateway_notify(sid)
+        clarify_mod.clear_pending(sid)
+
+    assert [payload["pending_count"] for payload in seen] == [1, 2]
+    # the head stays the oldest unresolved question while the count grows
+    assert [payload["question"] for payload in seen] == ["first?", "first?"]
 
 
 def test_clarify_poll_plumbs_the_pending_count_onto_the_prompt():

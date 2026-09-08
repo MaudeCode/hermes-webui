@@ -2469,12 +2469,17 @@ document.addEventListener('keydown',async e=>{
     if(composer){e.preventDefault();composer.focus();}
     return;
   }
-  // Enter on approval card = Allow once (when a button inside the card is focused or
-  // card is visible and focus is not on an input/textarea/select)
+  // Enter is the Allow-once accelerator for a visible approval card — but only
+  // while focus is NOT on one of the card's own controls. Enter on a focused
+  // button must activate THAT button: otherwise Deny, More options, collapse and
+  // dismiss all silently approve the command instead (codex P1). Allow once is
+  // unaffected either way — its native click runs the same respondApproval('once').
   if(e.key==='Enter'&&!e.metaKey&&!e.ctrlKey&&!e.shiftKey){
     const card=$('approvalCard');
-    const tag=(document.activeElement||{}).tagName||'';
-    if(card&&card.classList.contains('visible')&&tag!=='TEXTAREA'&&tag!=='INPUT'&&tag!=='SELECT'){
+    const active=document.activeElement;
+    const tag=(active||{}).tagName||'';
+    const onCardControl=!!(card&&active&&card.contains(active)&&(tag==='BUTTON'||tag==='A'));
+    if(card&&card.classList.contains('visible')&&!onCardControl&&tag!=='TEXTAREA'&&tag!=='INPUT'&&tag!=='SELECT'){
       e.preventDefault();
       if(typeof respondApproval==='function') respondApproval('once');
       return;

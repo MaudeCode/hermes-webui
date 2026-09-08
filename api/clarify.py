@@ -328,7 +328,12 @@ def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
             gw_queue.append(entry)
             _pending[session_key] = gw_queue[0].data
         cb = _gateway_notify_cbs.get(session_key)
-        callback_payload = dict(gw_queue[0].data)
+        # Carry the queue depth on the live callback the same way the approval
+        # path does (streaming.py::_approval_notify_cb). Without it the browser
+        # only learns its queue position from the slower /api/clarify/pending
+        # poll, so a queued question delivered mid-stream can be answered before
+        # it ever shows "1 of N pending".
+        callback_payload = {**dict(gw_queue[0].data), "pending_count": len(gw_queue)}
         notification = _clarify_sse_snapshot_locked(
             session_key, dict(gw_queue[0].data), len(gw_queue)
         )
