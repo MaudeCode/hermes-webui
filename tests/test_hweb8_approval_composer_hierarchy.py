@@ -279,25 +279,35 @@ def test_clarify_card_renders_the_queue_position_it_was_handed():
     assert out["single"]["display"] == "none"
 
 
-def test_live_clarify_callback_carries_the_queue_depth():
+@pytest.mark.parametrize("advance", ["oldest", "by_id"])
+def test_live_clarify_callback_carries_the_queue_depth(advance):
     # The live path (streaming.py::_clarify_notify_cb -> SSE "clarify") forwards
     # this payload verbatim, so the count has to be on it — the poll is slower
-    # and a queued question can be answered before the first poll lands.
+    # and a queued question can be answered before the first poll lands. Every
+    # head emission counts, not just arrival: a queue advance that drops the
+    # field blanks the counter until the next poll.
     import api.clarify as clarify_mod
 
-    sid = "hweb8-live-clarify"
+    sid = "hweb8-live-clarify-" + advance
     seen = []
     clarify_mod.register_gateway_notify(sid, seen.append)
     try:
-        clarify_mod.submit_pending(sid, {"question": "first?"})
+        first = clarify_mod.submit_pending(sid, {"question": "first?"})
         clarify_mod.submit_pending(sid, {"question": "second?"})
+        clarify_mod.submit_pending(sid, {"question": "third?"})
+        if advance == "oldest":
+            clarify_mod.resolve_clarify(sid, "answer")
+        else:
+            clarify_mod.resolve_clarify_by_id(sid, first.clarify_id, "answer")
     finally:
         clarify_mod.unregister_gateway_notify(sid)
         clarify_mod.clear_pending(sid)
 
-    assert [payload["pending_count"] for payload in seen] == [1, 2]
-    # the head stays the oldest unresolved question while the count grows
-    assert [payload["question"] for payload in seen] == ["first?", "first?"]
+    # three arrivals (head unchanged, depth growing) then the advance to "second?"
+    assert [payload["pending_count"] for payload in seen] == [1, 2, 3, 2]
+    assert [payload["question"] for payload in seen] == [
+        "first?", "first?", "first?", "second?",
+    ]
 
 
 def test_clarify_poll_plumbs_the_pending_count_onto_the_prompt():

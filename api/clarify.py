@@ -239,6 +239,18 @@ def _with_timeout_metadata(data: dict) -> dict:
     return item
 
 
+def _callback_head_payload_locked(queue_entries) -> dict:
+    """Payload for the live gateway callback when a queue head becomes current.
+
+    Every head emission carries the queue depth, matching what the SSE snapshot
+    beside it and ``streaming.py::_approval_notify_cb`` already do. The browser
+    otherwise learns its queue position only from the slower
+    ``/api/clarify/pending`` poll, so the "1 of N pending" counter is missing on
+    arrival and blinks out again on every queue advance.
+    """
+    return {**dict(queue_entries[0].data), "pending_count": len(queue_entries)}
+
+
 def _clarify_sse_snapshot_locked(session_id: str, head: dict | None, total: int):
     payload = {"pending": dict(head) if head else None, "pending_count": total}
     sequence = next(_clarify_sse_sequence_source)
@@ -328,12 +340,7 @@ def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
             gw_queue.append(entry)
             _pending[session_key] = gw_queue[0].data
         cb = _gateway_notify_cbs.get(session_key)
-        # Carry the queue depth on the live callback the same way the approval
-        # path does (streaming.py::_approval_notify_cb). Without it the browser
-        # only learns its queue position from the slower /api/clarify/pending
-        # poll, so a queued question delivered mid-stream can be answered before
-        # it ever shows "1 of N pending".
-        callback_payload = {**dict(gw_queue[0].data), "pending_count": len(gw_queue)}
+        callback_payload = _callback_head_payload_locked(gw_queue)
         notification = _clarify_sse_snapshot_locked(
             session_key, dict(gw_queue[0].data), len(gw_queue)
         )
@@ -388,7 +395,7 @@ def resolve_clarify(session_key: str, response: str, resolve_all: bool = False) 
         if q:
             _pending[session_key] = q[0].data
             cb = _gateway_notify_cbs.get(session_key)
-            callback_payload = dict(q[0].data)
+            callback_payload = _callback_head_payload_locked(q)
             notification = _clarify_sse_snapshot_locked(
                 session_key, dict(q[0].data), len(q)
             )
@@ -428,7 +435,7 @@ def resolve_clarify_by_id(session_key: str, clarify_id: str, response: str) -> b
         if q:
             _pending[session_key] = q[0].data
             cb = _gateway_notify_cbs.get(session_key) if index == 0 else None
-            callback_payload = dict(q[0].data) if cb is not None else None
+            callback_payload = _callback_head_payload_locked(q) if cb is not None else None
             notification = _clarify_sse_snapshot_locked(
                 session_key, dict(q[0].data), len(q)
             )
