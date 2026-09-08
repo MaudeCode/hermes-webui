@@ -86,9 +86,14 @@ def test_gateway_restart_disables_its_actions_through_the_record_not_the_dom():
     assert "let _gatewayRestartInFlight=false;" in UI_JS
     assert "label:_gatewayRestartInFlight?'Restarting...':'Restart Service'" in UI_JS
     assert "if(_gatewayRestartInFlight) return;" in UI_JS
-    # A successful restart resolves the condition; a failed one restores the row.
-    assert "if(restarted) _hideAgentHealthAlert();" in UI_JS
+    # A successful restart resolves the condition, and so does a heartbeat that
+    # resolved healthy while the request was in flight — only a still-down state
+    # restores the row, so a failed restart cannot resurrect a stale outage.
+    assert "if(restarted||_agentHealthLastState!=='down') _hideAgentHealthAlert();" in UI_JS
     assert "else _showAgentHealthAlert();" in UI_JS
+    # And a poll must not land mid-restart and clear the alert under its buttons.
+    poll = UI_JS[UI_JS.index("async function pollAgentHealth(){") :]
+    assert "if(_gatewayRestartInFlight) return;" in poll[: poll.index("try{")]
     # The old direct-DOM juggling is gone, so a re-render can't strip the state.
     assert "btn.textContent = 'Restarting...'" not in UI_JS
 
@@ -129,8 +134,8 @@ def test_restart_wait_publishes_both_messages_without_a_dangling_dom_reference()
     body = UI_JS[start:end]
     assert "msgEl" not in body, "restart poller still references the removed #reconnectMsg node"
     assert "if(typeof publishChatRuntimeNotice!=='function') return;" in body
-    assert "_publishRestartNotice('Restarting…'" in body
-    assert "_publishRestartNotice('Server is taking longer than expected'" in body
+    assert "_publishRestartNotice('runtime_notice_restarting_title'" in body
+    assert "_publishRestartNotice('runtime_notice_restart_slow_title'" in body
 
 
 def test_restart_wait_timeout_path_runs_without_throwing():
@@ -156,6 +161,7 @@ def test_restart_wait_timeout_path_runs_without_throwing():
         global.setTimeout = (cb, ms) => { now += ms || 0; cb(); return 0; };
         global.fetch = async () => { throw new Error('server down'); };
         global.publishChatRuntimeNotice = rec => { published.push(rec.title); };
+        global.t = key => key;
         """
     ) + wait_fn + textwrap.dedent(
         """
@@ -169,7 +175,10 @@ def test_restart_wait_timeout_path_runs_without_throwing():
     assert proc.returncode == 0, f"restart poller threw: {proc.stderr[:400]}"
     result = json.loads(proc.stdout.strip())
     assert result["reloads"] == 0
-    assert result["published"] == ["Restarting…", "Server is taking longer than expected"]
+    assert result["published"] == [
+        "runtime_notice_restarting_title",
+        "runtime_notice_restart_slow_title",
+    ]
 
 
 def test_cancelled_and_interrupted_turns_raise_no_failure_notice():
@@ -216,6 +225,9 @@ _STUB = textwrap.dedent(
       createElement(tag) { const el = _mkEl(''); el.tag = tag; return el; },
     };
     const $ = id => document.getElementById(id);
+    // Identity t(): the store's own strings go through i18n, so the harness
+    // needs the helper. Returning the key keeps assertions readable.
+    global.t = key => key;
     global.S = { session: null };
     """
 )
@@ -288,7 +300,9 @@ def test_highest_priority_problem_renders_first_and_expanded():
 
 def test_thread_error_outranks_offline():
     result = _run(
-        _publish("offline", "Connection lost") + _publish("thread_error", "Error", sessionId="s1")
+        "S.session = {session_id: 's1'};"
+        + _publish("offline", "Connection lost")
+        + _publish("thread_error", "Error", sessionId="s1")
     )
     assert result["kinds"][0] == "thread_error"
 
@@ -305,7 +319,8 @@ def test_duplicate_symptoms_from_one_condition_coalesce():
 
 def test_same_kind_different_run_ids_do_not_coalesce():
     result = _run(
-        _publish("provider_failure", "Rate limit reached", sessionId="s1", runId="r1")
+        "S.session = {session_id: 's1'};"
+        + _publish("provider_failure", "Rate limit reached", sessionId="s1", runId="r1")
         + _publish("provider_failure", "Out of credits", sessionId="s1", runId="r2")
     )
     assert result["activeKinds"] == ["provider_failure", "provider_failure"]
@@ -372,11 +387,39 @@ def test_transient_recovery_notice_expires_without_leaving_empty_space():
 
 def test_a_notice_from_another_session_is_not_shown_in_this_chat():
     result = _run(
-        _publish("thread_error", "Error", sessionId="other")
+        "S.session = {session_id: 'other'};"
+        + _publish("thread_error", "Error", sessionId="other")
         + "S.session = {session_id: 'current'};renderChatRuntimeNotices();"
     )
     assert result["activeKinds"] == []
     assert result["hidden"] is True
+
+
+def test_a_scoped_notice_is_hidden_once_no_session_is_active():
+    """Deleting the session or opening a new chat sets S.session to null.
+
+    Without an owning chat there is nothing for the record to belong to, so it
+    must not fall back to showing over the empty/new-chat screen.
+    """
+    result = _run(
+        "S.session = {session_id: 's1'};"
+        + _publish("thread_error", "Error", sessionId="s1")
+        + "S.session = null;renderChatRuntimeNotices();"
+    )
+    assert result["activeKinds"] == []
+    assert result["hidden"] is True
+
+
+def test_a_new_chats_notice_evicts_the_previous_chats_record_of_that_kind():
+    """A record for an abandoned or deleted chat must not be retained forever."""
+    result = _run(
+        _publish("thread_error", "Error in old chat", sessionId="s1")
+        + "S.session = {session_id: 's2'};"
+        + _publish("thread_error", "Error in new chat", sessionId="s2")
+        + "renderChatRuntimeNotices();"
+    )
+    assert result["activeKinds"] == ["thread_error"]
+    assert result["rows"][0] == ["Error in new chat", ""] or result["rows"][0][0] == "Error in new chat"
 
 
 def test_offline_recovery_replaces_the_failure_with_a_transient_status_row():
@@ -407,7 +450,8 @@ def test_dismissing_one_notice_leaves_the_others_in_the_stack():
 
 def test_stack_is_capped_at_the_visible_maximum():
     result = _run(
-        _publish("thread_error", "Error", sessionId="s1")
+        "S.session = {session_id: 's1'};"
+        + _publish("thread_error", "Error", sessionId="s1")
         + _publish("offline", "Connection lost")
         + _publish("agent_unavailable", "Agent down")
         + _publish("provider_failure", "Rate limit", sessionId="s1", runId="r1")

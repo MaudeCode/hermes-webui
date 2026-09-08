@@ -468,7 +468,7 @@
          priority, coalescing and dismissal live there, not in per-condition markup.
          The two sr-only regions below carry the announcements so the visible stack
          can re-render on every poll without re-announcing itself. -->
-    <div class="chat-runtime-notice" id="chatRuntimeNotice" role="region" aria-label="Connection and runtime status" hidden></div>
+    <div class="chat-runtime-notice" id="chatRuntimeNotice" role="region" aria-label="Connection and runtime status" data-i18n-aria-label="runtime_notice_region" hidden></div>
     <div id="chatRuntimeNoticeAlert" class="sr-only" role="alert" aria-live="assertive" aria-atomic="true"></div>
     <div id="chatRuntimeNoticeStatus" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
     <div class="composer-wrap" id="composerWrap">

@@ -72,6 +72,17 @@ function publishChatRuntimeNotice(notice){
   if(CHAT_NOTICE_PRIORITY.indexOf(kind)<0) return null;
   const key=_chatNoticeKey(kind,notice.sessionId,notice.runId);
   if(_chatNoticeDismissed.has(key)) return key;
+  // One chat owns a kind at a time: publishing for a new session drops the same
+  // kind held by another session, so a deleted or abandoned conversation cannot
+  // retain a record forever. Same-session records with different run ids are
+  // left alone — those are distinct turns of the chat you are looking at.
+  if(notice.sessionId){
+    _chatNotices.forEach((rec,existing)=>{
+      if(rec.kind===kind&&rec.sessionId&&rec.sessionId!==notice.sessionId){
+        _chatNotices.delete(existing);_clearChatNoticeTimer(existing);
+      }
+    });
+  }
   _chatNotices.set(key,{
     key,kind,
     sessionId:notice.sessionId||null,
@@ -123,9 +134,11 @@ function clearChatRuntimeNotice(kind,sessionId,runId){
 function _activeChatRuntimeNotices(){
   const currentSid=(typeof S==='object'&&S&&S.session&&S.session.session_id)||null;
   return [..._chatNotices.values()]
-    // A session-scoped notice belongs to its own chat: viewing another session
-    // must not show the failure of the one you left.
-    .filter(rec=>!rec.sessionId||!currentSid||rec.sessionId===currentSid)
+    // A session-scoped notice belongs to its own chat: viewing another session —
+    // or no session at all, after a delete or a new-chat reset — must not show
+    // the failure of the chat you left. Absent an active session there is no
+    // owner to match, so it stays hidden rather than defaulting to visible.
+    .filter(rec=>!rec.sessionId||(!!currentSid&&rec.sessionId===currentSid))
     .sort((a,b)=>CHAT_NOTICE_PRIORITY.indexOf(a.kind)-CHAT_NOTICE_PRIORITY.indexOf(b.kind));
 }
 function _buildChatRuntimeNoticeRow(rec,secondary){
@@ -146,7 +159,7 @@ function _buildChatRuntimeNoticeRow(rec,secondary){
   }
   row.appendChild(copy);
   const actions=rec.actions.slice();
-  if(rec.dismissible) actions.push({label:'Dismiss',onClick:()=>dismissChatRuntimeNotice(rec.key)});
+  if(rec.dismissible) actions.push({label:t('dismiss'),onClick:()=>dismissChatRuntimeNotice(rec.key)});
   if(actions.length){
     const box=document.createElement('div');
     box.className='chat-runtime-notice-actions';
@@ -359,8 +372,8 @@ async function _recoverFromOfflineSoftly(){
       kind:'reconnect',
       runId:'recovered',
       tone:'info',
-      title:'Connection restored',
-      detail:'Hermes is reachable again. Reattaching this conversation.',
+      title:t('runtime_notice_restored_title'),
+      detail:t('runtime_notice_restored_detail'),
       ttlMs:OFFLINE_RECOVERED_NOTICE_MS,
     });
     if(typeof reconnectSidebarSSE==='function') reconnectSidebarSSE();
@@ -10484,7 +10497,7 @@ function showReconnectBanner(msg) {
   publishChatRuntimeNotice({
     kind:'reconnect',
     tone:'info',
-    title:'Reload messages?',
+    title:t('runtime_notice_reload_title'),
     detail:msg||'A response may have been in progress when you last left.',
     actions:[
       {label:'Dismiss',onClick:()=>dismissReconnect()},
@@ -10653,14 +10666,19 @@ async function restartGatewayService(){
     showToast('Failed to restart gateway service: ' + e.message);
   } finally {
     _gatewayRestartInFlight = false;
-    // Restore the idle buttons only while the alert is still the live state —
-    // a successful restart resolves the condition, so clear it instead.
-    if(restarted) _hideAgentHealthAlert();
+    // Restore the idle buttons only while the outage is still the live state. A
+    // successful restart resolves it; so does a heartbeat that resolved healthy
+    // while the request was in flight — republishing then would resurrect a
+    // stale outage and ask the user to restart an already-recovered gateway.
+    if(restarted||_agentHealthLastState!=='down') _hideAgentHealthAlert();
     else _showAgentHealthAlert();
   }
 }
 async function pollAgentHealth(){
   if(document.visibilityState !== 'visible') return;
+  // Don't race an in-flight restart: a poll landing mid-request would clear the
+  // alert out from under its own buttons, and its result is stale by definition.
+  if(_gatewayRestartInFlight) return;
   if(Date.now() - _lastGatewayRestartTime < 15000) return;
   try{
     const payload=await api('/api/health/agent',{timeoutToast:false});
@@ -11445,11 +11463,13 @@ async function _waitForServerThenReload(opts){
   // previously dismissed reconnect prompt cannot suppress it. Guarded because
   // tests extract this function on its own, the same way the sidebar-SSE and
   // refreshSession calls elsewhere in this file are guarded.
-  const _publishRestartNotice=(title,detail)=>{
+  // Takes a key, not a string: t() is resolved behind the same guard so the
+  // extracted-function harnesses only need the globals they already stub.
+  const _publishRestartNotice=(titleKey,detail)=>{
     if(typeof publishChatRuntimeNotice!=='function') return;
-    publishChatRuntimeNotice({kind:'reconnect',runId:'restart',tone:'info',title,detail});
+    publishChatRuntimeNotice({kind:'reconnect',runId:'restart',tone:'info',title:t(titleKey),detail});
   };
-  _publishRestartNotice('Restarting…','\u23f3 Restarting… please wait');
+  _publishRestartNotice('runtime_notice_restarting_title','\u23f3 Restarting… please wait');
   const deadline=Date.now()+maxMs;
   // Track restart-outage evidence. An outage (failed or non-OK /health probes)
   // followed by a healthy response is a reliable new-instance signal even when
@@ -11547,7 +11567,7 @@ async function _waitForServerThenReload(opts){
     }catch(_){ _consecutiveOutages++; /* socket closed during restart — retry */ }
     await new Promise(r=>setTimeout(r, interval));
   }
-  _publishRestartNotice('Server is taking longer than expected','\u26a0\ufe0f Server is taking longer than expected — click Reload when ready');
+  _publishRestartNotice('runtime_notice_restart_slow_title','\u26a0\ufe0f Server is taking longer than expected — click Reload when ready');
 }
 
 function _pendingCurrentTailUserMessage(messages){
