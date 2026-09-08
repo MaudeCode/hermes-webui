@@ -77,7 +77,7 @@ def test_builtin_skin_msg_body_rules_use_conversation_font():
     for skin in ("graphite", "codex", "terracotta", "github"):
         selector = (
             f':root[data-skin="{skin}"] .msg-body'
-            '{font-family:var(--font-conversation);font-size:13px;font-weight:430;letter-spacing:0;line-height:1.6;}'
+            '{font-family:var(--font-conversation);font-weight:430;letter-spacing:0;}'
         )
         assert selector in CSS
 

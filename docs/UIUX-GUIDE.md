@@ -130,6 +130,15 @@ intent.
 Keep scale tight. Avoid introducing near-duplicate one-off font sizes, colors,
 radius values, or spacing values when an existing token works.
 
+Chat prose has one typographic authority: `--message-body-font-size` (with
+`--message-body-line-height`). Markdown headings inside `.msg-body` size in `em`
+so the Small / Large / Extra Large preference scales them from that one step,
+and every prose block — paragraph, list, blockquote, heading — shares a single
+`0.65em` gap with no outer margin on the first or last block. A message is a
+turn in a conversation, not a document: no divider rules under headings, no
+uppercase heading styling. A skin may repaint prose, but must not reintroduce
+its own prose size or spacing scale.
+
 ## Color, depth, and shape
 
 Use one accent at a time. Semantic colors are for semantic state: success,
