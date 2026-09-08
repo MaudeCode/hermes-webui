@@ -235,13 +235,17 @@ def test_rotated_session_error_is_keyed_to_the_continuation_session():
     publish_idx = MESSAGES_JS.index("kind:_isProviderFailure?'provider_failure':'thread_error',")
     owner = MESSAGES_JS[publish_idx : MESSAGES_JS.index("runId:", publish_idx)]
     assert "sessionId:continuationSid||" in owner
-    # The continuation id must already be resolved above the publish site.
+    # Decide and act must read the same resolved session. publishChatRuntimeNotice
+    # renders synchronously, so publishing before `S.session=d.session` would key
+    # the record to the continuation while the render's active-session filter still
+    # saw the archived parent — and nothing re-renders the stack afterwards, so the
+    # row would stay invisible until an unrelated syncTopbar().
     continuation_idx = MESSAGES_JS.rindex(
         "const continuationSid=(d.session&&d.session.session_id)", 0, publish_idx
     )
-    adopt_idx = MESSAGES_JS.index("S.session=d.session;", continuation_idx)
-    assert continuation_idx < publish_idx < adopt_idx, (
-        "publish must sit after continuationSid is resolved but before S.session is reassigned"
+    adopt_idx = MESSAGES_JS.rindex("S.session=d.session;", continuation_idx, publish_idx)
+    assert continuation_idx < adopt_idx < publish_idx, (
+        "publish must sit after both continuationSid is resolved and S.session is adopted"
     )
 
 
