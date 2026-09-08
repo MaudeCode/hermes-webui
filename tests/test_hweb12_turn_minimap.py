@@ -489,20 +489,82 @@ def test_a_turn_appended_during_the_load_does_not_move_the_jump_target(page):
     _setup(page)  # restore the shared page for the next test
 
 
-def test_a_language_change_relabels_the_marks(page):
-    """Mark labels come from t(), which applyLocaleToDOM() cannot reach."""
+def test_a_language_change_rebuilds_the_marks(page):
+    """Mark labels come from t(), not data-i18n-*, so applyLocaleToDOM() cannot
+    reach them -- only a rebuild re-runs t() and relabels them."""
     _setup_visible(page)
-    before = page.evaluate(
-        "() => document.querySelector('.outline-mark').getAttribute('aria-label')"
+    state = page.evaluate(
+        """() => {
+          const before = Array.from(document.querySelectorAll('.outline-mark'));
+          before.forEach(m => { m.dataset.stale = '1'; });
+          const label = before[0].getAttribute('aria-label');
+          const lang = document.documentElement.lang;
+          document.documentElement.lang = lang === 'de' ? 'fr' : 'de';
+          applyConversationOutlinePreference();
+          const after = Array.from(document.querySelectorAll('.outline-mark'));
+          document.documentElement.lang = lang;
+          return {
+            label: label,
+            count: after.length,
+            survivors: after.filter(m => m.dataset.stale === '1').length,
+          };
+        }"""
     )
-    page.evaluate("async () => { await setLocale('de'); }")
-    page.evaluate("() => applyConversationOutlinePreference()")
-    after = page.evaluate(
-        "() => document.querySelector('.outline-mark').getAttribute('aria-label')"
+    assert state["label"].startswith("Question 1"), state
+    assert state["count"] == _TURNS, state
+    # Every mark is a new node, so t() ran again under the new locale.
+    assert state["survivors"] == 0, state
+    _setup(page)  # restore the shared page for the next test
+
+
+def test_switching_to_full_width_chat_hides_the_rail(page):
+    """boot.js applies the outline preference before the chat width, and the
+    width switch does not resize the pane -- so without watching the root
+    attribute nothing re-syncs and CSS leaves a focusable rail off-column."""
+    m = _setup_visible(page)
+    assert m["hidden"] is False, m
+    # MutationObserver callbacks are microtasks, so one await is the whole
+    # window: no render, no resize and no settings sync can intervene.
+    hidden = page.evaluate(
+        """async () => {
+          document.documentElement.dataset.chatWidth = 'full';
+          await Promise.resolve();
+          const el = document.getElementById('outlineMinimap');
+          const state = { hidden: el.hidden,
+                          focusable: el.querySelectorAll('.outline-mark[tabindex="0"]').length };
+          delete document.documentElement.dataset.chatWidth;
+          return state;
+        }"""
     )
-    assert before.startswith("Question 1"), before
-    assert after.startswith("Frage 1"), (before, after)
-    page.evaluate("async () => { await setLocale('en'); }")
+    assert hidden["hidden"] is True, hidden
+    _setup(page)  # restore the shared page for the next test
+
+
+def test_preview_reads_responses_style_and_compacted_answers(page):
+    """Assistant prose also arrives as input_text/output_text parts, or in the
+    anchor scene of a compacted turn."""
+    _setup_visible(page)
+    page.evaluate(
+        """() => {
+          // Turn 2's answer uses Responses-style parts; turn 3's was compacted.
+          S.messages[3] = { role: 'assistant',
+                            content: [{ type: 'output_text', text: 'Responses-style answer' }] };
+          S.messages[5] = { role: 'assistant', content: [],
+                            _anchor_activity_scene: { final_answer: 'Compacted final answer' } };
+          applyConversationOutlinePreference();
+        }"""
+    )
+    previews = []
+    for nth in (2, 3):
+        page.hover(f".outline-mark:nth-of-type({nth})")
+        page.wait_for_timeout(120)
+        previews.append(
+            page.evaluate(
+                "() => (document.querySelector('.outline-preview-reply') || {}).textContent || ''"
+            )
+        )
+    assert "Responses-style answer" in previews[0], previews
+    assert "Compacted final answer" in previews[1], previews
     _setup(page)  # restore the shared page for the next test
 
 
@@ -540,6 +602,12 @@ def test_reuses_the_outline_mechanism_rather_than_a_second_index():
     # so the signature carries the base and a move re-stamps every mark.
     assert "data-session-idx=" in OUTLINE_JS
     assert "_minimapSessionIndex(0)" in OUTLINE_JS
+    # Full-width chat changes the column without resizing the pane, so the rail
+    # watches the root attribute rather than relying on a resize.
+    assert "attributeFilter: ['data-workspace-panel', 'data-chat-width']" in OUTLINE_JS
+    # Preview text matches ui.js's visible-assistant-content definition.
+    assert "p.type !== 'input_text' && p.type !== 'output_text'" in OUTLINE_JS
+    assert "_assistantAnchorSceneFinalAnswerText(m)" in OUTLINE_JS
     # Generated labels are not reachable by applyLocaleToDOM(), so the signature
     # carries the locale and a language change rebuilds them.
     assert "document.documentElement.lang + '|'" in OUTLINE_JS

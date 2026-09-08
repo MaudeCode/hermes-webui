@@ -85,8 +85,15 @@ function _excerptText(content, maxLen) {
   let text = '';
   if (Array.isArray(content)) {
     text = content
-      .filter(p => p && p.type === 'text')
-      .map(p => p.text || p.content || '')
+      .map(function(p) {
+        if (typeof p === 'string') return p;
+        if (!p || typeof p !== 'object') return '';
+        // The same three part types _assistantMessageHasVisibleContent() counts
+        // as visible output; anything else (tool_use, images) has no prose.
+        if (p.type !== 'text' && p.type !== 'input_text' && p.type !== 'output_text') return '';
+        return p.text || p.content || '';
+      })
+      .filter(Boolean)
       .join(' ');
   } else {
     text = String(content || '');
@@ -296,7 +303,11 @@ function _turnReplyExcerpt(rawIdx) {
     if (!m) continue;
     if (m.role === 'user') break;                 // next turn starts here
     if (m.role !== 'assistant') continue;
-    const text = _excerptText(m.content, MINIMAP_PREVIEW_LEN);
+    // A compacted turn carries its answer in the anchor scene, not in content.
+    const scene = typeof _assistantAnchorSceneFinalAnswerText === 'function'
+      ? _assistantAnchorSceneFinalAnswerText(m)
+      : '';
+    const text = _excerptText(scene || m.content, MINIMAP_PREVIEW_LEN);
     if (text) reply = text;                       // keep the LAST one
   }
   return reply;
@@ -700,7 +711,7 @@ document.addEventListener('DOMContentLoaded', function() {
     _outlineWorkspaceObserver = new MutationObserver(applyConversationOutlinePreference);
     _outlineWorkspaceObserver.observe(root, {
       attributes: true,
-      attributeFilter: ['data-workspace-panel']
+      attributeFilter: ['data-workspace-panel', 'data-chat-width']
     });
     // Also re-evaluate when the active main panel changes. switchPanel() is a
     // global function declaration (called via inline onclick), so it can't be
