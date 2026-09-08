@@ -17,8 +17,6 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 import api.updates
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -82,10 +80,12 @@ def test_no_test_removes_api_updates_from_the_module_cache():
     earlier in the same shard, so this scan is the deterministic half. It covers
     `del`, `.pop(...)` and `monkeypatch.delitem` rather than one literal form.
     """
-    # `monkeypatch.delitem(sys.modules, ...)` and `patch.dict(sys.modules)` both
-    # put the entry back at teardown, so they are the sanctioned way to force a
-    # re-import. Only the unscoped spellings leak. Match through an alias
-    # (`import sys as _sys`) by anchoring on `.modules` rather than on `sys.`.
+    # `monkeypatch.delitem(sys.modules, ...)` restores the entry at teardown, so
+    # it is the sanctioned way to force a fresh import and is not matched here.
+    # `patch.dict(sys.modules)` is deliberately NOT treated as an escape hatch:
+    # it restores the mapping but not the `api.updates` attribute on the `api`
+    # package, which a dotted re-import inside the block rebinds. Match through
+    # an alias (`import sys as _sys`) by anchoring on `.modules`, not on `sys.`.
     patterns = (
         re.compile(r"\bdel\s+\w+\.modules\["),
         re.compile(r"\b\w+\.modules\.pop\("),
@@ -97,8 +97,6 @@ def test_no_test_removes_api_updates_from_the_module_cache():
         source = path.read_text(encoding="utf-8")
         if "api.updates" not in source:
             continue
-        if "patch.dict(sys.modules)" in source:
-            continue  # scoped by patch.dict, which restores the mapping
         for number, line in enumerate(source.splitlines(), 1):
             stripped = line.strip()
             if not any(pattern.search(stripped) for pattern in patterns):
@@ -133,21 +131,42 @@ def test_sw_js_serves_the_version_the_app_currently_reports(tmp_path, monkeypatc
     assert bytes(handler.body) == b"const version = 'vTEST-hweb86';\n"
 
 
-def test_tagless_checkout_still_yields_a_version():
-    """The CI-only code path: no tags, so `git describe` returns a bare SHA.
+def test_version_detection_handles_a_tagless_checkout(tmp_path):
+    """Exercise the CI-only branch against a repository that really has no tags.
 
-    Locally the repo has tags and resolves to a descriptor, so this branch is
-    never otherwise exercised — which is why the split only ever showed up in CI.
+    A developer checkout has tags, so `git describe --tags --always` returns a
+    descriptor and the bare-SHA fallback never runs locally — which is why the
+    split only ever surfaced in CI. Build a tagless repo and drive the product
+    helper through it, rather than asserting git's own `--always` guarantee.
     """
-    out = subprocess.run(
-        ["git", "describe", "--tags", "--always"],
-        cwd=str(ROOT),
-        capture_output=True,
-        text=True,
+    repo = tmp_path / "tagless"
+    repo.mkdir()
+
+    def git(*args):
+        result = subprocess.run(
+            ["git", *args], cwd=str(repo), capture_output=True, text=True
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout.strip()
+
+    git("init", "--quiet")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "HWEB-86 test")
+    (repo / "file.txt").write_text("hweb86\n", encoding="utf-8")
+    git("add", "file.txt")
+    git("commit", "--quiet", "-m", "initial")
+
+    assert git("tag") == "", "the repository under test must be tagless"
+
+    described = api.updates._describe_git_version(repo)
+    assert described, "_describe_git_version must resolve a tagless checkout"
+
+    head = git("rev-parse", "HEAD")
+    assert head.startswith(described), (
+        f"expected an abbreviated SHA of {head}, got {described!r} — the tagless "
+        "branch must fall back to the bare commit id"
     )
-    if out.returncode != 0:
-        pytest.skip("not a git checkout")
-    assert out.stdout.strip(), "git describe --always must always produce a value"
+    assert described != head, "expected the abbreviated form, not the full SHA"
 
 
 # Reuse the request harness from the sibling resolver test rather than rebuilding it.
