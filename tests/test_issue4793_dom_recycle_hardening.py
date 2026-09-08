@@ -177,7 +177,9 @@ console.log(JSON.stringify({
     result = _run_node(script)
 
     assert result["blocksInnerHTML"] == ""
-    assert result["roleHtml"] == "role:Turn title:tps:42"
+    # HWEB-4: the settled role header no longer carries a TPS chip — TPS moved
+    # to the final-response metadata footer, so the recycle path passes no chip.
+    assert result["roleHtml"] == "role:Turn title:"
     assert result["currentAssistantTurnIsRecycled"] is True
     assert result["dataset"] == {
         "role": "assistant",
