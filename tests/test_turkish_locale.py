@@ -100,7 +100,7 @@ def test_turkish_locale_includes_representative_translations():
         "tab_chat: 'Sohbet'",
         "tab_tasks: 'Görevler'",
         "tab_profiles: 'Agent profilleri'",
-        "empty_title: 'Hangi konuda yardımcı olabilirim?'",
+        "empty_hero_title: 'Ne üzerinde çalışıyoruz?'",
         "onboarding_title: 'Hermes Web Kullanıcı Arayüzüne Hoş Geldiniz'",
     ]
     for entry in expected:

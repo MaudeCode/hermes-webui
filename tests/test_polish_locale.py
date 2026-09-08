@@ -100,7 +100,7 @@ def test_polish_locale_includes_representative_translations():
         "tab_chat: 'Czat'",
         "tab_tasks: 'Zadania'",
         "tab_profiles: 'Profile'",
-        "empty_title: 'W czym mogę pomóc?'",
+        "empty_hero_title: 'Nad czym pracujemy?'",
         "onboarding_title: 'Witaj w Hermes Web UI'",
     ]
     for entry in expected:

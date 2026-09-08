@@ -923,8 +923,7 @@
   :root[data-skin="geist-contrast"] .chip:hover,
   :root[data-skin="geist-contrast"] .profile-opt:hover,
   :root[data-skin="geist-contrast"] .ws-opt:hover,
-  :root[data-skin="geist-contrast"] .file-item:hover,
-  :root[data-skin="geist-contrast"] .suggestion:hover{background:var(--hover-bg)!important;}
+  :root[data-skin="geist-contrast"] .file-item:hover{background:var(--hover-bg)!important;}
   :root[data-skin="geist-contrast"] .session-item.active,
   :root[data-skin="geist-contrast"] .nav-tab.active,
   :root[data-skin="geist-contrast"] .rail-btn.active,
@@ -997,8 +996,6 @@
   :root[data-skin="geist-contrast"] .logo,
   :root[data-skin="geist-contrast"] .sidebar-header .logo{background:var(--surface-subtle)!important;color:var(--accent-text)!important;border:1px solid var(--border2)!important;border-radius:8px!important;box-shadow:none!important;font-weight:650!important;}
   :root[data-skin="geist-contrast"] .msg-row[data-role="user"] .msg-body{background:var(--surface-subtle)!important;border:1px solid var(--border)!important;border-radius:10px!important;}
-  :root[data-skin="geist-contrast"] .suggestion{background:var(--surface)!important;border-color:var(--border)!important;color:var(--muted)!important;transition:background .15s ease,border-color .15s ease,color .15s ease!important;}
-  :root[data-skin="geist-contrast"] .suggestion:hover{border-color:var(--border2)!important;color:var(--text)!important;}
   :root[data-skin="geist-contrast"] .msg-body a,
   :root[data-skin="geist-contrast"] .preview-md a,
   :root[data-skin="geist-contrast"] .empty-state a,
@@ -1379,8 +1376,6 @@
   :root:not(.dark) .composer-wrap::before{background:linear-gradient(to bottom,transparent,var(--sidebar));}
   :root:not(.dark) .composer-box{background:var(--bg);border-color:rgba(0,0,0,.12);}
   :root:not(.dark) .composer-box:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg);}
-  :root:not(.dark) .suggestion{border-color:rgba(0,0,0,.08);}
-  :root:not(.dark) .suggestion:hover{background:var(--accent-bg);border-color:var(--accent-bg-strong);}
   :root:not(.dark) .tool-card{border-color:rgba(0,0,0,.08);}
   :root:not(.dark) .tool-card:hover{border-color:rgba(0,0,0,.15);}
   :root:not(.dark) .icon-btn:hover{background:rgba(0,0,0,.06);}
@@ -2542,34 +2537,15 @@
   .dot{width:6px;height:6px;border-radius:50%;background:var(--blue);opacity:.3;animation:pulse 1.4s ease-in-out infinite;}
   .dot:nth-child(2){animation-delay:.22s;}.dot:nth-child(3){animation-delay:.44s;}
   @keyframes pulse{0%,80%,100%{opacity:.2;transform:scale(.8)}40%{opacity:.8;transform:scale(1)}}
-  .empty-state{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:40px;color:var(--muted);}
+  /* HWEB-1: an empty new conversation is a headline sitting directly on top of
+     the one real composer, both floated toward the middle of the chat column by
+     the #mainChat.composer-hero spacer below. */
+  .empty-state{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;padding:24px 20px 4px;color:var(--muted);}
   html[data-session-boot="1"] .empty-state{display:none}
-  .empty-state.no-suggestions .suggestion-grid{display:none}
-  .empty-state.no-welcome{display:none}
-  /* Empty-state brand mark: a free-breathing winged caduceus with a soft
-     "spirit" bloom behind it — no app-icon tile. Glow + mark gradient are
-     tuned separately for dark vs light themes (see --logo-glow / .hm-g* below). */
-  .empty-logo{position:relative;display:flex;align-items:center;justify-content:center;margin-bottom:10px;background:none;border:none;border-radius:0;box-shadow:none;}
-  .empty-logo::before{content:"";position:absolute;left:50%;top:50%;width:190px;height:190px;transform:translate(-50%,-50%);border-radius:50%;background:var(--logo-glow);z-index:0;pointer-events:none;}
-  .empty-logo svg{position:relative;z-index:1;width:88px;height:88px;display:block;}
-  /* Light themes (default :root): deeper, richer gradient holds contrast on
-     a pale background; cooler, restrained bloom. */
-  :root .empty-logo .hm-g0{stop-color:#0AA6CC;}
-  :root .empty-logo .hm-g1{stop-color:#1E63D6;}
-  :root{--logo-glow:radial-gradient(circle,rgba(30,99,214,0.15) 0%,rgba(10,166,204,0.07) 45%,transparent 70%);}
-  /* Dark themes: bright cyan→blue mark with a luminous bloom. */
-  :root.dark .empty-logo .hm-g0{stop-color:#08EBF1;}
-  :root.dark .empty-logo .hm-g1{stop-color:#3889FD;}
-  :root.dark{--logo-glow:radial-gradient(circle,rgba(8,235,241,0.20) 0%,rgba(56,137,253,0.15) 38%,transparent 72%);}
-  @media (prefers-reduced-motion: no-preference){
-    html:not([data-session-boot="1"]) .empty-logo svg{animation:emptyLogoRise .5s ease-out both;}
-    @keyframes emptyLogoRise{from{opacity:0;transform:translateY(6px) scale(.96);}to{opacity:1;transform:none;}}
-  }
-  .empty-state h2{font-size:20px;color:var(--text);font-weight:700;letter-spacing:-.02em;}
-  .empty-state p{font-size:14px;text-align:center;max-width:320px;}
-  .suggestion-grid{display:flex;flex-direction:column;gap:8px;margin-top:12px;width:100%;max-width:380px;}
-  .suggestion{padding:12px 14px;background:var(--input-bg);border:1px solid var(--border);border-radius:10px;font-size:13px;color:var(--muted);cursor:pointer;transition:all .15s;text-align:left;}
-  .suggestion:hover{background:var(--accent-bg);color:var(--text);border-color:var(--accent-bg);transform:translateX(2px);}
+  /* The workspace name is only known once boot settles, so the headline fades in
+     rather than painting a generic line and then rewriting it. */
+  .empty-hero-title{font-size:26px;line-height:1.25;color:var(--text);font-weight:600;letter-spacing:-.02em;text-align:center;max-width:var(--msg-max);opacity:0;transition:opacity .2s ease;}
+  .empty-hero-title.ready{opacity:1;}
   /* ── Composer ── */
   .composer-wrap{padding:12px 20px 16px;background:var(--bg);flex-shrink:0;}
   .composer-box{max-width:var(--msg-max);margin:0 auto;background:linear-gradient(var(--input-bg),var(--input-bg)),var(--bg);border:1px solid var(--border2);border-radius:16px;display:flex;flex-direction:column;transition:border-color .2s,box-shadow .2s;position:relative;z-index:2;}
@@ -3237,10 +3213,7 @@
     .session-item.streaming,.session-item.unread{padding-right:40px;}
     .session-actions{opacity:1;pointer-events:auto;}
     /* Empty state */
-    .empty-state h2{font-size:18px;}
-    .empty-state p{font-size:13px;}
-    .suggestion-grid{max-width:100%!important;}
-    .suggestion{font-size:12px;padding:10px 12px;}
+    .empty-hero-title{font-size:21px;}
   }
 
   @media (hover:none) and (pointer:coarse){
@@ -3574,6 +3547,27 @@ body:not(.tts-enabled) .msg-more:not(:has(.msg-more-item:not(.msg-tts-btn))){dis
 .composer-wrap{padding:10px 20px 14px;position:relative;z-index:10;}
 .composer-wrap::before{content:"";position:absolute;left:0;right:0;bottom:100%;height:32px;background:linear-gradient(to bottom,transparent,var(--bg));pointer-events:none;}
 
+/* HWEB-1 new-conversation hero: a trailing flex spacer inside #mainChat lifts
+   the composer off the bottom edge. flex-grow is interpolable, so docking after
+   the first message is a pure CSS transition on a composer that never moves in
+   the DOM (and so never loses its draft, selection or focus).
+   #mainChat ships .composer-hero in the markup so a fresh new chat paints the
+   hero on the first frame; a returning session's data-session-boot flag holds
+   the composer docked until the transcript resolves. */
+#mainChat::after{content:"";flex:0 1 0;transition:flex-grow .34s cubic-bezier(.22,.61,.36,1);}
+#mainChat.composer-hero::after{flex-grow:1;}
+html[data-session-boot="1"] #mainChat.composer-hero::after{flex-grow:0;}
+/* Docked, .composer-wrap is a footer: light mode and six skins paint it
+   var(--sidebar) with a top border, and its ::before fades the transcript into
+   it. Mid-column that footer chrome reads as a band and a rule drawn across the
+   conversation, so hero mode lifts only the .composer-box out of it. */
+html:not([data-session-boot="1"]) #mainChat.composer-hero .composer-wrap{background:transparent!important;border-top-color:transparent!important;box-shadow:none!important;}
+html:not([data-session-boot="1"]) #mainChat.composer-hero .composer-wrap::before{display:none;}
+@media (prefers-reduced-motion:reduce){
+  #mainChat::after{transition:none;}
+  .empty-hero-title{transition:none;}
+}
+
 @media (hover:none) and (pointer:coarse){
   .composer-wrap{padding-bottom:calc(14px + var(--keyboard-bottom-inset, 0px));}
 }
@@ -3588,12 +3582,6 @@ body:not(.tts-enabled) .msg-more:not(:has(.msg-more-item:not(.msg-tts-btn))){dis
 :root.dark .topbar{border-bottom:1px solid rgba(255,255,255,.07);}
 
 
-
-/* Suggestion grid: consistent width */
-.suggestion-grid{width:100%;max-width:400px;}
-
-/* Empty state: add subtle gradient behind logo */
-.empty-state{background:radial-gradient(ellipse at 50% 20%,var(--accent-bg) 0%,transparent 60%);}
 
 /* Remove old status-text from composer (kept for error messages only) */
 .status-text{font-size:11px;color:var(--muted);padding-left:2px;display:none;}

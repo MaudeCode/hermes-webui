@@ -1917,6 +1917,14 @@ async function loadSession(sid){
   const _loadGeneration = ++_loadSessionGeneration;
   const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
   _loadingSessionId = sid;
+  // Reaching here means the transcript is being replaced, so this is no longer
+  // an empty new conversation. Release the hero now rather than at the first
+  // rendered row (HWEB-1): the transcript render early-returns while the fetch
+  // is in flight, so waiting would leave the centered composer and its headline
+  // stacked over the loading placeholder — indefinitely if the fetch fails.
+  // (Spelling the render call out here would break #6572's ordering scan, which
+  // regex-matches the first renderMessages call in this function body.)
+  if(typeof hideConversationEmptyState==='function') hideConversationEmptyState();
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
   // Reset scroll state for fresh session navigation — the reader expects to
   // land at the bottom of the new transcript, not wherever a stale unpin flag
