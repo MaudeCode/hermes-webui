@@ -56,6 +56,10 @@ def test_announcement_roles_are_split_between_alert_and_status():
     assert 'role="region"' in host_tag
 
 
+def test_reconnect_is_declared_single_slot():
+    assert "const CHAT_NOTICE_SINGLE_SLOT=new Set(['reconnect']);" in UI_JS
+
+
 def test_priority_order_matches_the_ticket():
     assert (
         "const CHAT_NOTICE_PRIORITY=['thread_error','offline','agent_unavailable',"
@@ -529,6 +533,41 @@ def test_a_scoped_notice_is_hidden_once_no_session_is_active():
     )
     assert result["activeKinds"] == []
     assert result["hidden"] is True
+
+
+def test_reconnect_states_supersede_each_other_instead_of_stacking():
+    """The three reconnect run ids are mutually exclusive states of one condition.
+
+    Starting an update while the boot reconnect prompt is up used to stack
+    `reconnect||restart` beside `reconnect||`; since both are unscoped the
+    cross-session eviction never separated them, and the stale reload prompt
+    could push the restart status out of the four-row cap.
+    """
+    result = _run(
+        _publish("reconnect", "Reload messages?", tone="info")
+        + _publish("reconnect", "Restarting...", tone="info", runId="restart")
+    )
+    assert result["activeKinds"] == ["reconnect"]
+    assert result["rows"][0][0] == "Restarting..."
+
+
+def test_recovery_supersedes_a_live_reconnect_prompt_too():
+    result = _run(
+        _publish("reconnect", "Reload messages?", tone="info")
+        + _publish("reconnect", "Connection restored", tone="info", runId="recovered")
+    )
+    assert result["activeKinds"] == ["reconnect"]
+    assert result["rows"][0][0] == "Connection restored"
+
+
+def test_single_slot_does_not_collapse_a_multi_run_kind():
+    """provider_failure legitimately holds two turns of the same chat."""
+    result = _run(
+        "S.session = {session_id: 's1'};"
+        + _publish("provider_failure", "Rate limit", sessionId="s1", runId="r1")
+        + _publish("provider_failure", "Out of credits", sessionId="s1", runId="r2")
+    )
+    assert result["activeKinds"] == ["provider_failure", "provider_failure"]
 
 
 def test_a_new_chats_notice_evicts_the_previous_chats_record_of_that_kind():

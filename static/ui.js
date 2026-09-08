@@ -71,6 +71,13 @@ function _setComposerHero(on){
 // highest-priority current problem is always presented first with its action.
 const CHAT_NOTICE_PRIORITY=['thread_error','offline','agent_unavailable','provider_failure','reconnect'];
 const CHAT_NOTICE_MAX_VISIBLE=4;
+// Kinds that describe one condition with mutually exclusive states, so only the
+// newest may be shown. `reconnect` carries three: the boot "you may have missed a
+// response" prompt, "connection restored", and "restarting". They are unscoped,
+// so the cross-session eviction below does not separate them — without this an
+// update started under a live reconnect prompt stacks a second row, and the stale
+// prompt outranks the restart status it superseded.
+const CHAT_NOTICE_SINGLE_SLOT=new Set(['reconnect']);
 const _chatNotices=new Map();
 // Explicit dismissals, keyed exactly like the record. Kept separately so a
 // poller that re-publishes the same condition cannot resurrect a notice the user
@@ -91,13 +98,17 @@ function publishChatRuntimeNotice(notice){
   if(CHAT_NOTICE_PRIORITY.indexOf(kind)<0) return null;
   const key=_chatNoticeKey(kind,notice.sessionId,notice.runId);
   if(_chatNoticeDismissed.has(key)) return key;
-  // One chat owns a kind at a time: publishing for a new session drops the same
-  // kind held by another session, so a deleted or abandoned conversation cannot
-  // retain a record forever. Same-session records with different run ids are
-  // left alone — those are distinct turns of the chat you are looking at.
-  if(notice.sessionId){
+  // Supersede rather than stack. One chat owns a kind at a time, so publishing
+  // for a new session drops the same kind held by another session and a deleted
+  // or abandoned conversation cannot retain a record forever; same-session
+  // records with different run ids are left alone, because those are distinct
+  // turns of the chat you are looking at. A single-slot kind goes further: every
+  // other record of that kind is a superseded state of the same condition.
+  const singleSlot=CHAT_NOTICE_SINGLE_SLOT.has(kind);
+  if(singleSlot||notice.sessionId){
     _chatNotices.forEach((rec,existing)=>{
-      if(rec.kind===kind&&rec.sessionId&&rec.sessionId!==notice.sessionId){
+      if(rec.kind!==kind||existing===key) return;
+      if(singleSlot||(rec.sessionId&&rec.sessionId!==notice.sessionId)){
         _chatNotices.delete(existing);_clearChatNoticeTimer(existing);
       }
     });
