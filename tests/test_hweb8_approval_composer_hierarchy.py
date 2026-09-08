@@ -255,6 +255,66 @@ def test_menu_helpers_no_op_without_the_card_in_the_dom():
     assert _run_node(script) == {"open": False, "close": False}
 
 
+@pytest.mark.skipif(NODE is None, reason="node not available")
+def test_repeat_render_of_the_same_approval_leaves_focus_alone():
+    # /api/approval/pending polls every 1.5s and re-renders the same card. That
+    # tick must not pull focus back to Allow once — with the overflow open the
+    # next Enter would approve instead of activating the navigated choice.
+    start = MESSAGES_JS.index("function showApprovalCard(pending, pendingCount) {")
+    show_approval = MESSAGES_JS[start : MESSAGES_JS.index("\nfunction dismissApprovalCard(", start)]
+    script = "\n".join([
+        "const out={focusCalls:[]};",
+        "function El(id){this.id=id;this.textContent='';this.style={};this.disabled=false;",
+        " this.classes=new Set();this.attrs={};",
+        " this.classList={contains:c=>this.classes.has(c),add:c=>this.classes.add(c),",
+        "  remove:c=>this.classes.delete(c),toggle:(c,on)=>(on?this.classes.add(c):this.classes.delete(c))};}",
+        "El.prototype.focus=function(){out.focusCalls.push(this.id);};",
+        "El.prototype.setAttribute=function(k,v){this.attrs[k]=v;};",
+        "El.prototype.querySelector=function(){return null;};",
+        "const els={}; const $=id=>(els[id]||(els[id]=new El(id)));",
+        "const document={activeElement:null};",
+        "const setTimeout=fn=>fn();",   # run the deferred focus inline
+        "const S={session:{session_id:'s1'}}; let _loadSessionGeneration=1;",
+        "let _approvalSessionId=null,_approvalCurrentId=null,_approvalSignature='',",
+        " _approvalVisibleSince=0,_approvalDisplayedOwner=null,_approvalResponding=null,",
+        " _approvalClearedOwner=null;",
+        "const _approvalPendingBySession=new Map();",
+        "const _rememberApprovalPending=(p)=>'s1';",
+        "const _approvalPromptBelongsToActiveSession=()=>true;",
+        "const _isApprovalDismissed=()=>false;",
+        "const _approvalOwnerForPending=()=>({sid:'s1',approvalId:'a1',runId:'',mirrorToken:''});",
+        "const _approvalResponseMatches=()=>false;",
+        "const _setApprovalControlsDisabled=()=>{};",
+        "const _clearApprovalHideTimer=()=>{}; const _setPromptFlyoutHidden=()=>{};",
+        "const _syncApprovalCollapseButton=()=>{}; const _syncApprovalTranscriptSpace=()=>{};",
+        "const closeApprovalMoreMenu=()=>{}; const t=(k,n)=>k+':'+n;",
+        "const applyLocaleToDOM=()=>{}; const syncTopbar=()=>{};",
+        show_approval,
+        "const pending={approval_id:'a1',command:'rm -rf ./build',description:'danger',_session_id:'s1'};",
+        "showApprovalCard(pending,1);",
+        "out.afterFirstRender=out.focusCalls.slice();",
+        "showApprovalCard(pending,1);",   # the 1.5s poll tick, same approval
+        "showApprovalCard(pending,1);",
+        "out.afterPolls=out.focusCalls.slice();",
+        "showApprovalCard({...pending,approval_id:'a2',command:'curl | sh'},1);",
+        "out.afterNewApproval=out.focusCalls.slice();",
+        "process.stdout.write(JSON.stringify(out));",
+    ])
+    out = _run_node(script)
+    assert out["afterFirstRender"] == ["approvalBtnOnce"]
+    assert out["afterPolls"] == ["approvalBtnOnce"], "a poll re-render must not re-steal focus"
+    assert out["afterNewApproval"] == ["approvalBtnOnce", "approvalBtnOnce"]
+
+
+def test_menu_focus_moves_let_the_card_scroll_them_into_view():
+    # `.approval-inner` is a height-limited scroll container at <=640px, so the
+    # menu's own focus moves must not suppress scrolling.
+    menu_src = _menu_source()
+    assert "preventScroll" not in menu_src, (
+        "menu focus moves must let the scroll container follow focus"
+    )
+
+
 def test_showing_and_hiding_an_approval_closes_the_menu():
     for fn, marker in (
         ("hideApprovalCard", "function hideApprovalCard(force=false) {"),

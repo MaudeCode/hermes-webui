@@ -8462,7 +8462,11 @@ function showApprovalCard(pending, pendingCount) {
   _syncApprovalTranscriptSpace(card, {immediate: true});
   if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
   const onceBtn = $("approvalBtnOnce");
-  if (onceBtn && document.activeElement !== $('msg')) {
+  // Only on arrival. The pending poll re-renders the SAME card every 1.5s, and
+  // re-running the autofocus there yanks focus off whatever the user had reached
+  // — including a policy choice inside the open overflow, where the next Enter
+  // would then approve once instead of activating that choice (codex P2).
+  if (onceBtn && !sameApproval && document.activeElement !== $('msg')) {
     setTimeout(() => onceBtn.focus({preventScroll: true}), 50);
   }
   if (typeof syncTopbar === 'function') syncTopbar();
@@ -8570,9 +8574,9 @@ function toggleApprovalMoreMenu(forceOpen) {
   if (btn) btn.setAttribute("aria-expanded", open ? "true" : "false");
   if (open) {
     const first = menu.querySelector("button:not([disabled])");
-    if (first) first.focus({preventScroll: true});
+    if (first) first.focus();
   } else if (hadFocusInside && btn && !btn.disabled && card && card.classList.contains("visible")) {
-    btn.focus({preventScroll: true});
+    btn.focus();
   }
   _syncApprovalTranscriptSpace(card, {immediate: true});
   return open;
@@ -8596,7 +8600,9 @@ function _approvalMoreMenuArrowKey(e) {
   const items = Array.from(menu.querySelectorAll("button:not([disabled])"));
   if (!items.length) return false;
   const at = items.indexOf(document.activeElement);
-  items[((at < 0 ? 0 : at + step) + items.length) % items.length].focus({preventScroll: true});
+  // Plain focus() so `.approval-inner` — a height-limited scroll container at
+  // <=640px — scrolls the newly focused choice into view (codex P2).
+  items[((at < 0 ? 0 : at + step) + items.length) % items.length].focus();
   return true;
 }
 
