@@ -5179,6 +5179,13 @@ async function clearConversation() {
     S.session = data.session;
     S.messages = [];
     S.toolCalls = [];
+    // Clearing keeps the same session id, so a terminal notice would still match
+    // and hang over the emptied transcript. The turn it described is gone.
+    if(typeof clearChatRuntimeNotice==='function'){
+      const _clearedSid=(S.session&&S.session.session_id)||'';
+      clearChatRuntimeNotice('provider_failure',_clearedSid);
+      clearChatRuntimeNotice('thread_error',_clearedSid);
+    }
     syncTopbar();
     renderMessages();
     showToast(t('conversation_cleared'));

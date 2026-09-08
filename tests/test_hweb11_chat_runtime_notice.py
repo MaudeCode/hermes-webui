@@ -23,6 +23,7 @@ MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 INDEX_HTML = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
 STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
 SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +206,32 @@ def test_deleting_a_session_releases_its_notices_in_the_shared_teardown():
     # Both deletion paths must reach that teardown.
     assert SESSIONS_JS.count("_teardownDeletedSessionBrowserOwners(sid)") >= 1
     assert "deletedIds.forEach(_teardownDeletedSessionBrowserOwners)" in SESSIONS_JS
+
+
+def test_clearing_a_conversation_releases_its_terminal_notices():
+    """Clearing keeps the same session id, so the record keeps matching.
+
+    Unlike a delete, there is no teardown here and no session change for the
+    render predicate to act on — the notice would simply hang over the emptied
+    transcript describing a turn that no longer exists.
+    """
+    start = PANELS_JS.index("async function clearConversation() {")
+    body = PANELS_JS[start : PANELS_JS.index("\n}", start)]
+    assert "clearChatRuntimeNotice('provider_failure',_clearedSid);" in body
+    assert "clearChatRuntimeNotice('thread_error',_clearedSid);" in body
+    # Released before the re-render that would otherwise repaint the stale row.
+    assert body.index("clearChatRuntimeNotice('thread_error'") < body.index("syncTopbar();")
+
+
+def test_notice_title_prefers_the_gateway_supplied_label():
+    """gateway_* failures carry their own label; the local ladder does not."""
+    idx = MESSAGES_JS.index("kind:_isProviderFailure?'provider_failure':'thread_error',")
+    record = MESSAGES_JS[idx : MESSAGES_JS.index("dismissible:true,", idx)]
+    assert "title:String(d.label||label)," in record
+    api_src = (REPO_ROOT / "api" / "gateway_chat.py").read_text(encoding="utf-8")
+    # The backend really does send a label beside those types.
+    assert '"label": "Gateway request failed"' in api_src
+    assert '"label": "Gateway returned no response"' in api_src
 
 
 def test_every_emitted_provider_error_type_is_classified_as_a_provider_failure():

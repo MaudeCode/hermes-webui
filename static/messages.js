@@ -7427,7 +7427,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               sessionId:continuationSid||(S.session&&S.session.session_id)||activeSid||'',
               runId:streamId||'',
               tone:'error',
-              title:label,
+              // The gateway names its own failures ("Gateway request failed",
+              // "Gateway returned no response") next to the type; the local label
+              // ladder above does not cover those types and would fall through to a
+              // bare "Error". That is worst on a compact secondary row, where the
+              // detail line is hidden and the title is all the user gets.
+              title:String(d.label||label),
               detail:String(d.message||''),
               dismissible:true,
             });
