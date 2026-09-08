@@ -114,9 +114,44 @@ def test_enter_on_a_card_control_activates_it_instead_of_approving():
     ]
 
 
+@pytest.mark.skipif(NODE is None, reason="node not available")
+def test_escape_only_claims_an_on_screen_menu():
+    # switchPanel() hides #mainChat with display:none and leaves the menu's own
+    # hidden flag alone, so an off-screen menu must not swallow the Escape that
+    # closes Settings.
+    start = BOOT_JS.index("// Close the approval overflow menu first")
+    guard = BOOT_JS[start : BOOT_JS.index("// Close onboarding overlay if open", start)]
+    script = "\n".join([
+        "const out=[]; let menu={hidden:false,offsetParent:{}};",
+        "const $=id=>(id==='approvalMoreMenu'?menu:null);",
+        "const closeApprovalMoreMenu=()=>{out.push('closed');menu.hidden=true;return true;};",
+        "function escape(label){let claimed=true;",
+        " (function(){" + guard + " claimed=false;})();",
+        " out.push([label,claimed]);}",
+        "escape('on-screen');",
+        "menu={hidden:false,offsetParent:null};",   # chat replaced by a panel
+        "escape('off-screen');",
+        "menu={hidden:true,offsetParent:{}};",
+        "escape('menu-closed');",
+        "process.stdout.write(JSON.stringify(out));",
+    ])
+    assert _run_node(script) == [
+        "closed",
+        ["on-screen", True],
+        ["off-screen", False],   # Escape falls through to the settings panel
+        ["menu-closed", False],
+    ]
+
+
+def test_collapsed_clarify_strip_hides_the_counter_with_the_rest_of_the_body():
+    collapsed = [line for line in STYLE_CSS.splitlines() if ".clarify-card.collapsed .clarify-hint" in line]
+    assert collapsed and ".clarify-card.collapsed .clarify-counter" in collapsed[0]
+
+
 def test_escape_closes_the_menu_before_any_surface_behind_it():
-    start = BOOT_JS.index("if(e.key==='Escape'){", BOOT_JS.index("// Close onboarding overlay if open") - 400)
-    escape_block = BOOT_JS[start:][:1200]
+    onboarding = BOOT_JS.index("// Close onboarding overlay if open")
+    start = BOOT_JS.rindex("if(e.key==='Escape'){", 0, onboarding)
+    escape_block = BOOT_JS[start:][:2000]
     assert "closeApprovalMoreMenu()" in escape_block
     assert escape_block.index("closeApprovalMoreMenu()") < escape_block.index("onboardingOverlay")
 

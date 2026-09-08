@@ -2514,7 +2514,13 @@ document.addEventListener('keydown',async e=>{
   if(e.key==='Escape'){
     // Close the approval overflow menu first — it is the innermost open surface,
     // and Escape there must not also clear the session search or blur the composer.
-    if(typeof closeApprovalMoreMenu==='function'&&closeApprovalMoreMenu()) return;
+    // Only while it is actually on screen: switchPanel() hides #mainChat with
+    // display:none and leaves the menu's own hidden flag alone, so an off-screen
+    // menu would otherwise swallow the Escape that should close Settings (codex P2).
+    // offsetParent===null is the repo's laid-out test (see ui.js closeToolsetsDropdown).
+    const _moreMenu=$('approvalMoreMenu');
+    if(_moreMenu&&!_moreMenu.hidden&&_moreMenu.offsetParent!==null
+       &&typeof closeApprovalMoreMenu==='function'&&closeApprovalMoreMenu()) return;
     // Close onboarding overlay if open (skip/dismiss the wizard)
     const onboardingOverlay=$('onboardingOverlay');
     if(onboardingOverlay&&onboardingOverlay.style.display!=='none'){
