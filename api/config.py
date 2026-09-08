@@ -630,8 +630,15 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
                 # This matches master's pre-#4662 behavior (it entered the block for
                 # {} and set the mtime); the inner `if loaded:` only gates the no-op
                 # cache update, not the mtime stamp.
-                _cfg_mtime, _identity = _config_stat_state(config_path)
-                _cfg_stat_identity = (_cfg_mtime, _identity)
+                _cfg_mtime, _ = _config_stat_state(config_path)
+                # Stamp the identity of the generation we actually parsed, read
+                # back from the parse cache, rather than a second stat(). A
+                # replace landing between the load above and here would
+                # otherwise mark generation A fresh under generation B's
+                # identity, and no later read could ever tell (HWEB-81).
+                with _yaml_file_cache_lock:
+                    _parsed = _yaml_file_cache.get(str(config_path))
+                _cfg_stat_identity = (_cfg_mtime, _parsed[0]) if _parsed else ()
     except Exception:
         logger.debug("Failed to load yaml config from %s", config_path)
     _apply_config_defaults(_cfg_cache)

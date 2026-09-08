@@ -7,7 +7,42 @@ expansion still runs per call, and an mtime change still busts the cache.
 import os
 import time
 
+import pytest
 import yaml as _yaml
+
+
+@pytest.fixture(autouse=True)
+def _restore_config_globals():
+    """Put the process-global config state back after each test.
+
+    These tests load real config.yaml files into api.config's module globals.
+    Leaving a tmp profile's providers in _cfg_cache leaks into any later test
+    that reads the catalog without pinning its own config (HWEB-81: it made
+    tests/test_issue4756_session_visit_model_refresh.py see an `openai` group
+    that its own fixture had removed).
+    """
+    import api.config as cfg
+
+    saved = (
+        dict(cfg._cfg_cache),
+        cfg._cfg_mtime,
+        cfg._cfg_stat_identity,
+        cfg._cfg_path,
+        cfg._cfg_fingerprint,
+        dict(cfg._yaml_file_cache),
+    )
+    try:
+        yield
+    finally:
+        cfg._cfg_cache.clear()
+        cfg._cfg_cache.update(saved[0])
+        cfg._cfg_mtime = saved[1]
+        cfg._cfg_stat_identity = saved[2]
+        cfg._cfg_path = saved[3]
+        cfg._cfg_fingerprint = saved[4]
+        with cfg._yaml_file_cache_lock:
+            cfg._yaml_file_cache.clear()
+            cfg._yaml_file_cache.update(saved[5])
 
 
 def test_reload_config_uses_mtime_cache(tmp_path, monkeypatch):
@@ -281,3 +316,42 @@ def test_get_config_does_not_reload_an_unchanged_file(tmp_path, monkeypatch):
     for _ in range(5):
         cfg.get_config()
     assert reloads["n"] == 0, f"an unchanged config.yaml triggered {reloads['n']} reload(s)"
+
+
+def test_a_replace_racing_the_load_is_not_stamped_as_fresh(tmp_path, monkeypatch):
+    """HWEB-81 (Codex P2): _refresh_config_cache stats the file a second time to
+    stamp its freshness. A replace landing between the parse and that stat used
+    to leave generation A in _cfg_cache under generation B's identity, which no
+    later read could tell apart. The stamp now comes from the parse cache, so
+    the next read sees the mismatch and reloads."""
+    import api.config as cfg
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("providers:\n  openai:\n    models: [model-aaa]\n", encoding="utf-8")
+    monkeypatch.setattr(cfg, "_get_config_path", lambda: config_path)
+    with cfg._yaml_file_cache_lock:
+        cfg._yaml_file_cache.clear()
+
+    real_load = cfg._load_yaml_config_file_raw
+    raced = {"done": False}
+
+    def _load_then_replace(path, **kwargs):
+        result = real_load(path, **kwargs)
+        if not raced["done"]:
+            raced["done"] = True
+            replacement = tmp_path / "config.yaml.new"
+            replacement.write_text(
+                "providers:\n  openai:\n    models: [model-bbb]\n", encoding="utf-8"
+            )
+            os.replace(replacement, config_path)
+        return result
+
+    monkeypatch.setattr(cfg, "_load_yaml_config_file_raw", _load_then_replace)
+    cfg.reload_config()
+    assert raced["done"], "test setup: the racing replace never ran"
+    monkeypatch.setattr(cfg, "_load_yaml_config_file_raw", real_load)
+
+    assert cfg.get_config()["providers"]["openai"]["models"] == ["model-bbb"], (
+        "the generation parsed before the replace was stamped as if it were the "
+        "generation now on disk"
+    )
