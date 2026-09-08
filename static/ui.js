@@ -37,6 +37,10 @@ function showConversationEmptyState(){
 // The one place the empty state is taken down. Every caller that starts painting
 // a transcript row goes through here so the hero layout is released with it
 // (HWEB-1) — a direct style.display='none' would leave the composer centered.
+// Call sites guard with `typeof` (the existing _applyUserRowIntrinsicHeight
+// pattern): several regression tests extract one render function out of this
+// file and run it under node against hand-stubbed collaborators, so a bare
+// reference to a helper outside the extracted body is a ReferenceError there.
 function hideConversationEmptyState(){
   const empty=$('emptyState');
   if(empty) empty.style.display='none';
@@ -14840,7 +14844,7 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   if(!S.session||!S.activeStreamId) return false;
   if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
   if(streamId&&S.activeStreamId!==streamId) return false;
-  hideConversationEmptyState();
+  if(typeof hideConversationEmptyState==='function') hideConversationEmptyState();
   let turn=$('liveAssistantTurn');
   if(!turn){
     turn=_createAssistantTurn();
@@ -14937,7 +14941,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   if(!S.session||!S.activeStreamId) return false;
   if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
   if(streamId&&S.activeStreamId!==streamId) return false;
-  hideConversationEmptyState();
+  if(typeof hideConversationEmptyState==='function') hideConversationEmptyState();
   let turn=$('liveAssistantTurn');
   if(!turn){
     turn=_createAssistantTurn();
@@ -18047,7 +18051,7 @@ function renderMessages(options){
 
   const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);
   const visWithIdx=_getVisibleMessagesWithIdx();
-  if(visWithIdx.length||preservedCompressionTaskMessages.length) hideConversationEmptyState();
+  if(visWithIdx.length||preservedCompressionTaskMessages.length){ if(typeof hideConversationEmptyState==='function') hideConversationEmptyState(); }
   else showConversationEmptyState();
   const virtualWindow=virtualFallback
     ? {virtualized:false,start:0,end:visWithIdx.length,topPad:0,bottomPad:0,total:visWithIdx.length,tailStart:visWithIdx.length}
@@ -20743,7 +20747,7 @@ function ensureLiveWorklogShell(){
     _dedupeLiveProcessedWorklogAnchors($('liveAssistantTurn'));
     return $('liveAssistantTurn');
   }
-  hideConversationEmptyState();
+  if(typeof hideConversationEmptyState==='function') hideConversationEmptyState();
   const compactWorklog=typeof isCompactWorklogMode==='function'&&isCompactWorklogMode();
   if(!compactWorklog&&!isSimplifiedToolCalling()){
     appendThinking();
@@ -21754,7 +21758,7 @@ function appendThinking(text='', options){
     _renderLiveAnchorActivitySceneForStream(S.activeStreamId, S.session.session_id);
     return;
   }
-  hideConversationEmptyState();
+  if(typeof hideConversationEmptyState==='function') hideConversationEmptyState();
   if(!isSimplifiedToolCalling()){
     let row=$('thinkingRow');
     if(!row){

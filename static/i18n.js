@@ -12,8 +12,6 @@
 
 const LOCALES = {
   en: {
-    empty_hero_title: 'What are we working on?',
-    empty_hero_title_workspace: 'What are we working on in {0}?',
     offline_title: 'Connection lost',
     offline_browser_detail: 'Your browser reports that this device is offline.',
     offline_network_detail: 'Hermes is unreachable from this browser right now.',
@@ -1349,6 +1347,8 @@ const LOCALES = {
     save_skill: 'Save skill',
     editing: 'Editing',
     // Empty state
+    empty_hero_title: 'What are we working on?',
+    empty_hero_title_workspace: 'What are we working on in {0}?',
     // onboarding
     onboarding_badge: 'FIRST RUN',
     onboarding_title: 'Welcome to Hermes Web UI',
@@ -1819,8 +1819,6 @@ const LOCALES = {
   },
 
   it: {
-    empty_hero_title: 'Su cosa lavoriamo?',
-    empty_hero_title_workspace: 'Su cosa lavoriamo in {0}?',
     offline_title: 'Connessione persa',
     offline_browser_detail: 'Il browser segnala che questo dispositivo è offline.',
     offline_network_detail: 'Hermes non è raggiungibile da questo browser al momento.',
@@ -3143,6 +3141,8 @@ const LOCALES = {
     save_skill: 'Salva skill',
     editing: 'Modifica in corso',
     // Empty state
+    empty_hero_title: 'Su cosa lavoriamo?',
+    empty_hero_title_workspace: 'Su cosa lavoriamo in {0}?',
     // onboarding
     onboarding_badge: 'PRIMO AVVIO',
     onboarding_title: 'Benvenuto in Hermes Web UI',
@@ -3608,8 +3608,6 @@ const LOCALES = {
   },
 
   ja: {
-    empty_hero_title: '何に取り組みましょうか?',
-    empty_hero_title_workspace: '{0} で何に取り組みましょうか?',
     offline_title: '接続が切断されました',
     offline_browser_detail: 'ブラウザはこのデバイスがオフラインだと報告しています。',
     offline_network_detail: '現在、このブラウザからHermesに到達できません。',
@@ -4937,6 +4935,8 @@ const LOCALES = {
     save_skill: 'スキルを保存',
     editing: '編集中',
     // Empty state
+    empty_hero_title: '何に取り組みましょうか?',
+    empty_hero_title_workspace: '{0} で何に取り組みましょうか?',
     // onboarding
     onboarding_badge: '初回起動',
     onboarding_title: 'Hermes Web UI へようこそ',
@@ -5402,8 +5402,6 @@ const LOCALES = {
   },
 
   ru: {
-    empty_hero_title: 'Над чем будем работать?',
-    empty_hero_title_workspace: 'Над чем будем работать в {0}?',
     offline_title: 'Соединение потеряно',
     offline_browser_detail: 'Браузер сообщает, что это устройство офлайн.',
     offline_network_detail: 'Hermes сейчас недоступен из этого браузера.',
@@ -6347,6 +6345,9 @@ const LOCALES = {
     create_job: 'Создать задание',
     save_skill: 'Сохранить навык',
     editing: 'Редактирование',
+    // Empty state
+    empty_hero_title: 'Над чем будем работать?',
+    empty_hero_title_workspace: 'Над чем будем работать в {0}?',
     onboarding_badge: 'ПЕРВЫЙ ЗАПУСК',
     onboarding_title: 'Добро пожаловать в Hermes Web UI',
     onboarding_lead: 'Краткая пошаговая настройка проверит Hermes, сохранит рабочую конфигурацию провайдера, выберет рабочее пространство и модель и при желании защитит приложение паролем.',
@@ -7170,8 +7171,6 @@ const LOCALES = {
   },
 
   es: {
-    empty_hero_title: '¿En qué trabajamos?',
-    empty_hero_title_workspace: '¿En qué trabajamos en {0}?',
     offline_title: 'Conexión perdida',
     offline_browser_detail: 'Tu navegador indica que este dispositivo está sin conexión.',
     offline_network_detail: 'Hermes no está disponible desde este navegador ahora mismo.',
@@ -8101,6 +8100,8 @@ const LOCALES = {
     save_skill: 'Guardar skill',
     editing: 'Editando',
     // Empty state
+    empty_hero_title: '¿En qué trabajamos?',
+    empty_hero_title_workspace: '¿En qué trabajamos en {0}?',
     // onboarding
     onboarding_badge: 'PRIMER USO',
     onboarding_title: 'Bienvenido a Hermes Web UI',
@@ -8905,8 +8906,6 @@ const LOCALES = {
   },
 
   de: {
-    empty_hero_title: 'Woran arbeiten wir?',
-    empty_hero_title_workspace: 'Woran arbeiten wir in {0}?',
     offline_title: 'Verbindung verloren',
     offline_browser_detail: 'Dein Browser meldet, dass dieses Gerät offline ist.',
     offline_network_detail: 'Hermes ist von diesem Browser aus gerade nicht erreichbar.',
@@ -9801,7 +9800,6 @@ const LOCALES = {
     create_job: 'Job erstellen',
     save_skill: 'Skill speichern',
     editing: 'Bearbeitung',
-    // Empty state
     onboarding_password_will_enable: 'Wird aktiviert',
     onboarding_password_will_replace: 'Wird ersetzt',
     onboarding_password_keep_existing: 'Aktuelles Passwort beibehalten',
@@ -10181,6 +10179,9 @@ const LOCALES = {
     session_time_bucket_this_week: 'Diese Woche',
     session_time_bucket_last_week: 'Letzte Woche',
     session_time_bucket_older: 'Älter',
+    // Empty state
+    empty_hero_title: 'Woran arbeiten wir?',
+    empty_hero_title_workspace: 'Woran arbeiten wir in {0}?',
     onboarding_badge: 'Ersteinrichtung',
     onboarding_title: 'Willkommen bei Hermes',
     onboarding_lead: 'Lassen Sie uns Ihren Agenten einrichten.',
@@ -10634,8 +10635,6 @@ const LOCALES = {
   },
 
   zh: {
-    empty_hero_title: '我们来做点什么？',
-    empty_hero_title_workspace: '在 {0} 中我们来做点什么？',
     offline_title: '连接已断开',
     offline_browser_detail: '浏览器报告此设备当前离线。',
     offline_network_detail: '此浏览器当前无法连接到 Hermes。',
@@ -11574,6 +11573,9 @@ const LOCALES = {
     settings_desc_whats_new_summary: "将“新功能”动作从首先打开原始差异改为生成简短且易读的摘要。在生成摘要后，仍可进行常规的差异比较。",
     settings_desc_bot_name: '仅用于默认个人资料。其他个人资料会使用各自的名称。',
     settings_desc_password: '输入新密码以设置或更改。留空保持当前设置。',
+    // Empty state
+    empty_hero_title: '我们来做点什么？',
+    empty_hero_title_workspace: '在 {0} 中我们来做点什么？',
     // onboarding
     onboarding_badge: '首次运行',
     onboarding_title: '欢迎使用 Hermes Web UI',
@@ -12357,8 +12359,6 @@ const LOCALES = {
 
   // Traditional Chinese (zh-Hant)
   'zh-Hant': {
-    empty_hero_title: '我們來做點什麼？',
-    empty_hero_title_workspace: '在 {0} 中我們來做點什麼？',
 
     offline_title: '連線中斷',
     offline_browser_detail: '瀏覽器回報此裝置目前離線。',
@@ -13683,6 +13683,8 @@ const LOCALES = {
     save_skill: '儲存技能',
     editing: '編輯中',
     // Empty state
+    empty_hero_title: '我們來做點什麼？',
+    empty_hero_title_workspace: '在 {0} 中我們來做點什麼？',
     // onboarding
     onboarding_badge: '首次使用',
     onboarding_title: '歡迎使用 Hermes Web UI',
@@ -14149,8 +14151,6 @@ const LOCALES = {
   },
 
   pt: {
-    empty_hero_title: 'No que vamos trabalhar?',
-    empty_hero_title_workspace: 'No que vamos trabalhar em {0}?',
     offline_title: 'Conexão perdida',
     offline_browser_detail: 'O navegador informa que este dispositivo está offline.',
     offline_network_detail: 'O Hermes está inacessível neste navegador agora.',
@@ -15291,6 +15291,8 @@ const LOCALES = {
     save_skill: 'Salvar skill',
     editing: 'Editando',
     // Empty state
+    empty_hero_title: 'No que vamos trabalhar?',
+    empty_hero_title_workspace: 'No que vamos trabalhar em {0}?',
     // onboarding
     onboarding_badge: 'PRIMEIRO ACESSO',
     onboarding_title: 'Bem-vindo ao Hermes Web UI',
@@ -15757,8 +15759,6 @@ const LOCALES = {
     wiki_not_configured: 'Wiki not configured',
   },
   ko: {
-    empty_hero_title: '무엇을 작업할까요?',
-    empty_hero_title_workspace: '{0}에서 무엇을 작업할까요?',
     offline_title: '연결이 끊겼습니다',
     offline_browser_detail: '브라우저가 이 장치가 오프라인이라고 보고합니다.',
     offline_network_detail: '현재 이 브라우저에서 Hermes에 연결할 수 없습니다.',
@@ -16977,6 +16977,8 @@ const LOCALES = {
     save_skill: 'Save skill',
     editing: 'Editing',
     // Empty state
+    empty_hero_title: '무엇을 작업할까요?',
+    empty_hero_title_workspace: '{0}에서 무엇을 작업할까요?',
     // onboarding
     onboarding_badge: '첫 실행',
     onboarding_title: 'Hermes Web UI에 오신 것을 환영합니다',
@@ -17536,8 +17538,6 @@ const LOCALES = {
   },
 
   fr: {
-    empty_hero_title: 'Sur quoi travaillons-nous ?',
-    empty_hero_title_workspace: 'Sur quoi travaillons-nous dans {0} ?',
     offline_title: 'Connexion perdue',
     offline_browser_detail: 'Votre navigateur signale que cet appareil est hors ligne.',
     offline_network_detail: 'Hermes est actuellement inaccessible depuis ce navigateur.',
@@ -18846,6 +18846,9 @@ const LOCALES = {
     create_job: 'Créer une tâche',
     save_skill: 'Enregistrer la compétence',
     editing: 'Édition',
+    // Empty state
+    empty_hero_title: 'Sur quoi travaillons-nous ?',
+    empty_hero_title_workspace: 'Sur quoi travaillons-nous dans {0} ?',
     onboarding_badge: 'PREMIÈRE EXÉCUTION',
     onboarding_title: 'Bienvenue dans l\'interface Web Hermes',
     onboarding_lead: 'Une configuration guidée rapide vérifiera Hermes, enregistrera une configuration de fournisseur réelle, choisira un espace de travail et un modèle, et protégera éventuellement l\'application avec un mot de passe.',
@@ -19298,8 +19301,6 @@ const LOCALES = {
   },
 
   cs: {
-    empty_hero_title: 'Na čem budeme pracovat?',
-    empty_hero_title_workspace: 'Na čem budeme pracovat v {0}?',
     _label: 'Čeština',
     _lang: 'cs',
     _speech: 'cs-CZ',
@@ -19844,6 +19845,9 @@ const LOCALES = {
     onboarding_api_key_placeholder: 'Nechte prázdné pro zachování existujícího uloženého klíče',
     onboarding_api_key_placeholder_optional: 'Nechte prázdné pro servery bez klíče',
     onboarding_back: 'Zpět',
+    // Empty state
+    empty_hero_title: 'Na čem budeme pracovat?',
+    empty_hero_title_workspace: 'Na čem budeme pracovat v {0}?',
     onboarding_badge: 'PRVNÍ SPUŠTĚNÍ',
     onboarding_base_url_help: 'Použijte toto pro OpenAI-kompatibilní routery, samostatně hostované servery, LiteLLM, Ollama, LM Studio, vLLM nebo podobné koncové body.',
     onboarding_base_url_label: 'Základní URL',
@@ -21046,8 +21050,6 @@ const LOCALES = {
     tool_summary_join: _i18nToolSummaryJoinCs,
   },
   tr: {
-    empty_hero_title: 'Ne üzerinde çalışıyoruz?',
-    empty_hero_title_workspace: '{0} içinde ne üzerinde çalışıyoruz?',
 
 
 
@@ -22283,6 +22285,8 @@ const LOCALES = {
     save_skill: 'Beceriyi kaydet',
     editing: 'Düzenleme',
     // Empty state
+    empty_hero_title: 'Ne üzerinde çalışıyoruz?',
+    empty_hero_title_workspace: '{0} içinde ne üzerinde çalışıyoruz?',
     // onboarding
     onboarding_badge: 'İLK ÇALIŞMA',
     onboarding_title: 'Hermes Web Kullanıcı Arayüzüne Hoş Geldiniz',
@@ -22830,8 +22834,6 @@ const LOCALES = {
   
   },
   pl: {
-    empty_hero_title: 'Nad czym pracujemy?',
-    empty_hero_title_workspace: 'Nad czym pracujemy w {0}?',
     offline_title: 'Połączenie utracone',
     offline_browser_detail: 'Twoja przeglądarka zgłasza, że to urządzenie jest offline.',
     offline_network_detail: 'Hermes jest obecnie nieosiągalny z tej przeglądarki.',
@@ -24157,6 +24159,8 @@ const LOCALES = {
     save_skill: 'Zapisz umiejętność',
     editing: 'Edytowanie',
     // Empty state
+    empty_hero_title: 'Nad czym pracujemy?',
+    empty_hero_title_workspace: 'Nad czym pracujemy w {0}?',
     // onboarding
     onboarding_badge: 'PIERWSZE URUCHOMIENIE',
     onboarding_title: 'Witaj w Hermes Web UI',
@@ -24614,8 +24618,6 @@ const LOCALES = {
     checkpoint_diff_files_changed: (n) => n === 1 ? '1 plik zmieniony' : `${n} zmienionych plików`,
   },
   vi: {
-    empty_hero_title: 'Chúng ta làm gì nào?',
-    empty_hero_title_workspace: 'Chúng ta làm gì trong {0}?',
     offline_title: 'Mất kết nối',
     offline_browser_detail: 'Trình duyệt báo rằng thiết bị này đang ngoại tuyến.',
     offline_network_detail: 'Không thể kết nối tới Hermes từ trình duyệt lúc này.',
@@ -25772,6 +25774,8 @@ const LOCALES = {
     save_skill: 'Lưu kỹ năng',
     editing: 'Đang chỉnh sửa',
     // Empty state
+    empty_hero_title: 'Chúng ta làm gì nào?',
+    empty_hero_title_workspace: 'Chúng ta làm gì trong {0}?',
     // onboarding
     onboarding_badge: 'LẦN CHẠY ĐẦU',
     onboarding_title: 'Chào mừng đến với Hermes Web UI',

@@ -3070,7 +3070,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
 
     const tr=$('toolRunningRow');if(tr)tr.remove();
-    hideConversationEmptyState();
+    if(typeof hideConversationEmptyState==='function') hideConversationEmptyState();
     assistantRow=document.createElement('div');
     assistantRow.className='assistant-segment';
     _currentLiveSegmentSeq+=1;

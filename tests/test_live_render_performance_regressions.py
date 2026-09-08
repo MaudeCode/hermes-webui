@@ -455,15 +455,18 @@ def test_live_tool_dom_does_not_retain_full_serialized_rows():
     assert "data-full=" not in tool_builder
 
 
-def test_returning_session_boot_does_not_animate_transient_empty_logo():
+def test_returning_session_boot_does_not_animate_transient_empty_state():
     html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
     css = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
     ui = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
     assert "document.documentElement.dataset.sessionBoot='1'" in html
     assert "location.pathname.indexOf('/session/')===0" in html
     assert "localStorage.getItem('hermes-webui-session')" in html
-    assert 'html:not([data-session-boot="1"]) .empty-logo svg' in css
     assert 'html[data-session-boot="1"] .empty-state{display:none}' in css
+    # HWEB-1 replaced the logo rise with the composer hero. The flag now also has
+    # to hold the hero spacer flat, or a returning session pays for the fresh
+    # new chat's first-frame hero with an inverse composer jump.
+    assert 'html[data-session-boot="1"] #mainChat.composer-hero::after{flex-grow:0;}' in css
     assert "function showConversationEmptyState()" in ui
     assert "delete document.documentElement.dataset.sessionBoot" in ui
 

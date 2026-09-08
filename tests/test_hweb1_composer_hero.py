@@ -279,6 +279,46 @@ def test_returning_session_does_not_flash_the_hero_while_history_loads():
         assert first["gapBelow"] < 60, first
 
 
+def test_starting_a_session_load_releases_the_hero_before_the_fetch_resolves():
+    """Selecting a saved session must drop the hero at once, not at the first row.
+
+    ``renderMessages()`` early-returns while a session fetch is in flight, so a
+    hero released only by a rendered transcript row stays centered over the
+    "Loading conversation..." placeholder for the whole load — and forever if the
+    fetch fails.
+    """
+    with _page() as page:
+        page.wait_for_function(
+            "() => typeof S !== 'undefined' && S._bootReady === true", timeout=20000
+        )
+        assert _geometry(page)["hero"], "precondition: a fresh new chat is in hero mode"
+
+        state = page.evaluate(
+            """() => {
+              // Hang every request so the load can never reach renderMessages().
+              window.api = () => new Promise(() => {});
+              S.session = null;
+              loadSession('hweb1-never-resolves');
+              const chat = document.getElementById('mainChat');
+              const empty = document.getElementById('emptyState');
+              const box = document.getElementById('composerBox');
+              const cr = chat.getBoundingClientRect();
+              const br = box.getBoundingClientRect();
+              return {
+                hero: chat.classList.contains('composer-hero'),
+                emptyVisible: empty.getClientRects().length > 0,
+                gapBelow: cr.bottom - br.bottom,
+              };
+            }"""
+        )
+        assert not state["hero"], state
+        assert not state["emptyVisible"], state
+
+        page.wait_for_timeout(600)  # let the dock transition settle
+        settled = _geometry(page)
+        assert settled["chat"]["bottom"] - settled["box"]["bottom"] < 60, settled
+
+
 def test_reduced_motion_removes_the_dock_transition():
     with _page(reduced_motion="reduce") as page:
         before = _geometry(page)
