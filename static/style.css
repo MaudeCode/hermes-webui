@@ -7497,8 +7497,65 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
   100%{background:transparent;}
 }
 .outline-jump-flash{animation:outline-flash 1.2s ease-out forwards;}
+
+/* -- Turn minimap (HWEB-12) ---------------------------------------------- */
+/* A rail of one mark per loaded user turn, parked in the empty gutter to the
+   LEFT of the reading column (the right gutter already carries the Start jump
+   and the outline FAB). Positioned from the same --msg-max the column uses, so
+   full-width chat collapses the offset and outline.js hides the rail. The rail
+   itself is pointer-events:none so it never eats a transcript text selection;
+   only the marks take pointer events, and the preview card stays inert. */
+#outlineMinimap{
+  position:absolute;z-index:11;
+  right:calc(50% + var(--msg-max) / 2 + 20px);
+  top:10%;height:74%;width:20px;
+  display:flex;flex-direction:column;justify-content:center;align-items:flex-end;
+  pointer-events:none;user-select:none;
+}
+#outlineMinimap[hidden]{display:none;}
+/* flex:1 1 0 with no min/max height: the marks always divide the rail evenly,
+   so mark k sits ~k/N of the way down the conversation at any turn count, and a
+   long transcript compresses instead of overflowing. The band is the hit target;
+   the 2px dash inside it is what the reader sees. */
+.outline-mark{
+  pointer-events:auto;
+  flex:1 1 0;min-height:0;width:100%;
+  display:flex;align-items:center;justify-content:flex-end;
+  background:none;border:none;padding:0;margin:0;cursor:pointer;
+  position:relative;
+}
+.outline-mark::before{
+  content:"";display:block;height:2px;width:9px;border-radius:1px;
+  background:var(--border2);
+  transition:width .12s ease,background .12s ease;
+}
+/* The current turn is a static width/colour change, never a running animation. */
+.outline-mark[aria-current="true"]::before{width:16px;background:var(--accent);}
+.outline-mark:hover::before,.outline-mark:focus-visible::before{width:16px;background:var(--text);}
+.outline-mark:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px;border-radius:3px;}
+.outline-mark-preview{
+  position:absolute;left:100%;margin-left:12px;top:0;
+  width:min(300px,26vw);
+  padding:8px 10px;border-radius:8px;
+  background:var(--surface);border:1px solid var(--border2);
+  box-shadow:0 6px 24px rgba(0,0,0,.22);
+  pointer-events:none;
+}
+.outline-mark-preview[hidden]{display:none;}
+.outline-preview-user{
+  font-size:12px;line-height:1.45;color:var(--text);font-weight:600;
+  overflow-wrap:anywhere;
+}
+.outline-preview-reply{
+  margin-top:6px;padding-top:6px;border-top:1px solid var(--border-subtle);
+  font-size:12px;line-height:1.45;color:var(--muted);overflow-wrap:anywhere;
+}
+@media (prefers-reduced-motion:reduce){
+  .outline-mark::before{transition:none;}
+  .outline-jump-flash{animation:none;}
+}
 @media(max-width:900px){
-  #outlineToggleBtn,#outlinePanelWrapper{display:none!important;}
+  #outlineToggleBtn,#outlinePanelWrapper,#outlineMinimap{display:none!important;}
 }
 
 /* Settings search */
