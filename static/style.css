@@ -1422,7 +1422,7 @@
   :root:not(.dark) .panel-icon-btn:hover{background:rgba(0,0,0,.06);}
   :root:not(.dark) .file-item:hover{background:rgba(0,0,0,.04);}
   :root:not(.dark) .preview-md th{background:rgba(0,0,0,.04);}
-  :root:not(.dark) .msg-body th{background:rgba(0,0,0,.04);}
+  :root:not(.dark) .msg-body th{border-bottom-color:rgba(0,0,0,.16);}
   :root:not(.dark) .preview-md td{border-color:rgba(0,0,0,.08);}
   :root:not(.dark) .msg-body td{border-color:rgba(0,0,0,.08);}
   :root:not(.dark) .preview-badge.code{background:rgba(0,0,0,.05);}
@@ -2328,7 +2328,9 @@
   .msg-body > h4:first-child,.msg-body > h5:first-child,.msg-body > h6:first-child{margin-top:0;}
   .msg-body strong{color:var(--strong);font-weight:600;}.msg-body em{color:var(--em);font-style:italic;}
   .msg-body code{font-family:var(--font-mono);font-size:var(--message-code-font-size);background:var(--code-inline-bg);padding:1px 5px;border-radius:4px;color:var(--code-text);}
-  .msg-body pre{background:var(--code-bg);border:1px solid var(--border);border-radius:10px;padding:14px 16px;overflow-x:auto;contain:content;margin:10px 0;}
+  /* HWEB-6: a code block is a quote inside prose, not a card. Tight padding and
+     an 8px radius; the size stays on --message-pre-code-font-size. */
+  .msg-body pre{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px;overflow-x:auto;contain:content;margin:10px 0;}
   .msg-body pre code{background:none;padding:0;border-radius:0;color:var(--pre-text);font-size:var(--message-pre-code-font-size);line-height:1.6;}
   .msg-body pre.md-source-block,.preview-md pre.md-source-block{white-space:pre-wrap;overflow-x:hidden;overflow-wrap:anywhere;}
   .msg-body pre.md-source-block code,.preview-md pre.md-source-block code{display:block;white-space:inherit;overflow-wrap:anywhere;word-break:break-word;}
@@ -2381,12 +2383,14 @@
     .msg-body pre code .token,.preview-md pre code .token{white-space:inherit !important;overflow-wrap:anywhere !important;word-break:inherit !important;}
     .diff-block .diff-line{white-space:pre-wrap !important;overflow-wrap:anywhere !important;word-break:break-word !important;}
   }
-  .pre-header{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:8px 16px 8px;background:var(--input-bg);border-radius:10px 10px 0 0;border:1px solid var(--border);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px;}
+  .pre-header{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:6px 12px;background:var(--input-bg);border-radius:8px 8px 0 0;border:1px solid var(--border);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px;}
   .pre-header::before{content:'';width:8px;height:8px;border-radius:50%;background:var(--muted);opacity:.4;}
-  .msg-body .pre-header+pre{border-radius:0 0 10px 10px;border-top:none;margin-top:0;}
+  .msg-body .pre-header+pre{border-radius:0 0 8px 8px;border-top:none;margin-top:0;}
   /* Diff/patch viewer */
-  .diff-block{margin:0;counter-reset:diff-line;}
-  .diff-block .diff-line{display:block;padding:0 16px;min-height:1.4em;white-space:pre;}
+  /* The +/- tint is per line, so the block itself carries no side padding —
+     each line's own 12px inset matches the surrounding code-block padding. */
+  .diff-block{margin:0;padding-left:0;padding-right:0;counter-reset:diff-line;}
+  .diff-block .diff-line{display:block;padding:0 12px;min-height:1.4em;white-space:pre;}
   .diff-block .diff-plus{background:rgba(34,197,94,.1);color:#22c55e;}
   .diff-block .diff-minus{background:rgba(239,68,68,.1);color:#ef4444;}
   .diff-block .diff-hunk{color:var(--muted);font-style:italic;background:rgba(99,102,241,.06);}
@@ -2420,11 +2424,20 @@
   .msg-body hr{border:none;border-top:1px solid var(--border);margin:14px 0;}
   /* HWEB-2: a wide markdown table must scroll inside the reading column, not
      escape it — .messages clips horizontally, so an escaped table loses its
-     right-hand columns entirely. Same containment .csv-table-wrap gives CSV. */
-  .msg-body table{border-collapse:collapse;display:block;width:100%;max-width:100%;overflow-x:auto;margin:8px 0;font-size:12px;}
-  .msg-body th{background:rgba(255,255,255,.07);padding:6px 10px;text-align:left;font-weight:600;border:1px solid var(--border2);}
-  .msg-body td{padding:5px 10px;border:1px solid rgba(255,255,255,.06);}
-  .msg-body tr:nth-child(even){background:rgba(255,255,255,.03);}
+     right-hand columns entirely. Same containment .csv-table-wrap gives CSV.
+     HWEB-6: an ordinary markdown table is a reading table — row separators, no
+     cell grid, no header fill, no zebra. `width:max-content` lets columns take
+     their natural width and the block scroll when the content is wider than the
+     reading column, instead of squeezing every column to fit. */
+  .msg-body table{border-collapse:collapse;display:block;width:max-content;max-width:100%;overflow-x:auto;margin:8px 0;font-size:12px;}
+  .msg-body th{padding:6px 10px;text-align:left;font-weight:600;color:var(--muted);border:0;border-bottom:1px solid var(--border2);}
+  .msg-body td{padding:5px 10px;border:0;border-bottom:1px solid var(--border);}
+  .msg-body tbody tr:last-child td{border-bottom:0;}
+  /* A table column narrower than ~10 characters (box-sizing:border-box, so the
+     20px of cell padding is inside that) is unreadable, so a many-column table
+     scrolls — the block above already clips and scrolls — instead of being
+     squeezed into the reading column a letter wide. */
+  .msg-body th,.msg-body td{min-width:10ch;}
   .markdown-table-filter{display:block;width:min(260px,100%);margin:8px 0 4px;padding:5px 8px;border:1px solid var(--border2);border-radius:6px;background:var(--input-bg);color:var(--text);font:inherit;font-family:var(--font-ui);font-size:12px;}
   .markdown-table-filter:focus{outline:1px solid var(--accent);outline-offset:1px;}
   .markdown-table-sort{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;min-height:20px;padding:0;border:0;background:transparent;color:inherit;font:inherit;font-weight:inherit;text-align:left;cursor:pointer;}

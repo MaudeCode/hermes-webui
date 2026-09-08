@@ -130,6 +130,22 @@ intent.
 Keep scale tight. Avoid introducing near-duplicate one-off font sizes, colors,
 radius values, or spacing values when an existing token works.
 
+### Code blocks and tables in chat
+
+Code and tables are quoted content inside prose, not cards competing with it. A
+chat code block uses `10px 12px` padding and an `8px` radius (matching the
+`.pre-header` it sits under) and keeps its size on
+`--message-pre-code-font-size`; Prism highlighting, the Copy button, horizontal
+scrolling on desktop and wrapping under 640px all stay.
+
+An ordinary markdown table is a reading table: row separators only, no cell
+grid, no header fill, no zebra rows. Columns take their natural width with a
+`10ch` floor, so a wide table scrolls inside the reading column instead of
+squeezing columns to an unreadable width. Sorting and filtering chrome belongs
+to the explicit structured-data mode — a ```` ```csv ```` fence or a CSV
+preview, both rendered into `.csv-table-wrap` — and must not appear on prose
+tables.
+
 ## Color, depth, and shape
 
 Use one accent at a time. Semantic colors are for semantic state: success,
