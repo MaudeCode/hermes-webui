@@ -17,7 +17,7 @@
     --radius-sm:4px;--radius-md:8px;--radius-card:8px;--radius-lg:12px;--radius-pill:999px;
     --space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;
     --font-size-xs:11px;--font-size-sm:12px;--font-size-md:14px;
-    --message-body-font-size:14px;--message-body-line-height:1.75;--message-code-font-size:12.5px;--message-pre-code-font-size:13px;--message-table-font-size:12px;
+    --message-body-font-size:14px;--message-body-line-height:1.55;--message-code-font-size:12.5px;--message-pre-code-font-size:13px;--message-table-font-size:12px;
     --file-tree-toggle-width:10px;
     --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
     --font-conversation:var(--font-ui);
@@ -52,24 +52,6 @@
   :root[data-font-size="small"] .msg-body { font-size: 12px; }
   :root[data-font-size="large"] .msg-body { font-size: 16px; }
   :root[data-font-size="xlarge"] .msg-body { font-size: 18px; }
-  :root[data-font-size="small"] .msg-body h1 { font-size: 21px; }
-  :root[data-font-size="large"] .msg-body h1 { font-size: 27px; }
-  :root[data-font-size="xlarge"] .msg-body h1 { font-size: 30px; }
-  :root[data-font-size="small"] .msg-body h2 { font-size: 17px; }
-  :root[data-font-size="large"] .msg-body h2 { font-size: 23px; }
-  :root[data-font-size="xlarge"] .msg-body h2 { font-size: 26px; }
-  :root[data-font-size="small"] .msg-body h3 { font-size: 15px; }
-  :root[data-font-size="large"] .msg-body h3 { font-size: 20px; }
-  :root[data-font-size="xlarge"] .msg-body h3 { font-size: 22px; }
-  :root[data-font-size="small"] .msg-body h4 { font-size: 13px; }
-  :root[data-font-size="large"] .msg-body h4 { font-size: 17px; }
-  :root[data-font-size="xlarge"] .msg-body h4 { font-size: 19px; }
-  :root[data-font-size="small"] .msg-body h5 { font-size: 12px; }
-  :root[data-font-size="large"] .msg-body h5 { font-size: 16px; }
-  :root[data-font-size="xlarge"] .msg-body h5 { font-size: 18px; }
-  :root[data-font-size="small"] .msg-body h6 { font-size: 11px; }
-  :root[data-font-size="large"] .msg-body h6 { font-size: 15px; }
-  :root[data-font-size="xlarge"] .msg-body h6 { font-size: 17px; }
   :root[data-font-size="small"] .msg-body code { font-size: 10.5px; }
   :root[data-font-size="large"] .msg-body code { font-size: 14.5px; }
   :root[data-font-size="xlarge"] .msg-body code { font-size: 16px; }
@@ -210,10 +192,7 @@
   :root.dark[data-skin="graphite"] .composer-box{box-shadow:0 1px 2px rgba(0,0,0,0.28);}
   :root[data-skin="graphite"] .composer-box:focus-within{border-color:var(--accent)!important;box-shadow:0 0 0 2px var(--focus-ring)!important;}
   :root[data-skin="graphite"] textarea#msg{font-family:var(--font-ui)!important;font-size:14px;font-weight:430;letter-spacing:0;line-height:1.45;}
-  :root[data-skin="graphite"] .msg-body{font-family:var(--font-conversation);font-size:13px;font-weight:430;letter-spacing:0;line-height:1.6;}
-  :root[data-skin="graphite"][data-font-size="small"] .msg-body{font-size:11.5px;line-height:1.6;}
-  :root[data-skin="graphite"][data-font-size="large"] .msg-body{font-size:15px;line-height:1.62;}
-  :root[data-skin="graphite"][data-font-size="xlarge"] .msg-body{font-size:17px;line-height:1.62;}
+  :root[data-skin="graphite"] .msg-body{font-family:var(--font-conversation);font-weight:430;letter-spacing:0;}
   :root[data-skin="graphite"] .msg-body code{font-size:.92em;}
   :root[data-skin="graphite"] .msg-body code,
   :root[data-skin="graphite"] .msg-body pre,
@@ -336,10 +315,7 @@
   :root.dark[data-skin="codex"] .composer-box{box-shadow:0 1px 2px rgba(0,0,0,0.28);}
   :root[data-skin="codex"] .composer-box:focus-within{border-color:var(--accent)!important;box-shadow:0 0 0 2px var(--focus-ring)!important;}
   :root[data-skin="codex"] textarea#msg{font-family:var(--font-ui)!important;font-size:14px;font-weight:430;letter-spacing:0;line-height:1.45;}
-  :root[data-skin="codex"] .msg-body{font-family:var(--font-conversation);font-size:13px;font-weight:430;letter-spacing:0;line-height:1.6;}
-  :root[data-skin="codex"][data-font-size="small"] .msg-body{font-size:11.5px;line-height:1.6;}
-  :root[data-skin="codex"][data-font-size="large"] .msg-body{font-size:15px;line-height:1.62;}
-  :root[data-skin="codex"][data-font-size="xlarge"] .msg-body{font-size:17px;line-height:1.62;}
+  :root[data-skin="codex"] .msg-body{font-family:var(--font-conversation);font-weight:430;letter-spacing:0;}
   :root[data-skin="codex"] .msg-body code{font-size:.92em;}
   :root[data-skin="codex"] .msg-body code,
   :root[data-skin="codex"] .msg-body pre,
@@ -462,10 +438,7 @@
   :root.dark[data-skin="terracotta"] .composer-box{box-shadow:0 1px 2px rgba(0,0,0,0.28);}
   :root[data-skin="terracotta"] .composer-box:focus-within{border-color:var(--accent)!important;box-shadow:0 0 0 2px var(--focus-ring)!important;}
   :root[data-skin="terracotta"] textarea#msg{font-family:var(--font-ui)!important;font-size:14px;font-weight:430;letter-spacing:0;line-height:1.45;}
-  :root[data-skin="terracotta"] .msg-body{font-family:var(--font-conversation);font-size:13px;font-weight:430;letter-spacing:0;line-height:1.6;}
-  :root[data-skin="terracotta"][data-font-size="small"] .msg-body{font-size:11.5px;line-height:1.6;}
-  :root[data-skin="terracotta"][data-font-size="large"] .msg-body{font-size:15px;line-height:1.62;}
-  :root[data-skin="terracotta"][data-font-size="xlarge"] .msg-body{font-size:17px;line-height:1.62;}
+  :root[data-skin="terracotta"] .msg-body{font-family:var(--font-conversation);font-weight:430;letter-spacing:0;}
   :root[data-skin="terracotta"] .msg-body code{font-size:.92em;}
   :root[data-skin="terracotta"] .msg-body code,
   :root[data-skin="terracotta"] .msg-body pre,
@@ -588,10 +561,7 @@
   :root.dark[data-skin="github"] .composer-box{box-shadow:0 1px 2px rgba(0,0,0,0.28);}
   :root[data-skin="github"] .composer-box:focus-within{border-color:var(--accent)!important;box-shadow:0 0 0 2px var(--focus-ring)!important;}
   :root[data-skin="github"] textarea#msg{font-family:var(--font-ui)!important;font-size:14px;font-weight:430;letter-spacing:0;line-height:1.45;}
-  :root[data-skin="github"] .msg-body{font-family:var(--font-conversation);font-size:13px;font-weight:430;letter-spacing:0;line-height:1.6;}
-  :root[data-skin="github"][data-font-size="small"] .msg-body{font-size:11.5px;line-height:1.6;}
-  :root[data-skin="github"][data-font-size="large"] .msg-body{font-size:15px;line-height:1.62;}
-  :root[data-skin="github"][data-font-size="xlarge"] .msg-body{font-size:17px;line-height:1.62;}
+  :root[data-skin="github"] .msg-body{font-family:var(--font-conversation);font-weight:430;letter-spacing:0;}
   :root[data-skin="github"] .msg-body code{font-size:.92em;}
   :root[data-skin="github"] .msg-body code,
   :root[data-skin="github"] .msg-body pre,
@@ -2312,20 +2282,27 @@
   .role-icon.user{background:var(--accent-bg);color:var(--accent-text);border:1px solid var(--accent-bg-strong);}
   .role-icon.assistant{background:var(--accent-bg-strong);color:var(--accent-text);border:1px solid var(--accent-bg-strong);}
   .msg-body{font-family:var(--font-conversation);font-size:var(--message-body-font-size);line-height:var(--message-body-line-height);color:var(--text);padding-left:30px;max-width:var(--msg-max);overflow-wrap:anywhere;}
-  .msg-body p{margin-bottom:10px;}.msg-body p:last-child{margin-bottom:0;}
+  /* Conversation block rhythm: one shared 0.65em gap for every prose block, so
+     a chat answer reads as speech rather than as a standalone document. The
+     gap is em-based, so it tracks --message-body-font-size across the
+     small/large/xlarge preferences. Adjacent margins collapse to one gap. */
+  .msg-body p,.msg-body ul,.msg-body ol,.msg-body blockquote,
+  .msg-body h1,.msg-body h2,.msg-body h3,.msg-body h4,.msg-body h5,.msg-body h6{margin-block:.65em;}
+  /* No outer margin: a message must not carry empty space above or below it. */
+  .msg-body > :first-child{margin-top:0;}
+  .msg-body > :last-child,.msg-body li > :last-child{margin-bottom:0;}
   .msg-body td p,.msg-body th p{margin:0;}
-  .msg-body ul,.msg-body ol{margin:6px 0 10px 20px;}.msg-body li{margin-bottom:3px;}
+  .msg-body ul,.msg-body ol{margin-left:20px;}.msg-body li{margin-bottom:.15em;}
+  .msg-body li > ul,.msg-body li > ol{margin-block:0;}
   .msg-body h1,.msg-body h2,.msg-body h3,.msg-body h4,.msg-body h5,.msg-body h6{font-weight:700;color:var(--strong,var(--text));line-height:1.3;}
-  .msg-body h1{font-size:24px;margin:24px 0 12px;border-bottom:1px solid var(--border);padding-bottom:6px;}
-  .msg-body h2{font-size:20px;margin:22px 0 10px;border-bottom:1px solid var(--border);padding-bottom:4px;}
-  .msg-body h3{font-size:17px;margin:20px 0 8px;}
-  .msg-body h4{font-size:15px;margin:18px 0 8px;}
-  .msg-body h5{font-size:14px;margin:16px 0 6px;text-transform:uppercase;letter-spacing:0.04em;}
-  .msg-body h6{font-size:13px;margin:14px 0 6px;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em;}
-  /* First-heading-of-message: collapse the top margin so it doesn't push the
-     entire message down (the row already has spacing). */
-  .msg-body > h1:first-child,.msg-body > h2:first-child,.msg-body > h3:first-child,
-  .msg-body > h4:first-child,.msg-body > h5:first-child,.msg-body > h6:first-child{margin-top:0;}
+  /* Restrained chat scale, relative to the body size token (no borders, no
+     uppercase label styling — those read as documentation chrome). */
+  .msg-body h1{font-size:1.35em;}
+  .msg-body h2{font-size:1.22em;}
+  .msg-body h3{font-size:1.12em;}
+  .msg-body h4{font-size:1.05em;}
+  .msg-body h5{font-size:1em;}
+  .msg-body h6{font-size:.95em;color:var(--muted);}
   .msg-body strong{color:var(--strong);font-weight:600;}.msg-body em{color:var(--em);font-style:italic;}
   .msg-body code{font-family:var(--font-mono);font-size:var(--message-code-font-size);background:var(--code-inline-bg);padding:1px 5px;border-radius:4px;color:var(--code-text);}
   .msg-body pre{background:var(--code-bg);border:1px solid var(--border);border-radius:10px;padding:14px 16px;overflow-x:auto;contain:content;margin:10px 0;}
@@ -2414,7 +2391,7 @@
   .tree-null{color:var(--muted);font-style:italic;}
   .tree-comma{color:var(--muted);}
   .tree-item{line-height:1.6;}
-  .msg-body blockquote{border-left:3px solid var(--blue);padding-left:14px;color:var(--muted);font-style:italic;margin:10px 0;}
+  .msg-body blockquote{border-left:3px solid var(--blue);padding-left:14px;color:var(--muted);font-style:italic;}
   .msg-body blockquote p{margin:0;}
   .msg-body a{color:var(--blue);text-decoration:underline;}
   .msg-body hr{border:none;border-top:1px solid var(--border);margin:14px 0;}
