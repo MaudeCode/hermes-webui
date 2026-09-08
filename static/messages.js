@@ -7383,7 +7383,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             const _isProviderFailure=isRateLimit||isQuotaExhausted||isAuthMismatch||isGatewayAuthError||isModelNotFound||isNoResponse;
             publishChatRuntimeNotice({
               kind:_isProviderFailure?'provider_failure':'thread_error',
-              sessionId:(S.session&&S.session.session_id)||activeSid||'',
+              // Compression rotation assigns S.session=d.session further down, so
+              // reading S.session here would key the notice to the archived parent:
+              // it would then hide from the continuation the user is actually in,
+              // survive the next turn's setBusy() clear, and resurface if the
+              // parent is ever reopened. continuationSid is the post-rotation owner
+              // when the event carries one.
+              sessionId:continuationSid||(S.session&&S.session.session_id)||activeSid||'',
               runId:streamId||'',
               tone:'error',
               title:label,

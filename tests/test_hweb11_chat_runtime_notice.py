@@ -136,6 +136,8 @@ def test_restart_wait_publishes_both_messages_without_a_dangling_dom_reference()
     assert "if(typeof publishChatRuntimeNotice!=='function') return;" in body
     assert "_publishRestartNotice('runtime_notice_restarting_title'" in body
     assert "_publishRestartNotice('runtime_notice_restart_slow_title'" in body
+    # The timeout copy tells the user to click Reload, so the row must carry it.
+    assert "id:'btnRestartTimeoutReload',label:'Reload',onClick:()=>refreshSession()" in body
 
 
 def test_restart_wait_timeout_path_runs_without_throwing():
@@ -153,21 +155,25 @@ def test_restart_wait_timeout_path_runs_without_throwing():
         wait_fn = UI_JS[h_start:h_end] + "\n" + wait_fn
     script = textwrap.dedent(
         """\
-        let now = 0, reloads = 0, published = [];
+        let now = 0, reloads = 0, published = [], actions = [];
         global.window = {};
         global.document = { baseURI: 'http://127.0.0.1:8788/' };
         global.location = { reload: () => { reloads += 1; } };
         global.Date = { now: () => now };
         global.setTimeout = (cb, ms) => { now += ms || 0; cb(); return 0; };
         global.fetch = async () => { throw new Error('server down'); };
-        global.publishChatRuntimeNotice = rec => { published.push(rec.title); };
+        global.publishChatRuntimeNotice = rec => {
+          published.push(rec.title);
+          actions.push((rec.actions || []).map(a => a.label));
+        };
         global.t = key => key;
+        global.refreshSession = () => {};
         """
     ) + wait_fn + textwrap.dedent(
         """
         (async () => {
           await _waitForServerThenReload({ interval: 1, maxMs: 5 });
-          process.stdout.write(JSON.stringify({reloads, published}) + '\\n');
+          process.stdout.write(JSON.stringify({reloads, published, actions}) + '\\n');
         })().catch(err => { console.error(err.stack || err.message); process.exit(1); });
         """
     )
@@ -179,6 +185,29 @@ def test_restart_wait_timeout_path_runs_without_throwing():
         "runtime_notice_restarting_title",
         "runtime_notice_restart_slow_title",
     ]
+    # In-progress carries no action; the timeout state offers the Reload it asks for.
+    assert result["actions"] == [[], ["Reload"]]
+
+
+def test_rotated_session_error_is_keyed_to_the_continuation_session():
+    """Compression rotation reassigns S.session *after* the notice is published.
+
+    Reading S.session at the publish site would key the record to the archived
+    parent, so it would hide from the continuation the user is actually in, and
+    the next turn's setBusy() clear (which uses the current session id) would
+    never match it.
+    """
+    publish_idx = MESSAGES_JS.index("kind:_isProviderFailure?'provider_failure':'thread_error',")
+    owner = MESSAGES_JS[publish_idx : MESSAGES_JS.index("runId:", publish_idx)]
+    assert "sessionId:continuationSid||" in owner
+    # The continuation id must already be resolved above the publish site.
+    continuation_idx = MESSAGES_JS.rindex(
+        "const continuationSid=(d.session&&d.session.session_id)", 0, publish_idx
+    )
+    adopt_idx = MESSAGES_JS.index("S.session=d.session;", continuation_idx)
+    assert continuation_idx < publish_idx < adopt_idx, (
+        "publish must sit after continuationSid is resolved but before S.session is reassigned"
+    )
 
 
 def test_cancelled_and_interrupted_turns_raise_no_failure_notice():

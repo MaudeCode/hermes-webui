@@ -11465,9 +11465,13 @@ async function _waitForServerThenReload(opts){
   // refreshSession calls elsewhere in this file are guarded.
   // Takes a key, not a string: t() is resolved behind the same guard so the
   // extracted-function harnesses only need the globals they already stub.
-  const _publishRestartNotice=(titleKey,detail)=>{
+  // `actions` is what makes the timeout state actionable — its copy tells the
+  // user to click Reload, so the row has to carry that button the way the
+  // reconnect banner it replaced always did. refreshSession() hard-reloads while
+  // window._restartingForUpdate is set, which is exactly the recovery wanted.
+  const _publishRestartNotice=(titleKey,detail,actions)=>{
     if(typeof publishChatRuntimeNotice!=='function') return;
-    publishChatRuntimeNotice({kind:'reconnect',runId:'restart',tone:'info',title:t(titleKey),detail});
+    publishChatRuntimeNotice({kind:'reconnect',runId:'restart',tone:'info',title:t(titleKey),detail,actions});
   };
   _publishRestartNotice('runtime_notice_restarting_title','\u23f3 Restarting… please wait');
   const deadline=Date.now()+maxMs;
@@ -11567,7 +11571,7 @@ async function _waitForServerThenReload(opts){
     }catch(_){ _consecutiveOutages++; /* socket closed during restart — retry */ }
     await new Promise(r=>setTimeout(r, interval));
   }
-  _publishRestartNotice('runtime_notice_restart_slow_title','\u26a0\ufe0f Server is taking longer than expected — click Reload when ready');
+  _publishRestartNotice('runtime_notice_restart_slow_title','\u26a0\ufe0f Server is taking longer than expected — click Reload when ready',[{id:'btnRestartTimeoutReload',label:'Reload',onClick:()=>refreshSession()}]);
 }
 
 function _pendingCurrentTailUserMessage(messages){
