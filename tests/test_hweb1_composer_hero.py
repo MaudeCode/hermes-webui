@@ -319,6 +319,97 @@ def test_starting_a_session_load_releases_the_hero_before_the_fetch_resolves():
         assert settled["chat"]["bottom"] - settled["box"]["bottom"] < 60, settled
 
 
+@pytest.mark.parametrize(
+    "theme", ["light", "dark"], ids=["light", "dark"]
+)
+def test_hero_composer_does_not_paint_a_footer_band_across_the_chat(theme):
+    """Docked, .composer-wrap is a footer; mid-column its chrome is a band.
+
+    Light mode and six skins give the full-width wrapper ``var(--sidebar)`` plus
+    a top border, and its ``::before`` fades the transcript into it. None of that
+    may paint while the wrapper is floating in the middle of the conversation.
+    """
+    with _page() as page:
+        page.evaluate(
+            "(t) => { document.documentElement.classList.toggle('dark', t === 'dark');"
+            " document.documentElement.dataset.skin = 'graphite'; }",
+            theme,
+        )
+        _settle(page)
+        painted = page.evaluate(
+            """() => {
+              const chat = document.getElementById('mainChat');
+              const wrap = document.getElementById('composerWrap');
+              const box = document.getElementById('composerBox');
+              const cs = getComputedStyle(wrap);
+              const before = getComputedStyle(wrap, '::before');
+              return {
+                hero: chat.classList.contains('composer-hero'),
+                wrapBg: cs.backgroundColor,
+                wrapBorderTop: cs.borderTopColor,
+                beforeDisplay: before.display,
+                boxBg: getComputedStyle(box).backgroundColor,
+                boxBgImage: getComputedStyle(box).backgroundImage,
+                boxBorder: getComputedStyle(box).borderTopColor,
+              };
+            }"""
+        )
+        assert painted["hero"], painted
+        # transparent is rgba(0, 0, 0, 0) in every engine.
+        assert "rgba(0, 0, 0, 0)" in painted["wrapBg"], painted
+        assert "rgba(0, 0, 0, 0)" in painted["wrapBorderTop"], painted
+        assert painted["beforeDisplay"] == "none", painted
+        # The box itself keeps its own fill and border — only the wrapper is flattened.
+        assert not (
+            "rgba(0, 0, 0, 0)" in painted["boxBg"] and painted["boxBgImage"] == "none"
+        ), painted
+        assert "rgba(0, 0, 0, 0)" not in painted["boxBorder"], painted
+
+
+def test_subpath_session_link_never_paints_the_hero_first():
+    """A direct session URL under a subpath mount must set the boot flag.
+
+    ``_sessionIdFromLocation()`` finds ``/session/`` anywhere in the path and also
+    honours ``?session=``/``?session_id=``. The early flag has to recognise the
+    same routes, or a fresh browser opening ``/hermes/session/<id>`` paints the
+    hero and then jumps the composer down once the deferred scripts run.
+    """
+    html = read("static/index.html")
+    boot = next(line for line in html.splitlines() if "dataset.sessionBoot='1'" in line)
+    assert "indexOf('/session/')===0" not in boot, boot
+    assert "indexOf('/session/')>=0" in boot, boot
+    assert "session_id" in boot, boot
+
+    routes = [
+        "/session/abc",
+        "/hermes/session/abc",
+        "/a/b/session/abc",
+        "/?session=abc",
+        "/hermes/?session_id=abc",
+    ]
+    not_sessions = ["/", "/hermes/", "/settings", "/?q=hello", "/?sessions=1"]
+    with _page() as page:
+        detected = page.evaluate(
+            """(cases) => {
+              const src = [...document.querySelectorAll('script:not([src])')]
+                .map((s) => s.textContent)
+                .find((t) => t && t.includes("dataset.sessionBoot='1'"));
+              // Re-run the shipped predicate against synthetic locations.
+              const body = src.slice(src.indexOf('function d()'), src.indexOf('try{'));
+              const make = (url) => {
+                const u = new URL(url, 'http://x');
+                return new Function('location', body + ' return d();')(
+                  { pathname: u.pathname, search: u.search }
+                );
+              };
+              return { yes: cases.yes.map(make), no: cases.no.map(make) };
+            }""",
+            {"yes": routes, "no": not_sessions},
+        )
+        assert all(detected["yes"]), list(zip(routes, detected["yes"]))
+        assert not any(detected["no"]), list(zip(not_sessions, detected["no"]))
+
+
 def test_reduced_motion_removes_the_dock_transition():
     with _page(reduced_motion="reduce") as page:
         before = _geometry(page)

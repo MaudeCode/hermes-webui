@@ -3532,6 +3532,12 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
 #mainChat::after{content:"";flex:0 1 0;transition:flex-grow .34s cubic-bezier(.22,.61,.36,1);}
 #mainChat.composer-hero::after{flex-grow:1;}
 html[data-session-boot="1"] #mainChat.composer-hero::after{flex-grow:0;}
+/* Docked, .composer-wrap is a footer: light mode and six skins paint it
+   var(--sidebar) with a top border, and its ::before fades the transcript into
+   it. Mid-column that footer chrome reads as a band and a rule drawn across the
+   conversation, so hero mode lifts only the .composer-box out of it. */
+html:not([data-session-boot="1"]) #mainChat.composer-hero .composer-wrap{background:transparent!important;border-top-color:transparent!important;box-shadow:none!important;}
+html:not([data-session-boot="1"]) #mainChat.composer-hero .composer-wrap::before{display:none;}
 @media (prefers-reduced-motion:reduce){
   #mainChat::after{transition:none;}
   .empty-hero-title{transition:none;}

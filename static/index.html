@@ -30,7 +30,7 @@
 <!-- A returning/direct session briefly owns the static empty-state node while its
      transcript loads. Mark that boot before CSS so the welcome-only entrance
      animation cannot create a large layout shift behind the loading session. -->
-<script>(function(){try{if(location.pathname.indexOf('/session/')===0||localStorage.getItem('hermes-webui-session'))document.documentElement.dataset.sessionBoot='1';}catch(e){if(location.pathname.indexOf('/session/')===0)document.documentElement.dataset.sessionBoot='1';}})()</script>
+<script>(function(){function d(){var p=location.pathname||'';if(p.indexOf('/session/')>=0)return true;var s=location.search||'';return /[?&](session|session_id)=[^&]/.test(s);}try{if(d()||localStorage.getItem('hermes-webui-session'))document.documentElement.dataset.sessionBoot='1';}catch(e){if(d())document.documentElement.dataset.sessionBoot='1';}})()</script>
 <link rel="preload" href="static/pwa-startup.js?v=__WEBUI_VERSION__" as="script">
 <script src="static/pwa-startup.js?v=__WEBUI_VERSION__"></script>
 <script>window.__HERMES_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__,csrfToken:__CSRF_TOKEN_JSON__};</script>
