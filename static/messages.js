@@ -7373,6 +7373,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const hint=d.hint?`\n\n*${d.hint}*`:'';
           const details=d.details?String(d.details).replace(/```/g,'`\u200b``'):'';
           const detailsLabel=isCancelled?'Cancellation details':isInterrupted?'Interruption details':isToolLimitReached?'Terminal state details':undefined;
+          // HWEB-11: a terminal failure also raises a runtime notice so it shares
+          // the connection/agent notification stack instead of living only in the
+          // transcript. Cancels, interrupts and the recovery control message are
+          // not failures, so they raise nothing. The record is keyed by
+          // (session, stream) so a retry of the same turn coalesces and setBusy()
+          // can clear it when the next turn starts.
+          if(!isCancelled&&!isInterrupted&&!isRecoveryControlMessage&&typeof publishChatRuntimeNotice==='function'){
+            const _isProviderFailure=isRateLimit||isQuotaExhausted||isAuthMismatch||isGatewayAuthError||isModelNotFound||isNoResponse;
+            publishChatRuntimeNotice({
+              kind:_isProviderFailure?'provider_failure':'thread_error',
+              sessionId:(S.session&&S.session.session_id)||activeSid||'',
+              runId:streamId||'',
+              tone:'error',
+              title:label,
+              detail:String(d.message||''),
+              dismissible:true,
+            });
+          }
           window._compressionUi=null;
           if(typeof clearCompressionUi==='function') clearCompressionUi();
           if(isRecoveryControlMessage){

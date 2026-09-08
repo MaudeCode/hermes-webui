@@ -462,31 +462,15 @@
       <div id="liveToolCards" style="display:none;max-width:var(--msg-max);margin:0 auto;width:100%;"></div>
     </div>
     </div>
-    <div class="reconnect-banner" id="reconnectBanner">
-      <span id="reconnectMsg"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-1px"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg> A response may have been in progress when you last left. Reload messages?</span>
-      <div style="display:flex;gap:8px;flex-shrink:0">
-        <button class="reconnect-btn" onclick="dismissReconnect()">Dismiss</button>
-        <button class="reconnect-btn" onclick="refreshSession()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-1px"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> Reload</button>
-      </div>
-    </div>
-    <div class="offline-banner" id="offlineBanner" role="status" aria-live="assertive" hidden>
-      <div class="offline-copy">
-        <strong id="offlineTitle" data-i18n="offline_title">Connection lost</strong>
-        <span id="offlineDetails" data-i18n="offline_browser_detail">Your browser reports that this device is offline.</span>
-        <span id="offlineAutorefresh" data-i18n="offline_autorefresh">I will refresh this page automatically when Hermes is reachable again.</span>
-      </div>
-      <button class="offline-action" id="offlineCheckNow" type="button" onclick="checkOfflineRecoveryNow()" data-i18n="offline_check_now">Check now</button>
-    </div>
-    <div class="agent-health-banner" id="agentHealthBanner" role="alert" aria-live="assertive" hidden>
-      <div class="agent-health-copy">
-        <strong id="agentHealthTitle">Hermes agent is not responding</strong>
-        <span id="agentHealthDetails">The gateway heartbeat failed. Messages may not be delivered until it comes back.</span>
-      </div>
-      <div class="agent-health-actions">
-        <button class="agent-health-restart" id="btnRestartGateway" type="button" onclick="restartGatewayService()">Restart Service</button>
-        <button class="agent-health-dismiss" id="agentHealthDismiss" type="button" onclick="dismissAgentHealthAlert()" aria-label="Dismiss Hermes agent heartbeat alert">Dismiss</button>
-      </div>
-    </div>
+    <!-- HWEB-11: one prioritized notice stack for chat connection/runtime state.
+         Replaces the separate #reconnectBanner / #offlineBanner / #agentHealthBanner
+         hosts. Records are published through publishChatRuntimeNotice() in ui.js;
+         priority, coalescing and dismissal live there, not in per-condition markup.
+         The two sr-only regions below carry the announcements so the visible stack
+         can re-render on every poll without re-announcing itself. -->
+    <div class="chat-runtime-notice" id="chatRuntimeNotice" role="region" aria-label="Connection and runtime status" hidden></div>
+    <div id="chatRuntimeNoticeAlert" class="sr-only" role="alert" aria-live="assertive" aria-atomic="true"></div>
+    <div id="chatRuntimeNoticeStatus" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
     <div class="composer-wrap" id="composerWrap">
       <div class="composer-flyout">
       <!-- Queue flyout: slides up from behind composer, same pattern as approval-card -->
