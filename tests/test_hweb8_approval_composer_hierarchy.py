@@ -14,6 +14,8 @@ import shutil
 import subprocess
 import tempfile
 
+from urllib.parse import urlparse
+
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -403,6 +405,46 @@ def test_live_clarify_callback_carries_the_queue_depth(advance):
     assert [payload["question"] for payload in seen] == [
         "first?", "first?", "first?", "second?",
     ]
+
+
+def test_clarify_pending_endpoint_returns_the_queue_depth():
+    # The poll is the authoritative source after a reload or session switch, so
+    # an endpoint that omits the depth would floor the counter to 1 on the first
+    # tick and hide it for the rest of the queue.
+    import api.clarify as clarify_mod
+    from api.routes import _handle_clarify_pending
+
+    sid = "hweb8-pending-endpoint"
+    sent = {}
+
+    class _Handler:
+        pass
+
+    def fake_j(handler, payload, status=200):
+        sent.update(payload)
+        return payload
+
+    import api.routes as routes_mod
+    real_j = routes_mod.j
+    routes_mod.j = fake_j
+    parsed = urlparse("/api/clarify/pending?session_id=" + sid)
+    try:
+        _handle_clarify_pending(_Handler(), parsed)
+        assert sent == {"pending": None, "pending_count": 0}
+
+        clarify_mod.submit_pending(sid, {"question": "first?"})
+        clarify_mod.submit_pending(sid, {"question": "second?"})
+        _handle_clarify_pending(_Handler(), parsed)
+        assert sent["pending"]["question"] == "first?"
+        assert sent["pending_count"] == 2
+
+        clarify_mod.resolve_clarify(sid, "answer")
+        _handle_clarify_pending(_Handler(), parsed)
+        assert sent["pending"]["question"] == "second?"
+        assert sent["pending_count"] == 1
+    finally:
+        routes_mod.j = real_j
+        clarify_mod.clear_pending(sid)
 
 
 def test_clarify_poll_plumbs_the_pending_count_onto_the_prompt():

@@ -359,6 +359,21 @@ def get_pending(session_key: str) -> dict | None:
         return dict(pending) if pending else None
 
 
+def get_pending_with_count(session_key: str) -> tuple[dict | None, int]:
+    """Return the oldest unresolved prompt and how many are queued behind it.
+
+    One read under one lock: the browser renders "1 of N pending" from both
+    values, and taking them from two separate ``_lock`` acquisitions could pair
+    a head with a depth from a different moment.
+    """
+    with _lock:
+        queue = _gateway_queues.get(session_key) or []
+        if queue:
+            return dict(queue[0].data), len(queue)
+        pending = _pending.get(session_key)
+        return (dict(pending), 1) if pending else (None, 0)
+
+
 def has_pending(session_key: str) -> bool:
     with _lock:
         return bool(_gateway_queues.get(session_key))

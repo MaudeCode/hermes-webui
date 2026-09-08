@@ -11629,6 +11629,7 @@ try:
     from api.clarify import (
         submit_pending as submit_clarify_pending,
         get_pending as get_clarify_pending,
+        get_pending_with_count as get_clarify_pending_with_count,
         pending_count as get_clarify_pending_count,
         pending_session_keys as clarify_pending_session_keys,
         resolve_clarify,
@@ -11639,6 +11640,7 @@ try:
 except ImportError:
     submit_clarify_pending = lambda *a, **k: None
     get_clarify_pending = lambda *a, **k: None
+    get_clarify_pending_with_count = lambda *a, **k: (None, 0)
     get_clarify_pending_count = lambda *a, **k: 0
     clarify_pending_session_keys = lambda *a, **k: set()
     clarify_sse_subscribe = None
@@ -22922,10 +22924,14 @@ def _handle_approval_inject(handler, parsed):
 
 def _handle_clarify_pending(handler, parsed):
     sid = parse_qs(parsed.query).get("session_id", [""])[0]
-    pending = get_clarify_pending(sid)
+    # pending_count is what the card renders its "1 of N pending" progress from.
+    # Without it here the poll would overwrite the live count on every tick and
+    # a reload would never show the queue position at all — the approval
+    # endpoint has always returned the pair for the same reason.
+    pending, total = get_clarify_pending_with_count(sid)
     if pending:
-        return j(handler, {"pending": pending})
-    return j(handler, {"pending": None})
+        return j(handler, {"pending": pending, "pending_count": total})
+    return j(handler, {"pending": None, "pending_count": 0})
 
 
 def _handle_clarify_sse_stream(handler, parsed):
