@@ -6031,6 +6031,9 @@ function _applySessionToolsets(toolsets) {
 document.addEventListener('click', function(e) {
   if (
     !e.target.closest('#composerToolsetsChip') &&
+    // The overflow row is the trigger at every width since HWEB-7; without this
+    // exemption the click that opens the dropdown bubbles here and closes it.
+    !e.target.closest('#composerMobileToolsetsAction') &&
     !e.target.closest('#composerToolsetsDropdown')
   ) closeToolsetsDropdown();
   // Active profile defaults button

@@ -160,6 +160,49 @@ def test_widening_the_window_no_longer_closes_the_panel():
     )
 
 
+# Every panel row that opens a dropdown, and the click-away handler that must
+# exempt it. A row whose trigger is missing here has its own opening click
+# bubble into the close handler, so the control is unusable.
+PANEL_TRIGGERS = [
+    ("#composerMobileProfileAction", "closeProfileDropdown"),
+    ("#composerMobileWorkspaceAction", "closeWsDropdown"),
+    ("#composerMobileModelAction", "closeModelDropdown"),
+    ("#composerMobileReasoningAction", "closeReasoningDropdown"),
+    ("#composerMobileToolsetsAction", "closeToolsetsDropdown"),
+]
+
+
+def _click_handlers(src: str) -> list[str]:
+    """Every `document.addEventListener('click', …)` body, brace-matched."""
+    out = []
+    for m in re.finditer(r"document\.addEventListener\('click'", src):
+        brace = src.index("{", m.end())
+        depth = 0
+        for i in range(brace, len(src)):
+            if src[i] == "{":
+                depth += 1
+            elif src[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    out.append(src[m.start() : i + 1])
+                    break
+    return out
+
+
+def test_every_panel_trigger_is_exempt_from_its_own_click_away_handler():
+    handlers = _click_handlers(UI_JS) + _click_handlers(
+        (REPO / "static" / "panels.js").read_text(encoding="utf-8")
+    )
+    for trigger, closer in PANEL_TRIGGERS:
+        closing = [h for h in handlers if f"{closer}()" in h and "closest(" in h]
+        assert closing, f"no click-away handler found calling {closer}()"
+        for handler in closing:
+            assert f"closest('{trigger}')" in handler, (
+                f"the click that opens this dropdown from {trigger} bubbles into "
+                f"a {closer} click-away handler and closes it again"
+            )
+
+
 def test_surfaces_opened_from_the_panel_do_not_close_it():
     body = UI_JS[UI_JS.index("e.target.closest('#composerMobileConfigBtn')") :][:900]
     for opened_from_panel in ("#composerToolsetsDropdown", "#profileDropdown", "#savedPromptsPopup"):
@@ -241,6 +284,34 @@ def test_desktop_footer_hides_the_secondary_controls_and_the_panel_holds_them():
         assert opened["panelOpen"], opened
         for row in ("composerMobileProfileAction", "composerMobileWorkspaceAction", "btnSavedPrompts"):
             assert row in opened["panelRows"], (row, opened["panelRows"])
+
+
+def test_clicking_a_panel_row_leaves_its_dropdown_open():
+    """A real click, not a direct call: the opening click also bubbles to the
+    document click-away handlers, which is where the trigger has to be exempt."""
+    with _page(1440) as page:
+        page.click("#composerMobileConfigBtn")
+        page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+        for trigger, dropdown in (
+            ("#composerMobileToolsetsAction", "#composerToolsetsDropdown"),
+            ("#composerMobileProfileAction", "#profileDropdown"),
+        ):
+            page.click(trigger)
+            page.wait_for_timeout(300)
+            state = page.evaluate(
+                "(sel) => {"
+                " const dd = document.querySelector(sel);"
+                " const panel = document.getElementById('composerMobileConfigPanel');"
+                " return {open: dd.classList.contains('open'), panel: panel.classList.contains('open')};"
+                "}",
+                dropdown,
+            )
+            assert state["open"], f"{trigger} opened {dropdown} and something closed it again"
+            assert state["panel"], f"{trigger} closed the panel it was clicked in"
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(200)
+            page.click("#composerMobileConfigBtn")
+            page.wait_for_timeout(200)
 
 
 def test_phone_keeps_its_panel_and_the_context_ring_on_the_button():
