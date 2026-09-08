@@ -199,9 +199,20 @@ class TestToolsetsDropdownResizeGuard:
         )
         assert m, "Toolsets resize handler must exist"
         body = m.group(0)
-        assert "offsetParent" in body, (
-            "Resize handler must check chip.offsetParent === null — without it "
-            "the open dropdown stays open after CSS hides the chip mid-session "
+        # HWEB-7 moved the chip into the composer overflow panel, so the
+        # visibility check lives in the shared _toolsetsDropdownAnchor() the
+        # handler now resolves through — checking the footer chip alone would
+        # close a picker opened from the overflow row on every resize.
+        assert "_toolsetsDropdownAnchor()" in body, (
+            "Resize handler must resolve the anchor through "
+            "_toolsetsDropdownAnchor() so it sees the overflow row too"
+        )
+        anchor = re.search(
+            r"function _toolsetsDropdownAnchor\(\)\s*\{.*?\n\}", js, re.DOTALL
+        )
+        assert anchor and "offsetParent" in anchor.group(0), (
+            "_toolsetsDropdownAnchor must check offsetParent — without it "
+            "the open dropdown stays open after CSS hides its anchor mid-session "
             "(e.g. workspace-panel toggle crossing 1100px threshold)"
         )
         assert "closeToolsetsDropdown" in body, (

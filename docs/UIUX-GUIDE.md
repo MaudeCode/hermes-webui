@@ -28,7 +28,9 @@ dictation, the selected model, the active reasoning mode, context usage, and
 Stop/Send. Profile, workspace, toolsets, saved prompts, voice mode and provider
 quota live one level down, in the composer's overflow menu
 (`#composerMobileConfigBtn` / `#composerMobileConfigPanel`) — one menu at every
-width, not a second desktop-only surface. Settings and session-level tools live
+width, not a second desktop-only surface. Saved prompts is the exception: it
+stays a desktop-only affordance (#3571) and is absent from the menu at phone
+widths. Settings and session-level tools live
 in the Hermes Control Center. Pending attachments and action-required states
 (approvals, clarifications, the queue card) never move into overflow. Preserve
 this shape unless the change explicitly justifies a different interaction

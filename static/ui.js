@@ -6085,8 +6085,11 @@ document.addEventListener('change', function(e) {
 window.addEventListener('resize', () => {
   const dd = $('composerToolsetsDropdown');
   if (!dd || !dd.classList.contains('open')) return;
-  const chip = $('composerToolsetsChip');
-  if (!chip || chip.offsetParent === null) { closeToolsetsDropdown(); return; }
+  // Resolve through the shared anchor: the footer chip is hidden at every width
+  // since HWEB-7, so checking it alone would close a picker opened from the
+  // overflow row on any resize — including the visual-viewport change an
+  // on-screen keyboard causes when the picker's own input takes focus.
+  if (!_toolsetsDropdownAnchor()) { closeToolsetsDropdown(); return; }
   _positionToolsetsDropdown();
 });
 

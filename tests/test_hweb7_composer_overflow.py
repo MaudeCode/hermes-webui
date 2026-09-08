@@ -145,6 +145,15 @@ def test_control_order_applies_to_the_overflow_row_too():
     )
 
 
+def test_toolsets_resize_handler_uses_the_shared_anchor():
+    """The footer chip is hidden at every width now, so a resize handler that
+    only checks it closes a picker opened from the overflow row."""
+    start = UI_JS.index("window.addEventListener('resize', () => {\n  const dd = $('composerToolsetsDropdown');")
+    handler = UI_JS[start : UI_JS.index("});", start)]
+    assert "_toolsetsDropdownAnchor()" in handler, handler
+    assert "$('composerToolsetsChip')" not in handler, handler
+
+
 def test_widening_the_window_no_longer_closes_the_panel():
     assert "matchMedia('(max-width: 640px)').matches" not in UI_JS, (
         "the panel is no longer phone-only; a resize past 640px must not close it"
