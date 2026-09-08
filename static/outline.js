@@ -456,17 +456,19 @@ function _renderMinimapMarks(entries) {
   if (!el) return;
   const active = _minimapActive;
   // A jump into unloaded history re-renders the transcript, which rebuilds the
-  // marks under a keyboard user's feet. Put focus back on the same TURN: older
-  // messages arriving ahead of it shift every rawIdx, but not its distance from
-  // the end of the list.
-  const before = _minimapMarks();
-  const focusedAt = before.indexOf(document.activeElement);
-  const focusedFromEnd = focusedAt >= 0 ? before.length - 1 - focusedAt : -1;
+  // marks under a keyboard user's feet. Put focus back on the same TURN, keyed
+  // by the session-absolute index so a prepend or an append cannot move it.
+  const focusedMark = _minimapMarks().indexOf(document.activeElement) >= 0
+    ? document.activeElement
+    : null;
+  const focusedSessionIdx = _minimapMarkSessionIndex(focusedMark);
   el.innerHTML = entries.map(function(e) {
     const label = _escHtml(t('outline_minimap_mark', e.label, e.excerpt));
     const current = e.rawIdx === active ? ' aria-current="true"' : '';
+    const session = _minimapSessionIndex(e.rawIdx);
+    const sessionAttr = session === null ? '' : ' data-session-idx="' + session + '"';
     return '<button class="outline-mark" type="button" data-raw-idx="' + e.rawIdx +
-      '" tabindex="-1" aria-label="' + label + '"' + current + '></button>';
+      '"' + sessionAttr + ' tabindex="-1" aria-label="' + label + '"' + current + '></button>';
   }).join('') + '<div class="outline-mark-preview" hidden aria-hidden="true"></div>';
   const marks = _minimapMarks();
   if (!marks.length) return;
@@ -474,8 +476,13 @@ function _renderMinimapMarks(entries) {
   for (let i = 0; i < marks.length; i++) {
     if (Number(marks[i].dataset.rawIdx) === active) { stop = marks[i]; break; }
   }
-  if (focusedFromEnd >= 0) {
-    const refocus = marks[marks.length - 1 - focusedFromEnd] || marks[marks.length - 1];
+  if (focusedSessionIdx !== null) {
+    const raw = _minimapRawIdxForSessionIndex(focusedSessionIdx);
+    let refocus = null;
+    for (let i = 0; i < marks.length && raw !== null; i++) {
+      if (Number(marks[i].dataset.rawIdx) === raw) { refocus = marks[i]; break; }
+    }
+    refocus = refocus || marks[marks.length - 1];
     refocus.tabIndex = 0;
     refocus.focus();
     return;
@@ -507,7 +514,13 @@ function _syncMinimap() {
   }
 
   const entries = (sid && S && S.messages) ? _buildEntries() : [];
-  const sig = entries.map(function(e) { return e.rawIdx + ':' + e.excerpt; }).join(' ');
+  // The locale is part of the signature because the mark labels are built with
+  // t() rather than data-i18n-*, so applyLocaleToDOM() cannot retranslate them.
+  // The loaded window's base offset is part of it because each mark is stamped
+  // with a session-absolute index derived from that base; if the base moves, a
+  // stamp made under the old one no longer resolves to its own turn.
+  const sig = document.documentElement.lang + '|' + _minimapSessionIndex(0) + '|' +
+    entries.map(function(e) { return e.rawIdx + ':' + e.excerpt; }).join(' ');
   _minimapEntries = entries;
   if (sig !== _minimapSig) {
     _minimapSig = sig;
@@ -537,22 +550,43 @@ function _scheduleMinimapSync() {
   }) || 1;
 }
 
+// The session-absolute index of a loaded message, or null when ui.js's index
+// helpers are unavailable. This is the one identity that survives BOTH ends of
+// a reload: _loadOlderMessages prepends and shifts every rawIdx down, and any
+// other writer (a second tab, a messaging integration) can append while a load
+// is in flight, so neither a raw index nor a position in the turn list holds.
+function _minimapSessionIndex(rawIdx) {
+  if (typeof _messageSessionIndexForRawIdx !== 'function') return null;
+  const idx = _messageSessionIndexForRawIdx(rawIdx);
+  return (idx === null || !isFinite(idx)) ? null : idx;
+}
+
+// The index a mark was stamped with when it was rendered, or null.
+function _minimapMarkSessionIndex(mark) {
+  if (!mark || !mark.dataset || mark.dataset.sessionIdx === undefined) return null;
+  const idx = Number(mark.dataset.sessionIdx);
+  return isFinite(idx) ? idx : null;
+}
+
+function _minimapRawIdxForSessionIndex(sessionIdx) {
+  if (sessionIdx === null || typeof _messageRawIdxForSessionIndex !== 'function') return null;
+  const raw = _messageRawIdxForSessionIndex(sessionIdx);
+  return (raw === null || !isFinite(raw) || raw < 0) ? null : raw;
+}
+
 // A mark's rawIdx is an index into the CURRENTLY loaded messages. While the
 // session is still truncated (the initial fetch is a tail window that
 // _loadOlderMessages grows backwards) that index is tail-relative, and
 // _jumpToMessage's own recovery path replaces S.messages with the COMPLETE
 // transcript -- which renumbers every row. So when history is still unloaded,
-// run the existing explicit full-load first, then re-resolve the mark by its
-// position from the end of the turn list, which the prepend leaves fixed.
+// run the existing explicit full-load first, then re-resolve the mark from its
+// session-absolute index.
 function _activateMinimapMark(mark) {
   const rawIdx = Number(mark.dataset.rawIdx);
   const sid = _currentSid();
   const truncated = typeof _messagesTruncated !== 'undefined' && _messagesTruncated;
-  let fromEnd = -1;
-  for (let i = 0; i < _minimapEntries.length; i++) {
-    if (_minimapEntries[i].rawIdx === rawIdx) { fromEnd = _minimapEntries.length - 1 - i; break; }
-  }
-  if (!truncated || fromEnd < 0) {
+  const sessionIdx = _minimapMarkSessionIndex(mark);
+  if (!truncated || sessionIdx === null) {
     _jumpToMessage(rawIdx);
     return;
   }
@@ -560,8 +594,8 @@ function _activateMinimapMark(mark) {
     if (_currentSid() !== sid) return;
     if (!loaded) { _jumpToMessage(rawIdx); return; }
     _syncMinimap();                      // marks now carry absolute indices
-    const entry = _minimapEntries[_minimapEntries.length - 1 - fromEnd];
-    _jumpToMessage(entry ? entry.rawIdx : rawIdx);
+    const resolved = _minimapRawIdxForSessionIndex(sessionIdx);
+    _jumpToMessage(resolved === null ? rawIdx : resolved);
   });
 }
 

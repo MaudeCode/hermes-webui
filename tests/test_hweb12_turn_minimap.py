@@ -33,6 +33,10 @@ _TURNS = 8
 _SETUP_JS = """
 (opts) => {
   const doc = document;
+  // A fresh state dir (the CI runner's, and any first run) shows the onboarding
+  // wizard; its modal overlay intercepts every pointer event aimed at the rail.
+  const onboarding = doc.getElementById('onboardingOverlay');
+  if (onboarding) onboarding.remove();
   const msgs = [];
   let html = '';
   for (let i = 0; i < opts.turns; i++) {
@@ -52,6 +56,8 @@ _SETUP_JS = """
   // Pin the chat pane's width: an open workspace panel narrows it, and whether
   // it starts open depends on saved state the assertions should not ride on.
   doc.documentElement.dataset.workspacePanel = 'closed';
+  if (typeof _oldestIdx !== 'undefined') _oldestIdx = 0;
+  if (typeof _messagesTruncated !== 'undefined') _messagesTruncated = false;
 
   // boot.js re-applies the persisted preference when its settings request
   // lands, which would flip the flag mid-test. Pin it behind an accessor whose
@@ -359,12 +365,15 @@ def test_keyboard_arrows_walk_the_rail_and_activate_a_turn(page):
 def test_focus_survives_the_rebuild_a_jump_into_history_triggers(page):
     """Loading older history re-renders the marks; the keyboard user keeps their place."""
     _setup_visible(page)
+    page.evaluate("() => { _oldestIdx = 2; applyConversationOutlinePreference(); }")
     page.evaluate("() => document.querySelectorAll('.outline-mark')[3].focus()")
-    # A jump into unloaded history prepends turns and rebuilds every mark.
+    # A jump into unloaded history prepends turns and rebuilds every mark, and
+    # drops the loaded window's offset to 0 the way the real load does.
     page.evaluate(
         """() => {
           S.messages = [{ role: 'user', content: 'Older question' },
                         { role: 'assistant', content: 'Older answer' }].concat(S.messages);
+          _oldestIdx = 0;
           applyConversationOutlinePreference();
         }"""
     )
@@ -403,14 +412,20 @@ def test_a_mark_still_lands_on_its_own_turn_after_unloaded_history_arrives(page)
     _setup_visible(page)
     page.evaluate(
         """() => {
-          // The session still has older messages the initial tail window skipped.
+          // The session still has older messages the initial tail window skipped:
+          // two of them, so the loaded window starts at session index 2. The
+          // marks have to be re-stamped under that base, exactly as they would
+          // have been had the session loaded truncated in the first place.
           _messagesTruncated = true;
+          _oldestIdx = 2;
+          applyConversationOutlinePreference();
           // Replaces S.messages and nothing else, exactly like the real one:
           // every row in the DOM still carries its pre-load index afterwards.
           window._ensureAllMessagesLoaded = function() {
             S.messages = [{ role: 'user', content: 'Older question' },
                           { role: 'assistant', content: 'Older answer' }].concat(S.messages);
             _messagesTruncated = false;
+            _oldestIdx = 0;               // the whole transcript is loaded now
             return Promise.resolve();
           };
         }"""
@@ -435,6 +450,59 @@ def test_a_mark_still_lands_on_its_own_turn_after_unloaded_history_arrives(page)
     assert "Question number 6" in (landed["text"] or ""), landed
     # The transcript was rebuilt too, so the row id and the index agree.
     assert "Question number 6" in (landed["twelve"] or ""), landed
+    _setup(page)  # restore the shared page for the next test
+
+
+def test_a_turn_appended_during_the_load_does_not_move_the_jump_target(page):
+    """Another writer can append while the full-history request is in flight."""
+    _setup_visible(page)
+    page.evaluate(
+        """() => {
+          _messagesTruncated = true;
+          _oldestIdx = 2;
+          applyConversationOutlinePreference();   // re-stamp under the real base
+          window._ensureAllMessagesLoaded = function() {
+            // Older history arrives AND a second writer appends a new turn.
+            S.messages = [{ role: 'user', content: 'Older question' },
+                          { role: 'assistant', content: 'Older answer' }]
+                         .concat(S.messages)
+                         .concat([{ role: 'user', content: 'Question number 99' },
+                                  { role: 'assistant', content: 'Answer number 99' }]);
+            _messagesTruncated = false;
+            _oldestIdx = 0;
+            return Promise.resolve();
+          };
+        }"""
+    )
+    page.click(".outline-mark:nth-of-type(6)")   # the 6th user turn
+    page.wait_for_timeout(600)
+    landed = page.evaluate(
+        """() => {
+          const row = document.querySelector('.outline-jump-flash');
+          return { id: row ? row.id : null,
+                   text: row ? row.textContent.trim().slice(0, 40) : null };
+        }"""
+    )
+    # A position-from-the-end key would have shifted by the appended turn.
+    assert landed["id"] == "msg-user-12", landed
+    assert "Question number 6" in (landed["text"] or ""), landed
+    _setup(page)  # restore the shared page for the next test
+
+
+def test_a_language_change_relabels_the_marks(page):
+    """Mark labels come from t(), which applyLocaleToDOM() cannot reach."""
+    _setup_visible(page)
+    before = page.evaluate(
+        "() => document.querySelector('.outline-mark').getAttribute('aria-label')"
+    )
+    page.evaluate("async () => { await setLocale('de'); }")
+    page.evaluate("() => applyConversationOutlinePreference()")
+    after = page.evaluate(
+        "() => document.querySelector('.outline-mark').getAttribute('aria-label')"
+    )
+    assert before.startswith("Question 1"), before
+    assert after.startswith("Frage 1"), (before, after)
+    page.evaluate("async () => { await setLocale('en'); }")
     _setup(page)  # restore the shared page for the next test
 
 
@@ -464,6 +532,17 @@ def test_reuses_the_outline_mechanism_rather_than_a_second_index():
     # or the load-time bottom settle snaps the reader back to the tail.
     assert "_cancelBottomSettle();" in OUTLINE_JS
     assert "_beginMessageJumpScroll(scroller);" in OUTLINE_JS
+    # Mark identity across a reload is ui.js's session-absolute index, which
+    # holds under a prepend AND a concurrent append -- not a list position.
+    assert "_messageSessionIndexForRawIdx(rawIdx)" in OUTLINE_JS
+    assert "_messageRawIdxForSessionIndex(sessionIdx)" in OUTLINE_JS
+    # Stamped at render time: read later, it would resolve against the new base,
+    # so the signature carries the base and a move re-stamps every mark.
+    assert "data-session-idx=" in OUTLINE_JS
+    assert "_minimapSessionIndex(0)" in OUTLINE_JS
+    # Generated labels are not reachable by applyLocaleToDOM(), so the signature
+    # carries the locale and a language change rebuilds them.
+    assert "document.documentElement.lang + '|'" in OUTLINE_JS
     # One IntersectionObserver over the rendered user rows - no scroll-time scan.
     assert OUTLINE_JS.count("new IntersectionObserver") == 1
     assert "root: document.getElementById('messages')" in OUTLINE_JS
