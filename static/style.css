@@ -2387,9 +2387,11 @@
   .pre-header::before{content:'';width:8px;height:8px;border-radius:50%;background:var(--muted);opacity:.4;}
   .msg-body .pre-header+pre{border-radius:0 0 8px 8px;border-top:none;margin-top:0;}
   /* Diff/patch viewer */
-  /* The +/- tint is per line, so the block itself carries no side padding —
-     each line's own 12px inset matches the surrounding code-block padding. */
-  .diff-block{margin:0;padding-left:0;padding-right:0;counter-reset:diff-line;}
+  .diff-block{margin:0;counter-reset:diff-line;}
+  /* The +/- tint is per line, so the block itself carries no side padding — each
+     line's own 12px inset matches the surrounding code-block padding. Needs the
+     .msg-body/.preview-md prefix to outrank `.msg-body pre`/`.preview-md pre`. */
+  .msg-body pre.diff-block,.preview-md pre.diff-block{padding-left:0;padding-right:0;}
   .diff-block .diff-line{display:block;padding:0 12px;min-height:1.4em;white-space:pre;}
   .diff-block .diff-plus{background:rgba(34,197,94,.1);color:#22c55e;}
   .diff-block .diff-minus{background:rgba(239,68,68,.1);color:#ef4444;}

@@ -21246,7 +21246,12 @@ function loadCsvInline(container){
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         const preview=buildCsvTablePreview(path, text, downloadUrl);
+        // The table lands after renderMessages() already ran the enhancer, so a
+        // message-level CSV preview would otherwise miss the sorting/filtering
+        // that structured-data mode is supposed to carry (HWEB-6).
+        const host=el.parentElement;
         el.outerHTML=preview.html||_csvPreviewErrorHtml(path, preview.errorKey||'csv_error', snap);
+        if(host&&typeof enhanceMarkdownTables==='function') enhanceMarkdownTables(host);
       })
       .catch(()=>{
         el.outerHTML=_csvPreviewErrorHtml(path, 'csv_error', snap);

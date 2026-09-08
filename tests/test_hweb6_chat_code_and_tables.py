@@ -56,7 +56,17 @@ def test_code_block_header_matches_the_block_radius():
 
 def test_diff_lines_keep_one_inset_matching_the_code_padding():
     assert "padding:0 12px" in _rule(".diff-block .diff-line", "padding")
-    assert "padding-left:0" in _rule(".diff-block")
+    # Must outrank `.msg-body pre`/`.preview-md pre`, which are more specific
+    # than a bare `.diff-block`.
+    assert "padding-left:0" in _rule(".msg-body pre.diff-block,.preview-md pre.diff-block")
+
+
+def test_message_csv_previews_are_enhanced_after_async_insertion():
+    ui = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+    loader = ui[ui.index("function loadCsvInline(container)"):
+                ui.index("function loadExcalidrawInline(container)")]
+    assert "const host=el.parentElement;" in loader
+    assert "enhanceMarkdownTables(host)" in loader
 
 
 def test_markdown_tables_are_row_separated_not_grid_ruled():
@@ -180,6 +190,8 @@ _MEASURE_JS = """
     headerRadiusTop: cs('probePreHeader').borderTopLeftRadius,
     headerPaddingLeft: cs('probePreHeader').paddingLeft,
     diffLinePaddingLeft: cs('probeDiffMinus').paddingLeft,
+    diffPrePaddingLeft: cs('probeDiff').paddingLeft,
+    diffPrePaddingTop: cs('probeDiff').paddingTop,
     diffLineBackground: cs('probeDiffMinus').backgroundColor,
     inlineCodeBackground: cs('probeInlineCode').backgroundColor,
     inlineCodeFont: cs('probeInlineCode').fontFamily,
@@ -254,6 +266,9 @@ def test_chat_code_and_tables_render_quietly(label, viewport):
 
     # Diffs keep their per-line tint and a single inset.
     assert m["diffLinePaddingLeft"] == "12px", m
+    # One inset, not two: the block drops its side padding so the tint bleeds.
+    assert m["diffPrePaddingLeft"] == "0px", m
+    assert m["diffPrePaddingTop"] == "10px", m
     assert m["diffLineBackground"] not in _TRANSPARENT
 
     # Nested lists still indent.
