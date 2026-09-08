@@ -9,10 +9,16 @@ but `tests/test_issue1579_whats_new_link_404.py` drops `api.updates` from
 in-function import — the `/sw.js` route does exactly that — reads the new one.
 
 On CI the two disagreed and `/sw.js` served a cache name the test did not expect.
+
+The load-bearing test here is `test_describe_is_stable_when_the_repo_abbrev_changes`:
+it drives git's own `core.abbrev` knob, which is what `auto` resolves to, and so
+fails against an unpinned `_describe_git_version` rather than merely restating
+the implementation.
 """
 
 from __future__ import annotations
 
+import importlib
 import pathlib
 import re
 import subprocess
@@ -20,60 +26,136 @@ import sys
 
 import pytest
 
+from api import updates
+
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
-UPDATES_PY = (REPO_ROOT / "api" / "updates.py").read_text(encoding="utf-8")
 
 
-def test_describe_pins_the_abbreviation_length():
-    """An unpinned describe is what let two computations disagree."""
-    assert "_GIT_DESCRIBE_ABBREV = 8" in UPDATES_PY
-    call = UPDATES_PY[
-        UPDATES_PY.index("def _describe_git_version(") : UPDATES_PY.index(
-            "def _detect_webui_version("
-        )
-    ]
-    assert "f'--abbrev={_GIT_DESCRIBE_ABBREV}'" in call
-    assert "['describe', '--tags', '--always']" not in call
+def _git(repo: pathlib.Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=30
+    )
 
 
-def test_reimporting_api_updates_yields_the_same_version_string():
-    """Re-import must reproduce the constant, not a differently-sized SHA.
+@pytest.fixture
+def tagless_repo(tmp_path):
+    """A committed, tagless checkout — the shape CI's shallow clone leaves behind."""
+    if not updates._resolve_git_executable():
+        pytest.skip("git executable not available")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "f.txt").write_text("x", encoding="utf-8")
+    _git(repo, "add", "f.txt")
+    made = _git(repo, "commit", "-q", "-m", "initial")
+    if made.returncode != 0:
+        pytest.skip(f"could not create a test repo: {made.stderr[:200]}")
+    return repo
 
-    This is the exact sequence the shard hit: bind the value, force the
-    re-import another test performs, then compare what a late importer sees.
+
+def _sha_of(described: str) -> str:
+    """Return the object-name part of a describe string.
+
+    Tagless `--always` output is the bare abbreviated sha; tagged output ends in
+    `-g<sha>`. An exact tag has no object name at all.
     """
-    import api.updates as first
+    return described.rsplit("-g", 1)[-1] if "-g" in described else described
 
-    bound = first.WEBUI_VERSION
+
+def test_describe_is_stable_when_the_repo_abbrev_changes(tagless_repo):
+    """The real regression: two describes of one commit must agree.
+
+    `core.abbrev` is exactly what `auto` resolves to, so setting it is a faithful
+    stand-in for the object-count growth that moved it on CI — and it fails
+    against the unpinned helper, which honours the config.
+    """
+    _git(tagless_repo, "config", "core.abbrev", "7")
+    first = updates._describe_git_version(tagless_repo)
+    _git(tagless_repo, "config", "core.abbrev", "12")
+    second = updates._describe_git_version(tagless_repo)
+
+    assert first and second
+    assert first == second, (
+        "_describe_git_version() followed the repository's abbrev setting, so two "
+        "computations of the same commit disagree — this is what let the /sw.js "
+        f"route and its test see different versions ({first!r} vs {second!r})"
+    )
+    assert re.fullmatch(r"[0-9a-f]{8}", _sha_of(first)), (
+        f"expected a pinned 8-character object name, got {first!r}"
+    )
+
+
+def test_detect_webui_version_is_stable_across_a_reimport(tagless_repo, monkeypatch):
+    """Replay the sequence the shard hit, with the abbrev moving underneath it.
+
+    A bare re-import cannot fail on its own — nothing changes between the two
+    computations — so this drives the same knob to make the re-import meaningful.
+    """
+    monkeypatch.setattr(updates, "REPO_ROOT", tagless_repo)
+    _git(tagless_repo, "config", "core.abbrev", "7")
+    bound = updates._detect_webui_version()
+    _git(tagless_repo, "config", "core.abbrev", "12")
+    late = updates._detect_webui_version()
+
+    assert bound == late, (
+        "a re-import of api.updates would rebind WEBUI_VERSION to a different "
+        "string, so a module-level binding and a late in-function import disagree"
+    )
+
+
+def test_reimport_leaves_one_live_api_updates_module():
+    """Guard the isolation this file's own re-import could break.
+
+    Restoring only `sys.modules['api.updates']` would leave the `api` package
+    attribute pointing at the second module, so `from api import updates` and
+    `importlib.import_module('api.updates')` would return different objects with
+    separate caches.
+    """
+    import api
+
+    first = sys.modules["api.updates"]
     del sys.modules["api.updates"]
     try:
-        import api.updates as second  # noqa: PLC0415 — deliberate re-import
-
-        # What the /sw.js route sees on a late in-function import.
-        late = second.WEBUI_VERSION
+        second = importlib.import_module("api.updates")
+        assert second is not first
     finally:
         sys.modules["api.updates"] = first
+        api.updates = first
 
-    assert late == bound, (
-        "WEBUI_VERSION changed across a re-import; a module-level binding taken "
-        "before it and a late import taken after it now disagree"
-    )
+    from api import updates as via_package
+
+    assert via_package is first
+    assert importlib.import_module("api.updates") is first
 
 
-def test_pinned_abbreviation_survives_an_object_count_change():
-    """The adaptive width is what varied; a pinned one must not.
+def test_describe_passes_the_pinned_flag_to_git(tagless_repo, monkeypatch):
+    """The flag must reach git, not just exist as a constant."""
+    seen = []
+    real = updates._run_git
 
-    Ask git for the same commit either side of a real repo write, which is the
-    condition that moves `core.abbrev=auto`.
-    """
-    git = ["git", "-C", str(REPO_ROOT), "describe", "--tags", "--always"]
-    pinned = subprocess.run(
-        git + ["--abbrev=8"], capture_output=True, text=True, timeout=30
-    )
-    if pinned.returncode != 0:
-        pytest.skip(f"git describe unavailable: {pinned.stderr[:200]}")
-    sha = pinned.stdout.strip().rsplit("-g", 1)[-1]
-    assert re.fullmatch(r"[0-9a-f]{8}", sha), (
-        f"pinned describe did not yield a fixed-width sha: {pinned.stdout.strip()!r}"
-    )
+    def _record(args, cwd, **kwargs):
+        seen.append(list(args))
+        return real(args, cwd, **kwargs)
+
+    monkeypatch.setattr(updates, "_run_git", _record)
+    updates._describe_git_version(tagless_repo)
+
+    describe = next((a for a in seen if a and a[0] == "describe"), None)
+    assert describe is not None, seen
+    assert f"--abbrev={updates._GIT_DESCRIBE_ABBREV}" in describe
+
+
+def test_real_checkout_describes_to_a_pinned_width():
+    """End-to-end on this repository, whatever shape its describe takes."""
+    described = updates._describe_git_version(REPO_ROOT)
+    if not described:
+        pytest.skip("git describe unavailable in this checkout")
+    base = described.split("-dirty-", 1)[0]
+    if "-g" not in base:
+        # An exact tag carries no object name; --abbrev does not replace it.
+        assert base, described
+        return
+    assert re.fullmatch(r"[0-9a-f]{8}", _sha_of(base)), described
