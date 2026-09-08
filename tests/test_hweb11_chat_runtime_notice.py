@@ -249,19 +249,33 @@ def test_gateway_label_is_a_fallback_not_an_override_of_a_translation():
     ).read_text(encoding="utf-8")
 
 
-def test_toasts_render_above_the_notice_stack():
-    """A failed gateway restart reports its real error only through a toast.
+def _z_index(selector):
+    """Return the z-index for a selector, skipping themed overrides.
 
-    Both are fixed at the top of the viewport, so the persistent notice must not
-    cover the transient, more specific message that explains it.
+    `.app-dialog-overlay` also appears in a skin block that only sets a
+    background, and it comes first in the file — match the rule that actually
+    declares the layer.
     """
     import re as _re
 
-    def _z(selector):
-        rule = _re.search(_re.escape(selector) + r"\{[^}]*\}", STYLE_CSS).group(0)
-        return int(_re.search(r"z-index:(\d+)", rule).group(1))
+    for rule in _re.finditer(_re.escape(selector) + r"\{[^}]*\}", STYLE_CSS):
+        found = _re.search(r"z-index:(\d+)", rule.group(0))
+        if found:
+            return int(found.group(1))
+    raise AssertionError(f"no z-index declared for {selector}")
 
-    assert _z(".toast") > _z(".chat-runtime-notice")
+
+def test_top_of_viewport_layer_order_is_stack_then_toast_then_modal():
+    """Three fixed layers share the top of the viewport; order is a contract.
+
+    The toast outranks the stack because it carries the specific detail for the
+    condition the notice describes — a failed gateway restart reports its real
+    error only there. Both stay under the modal overlay: a stack up to 320px tall
+    would otherwise cover a centred dialog on mobile and leave its buttons
+    clickable outside the `aria-modal` focus trap.
+    """
+    assert _z_index(".chat-runtime-notice") < _z_index(".toast")
+    assert _z_index(".toast") < _z_index(".app-dialog-overlay")
 
 
 def test_every_emitted_provider_error_type_is_classified_as_a_provider_failure():
@@ -499,6 +513,27 @@ def test_action_required_failure_stays_visible_across_renders():
     )
     assert result["kinds"] == ["offline"]
     assert result["buttons"][0] == [["Check now", False]]
+
+
+def test_dropping_offline_again_supersedes_the_recovery_row():
+    """The recovery row is a 5s transient; a new outage supersedes it.
+
+    Without this the stack shows "Connection lost" and "Connection restored"
+    together until the timer fires.
+    """
+    assert "clearChatRuntimeNotice('reconnect','','recovered');" in UI_JS
+    show = UI_JS[UI_JS.index("function showOfflineBanner(reason){") :]
+    show = show[: show.index("\nfunction ")]
+    # Cleared before the offline record is published, so one render shows one state.
+    assert show.index("clearChatRuntimeNotice") < show.index("_renderOfflineNotice()")
+
+    result = _run(
+        _publish("reconnect", "Connection restored", tone="info", runId="recovered")
+        + "clearChatRuntimeNotice('reconnect','','recovered');"
+        + _publish("offline", "Connection lost", detail="device offline")
+    )
+    assert result["activeKinds"] == ["offline"]
+    assert result["rows"][0] == ["Connection lost", "device offline"]
 
 
 def test_transient_recovery_notice_expires_without_leaving_empty_space():

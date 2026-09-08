@@ -313,6 +313,10 @@ function _stopOfflineProbeTimer(){
 function showOfflineBanner(reason){
   _offlineVisible=true;
   _offlineReason=reason||(_browserReportsOnline()?'network':'browser');
+  // A recovery row is a 5s transient. Dropping offline again inside that window
+  // would otherwise show "Connection lost" and "Connection restored" together —
+  // the recovery it announced has been superseded, not merely aged out.
+  clearChatRuntimeNotice('reconnect','','recovered');
   _renderOfflineNotice();
   _startOfflineProbeTimer();
 }
