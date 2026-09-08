@@ -448,9 +448,31 @@ def _dirty_suffix(path: Path, timeout=1) -> str:
     return "-dirty"
 
 
+# Pin the abbreviation length instead of letting git choose it.
+#
+# `git describe` defaults to `core.abbrev=auto`, which sizes the short SHA from
+# the repository's object count — so the SAME commit describes as `a42c991` in
+# one process and `a42c9917` in another once the count crosses a threshold.
+# WEBUI_VERSION is computed at import, but a test that drops `api.updates` from
+# sys.modules (tests/test_issue1579_whats_new_link_404.py) forces a re-import
+# that recomputes it, leaving an earlier `from api.updates import WEBUI_VERSION`
+# binding holding the old string while a late in-function import reads the new
+# one. That mismatch broke /sw.js cache-name assertions on CI, where a shallow
+# tagless checkout makes describe fall back to a bare abbreviated SHA.
+#
+# A fixed width makes every computation of a given commit produce the same
+# string, so a re-import is harmless. 8 matches what git already picks for this
+# repository, so the displayed version is unchanged.
+_GIT_DESCRIBE_ABBREV = 8
+
+
 def _describe_git_version(path: Path, *, timeout=5, dirty_timeout=1) -> str | None:
     """Return a fast git version string for a checkout, if available."""
-    out, ok = _run_git(['describe', '--tags', '--always'], path, timeout=timeout)
+    out, ok = _run_git(
+        ['describe', '--tags', '--always', f'--abbrev={_GIT_DESCRIBE_ABBREV}'],
+        path,
+        timeout=timeout,
+    )
     if not (ok and out):
         return None
     return out + _dirty_suffix(path, timeout=dirty_timeout)
