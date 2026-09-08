@@ -2282,15 +2282,21 @@
   .role-icon.user{background:var(--accent-bg);color:var(--accent-text);border:1px solid var(--accent-bg-strong);}
   .role-icon.assistant{background:var(--accent-bg-strong);color:var(--accent-text);border:1px solid var(--accent-bg-strong);}
   .msg-body{font-family:var(--font-conversation);font-size:var(--message-body-font-size);line-height:var(--message-body-line-height);color:var(--text);padding-left:30px;max-width:var(--msg-max);overflow-wrap:anywhere;}
-  /* Conversation block rhythm: one shared 0.65em gap for every prose block, so
-     a chat answer reads as speech rather than as a standalone document. The
-     gap is em-based, so it tracks --message-body-font-size across the
-     small/large/xlarge preferences. Adjacent margins collapse to one gap. */
+  /* Conversation block rhythm: one shared gap for every prose block, so a chat
+     answer reads as speech rather than as a standalone document. The gap is
+     computed from --message-body-font-size rather than written as `em`: on a
+     heading, `em` would resolve against the heading's own larger size and
+     collapse to a bigger gap, so the rhythm would vary by heading level.
+     Adjacent margins collapse to one gap. */
   .msg-body p,.msg-body ul,.msg-body ol,.msg-body blockquote,
-  .msg-body h1,.msg-body h2,.msg-body h3,.msg-body h4,.msg-body h5,.msg-body h6{margin-block:.65em;}
-  /* No outer margin: a message must not carry empty space above or below it. */
-  .msg-body > :first-child{margin-top:0;}
-  .msg-body > :last-child,.msg-body li > :last-child{margin-bottom:0;}
+  .msg-body h1,.msg-body h2,.msg-body h3,.msg-body h4,.msg-body h5,.msg-body h6{margin-block:calc(var(--message-body-font-size) * .65);}
+  /* No outer margin: a message must not carry empty space above or below it.
+     `.msg-clip` (the long-user-message collapse wrapper) sits between .msg-body
+     and the prose, so the boundary reset has to reach through it — otherwise
+     the clipped box carries the gap inside its own fixed max-height. */
+  .msg-body > :first-child,.msg-body > .msg-clip > :first-child{margin-top:0;}
+  .msg-body > :last-child,.msg-body > .msg-clip > :last-child,
+  .msg-body li > :last-child{margin-bottom:0;}
   .msg-body td p,.msg-body th p{margin:0;}
   .msg-body ul,.msg-body ol{margin-left:20px;}.msg-body li{margin-bottom:.15em;}
   .msg-body li > ul,.msg-body li > ol{margin-block:0;}
