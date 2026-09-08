@@ -337,10 +337,14 @@ def _expand_env_vars(obj):
 _cfg_cache = {}
 _cfg_lock = threading.Lock()
 _cfg_mtime: float = 0.0  # last known mtime of config.yaml; 0 = never loaded
-# Full identity of the config.yaml behind _cfg_cache, matching the parse cache's
-# key. st_mtime alone cannot see an atomic replace that restores mtime and keeps
-# the byte length, so the guards below would keep serving process-global settings
-# (providers, models, gateway) from a file that no longer exists (HWEB-81).
+# (_cfg_mtime at stamp time, full file identity) for the config.yaml behind
+# _cfg_cache, the identity matching the parse cache's key. st_mtime alone cannot
+# see an atomic replace that restores mtime and keeps the byte length, so the
+# guards below would keep serving process-global settings (providers, models,
+# gateway) from a file that no longer exists (HWEB-81). The mtime is carried
+# alongside because callers and tests pin _cfg_mtime directly to declare the
+# cache fresh; once it no longer matches, this identity describes some other
+# load and must not be consulted.
 _cfg_stat_identity: tuple = ()  # () = never loaded
 _cfg_path: Path | None = None  # active config.yaml path for the disk-loaded cache
 _cfg_fingerprint: str | None = None  # serialized snapshot from the last disk load
@@ -466,13 +470,18 @@ def _config_stat_state(config_path) -> tuple[float, tuple]:
 def _config_is_stale(current_mtime: float, current_identity: tuple) -> bool:
     """True when the on-disk config differs from what _cfg_cache was built from.
 
-    Both halves matter: tests and callers pin _cfg_mtime directly to declare the
-    cache fresh, and the identity catches a same-size, mtime-restored replace
-    that the mtime comparison cannot see.
+    The mtime comparison decides first. The identity then catches a same-size,
+    mtime-restored replace that the mtime cannot see -- but only while it still
+    belongs to the currently stamped _cfg_mtime. A caller that pinned _cfg_mtime
+    by hand (many tests do, to declare the cache fresh without loading) leaves
+    the identity describing a different load, and an identity from a different
+    load is not evidence about this one.
     """
     if current_mtime != _cfg_mtime:
         return True
-    return bool(_cfg_stat_identity) and current_identity != _cfg_stat_identity
+    if not _cfg_stat_identity or _cfg_stat_identity[0] != _cfg_mtime:
+        return False
+    return current_identity != _cfg_stat_identity[1]
 
 
 def reload_config_if_stale() -> None:
@@ -621,7 +630,8 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
                 # This matches master's pre-#4662 behavior (it entered the block for
                 # {} and set the mtime); the inner `if loaded:` only gates the no-op
                 # cache update, not the mtime stamp.
-                _cfg_mtime, _cfg_stat_identity = _config_stat_state(config_path)
+                _cfg_mtime, _identity = _config_stat_state(config_path)
+                _cfg_stat_identity = (_cfg_mtime, _identity)
     except Exception:
         logger.debug("Failed to load yaml config from %s", config_path)
     _apply_config_defaults(_cfg_cache)
