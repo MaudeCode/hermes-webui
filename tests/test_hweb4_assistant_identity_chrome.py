@@ -184,3 +184,53 @@ def test_overflow_menu_never_unconditionally_shows_the_listen_row():
     assert ".msg-more-menu .msg-more-item{display:" not in STYLE_CSS
     assert ".msg-more-menu .msg-tts-btn{display:none;}" in STYLE_CSS
     assert "body.tts-enabled .msg-more-menu .msg-tts-btn{display:flex;}" in STYLE_CSS
+
+
+def _placement(room_above: float, menu_height: float, open_: bool = True) -> str:
+    """Run the real _placeMessageActionMenu against stubbed geometry."""
+    script = _prefix() + f"""
+const fn = extractBetween("function _placeMessageActionMenu(", "// `toggle` does not bubble");
+eval(fn.slice(0, fn.lastIndexOf('}}') + 1));
+const attrs = {{}};
+const menu = {{offsetHeight: {json.dumps(menu_height)}}};
+const scroller = {{getBoundingClientRect: () => ({{top: 100}})}};
+const details = {{
+  open: {json.dumps(open_)},
+  querySelector: sel => (sel === '.msg-more-menu' ? menu : null),
+  closest: sel => (sel === '.messages' ? scroller : null),
+  getBoundingClientRect: () => ({{top: 100 + {json.dumps(room_above)}}}),
+  setAttribute: (k, v) => {{ attrs[k] = v; }},
+  removeAttribute: k => {{ delete attrs[k]; }},
+}};
+_placeMessageActionMenu(details);
+console.log(JSON.stringify({{drop: attrs['data-drop'] ?? null}}));
+"""
+    return _run_node(script)["drop"]
+
+
+def test_overflow_menu_drops_below_the_trigger_when_the_space_above_is_clipped():
+    """`.messages` start-side overflow is unreachable — scrollTop cannot go below 0.
+
+    A menu taller than the room above its trigger would be clipped with no way to
+    scroll to it, so it has to open downward instead.
+    """
+    # 146px menu (three 44px touch rows) with only 120px above it → must flip.
+    assert _placement(room_above=120, menu_height=146) == "down"
+    # Plenty of room → stays upward, where it cannot cover the composer.
+    assert _placement(room_above=400, menu_height=146) == "up"
+    # The 6px offset counts: exactly-tall-enough is still up, one pixel less is not.
+    assert _placement(room_above=152, menu_height=146) == "up"
+    assert _placement(room_above=151, menu_height=146) == "down"
+
+
+def test_closing_the_overflow_clears_its_placement():
+    assert _placement(room_above=120, menu_height=146, open_=False) is None
+
+
+def test_overflow_menu_is_anchored_with_a_logical_inset_for_rtl():
+    """`.chat-content-rtl .msg-row{direction:rtl}` moves the trigger to the right
+    edge; a physical `left:0` would grow the menu outward into
+    `.messages{overflow-x:hidden}`."""
+    assert "inset-inline-start:0;inset-inline-end:auto" in STYLE_CSS
+    assert ".msg-more-menu{position:absolute;bottom:calc(100% + 6px);left:0" not in STYLE_CSS
+    assert '.msg-more[data-drop="down"] .msg-more-menu{bottom:auto;top:calc(100% + 6px);}' in STYLE_CSS

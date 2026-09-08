@@ -11803,6 +11803,27 @@ document.addEventListener('keydown',e=>{
   _closeMessageActionMenus(null);
   if(summary&&summary.focus) summary.focus();
 });
+// The menu opens upward so it never fights the composer, but `.messages` is a
+// scroller: overflow past its start edge is clipped AND unreachable (scrollTop
+// cannot go below 0), while end-side overflow can always be scrolled to. So on
+// a short transcript, where the first assistant footer can sit closer to the top
+// than the menu is tall, drop it below the trigger instead.
+function _placeMessageActionMenu(details){
+  if(!details) return;
+  if(!details.open){details.removeAttribute('data-drop');return;}
+  const menu=details.querySelector('.msg-more-menu');
+  const scroller=details.closest?details.closest('.messages'):null;
+  if(!menu||!scroller||!details.getBoundingClientRect) return;
+  const needed=(menu.offsetHeight||0)+6;
+  const roomAbove=details.getBoundingClientRect().top-scroller.getBoundingClientRect().top;
+  details.setAttribute('data-drop', roomAbove<needed?'down':'up');
+}
+// `toggle` does not bubble, so listen in the capture phase.
+document.addEventListener('toggle',e=>{
+  const el=e.target;
+  if(!el||!el.classList||!el.classList.contains('msg-more')) return;
+  _placeMessageActionMenu(el);
+}, true);
 function _setAssistantTurnTps(turn, tpsText=''){
   if(!turn) return;
   const role=turn.querySelector('.msg-role.assistant');
