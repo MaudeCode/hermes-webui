@@ -595,7 +595,7 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
             # run the env expansion HERE, pinned to the unscoped process-env
             # view (below) — never the helper's per-call expansion — for the
             # #798 TLS reason documented in the pin block.
-            loaded = _load_yaml_config_file_raw(config_path)
+            loaded, _parsed_identity = _load_yaml_config_file_identified(config_path)
             if isinstance(loaded, dict):
                 if loaded:
                     # The process-global _cfg_cache must reflect PROCESS-env
@@ -631,14 +631,12 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
                 # {} and set the mtime); the inner `if loaded:` only gates the no-op
                 # cache update, not the mtime stamp.
                 _cfg_mtime, _ = _config_stat_state(config_path)
-                # Stamp the identity of the generation we actually parsed, read
-                # back from the parse cache, rather than a second stat(). A
-                # replace landing between the load above and here would
-                # otherwise mark generation A fresh under generation B's
-                # identity, and no later read could ever tell (HWEB-81).
-                with _yaml_file_cache_lock:
-                    _parsed = _yaml_file_cache.get(str(config_path))
-                _cfg_stat_identity = (_cfg_mtime, _parsed[0]) if _parsed else ()
+                # Stamp the identity the load itself reported. Neither a second
+                # stat() nor a second look at the parse cache can be trusted
+                # here: a replace, or a concurrent reader repopulating the
+                # shared entry, would mark generation A fresh under generation
+                # B's identity and no later read could tell (HWEB-81).
+                _cfg_stat_identity = (_cfg_mtime, _parsed_identity) if _parsed_identity else ()
     except Exception:
         logger.debug("Failed to load yaml config from %s", config_path)
     _apply_config_defaults(_cfg_cache)
@@ -674,7 +672,21 @@ _yaml_file_cache_lock = threading.Lock()
 
 
 def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict:
-    """Return the RAW (un-env-expanded) parsed config dict, memoized on
+    """Return just the parsed dict; see _load_yaml_config_file_identified."""
+    return _load_yaml_config_file_identified(config_path, _copy=_copy)[0]
+
+
+def _load_yaml_config_file_identified(
+    config_path: Path, *, _copy: bool = True
+) -> tuple[dict, tuple]:
+    """Return (RAW parsed config dict, the file identity it was read at).
+
+    A caller that records freshness must stamp the identity this returns rather
+    than re-deriving one: a second stat(), or a second look at the shared parse
+    cache, can both describe a generation this call never saw once a concurrent
+    reader or a config-management replace lands in between (HWEB-81).
+
+    The dict itself is the RAW (un-env-expanded) config, memoized on
     (resolved path, st_mtime_ns, st_size, st_ino, st_ctime_ns). Shared parse
     core for _load_yaml_config_file() and reload_config(): the former runs the
     helper's own per-call env expansion on the result; the latter must run expansion
@@ -692,13 +704,13 @@ def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict
     try:
         import yaml as _yaml
     except ImportError:
-        return {}
+        return {}, ()
 
     try:
         st = config_path.stat()
     except OSError:
         # Missing or unstattable file — preserve the original "no config" contract.
-        return {}
+        return {}, ()
 
     cache_key = str(config_path)
     # st_ino/st_ctime_ns are part of the key because an atomic replace that
@@ -716,21 +728,24 @@ def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict
         if cached is not None and cached[0] == stat_key:
             raw = cached[1]
             if not isinstance(raw, dict):
-                return {}
-            return copy.deepcopy(raw) if _copy else raw
+                return {}, stat_key
+            return (copy.deepcopy(raw) if _copy else raw), stat_key
 
     # Cache miss / stale: parse off disk. Done outside the lock so a slow parse
     # doesn't serialize unrelated paths; a concurrent duplicate parse is harmless.
     try:
         loaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
     except Exception:
+        # Still the identity of the generation we read. A caller that stamps the
+        # previous generation's identity here would mark every later read stale
+        # and reparse this same malformed file forever.
         logger.debug("Failed to parse yaml config from %s", config_path)
-        return {}
+        return {}, stat_key
 
     raw = loaded if isinstance(loaded, dict) else {}
     with _yaml_file_cache_lock:
         _yaml_file_cache[cache_key] = (stat_key, raw)
-    return copy.deepcopy(raw) if _copy else raw
+    return (copy.deepcopy(raw) if _copy else raw), stat_key
 
 
 def _load_yaml_config_file(config_path: Path) -> dict:
