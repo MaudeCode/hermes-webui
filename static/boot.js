@@ -2507,6 +2507,9 @@ document.addEventListener('keydown',async e=>{
     return;
   }
   if(e.key==='Escape'){
+    // Close the approval overflow menu first — it is the innermost open surface,
+    // and Escape there must not also clear the session search or blur the composer.
+    if(typeof closeApprovalMoreMenu==='function'&&closeApprovalMoreMenu()) return;
     // Close onboarding overlay if open (skip/dismiss the wizard)
     const onboardingOverlay=$('onboardingOverlay');
     if(onboardingOverlay&&onboardingOverlay.style.display!=='none'){

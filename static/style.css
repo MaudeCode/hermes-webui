@@ -1000,7 +1000,6 @@
   :root[data-skin="geist-contrast"] .update-primary,
   :root[data-skin="geist-contrast"] .app-dialog-btn.confirm,
   :root[data-skin="geist-contrast"] .approval-btn.once,
-  :root[data-skin="geist-contrast"] .approval-btn.session,
   :root[data-skin="geist-contrast"] .clarify-submit{background:var(--accent)!important;border-color:var(--accent)!important;color:#050505!important;font-weight:600!important;box-shadow:none!important;}
   :root[data-skin="geist-contrast"]:not(.dark) .new-chat-btn,
   :root[data-skin="geist-contrast"]:not(.dark) button.send-btn:not(:disabled),
@@ -1008,7 +1007,6 @@
   :root[data-skin="geist-contrast"]:not(.dark) .update-primary,
   :root[data-skin="geist-contrast"]:not(.dark) .app-dialog-btn.confirm,
   :root[data-skin="geist-contrast"]:not(.dark) .approval-btn.once,
-  :root[data-skin="geist-contrast"]:not(.dark) .approval-btn.session,
   :root[data-skin="geist-contrast"]:not(.dark) .clarify-submit{color:#ffffff!important;}
   :root[data-skin="geist-contrast"] .new-chat-btn:hover,
   :root[data-skin="geist-contrast"] button.send-btn:not(:disabled):hover,
@@ -1016,7 +1014,6 @@
   :root[data-skin="geist-contrast"] .update-primary:hover,
   :root[data-skin="geist-contrast"] .app-dialog-btn.confirm:hover,
   :root[data-skin="geist-contrast"] .approval-btn.once:hover,
-  :root[data-skin="geist-contrast"] .approval-btn.session:hover,
   :root[data-skin="geist-contrast"] .clarify-submit:hover{background:var(--accent-hover)!important;border-color:var(--accent-hover)!important;transform:none!important;}
   :root[data-skin="geist-contrast"] button.send-btn:disabled{background:var(--surface-subtle)!important;border-color:var(--border)!important;color:var(--muted)!important;opacity:1!important;}
   :root.dark[data-skin="geist-contrast"] button.send-btn:disabled svg,
@@ -1992,10 +1989,11 @@
   .approval-card.collapsed{max-height:56px;bottom:8px;}
   .approval-card.collapsed .approval-inner{max-height:48px;overflow:hidden;padding:10px 14px;}
   .approval-card.collapsed .approval-header{margin-bottom:0;}
-  .approval-card.collapsed .approval-desc,.approval-card.collapsed .approval-cmd,.approval-card.collapsed .approval-counter,.approval-card.collapsed .approval-btns{display:none;}
+  .approval-card.collapsed .approval-desc,.approval-card.collapsed .approval-cmd,.approval-card.collapsed .approval-counter,.approval-card.collapsed .approval-btns,.approval-card.collapsed .approval-more-menu{display:none;}
   .approval-desc{font-size:12px;color:var(--muted);margin-bottom:8px;line-height:1.5;}
   .approval-cmd{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-family:var(--font-mono);font-size:12px;color:var(--pre-text);white-space:pre-wrap;word-break:break-all;margin-bottom:14px;max-height:120px;overflow-y:auto;}
   .approval-counter{font-size:11px;color:var(--muted);margin:0 0 12px;font-variant-numeric:tabular-nums;letter-spacing:0.01em;}
+  .clarify-counter{font-size:11px;color:var(--muted);margin:0 0 8px;font-variant-numeric:tabular-nums;letter-spacing:0.01em;}
   .approval-btns{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
   .approval-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:8px;font-size:12px;font-weight:600;border:1px solid var(--border2);background:var(--hover-bg);color:var(--text);cursor:pointer;transition:all .15s;white-space:nowrap;}
   .approval-btn:hover{background:rgba(255,255,255,0.12);transform:translateY(-1px);box-shadow:0 2px 8px rgba(0,0,0,0.2);}
@@ -2052,6 +2050,14 @@
   .approval-btn.deny{border-color:var(--error);color:var(--error);}
   .approval-btn.deny:hover{background:rgba(239,83,80,.12);border-color:var(--error);}
   .approval-btn.loading{opacity:.7;cursor:wait;}
+  .approval-btn.more{border-color:var(--border2);color:var(--muted);background:transparent;}
+  .approval-btn.more:hover{color:var(--text);border-color:var(--accent-bg-strong);background:var(--hover-bg);}
+  .approval-btn.more[aria-expanded="true"]{color:var(--text);border-color:var(--accent-bg-strong);background:var(--hover-bg);}
+  .approval-more-menu{display:flex;flex-direction:column;gap:4px;margin-top:8px;padding:6px;border:1px solid var(--border);border-radius:10px;background:var(--code-bg);}
+  .approval-more-menu[hidden]{display:none;}
+  .approval-more-menu .approval-btn{width:100%;justify-content:flex-start;background:transparent;border-color:transparent;color:var(--text);font-weight:500;}
+  .approval-more-menu .approval-btn.yolo{color:#f59e0b;}
+  .approval-more-menu .approval-btn:hover{transform:none;box-shadow:none;background:var(--hover-bg);border-color:var(--border2);}
   /* ── Clarify card ── */
   .clarify-card{position:absolute;left:0;right:0;bottom:-24px;max-width:var(--msg-max);margin:0 auto;box-sizing:border-box;width:100%;overflow:hidden;pointer-events:none;max-height:clamp(180px,min(68vh,calc(100vh - 220px)),420px);}
   .clarify-card.visible{pointer-events:auto;}
@@ -3293,7 +3299,8 @@
     .approval-cmd{max-height:86px;margin-bottom:10px;}
     .approval-btns{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;}
     .approval-btn{justify-content:center;padding:8px 10px;font-size:12px;min-height:44px;min-width:0;line-height:1.2;}
-    .approval-btn.yolo{grid-column:1 / -1;}
+    .approval-btn.more{grid-column:1 / -1;}
+    .approval-more-menu .approval-btn{min-height:44px;}
     .approval-kbd{display:none;}
     /* Clarify card */
     .clarify-card{overflow:visible;max-height:clamp(180px,min(62vh,calc(100vh - 180px)),360px);}

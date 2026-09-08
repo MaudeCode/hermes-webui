@@ -637,6 +637,10 @@ Approval:
     showApprovalCard(p)   Shows the approval card with command/description text
     hideApprovalCard()    Hides approval card, clears text
     respondApproval(ch)   POST /api/approval/respond, hide card
+    toggleApprovalMoreMenu / closeApprovalMoreMenu
+                          Opens/closes the overflow holding the policy choices
+                          (Allow session, Always allow, Skip all); Allow once
+                          and Deny stay in the button row
     startApprovalPolling  setInterval 1500ms GET /api/approval/pending
     stopApprovalPolling   clearInterval
 

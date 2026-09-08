@@ -8183,6 +8183,7 @@ function hideApprovalCard(force=false) {
   _approvalSessionId = null;
   _resetApprovalCardState();
   if (!preserveDisplayedOwner) _approvalDisplayedOwner = null;
+  if (typeof closeApprovalMoreMenu === 'function') closeApprovalMoreMenu();
   card.classList.remove("visible");
   card.classList.remove("collapsed");
   _setPromptFlyoutHidden(card, true);
@@ -8388,7 +8389,7 @@ function _setApprovalControlsDisabled(choice, disabled) {
   const loadingId = choice === "skipAll"
     ? "approvalSkipAll"
     : (choice ? "approvalBtn" + choice.charAt(0).toUpperCase() + choice.slice(1) : null);
-  ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny","approvalSkipAll"].forEach(id => {
+  ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny","approvalSkipAll","approvalMoreBtn"].forEach(id => {
     const b = $(id);
     if (!b) return;
     b.disabled = !!disabled;
@@ -8448,6 +8449,7 @@ function showApprovalCard(pending, pendingCount) {
     // A distinct approval must always render expanded — never inherit a prior
     // approval's collapsed state, which would hide its command + action buttons. (#3515)
     card.classList.remove("collapsed");
+    if (typeof closeApprovalMoreMenu === 'function') closeApprovalMoreMenu();
   }
   const responding = _approvalResponseMatches(sid, _approvalCurrentId);
   _setApprovalControlsDisabled(
@@ -8544,8 +8546,71 @@ function toggleApprovalCardCollapsed(forceCollapsed) {
   if (!card) return;
   const collapsed = typeof forceCollapsed === "boolean" ? forceCollapsed : !card.classList.contains("collapsed");
   card.classList.toggle("collapsed", collapsed);
+  if (typeof closeApprovalMoreMenu === 'function') closeApprovalMoreMenu();
   _syncApprovalCollapseButton(card);
   _syncApprovalTranscriptSpace(card, {immediate: true});
+}
+
+// ── Approval policy overflow ──
+// Session/permanent policy changes (Allow session, Always allow, Skip all) live
+// behind one overflow so only the choices valid for THIS request — Allow once
+// and Deny — carry primary weight. The menu expands in flow instead of floating:
+// `.approval-card` clips its overflow and `.approval-inner` scrolls on mobile, so
+// an absolutely positioned popup would be cut off on a short card, and the
+// transcript spacer already re-measures the card on every toggle.
+function toggleApprovalMoreMenu(forceOpen) {
+  const menu = $("approvalMoreMenu");
+  if (!menu) return false;
+  const btn = $("approvalMoreBtn");
+  const card = $("approvalCard");
+  const open = typeof forceOpen === "boolean" ? forceOpen : !!menu.hidden;
+  if (menu.hidden === !open) return open;
+  const hadFocusInside = menu.contains(document.activeElement);
+  menu.hidden = !open;
+  if (btn) btn.setAttribute("aria-expanded", open ? "true" : "false");
+  if (open) {
+    const first = menu.querySelector("button:not([disabled])");
+    if (first) first.focus({preventScroll: true});
+  } else if (hadFocusInside && btn && !btn.disabled && card && card.classList.contains("visible")) {
+    btn.focus({preventScroll: true});
+  }
+  _syncApprovalTranscriptSpace(card, {immediate: true});
+  return open;
+}
+
+// Returns true only when it actually closed an open menu, so Escape and outside
+// clicks can stop there instead of also acting on the surface behind it.
+function closeApprovalMoreMenu() {
+  const menu = $("approvalMoreMenu");
+  if (!menu || menu.hidden) return false;
+  toggleApprovalMoreMenu(false);
+  return true;
+}
+
+// role="menu" promises arrow-key movement, not just Tab order.
+function _approvalMoreMenuArrowKey(e) {
+  const step = e.key === "ArrowDown" ? 1 : (e.key === "ArrowUp" ? -1 : 0);
+  if (!step) return false;
+  const menu = $("approvalMoreMenu");
+  if (!menu || menu.hidden || !menu.contains(document.activeElement)) return false;
+  const items = Array.from(menu.querySelectorAll("button:not([disabled])"));
+  if (!items.length) return false;
+  const at = items.indexOf(document.activeElement);
+  items[((at < 0 ? 0 : at + step) + items.length) % items.length].focus({preventScroll: true});
+  return true;
+}
+
+if (typeof document !== "undefined") {
+  document.addEventListener("click", (e) => {
+    const menu = $("approvalMoreMenu");
+    if (!menu || menu.hidden) return;
+    const btn = $("approvalMoreBtn");
+    if (menu.contains(e.target) || (btn && btn.contains(e.target))) return;
+    closeApprovalMoreMenu();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (_approvalMoreMenuArrowKey(e)) e.preventDefault();
+  });
 }
 
 async function respondApproval(choice, options = {}) {
@@ -9307,8 +9372,9 @@ function _ensureClarifyCardDom() {
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 17h.01"/><path d="M9.09 9a3 3 0 1 1 5.82 1c0 2-3 2-3 4"/><circle cx="12" cy="12" r="10"/></svg>
         <span id="clarifyHeading" data-i18n="clarify_heading">Clarification needed</span>
         <span class="clarify-countdown" id="clarifyCountdown"></span>
-        <button type="button" class="clarify-collapse" id="clarifyCollapse" aria-expanded="true" aria-label="Collapse clarification" aria-controls="clarifyQuestion clarifyChoices clarifyQuestions clarifyInput clarifyHint" onclick="toggleClarifyCardCollapsed()" title="Collapse clarification"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+        <button type="button" class="clarify-collapse" id="clarifyCollapse" aria-expanded="true" aria-label="Collapse clarification" aria-controls="clarifyCounter clarifyQuestion clarifyChoices clarifyQuestions clarifyInput clarifyHint" onclick="toggleClarifyCardCollapsed()" title="Collapse clarification"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
       </div>
+      <div class="clarify-counter" id="clarifyCounter" style="display:none;"></div>
       <div class="clarify-question" id="clarifyQuestion"></div>
       <div class="clarify-choices" id="clarifyChoices"></div>
       <div class="clarify-questions" id="clarifyQuestions" hidden></div>
@@ -9523,6 +9589,8 @@ function hideClarifyCard(force=false, reason="dismissed") {
   _setPromptFlyoutHidden(card, true);
   _syncClarifyTranscriptSpace(null);
   if (typeof unlockComposerForClarify === "function") unlockComposerForClarify();
+  const _counter = $("clarifyCounter");
+  if (_counter) { _counter.textContent = ""; _counter.style.display = "none"; }
   $("clarifyQuestion").textContent = "";
   $("clarifyQuestion").hidden = false;
   $("clarifyChoices").innerHTML = "";
@@ -9714,6 +9782,20 @@ function showClarifyCard(pending) {
   });
   const card = _ensureClarifyCardDom();
   if (!card) return;
+  // Multiple queued questions are answered one at a time, so show which one
+  // this is — same counter contract as the approval card.
+  const counter = $("clarifyCounter");
+  if (counter) {
+    const pendingCount = Number(pending.pending_count || 0);
+    if (pendingCount > 1) {
+      counter.textContent = (typeof t === "function")
+        ? t("approval_pending_count", pendingCount)
+        : ("1 of " + pendingCount + " pending");
+      counter.style.display = "";
+    } else {
+      counter.style.display = "none";
+    }
+  }
   const questionEl = $("clarifyQuestion");
   const choicesEl = $("clarifyChoices");
   const input = $("clarifyInput");
@@ -9974,7 +10056,7 @@ function _startClarifyFallbackPoll(sid) {
     inFlight = true;
     try {
       const data = await api("/api/clarify/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
-      if (data.pending) { showClarifyForSession(sid, data.pending); }
+      if (data.pending) { data.pending.pending_count = data.pending_count || 1; showClarifyForSession(sid, data.pending); }
       else { _clearClarifyPendingForSession(sid); _hideClarifyCardIfOwner(sid, false, 'expired'); }
     } catch(e) {
       const msg = String((e && e.message) || "");
