@@ -23,10 +23,16 @@ The primary layout is three-panel:
 - center panel for chat,
 - right panel for workspace file browsing and previews.
 
-Model, profile, workspace, attachments, voice input, context usage, Stop, and
-Send controls live in the composer footer. Settings and session-level tools live
-in the Hermes Control Center. Preserve this shape unless the change explicitly
-justifies a different interaction model.
+The composer footer carries only what the current message needs: attachments,
+dictation, the selected model, the active reasoning mode, context usage, and
+Stop/Send. Profile, workspace, toolsets, saved prompts, voice mode and provider
+quota live one level down, in the composer's overflow menu
+(`#composerMobileConfigBtn` / `#composerMobileConfigPanel`) — one menu at every
+width, not a second desktop-only surface. Settings and session-level tools live
+in the Hermes Control Center. Pending attachments and action-required states
+(approvals, clarifications, the queue card) never move into overflow. Preserve
+this shape unless the change explicitly justifies a different interaction
+model.
 
 ## Core feeling: calm developer console
 

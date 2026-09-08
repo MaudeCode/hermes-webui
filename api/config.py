@@ -10182,7 +10182,10 @@ _SETTINGS_DEFAULTS = {
     "hide_composer_yolo": False,  # hide YOLO chip in composer footer
     "hide_composer_profile": False,  # hide profile chip in composer footer
     "hide_composer_workspace": False,  # hide workspace controls in composer footer/mobile config panel
-    "hide_composer_mobile_config": False,  # hide mobile composer config button
+    # HWEB-7 retired this toggle (the overflow button is the only route to the
+    # controls its panel owns). Kept registered so older settings.json files with
+    # the key still load and round-trip.
+    "hide_composer_mobile_config": False,
     "hide_composer_model": False,  # hide model chip in composer footer/mobile config panel
     "hide_composer_quota_chip": False,  # hide provider quota chip in composer footer
     "hide_composer_reasoning": False,  # hide reasoning chip in composer footer/mobile config panel

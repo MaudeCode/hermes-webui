@@ -5768,6 +5768,11 @@ function _applyToolsetsChip(toolsets) {
     chip.classList.remove('has-custom');
     chip.title = t('session_toolsets') + ': ' + t('session_toolsets_profile_defaults');
   }
+  // The overflow row is the primary surface for this control (HWEB-7).
+  const actionLabel = $('composerMobileToolsetsLabel');
+  const action = $('composerMobileToolsetsAction');
+  if (actionLabel) actionLabel.textContent = label.textContent;
+  if (action) { action.title = chip.title; action.classList.toggle('has-custom', hasCustom); }
 }
 
 function _syncToolsetsChip() {
@@ -5917,12 +5922,23 @@ function _populateToolsetsDropdown() {
   _renderToolsetsPresetSections({ state, input });
 }
 
+function _toolsetsDropdownAnchor() {
+  // HWEB-7: the toolsets chip lives in the overflow panel, so the open panel's
+  // row is the anchor; the footer chip stays the fallback for any width where
+  // the container query still shows it.
+  const panel = $('composerMobileConfigPanel');
+  const action = $('composerMobileToolsetsAction');
+  if (panel && panel.classList.contains('open') && action && action.offsetParent !== null) return action;
+  const chip = $('composerToolsetsChip');
+  return (chip && chip.offsetParent !== null) ? chip : null;
+}
+
 function _positionToolsetsDropdown() {
   const dd = $('composerToolsetsDropdown');
-  const chip = $('composerToolsetsChip');
+  const chip = _toolsetsDropdownAnchor();
   const footer = document.querySelector('.composer-footer');
   if (!dd || !chip || !footer) return;
-  // Defense: if the chip has been hidden by responsive CSS (e.g. resize across
+  // Defense: if the anchor has been hidden by responsive CSS (e.g. resize across
   // 1100px container threshold while dropdown was open), don't try to anchor
   // to a zero-rect element — close the dropdown instead. (#1431)
   if (chip.offsetParent === null) { closeToolsetsDropdown(); return; }
@@ -5936,11 +5952,12 @@ function _positionToolsetsDropdown() {
 
 function toggleToolsetsDropdown() {
   const dd = $('composerToolsetsDropdown');
-  const chip = $('composerToolsetsChip');
-  if (!dd || !chip) return;
-  // Don't open when the chip itself is hidden by responsive CSS (#1431).
-  // offsetParent === null catches display:none on the element or any ancestor.
-  if (chip.offsetParent === null) return;
+  const chip = _toolsetsDropdownAnchor();
+  if (!dd) return;
+  // Don't open when no anchor is visible — neither the overflow row nor the
+  // wide-container chip. offsetParent === null catches display:none on the
+  // element or any ancestor. (#1431)
+  if (!chip) { if (dd.classList.contains('open')) closeToolsetsDropdown(); return; }
   const open = dd.classList.contains('open');
   if (open) { closeToolsetsDropdown(); return; }
   if (typeof closeProfileDropdown === 'function') closeProfileDropdown();
@@ -5960,6 +5977,8 @@ function toggleToolsetsDropdown() {
   dd.classList.add('open');
   _positionToolsetsDropdown();
   chip.classList.add('active');
+  const action = $('composerMobileToolsetsAction');
+  if (action) { action.classList.add('active'); action.setAttribute('aria-expanded', 'true'); }
   // Focus the input after a tick so the layout has settled
   setTimeout(() => { const inp = $('toolsetsInput'); if (inp) inp.focus(); }, 50);
 }
@@ -5967,8 +5986,10 @@ function toggleToolsetsDropdown() {
 function closeToolsetsDropdown() {
   const dd = $('composerToolsetsDropdown');
   const chip = $('composerToolsetsChip');
+  const action = $('composerMobileToolsetsAction');
   if (dd) dd.classList.remove('open');
   if (chip) chip.classList.remove('active');
+  if (action) { action.classList.remove('active'); action.setAttribute('aria-expanded', 'false'); }
 }
 
 function _applySessionToolsets(toolsets) {
@@ -6083,6 +6104,21 @@ function closeMobileComposerConfig(){
   if(typeof closeWsDropdown==='function') closeWsDropdown();
 }
 
+// The panel is only readable while open, so pulling the labels of the controls
+// it now owns across at open time keeps one sync point instead of hooking every
+// place those labels change. (HWEB-7)
+function _syncComposerOverflowLabels(){
+  const pairs=[['profileChipLabel','composerMobileProfileLabel'],['composerToolsetsLabel','composerMobileToolsetsLabel']];
+  for(const pair of pairs){
+    const src=$(pair[0]);
+    const dst=$(pair[1]);
+    // An empty source means the chip has not been populated yet; keep the row's
+    // own text rather than blanking it.
+    if(src&&dst&&src.textContent) dst.textContent=src.textContent;
+  }
+}
+window._syncComposerOverflowLabels=_syncComposerOverflowLabels;
+
 function openMobileComposerConfig(){
   const panel=$('composerMobileConfigPanel');
   if(!panel) return;
@@ -6091,6 +6127,7 @@ function openMobileComposerConfig(){
   closeModelDropdown();
   closeReasoningDropdown();
   if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
+  _syncComposerOverflowLabels();
   panel.classList.add('open');
   _syncMobileComposerConfigButton(true);
 }
@@ -6129,7 +6166,11 @@ document.addEventListener('click',function(e){
     e.target.closest('#composerMobileConfigPanel') ||
     e.target.closest('#composerWsDropdown') ||
     e.target.closest('#composerModelDropdown') ||
-    e.target.closest('#composerReasoningDropdown')
+    e.target.closest('#composerReasoningDropdown') ||
+    // Opened from a panel row, so they must not close the panel under them.
+    e.target.closest('#composerToolsetsDropdown') ||
+    e.target.closest('#profileDropdown') ||
+    e.target.closest('#savedPromptsPopup')
   ) return;
   closeMobileComposerConfig();
 });
@@ -6143,15 +6184,21 @@ document.addEventListener('keydown',function(e){
   if(typeof closeWsDropdown==='function') closeWsDropdown();
   closeModelDropdown();
   closeReasoningDropdown();
+  if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
+  if(typeof closeProfileDropdown==='function') closeProfileDropdown();
+  const btn=$('composerMobileConfigBtn');
+  if(btn&&typeof btn.focus==='function'){try{btn.focus({preventScroll:true});}catch(_){btn.focus();}}
 });
 
+// The panel used to be phone-only, so crossing 640px simply closed it and its
+// dropdowns. It is open at every width now (HWEB-7), so a resize has to move
+// the footer-anchored dropdowns instead. The model, profile and toolsets
+// dropdowns already have their own resize handlers.
 window.addEventListener('resize',function(){
-  if(window.matchMedia && !window.matchMedia('(max-width: 640px)').matches){
-    closeMobileComposerConfig();
-    closeModelDropdown();
-    closeReasoningDropdown();
-    if(typeof closeWsDropdown==='function') closeWsDropdown();
-  }
+  const reasoning=$('composerReasoningDropdown');
+  if(reasoning&&reasoning.classList.contains('open')&&typeof _positionReasoningDropdown==='function') _positionReasoningDropdown();
+  const ws=$('composerWsDropdown');
+  if(ws&&ws.classList.contains('open')&&typeof _positionComposerWsDropdown==='function') _positionComposerWsDropdown();
 });
 
 // ── Scroll pinning ──────────────────────────────────────────────────────────
@@ -7116,7 +7163,7 @@ function _clearActivityElapsedTimer(){
   _activityElapsedTimerGroup=null;
 }
 
-const _MOBILE_CONFIG_BASE_LABEL='Workspace, model, quota, reasoning, and context settings';
+const _MOBILE_CONFIG_BASE_LABEL='Composer settings and secondary controls';
 
 function _setCtxCompressButton(btn,text){
   if(!btn)return;

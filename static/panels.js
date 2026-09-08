@@ -7258,8 +7258,13 @@ function toggleProfileDropdown(e) {
   if (dd.classList.contains('open')) { closeProfileDropdown(); return; }
   closeWsDropdown(); // close workspace dropdown if open
   if(typeof closeModelDropdown==='function') closeModelDropdown();
-  // Track which element triggered the dropdown for positioning
-  _profileDropdownTrigger = (e && e.currentTarget) || $('profileChip');
+  // Track which element triggered the dropdown for positioning. The composer
+  // chip lives in the overflow panel now (HWEB-7), so an open panel's row is
+  // the anchor whenever the click did not come from a real element.
+  const _panel = $('composerMobileConfigPanel');
+  const _overflowRow = (_panel && _panel.classList.contains('open')) ? $('composerMobileProfileAction') : null;
+  _profileDropdownTrigger = (e && e.currentTarget) || _overflowRow || $('profileChip');
+  if (_overflowRow) { _overflowRow.classList.add('active'); _overflowRow.setAttribute('aria-expanded', 'true'); }
   const openGen = ++_profileDropdownOpenGeneration;
   const cached = _profileDropdownBestCachedData();
 
@@ -7299,9 +7304,11 @@ function closeProfileDropdown() {
   if(chip) chip.classList.remove('active');
   const tbtn=$('titlebarProfileBtn');
   if(tbtn) tbtn.classList.remove('active');
+  const row=$('composerMobileProfileAction');
+  if(row){ row.classList.remove('active'); row.setAttribute('aria-expanded','false'); }
 }
 document.addEventListener('click', e => {
-  if (!e.target.closest('#profileChipWrap') && !e.target.closest('#titlebarProfileBtn') && !e.target.closest('#profileDropdown')) closeProfileDropdown();
+  if (!e.target.closest('#profileChipWrap') && !e.target.closest('#composerMobileProfileAction') && !e.target.closest('#titlebarProfileBtn') && !e.target.closest('#profileDropdown')) closeProfileDropdown();
 });
 window.addEventListener('resize',()=>{
   const dd=$('profileDropdown');
