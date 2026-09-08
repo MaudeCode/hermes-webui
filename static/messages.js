@@ -7428,11 +7428,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               runId:streamId||'',
               tone:'error',
               // The gateway names its own failures ("Gateway request failed",
-              // "Gateway returned no response") next to the type; the local label
-              // ladder above does not cover those types and would fall through to a
-              // bare "Error". That is worst on a compact secondary row, where the
-              // detail line is hidden and the title is all the user gets.
-              title:String(d.label||label),
+              // "Gateway returned no response") next to the type, and the local
+              // ladder does not cover those, so they would fall through to a bare
+              // "Error" — worst on a compact secondary row, where the detail line
+              // is hidden and the title is all the user gets. But the ladder DOES
+              // resolve a translated title for the types it names (gateway_auth_error
+              // has t('gateway_auth_label') in every locale), and d.label is English
+              // only, so preferring it unconditionally would untranslate those.
+              // The gateway label is a fallback for the uncovered types, not an
+              // override of a resolved translation.
+              title:String(label==='Error'&&d.label?d.label:label),
               detail:String(d.message||''),
               dismissible:true,
             });

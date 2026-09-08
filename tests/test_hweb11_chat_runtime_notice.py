@@ -223,15 +223,41 @@ def test_clearing_a_conversation_releases_its_terminal_notices():
     assert body.index("clearChatRuntimeNotice('thread_error'") < body.index("syncTopbar();")
 
 
-def test_notice_title_prefers_the_gateway_supplied_label():
-    """gateway_* failures carry their own label; the local ladder does not."""
+def test_gateway_label_is_a_fallback_not_an_override_of_a_translation():
+    """d.label fills the gap the local ladder leaves; it must not untranslate.
+
+    The ladder resolves a translated title for the types it names — gateway_auth_error
+    has t('gateway_auth_label') in every locale — while d.label is English only. It
+    is used only where the ladder fell through to the generic "Error".
+    """
     idx = MESSAGES_JS.index("kind:_isProviderFailure?'provider_failure':'thread_error',")
     record = MESSAGES_JS[idx : MESSAGES_JS.index("dismissible:true,", idx)]
-    assert "title:String(d.label||label)," in record
+    assert "title:String(label==='Error'&&d.label?d.label:label)," in record
+    assert "title:String(d.label||label)," not in record
     api_src = (REPO_ROOT / "api" / "gateway_chat.py").read_text(encoding="utf-8")
-    # The backend really does send a label beside those types.
+    # The backend really does send a label beside the uncovered types …
     assert '"label": "Gateway request failed"' in api_src
     assert '"label": "Gateway returned no response"' in api_src
+    # … and an English one beside a type the ladder already translates.
+    assert '"label": "Gateway authentication failed"' in api_src
+    assert "gateway_auth_label: 'Gateway authentication failed'" in (
+        REPO_ROOT / "static" / "i18n.js"
+    ).read_text(encoding="utf-8")
+
+
+def test_toasts_render_above_the_notice_stack():
+    """A failed gateway restart reports its real error only through a toast.
+
+    Both are fixed at the top of the viewport, so the persistent notice must not
+    cover the transient, more specific message that explains it.
+    """
+    import re as _re
+
+    def _z(selector):
+        rule = _re.search(_re.escape(selector) + r"\{[^}]*\}", STYLE_CSS).group(0)
+        return int(_re.search(r"z-index:(\d+)", rule).group(1))
+
+    assert _z(".toast") > _z(".chat-runtime-notice")
 
 
 def test_every_emitted_provider_error_type_is_classified_as_a_provider_failure():
