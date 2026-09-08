@@ -21,9 +21,11 @@ def test_msg_body_table_th_td_present():
     assert ".msg-body td" in css, ".msg-body td rule missing from style.css"
 
 
-def test_msg_body_table_tr_stripe_present():
+def test_msg_body_table_rows_are_not_striped():
+    """HWEB-6 replaced the zebra fill with row separators; the stripe must stay gone."""
     css = _read_css()
-    assert ".msg-body tr:nth-child(even)" in css, ".msg-body tr:nth-child(even) rule missing from style.css"
+    assert ".msg-body tr:nth-child(even)" not in css, \
+        "chat tables must not reintroduce zebra striping"
 
 
 def test_msg_body_light_theme_overrides():

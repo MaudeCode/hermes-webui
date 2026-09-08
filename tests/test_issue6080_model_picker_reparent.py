@@ -105,7 +105,10 @@ def test_dropdown_escapes_footer_containing_block_when_open_on_phone():
     block_end = UI_JS.index("function _readModelOverflowData(")
     position_block = UI_JS[block_start:block_end]
     close_block = _function_body(UI_JS, "function closeModelDropdown(")
-    snippets = [position_block, close_block]
+    # HWEB-7: _positionModelDropdown resolves its anchor through this shared
+    # helper, so the harness runs the real one rather than a stub.
+    anchor_block = _function_body(UI_JS, "function _composerOverflowAnchor(")
+    snippets = [anchor_block, position_block, close_block]
 
     script = textwrap.dedent(
         f"""

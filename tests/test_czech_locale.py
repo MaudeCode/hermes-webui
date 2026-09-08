@@ -99,7 +99,7 @@ def test_czech_locale_includes_representative_translations():
         "approval_heading: 'Požadováno schválení'",
         "tab_tasks: 'Úkoly'",
         "tab_profiles: 'Profily'",
-        "empty_title: 'Jak vám mohu pomoci?'",
+        "empty_hero_title: 'Na čem budeme pracovat?'",
         "onboarding_title: 'Vítejte v Hermes Web UI'",
     ]
     for entry in expected:

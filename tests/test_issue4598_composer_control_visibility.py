@@ -149,7 +149,10 @@ def test_new_i18n_keys_exist_across_all_locale_blocks():
             f"block) for strict locale parity"
         )
 
-    assert "Drag chips to reorder each footer group." in INDEX_HTML
+    # HWEB-7 reworded this: the secondary controls moved into the composer
+    # overflow menu, so "each footer group" no longer describes them.
+    assert "Drag chips to reorder each group." in INDEX_HTML
+    assert "shown in the chat footer" not in INDEX_HTML
     assert "Reordering is not supported." not in INDEX_HTML
     assert "Reordering is not supported." not in I18N_JS
     assert "不支持重新排序" not in I18N_JS

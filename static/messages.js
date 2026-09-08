@@ -535,14 +535,16 @@ if(typeof window!=='undefined'){
   };
 }
 
+// HWEB-6: sort/filter chrome belongs to the explicit structured-data mode only
+// (a ```csv fence or a CSV preview, both rendered into .csv-table-wrap). An
+// ordinary markdown table in prose stays a static reading table.
 function enhanceMarkdownTables(root){
   if(!root||!root.querySelectorAll) return;
   const scope=root;
-  const tables=scope.querySelectorAll('.msg-body table:not([data-markdown-table-enhanced])');
+  const tables=scope.querySelectorAll('.msg-body .csv-table-wrap table:not([data-markdown-table-enhanced])');
   const sortLabel=typeof t==='function'?t('markdown_table_sort_column'):'Sort column';
   const filterLabel=typeof t==='function'?t('markdown_table_filter'):'Filter table';
   tables.forEach((table)=>{
-    if(table.closest('.csv-table-wrap')) return;
     const headRows=table.tHead?Array.from(table.tHead.rows):[];
     const body=table.tBodies&&table.tBodies.length?table.tBodies[0]:table;
     const bodyRows=Array.from(body.rows||[]).filter((row)=>row.parentElement===body);
@@ -551,7 +553,9 @@ function enhanceMarkdownTables(root){
     table.setAttribute('data-markdown-table-enhanced','1');
     bodyRows.forEach((row,idx)=>{ row.dataset.markdownTableOriginalIndex=String(idx); });
 
-    if(bodyRows.length>=4&&table.parentElement){
+    // The filter sits above the wrapper, not inside its bordered scroll box.
+    const filterAnchor=table.closest('.csv-table-wrap')||table;
+    if(bodyRows.length>=4&&filterAnchor.parentElement){
       const filter=document.createElement('input');
       filter.type='search';
       filter.className='markdown-table-filter';
@@ -565,7 +569,7 @@ function enhanceMarkdownTables(root){
           row.hidden=!!query&&!_markdownTableText(row.textContent).toLowerCase().includes(query);
         });
       });
-      table.parentElement.insertBefore(filter,table);
+      filterAnchor.parentElement.insertBefore(filter,filterAnchor);
     }
 
     Array.from(headerRow.cells||[]).forEach((cell,colIdx)=>{
@@ -3070,7 +3074,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
 
     const tr=$('toolRunningRow');if(tr)tr.remove();
-    $('emptyState').style.display='none';
+    if(typeof hideConversationEmptyState==='function') hideConversationEmptyState();
     assistantRow=document.createElement('div');
     assistantRow.className='assistant-segment';
     _currentLiveSegmentSeq+=1;

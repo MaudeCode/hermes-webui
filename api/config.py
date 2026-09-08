@@ -337,6 +337,15 @@ def _expand_env_vars(obj):
 _cfg_cache = {}
 _cfg_lock = threading.Lock()
 _cfg_mtime: float = 0.0  # last known mtime of config.yaml; 0 = never loaded
+# (_cfg_mtime at stamp time, full file identity) for the config.yaml behind
+# _cfg_cache, the identity matching the parse cache's key. st_mtime alone cannot
+# see an atomic replace that restores mtime and keeps the byte length, so the
+# guards below would keep serving process-global settings (providers, models,
+# gateway) from a file that no longer exists (HWEB-81). The mtime is carried
+# alongside because callers and tests pin _cfg_mtime directly to declare the
+# cache fresh; once it no longer matches, this identity describes some other
+# load and must not be consulted.
+_cfg_stat_identity: tuple = ()  # () = never loaded
 _cfg_path: Path | None = None  # active config.yaml path for the disk-loaded cache
 _cfg_fingerprint: str | None = None  # serialized snapshot from the last disk load
 
@@ -444,17 +453,45 @@ def _apply_config_defaults(config_data: dict) -> None:
         experimental.setdefault(key, value)
 
  
+def _config_stat_state(config_path) -> tuple[float, tuple]:
+    """Return (st_mtime, file identity) for *config_path* from one stat().
+
+    The identity is the same tuple the YAML parse cache keys on, so the
+    process-global staleness guards and that cache agree about what "the same
+    file" means. A missing or unstattable file yields the never-loaded values.
+    """
+    try:
+        st = Path(config_path).stat()
+    except OSError:
+        return 0.0, ()
+    return st.st_mtime, (st.st_mtime_ns, st.st_size, st.st_ino, st.st_ctime_ns)
+
+
+def _config_is_stale(current_mtime: float, current_identity: tuple) -> bool:
+    """True when the on-disk config differs from what _cfg_cache was built from.
+
+    The mtime comparison decides first. The identity then catches a same-size,
+    mtime-restored replace that the mtime cannot see -- but only while it still
+    belongs to the currently stamped _cfg_mtime. A caller that pinned _cfg_mtime
+    by hand (many tests do, to declare the cache fresh without loading) leaves
+    the identity describing a different load, and an identity from a different
+    load is not evidence about this one.
+    """
+    if current_mtime != _cfg_mtime:
+        return True
+    if not _cfg_stat_identity or _cfg_stat_identity[0] != _cfg_mtime:
+        return False
+    return current_identity != _cfg_stat_identity[1]
+
+
 def reload_config_if_stale() -> None:
     """Refresh config.yaml once for concurrent stale read paths."""
     global cfg
     with _cfg_lock:
-        try:
-            config_path = _get_config_path()
-            current_mtime = config_path.stat().st_mtime
-        except OSError:
-            current_mtime = 0.0
+        config_path = _get_config_path()
+        current_mtime, current_identity = _config_stat_state(config_path)
         path_changed = _cfg_path != config_path
-        mtime_stale = current_mtime != _cfg_mtime
+        mtime_stale = _config_is_stale(current_mtime, current_identity)
         if not _cfg_cache or path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
             _refresh_config_cache(config_path)
             if path_changed:
@@ -464,12 +501,9 @@ def reload_config_if_stale() -> None:
 def get_config() -> dict:
     """Return the cached config dict, loading from disk if needed."""
     config_path = _get_config_path()
-    try:
-        current_mtime = config_path.stat().st_mtime
-    except OSError:
-        current_mtime = 0.0
+    current_mtime, current_identity = _config_stat_state(config_path)
     path_changed = _cfg_path != config_path
-    mtime_stale = current_mtime != _cfg_mtime
+    mtime_stale = _config_is_stale(current_mtime, current_identity)
     if not _cfg_cache or path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
         reload_config_if_stale()
     # When a test (or runtime caller) has rebound ``cfg`` to a different dict
@@ -489,12 +523,9 @@ def get_config_snapshot() -> dict:
     """Return a request-owned config snapshot captured under the cache lock."""
     with _cfg_lock:
         config_path = _get_config_path()
-        try:
-            current_mtime = config_path.stat().st_mtime
-        except OSError:
-            current_mtime = 0.0
+        current_mtime, current_identity = _config_stat_state(config_path)
         path_changed = _cfg_path != config_path
-        mtime_stale = current_mtime != _cfg_mtime
+        mtime_stale = _config_is_stale(current_mtime, current_identity)
         if not _cfg_cache or path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
             _refresh_config_cache(config_path)
         try:
@@ -545,7 +576,7 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
     Callers must hold _cfg_lock when invoking this helper because it mutates
     shared state.
     """
-    global _cfg_mtime, _cfg_path, _cfg_fingerprint
+    global _cfg_mtime, _cfg_stat_identity, _cfg_path, _cfg_fingerprint
     if config_path is None:
         config_path = _get_config_path()
     _cfg_cache.clear()
@@ -554,6 +585,7 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
     _old_cfg_mtime = _cfg_mtime
     _cfg_path = config_path
     _cfg_mtime = 0.0
+    _cfg_stat_identity = ()
     try:
         if config_path.exists():
             # Route the parse through the mtime-keyed cache (#4652) so an
@@ -563,7 +595,7 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
             # run the env expansion HERE, pinned to the unscoped process-env
             # view (below) — never the helper's per-call expansion — for the
             # #798 TLS reason documented in the pin block.
-            loaded = _load_yaml_config_file_raw(config_path)
+            loaded, _parsed_identity = _load_yaml_config_file_identified(config_path)
             if isinstance(loaded, dict):
                 if loaded:
                     # The process-global _cfg_cache must reflect PROCESS-env
@@ -598,10 +630,13 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
                 # This matches master's pre-#4662 behavior (it entered the block for
                 # {} and set the mtime); the inner `if loaded:` only gates the no-op
                 # cache update, not the mtime stamp.
-                try:
-                    _cfg_mtime = Path(config_path).stat().st_mtime
-                except OSError:
-                    _cfg_mtime = 0.0
+                _cfg_mtime, _ = _config_stat_state(config_path)
+                # Stamp the identity the load itself reported. Neither a second
+                # stat() nor a second look at the parse cache can be trusted
+                # here: a replace, or a concurrent reader repopulating the
+                # shared entry, would mark generation A fresh under generation
+                # B's identity and no later read could tell (HWEB-81).
+                _cfg_stat_identity = (_cfg_mtime, _parsed_identity) if _parsed_identity else ()
     except Exception:
         logger.debug("Failed to load yaml config from %s", config_path)
     _apply_config_defaults(_cfg_cache)
@@ -622,27 +657,42 @@ def reload_config() -> None:
 
 
 # Memoized parse cache for _load_yaml_config_file, keyed on (resolved path,
-# st_mtime_ns, st_size). yaml.safe_load on an ~800-line / 24KB config.yaml costs
-# ~125ms of pure-Python parsing, and hot read paths (e.g. GET /api/reasoning ->
-# get_reasoning_status) call this on every request. Without a cache, a UI sync
+# st_mtime_ns, st_size, st_ino, st_ctime_ns). yaml.safe_load on an ~800-line /
+# 24KB config.yaml costs ~125ms of pure-Python parsing, and hot read paths
+# (e.g. GET /api/reasoning -> get_reasoning_status) call this on every request. Without a cache, a UI sync
 # storm turns into a YAML-reparse storm (#4650). We cache the RAW parsed dict and
 # re-run _expand_env_vars() on every call: env expansion is cheap, always returns
 # a fresh structure (so callers that read-modify-save the result never corrupt the
 # cache), and keeps ${VAR} references live against the current os.environ. The
-# (mtime_ns, size) key means any on-disk edit (including by _save_yaml_config_file)
-# is picked up on the next read.
+# stat key means any on-disk edit (including by _save_yaml_config_file) is picked
+# up on the next read, and a same-size replacement with a restored mtime is too
+# because it lands on a new inode.
 _yaml_file_cache: dict[str, tuple] = {}
 _yaml_file_cache_lock = threading.Lock()
 
 
 def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict:
-    """Return the RAW (un-env-expanded) parsed config dict, memoized on
-    (resolved path, st_mtime_ns, st_size). Shared parse core for
-    _load_yaml_config_file() and reload_config(): the former runs the helper's
-    own per-call env expansion on the result; the latter must run expansion
+    """Return just the parsed dict; see _load_yaml_config_file_identified."""
+    return _load_yaml_config_file_identified(config_path, _copy=_copy)[0]
+
+
+def _load_yaml_config_file_identified(
+    config_path: Path, *, _copy: bool = True
+) -> tuple[dict, tuple]:
+    """Return (RAW parsed config dict, the file identity it was read at).
+
+    A caller that records freshness must stamp the identity this returns rather
+    than re-deriving one: a second stat(), or a second look at the shared parse
+    cache, can both describe a generation this call never saw once a concurrent
+    reader or a config-management replace lands in between (HWEB-81).
+
+    The dict itself is the RAW (un-env-expanded) config, memoized on
+    (resolved path, st_mtime_ns, st_size, st_ino, st_ctime_ns). Shared parse
+    core for _load_yaml_config_file() and reload_config(): the former runs the
+    helper's own per-call env expansion on the result; the latter must run expansion
     under its own process-env-pinned thread context (#798), so it takes the raw
     dict and expands it itself. Either way the file is parsed at most once per
-    (mtime, size) — a UI sync storm can't turn into a YAML-reparse storm (#4650),
+    stat identity — a UI sync storm can't turn into a YAML-reparse storm (#4650),
     and an unchanged config.yaml isn't reparsed on the profile-switch hot path
     (#4662 Phase 2).
 
@@ -654,36 +704,48 @@ def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict
     try:
         import yaml as _yaml
     except ImportError:
-        return {}
+        return {}, ()
 
     try:
         st = config_path.stat()
     except OSError:
         # Missing or unstattable file — preserve the original "no config" contract.
-        return {}
+        return {}, ()
 
     cache_key = str(config_path)
-    stat_key = (st.st_mtime_ns, st.st_size)
+    # st_ino/st_ctime_ns are part of the key because an atomic replace that
+    # restores mtime and keeps the byte length (rsync -a, cp -p, config
+    # management that puts metadata back) leaves (mtime_ns, size) identical and
+    # would otherwise serve the previous parse forever — including the
+    # webui_oidc policy that decides owner authority (HWEB-81). Both change when
+    # the directory entry is repointed at a new inode, and both come from the
+    # stat() we already do. Both are stable per file on Linux, macOS and
+    # Windows, and a platform that reports a constant st_ino (some network
+    # mounts) simply degrades to the old key rather than reparsing repeatedly.
+    stat_key = (st.st_mtime_ns, st.st_size, st.st_ino, st.st_ctime_ns)
     with _yaml_file_cache_lock:
         cached = _yaml_file_cache.get(cache_key)
         if cached is not None and cached[0] == stat_key:
             raw = cached[1]
             if not isinstance(raw, dict):
-                return {}
-            return copy.deepcopy(raw) if _copy else raw
+                return {}, stat_key
+            return (copy.deepcopy(raw) if _copy else raw), stat_key
 
     # Cache miss / stale: parse off disk. Done outside the lock so a slow parse
     # doesn't serialize unrelated paths; a concurrent duplicate parse is harmless.
     try:
         loaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
     except Exception:
+        # Still the identity of the generation we read. A caller that stamps the
+        # previous generation's identity here would mark every later read stale
+        # and reparse this same malformed file forever.
         logger.debug("Failed to parse yaml config from %s", config_path)
-        return {}
+        return {}, stat_key
 
     raw = loaded if isinstance(loaded, dict) else {}
     with _yaml_file_cache_lock:
         _yaml_file_cache[cache_key] = (stat_key, raw)
-    return copy.deepcopy(raw) if _copy else raw
+    return (copy.deepcopy(raw) if _copy else raw), stat_key
 
 
 def _load_yaml_config_file(config_path: Path) -> dict:
@@ -7184,14 +7246,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _cache_build_cv
     # Config mtime check — must come before any config reads.
     # (Test #585 verifies _current_mtime appears before active_provider = None)
-    try:
-        _current_path = _get_config_path()
-        _current_mtime = _current_path.stat().st_mtime
-    except OSError:
-        _current_path = _get_config_path()
-        _current_mtime = 0.0
+    _current_path = _get_config_path()
+    _current_mtime, _current_identity = _config_stat_state(_current_path)
     path_changed = _current_path != _cfg_path
-    mtime_stale = _current_mtime != _cfg_mtime
+    mtime_stale = _config_is_stale(_current_mtime, _current_identity)
     if path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
         reload_config_if_stale()
     # ── COLD PATH helper ─────────────────────────────────────────────────────
@@ -8670,11 +8728,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
     # Check config mtime OUTSIDE the lock so this cheap check doesn't serialize
     # concurrent requests.  Must come before any config reads in the cold path.
-    try:
-        _current_mtime = Path(_get_config_path()).stat().st_mtime
-    except OSError:
-        _current_mtime = 0.0
-    _cfg_changed = _current_mtime != _cfg_mtime
+    _current_mtime, _current_identity = _config_stat_state(_get_config_path())
+    _cfg_changed = _config_is_stale(_current_mtime, _current_identity)
 
     # Disk load BEFORE lock: ~0.1ms, lets concurrent requests skip entirely.
     # Then acquire lock and check memory cache.  Cold path runs inside the lock
@@ -10131,8 +10186,6 @@ _SETTINGS_DEFAULTS = {
     "show_quota_chip": False,  # show ambient provider quota chip in composer footer (default off; wide desktop only when enabled, see style.css @media)
     "show_conversation_outline": False,  # show opt-in desktop jump-to-question outline panel
     "show_busy_placeholder_hint": False,  # opt-in busy composer placeholder hint
-    "hide_empty_state_suggestions": False,  # hide the default new-chat suggestion buttons
-    "hide_empty_state_panel": False,  # hide the complete new-chat welcome panel
     "new_chat_on_workspace_switch": False,  # #5473 opt-in: switching to a DIFFERENT workspace starts a new chat (leaving the current conversation on its original workspace) instead of mutating the current session's workspace in place. Default OFF preserves the shipped in-place-switch behavior.
     "virtualize_transcript": False,  # #4343: virtualize long (>80 msg) transcripts. EXPERIMENTAL, opt-IN (default OFF). Was opt-out/default-on in #4325 but caused scroll-up flicker on long sessions with tall tool-call rows (variable-height anchor oscillation) — flipped off for everyone in #4343; re-enabling requires an explicit opt-in (see virtualize_transcript_optin migration in load_settings).
     "virtualize_transcript_optin": False,  # #4343 migration marker: True only once the user explicitly enables virtualize_transcript AFTER the default-off flip. A stored virtualize_transcript=True WITHOUT this marker is a stale pre-flip value and is reset to False on load (force-off-for-everyone migration).
@@ -10182,7 +10235,10 @@ _SETTINGS_DEFAULTS = {
     "hide_composer_yolo": False,  # hide YOLO chip in composer footer
     "hide_composer_profile": False,  # hide profile chip in composer footer
     "hide_composer_workspace": False,  # hide workspace controls in composer footer/mobile config panel
-    "hide_composer_mobile_config": False,  # hide mobile composer config button
+    # HWEB-7 retired this toggle (the overflow button is the only route to the
+    # controls its panel owns). Kept registered so older settings.json files with
+    # the key still load and round-trip.
+    "hide_composer_mobile_config": False,
     "hide_composer_model": False,  # hide model chip in composer footer/mobile config panel
     "hide_composer_quota_chip": False,  # hide provider quota chip in composer footer
     "hide_composer_reasoning": False,  # hide reasoning chip in composer footer/mobile config panel
@@ -10477,8 +10533,6 @@ _SETTINGS_BOOL_KEYS = {
     "show_quota_chip",
     "show_conversation_outline",
     "show_busy_placeholder_hint",
-    "hide_empty_state_suggestions",
-    "hide_empty_state_panel",
     "new_chat_on_workspace_switch",
     "virtualize_transcript",
     "virtualize_transcript_optin",

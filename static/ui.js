@@ -30,6 +30,25 @@ function showConversationEmptyState(){
   try{ delete document.documentElement.dataset.sessionBoot; }catch(_){}
   const empty=$('emptyState');
   if(empty) empty.style.display='';
+  _setComposerHero(true);
+  // Re-resolve the workspace-aware headline for the conversation we just landed on.
+  if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
+}
+// The one place the empty state is taken down. Every caller that starts painting
+// a transcript row goes through here so the hero layout is released with it
+// (HWEB-1) — a direct style.display='none' would leave the composer centered.
+// Call sites guard with `typeof` (the existing _applyUserRowIntrinsicHeight
+// pattern): several regression tests extract one render function out of this
+// file and run it under node against hand-stubbed collaborators, so a bare
+// reference to a helper outside the extracted body is a ReferenceError there.
+function hideConversationEmptyState(){
+  const empty=$('emptyState');
+  if(empty) empty.style.display='none';
+  _setComposerHero(false);
+}
+function _setComposerHero(on){
+  const chat=$('mainChat');
+  if(chat) chat.classList.toggle('composer-hero',!!on);
 }
 // ── HWEB-11: consolidated chat connection/runtime notice stack ───────────────
 // Reconnect, offline, agent-health, provider-failure and thread-error each used
@@ -4450,8 +4469,7 @@ function _positionModelDropdown(){
   const mobileAction=$('composerMobileModelAction');
   const footer=document.querySelector('.composer-footer');
   if(!dd||!footer) return;
-  const panel=$('composerMobileConfigPanel');
-  const anchor=(panel&&panel.classList.contains('open')&&mobileAction)?mobileAction:(chip&&chip.offsetParent?chip:mobileAction);
+  const anchor=_composerOverflowAnchor('composerMobileModelAction',chip)||mobileAction;
   if(!anchor) return;
   const isPhone=typeof window.matchMedia==='function'&&window.matchMedia('(max-width:640px)').matches;
   if(isPhone){
@@ -5875,11 +5893,9 @@ function toggleReasoningDropdown(){
 function _positionReasoningDropdown(){
   const dd=$('composerReasoningDropdown');
   const chip=$('composerReasoningChip');
-  const mobileAction=$('composerMobileReasoningAction');
   const footer=document.querySelector('.composer-footer');
   if(!dd||!chip||!footer) return;
-  const panel=$('composerMobileConfigPanel');
-  const anchor=(panel&&panel.classList.contains('open')&&mobileAction)?mobileAction:chip;
+  const anchor=_composerOverflowAnchor('composerMobileReasoningAction',chip)||chip;
   const chipRect=anchor.getBoundingClientRect();
   const footerRect=footer.getBoundingClientRect();
   let left=chipRect.left-footerRect.left;
@@ -5960,6 +5976,11 @@ function _applyToolsetsChip(toolsets) {
     chip.classList.remove('has-custom');
     chip.title = t('session_toolsets') + ': ' + t('session_toolsets_profile_defaults');
   }
+  // The overflow row is the primary surface for this control (HWEB-7).
+  const actionLabel = $('composerMobileToolsetsLabel');
+  const action = $('composerMobileToolsetsAction');
+  if (actionLabel) actionLabel.textContent = label.textContent;
+  if (action) { action.title = chip.title; action.classList.toggle('has-custom', hasCustom); }
 }
 
 function _syncToolsetsChip() {
@@ -6109,12 +6130,31 @@ function _populateToolsetsDropdown() {
   _renderToolsetsPresetSections({ state, input });
 }
 
+// HWEB-7: a control can have a footer chip, an overflow row, or both showing,
+// and which one is laid out changes with the fit stage. An open panel is not
+// enough to pick the row — the model, reasoning and context rows are
+// display:none at the widths where the footer keeps its own chip, so anchoring
+// on `.open` alone reads a zero rect and drops the popup at the footer's left
+// edge. Prefer the row only when it actually has a box, then the chip, then
+// nothing (callers close rather than anchor to a zero rect, per #1431).
+function _composerOverflowAnchor(rowId, chip) {
+  const panel = $('composerMobileConfigPanel');
+  const row = $(rowId);
+  if (panel && panel.classList.contains('open') && row && row.offsetParent !== null) return row;
+  return (chip && chip.offsetParent !== null) ? chip : null;
+}
+window._composerOverflowAnchor = _composerOverflowAnchor;
+
+function _toolsetsDropdownAnchor() {
+  return _composerOverflowAnchor('composerMobileToolsetsAction', $('composerToolsetsChip'));
+}
+
 function _positionToolsetsDropdown() {
   const dd = $('composerToolsetsDropdown');
-  const chip = $('composerToolsetsChip');
+  const chip = _toolsetsDropdownAnchor();
   const footer = document.querySelector('.composer-footer');
   if (!dd || !chip || !footer) return;
-  // Defense: if the chip has been hidden by responsive CSS (e.g. resize across
+  // Defense: if the anchor has been hidden by responsive CSS (e.g. resize across
   // 1100px container threshold while dropdown was open), don't try to anchor
   // to a zero-rect element — close the dropdown instead. (#1431)
   if (chip.offsetParent === null) { closeToolsetsDropdown(); return; }
@@ -6128,11 +6168,12 @@ function _positionToolsetsDropdown() {
 
 function toggleToolsetsDropdown() {
   const dd = $('composerToolsetsDropdown');
-  const chip = $('composerToolsetsChip');
-  if (!dd || !chip) return;
-  // Don't open when the chip itself is hidden by responsive CSS (#1431).
-  // offsetParent === null catches display:none on the element or any ancestor.
-  if (chip.offsetParent === null) return;
+  const chip = _toolsetsDropdownAnchor();
+  if (!dd) return;
+  // Don't open when no anchor is visible — neither the overflow row nor the
+  // wide-container chip. offsetParent === null catches display:none on the
+  // element or any ancestor. (#1431)
+  if (!chip) { if (dd.classList.contains('open')) closeToolsetsDropdown(); return; }
   const open = dd.classList.contains('open');
   if (open) { closeToolsetsDropdown(); return; }
   if (typeof closeProfileDropdown === 'function') closeProfileDropdown();
@@ -6152,6 +6193,8 @@ function toggleToolsetsDropdown() {
   dd.classList.add('open');
   _positionToolsetsDropdown();
   chip.classList.add('active');
+  const action = $('composerMobileToolsetsAction');
+  if (action) { action.classList.add('active'); action.setAttribute('aria-expanded', 'true'); }
   // Focus the input after a tick so the layout has settled
   setTimeout(() => { const inp = $('toolsetsInput'); if (inp) inp.focus(); }, 50);
 }
@@ -6159,8 +6202,10 @@ function toggleToolsetsDropdown() {
 function closeToolsetsDropdown() {
   const dd = $('composerToolsetsDropdown');
   const chip = $('composerToolsetsChip');
+  const action = $('composerMobileToolsetsAction');
   if (dd) dd.classList.remove('open');
   if (chip) chip.classList.remove('active');
+  if (action) { action.classList.remove('active'); action.setAttribute('aria-expanded', 'false'); }
 }
 
 function _applySessionToolsets(toolsets) {
@@ -6202,6 +6247,9 @@ function _applySessionToolsets(toolsets) {
 document.addEventListener('click', function(e) {
   if (
     !e.target.closest('#composerToolsetsChip') &&
+    // The overflow row is the trigger at every width since HWEB-7; without this
+    // exemption the click that opens the dropdown bubbles here and closes it.
+    !e.target.closest('#composerMobileToolsetsAction') &&
     !e.target.closest('#composerToolsetsDropdown')
   ) closeToolsetsDropdown();
   // Active profile defaults button
@@ -6256,8 +6304,11 @@ document.addEventListener('change', function(e) {
 window.addEventListener('resize', () => {
   const dd = $('composerToolsetsDropdown');
   if (!dd || !dd.classList.contains('open')) return;
-  const chip = $('composerToolsetsChip');
-  if (!chip || chip.offsetParent === null) { closeToolsetsDropdown(); return; }
+  // Resolve through the shared anchor: the footer chip is hidden at every width
+  // since HWEB-7, so checking it alone would close a picker opened from the
+  // overflow row on any resize — including the visual-viewport change an
+  // on-screen keyboard causes when the picker's own input takes focus.
+  if (!_toolsetsDropdownAnchor()) { closeToolsetsDropdown(); return; }
   _positionToolsetsDropdown();
 });
 
@@ -6275,6 +6326,21 @@ function closeMobileComposerConfig(){
   if(typeof closeWsDropdown==='function') closeWsDropdown();
 }
 
+// The panel is only readable while open, so pulling the labels of the controls
+// it now owns across at open time keeps one sync point instead of hooking every
+// place those labels change. (HWEB-7)
+function _syncComposerOverflowLabels(){
+  const pairs=[['profileChipLabel','composerMobileProfileLabel'],['composerToolsetsLabel','composerMobileToolsetsLabel']];
+  for(const pair of pairs){
+    const src=$(pair[0]);
+    const dst=$(pair[1]);
+    // An empty source means the chip has not been populated yet; keep the row's
+    // own text rather than blanking it.
+    if(src&&dst&&src.textContent) dst.textContent=src.textContent;
+  }
+}
+window._syncComposerOverflowLabels=_syncComposerOverflowLabels;
+
 function openMobileComposerConfig(){
   const panel=$('composerMobileConfigPanel');
   if(!panel) return;
@@ -6283,6 +6349,7 @@ function openMobileComposerConfig(){
   closeModelDropdown();
   closeReasoningDropdown();
   if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
+  if(typeof _syncComposerOverflowLabels==='function') _syncComposerOverflowLabels();
   panel.classList.add('open');
   _syncMobileComposerConfigButton(true);
 }
@@ -6321,7 +6388,11 @@ document.addEventListener('click',function(e){
     e.target.closest('#composerMobileConfigPanel') ||
     e.target.closest('#composerWsDropdown') ||
     e.target.closest('#composerModelDropdown') ||
-    e.target.closest('#composerReasoningDropdown')
+    e.target.closest('#composerReasoningDropdown') ||
+    // Opened from a panel row, so they must not close the panel under them.
+    e.target.closest('#composerToolsetsDropdown') ||
+    e.target.closest('#profileDropdown') ||
+    e.target.closest('#savedPromptsPopup')
   ) return;
   closeMobileComposerConfig();
 });
@@ -6335,15 +6406,29 @@ document.addEventListener('keydown',function(e){
   if(typeof closeWsDropdown==='function') closeWsDropdown();
   closeModelDropdown();
   closeReasoningDropdown();
+  if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
+  if(typeof closeProfileDropdown==='function') closeProfileDropdown();
+  // Saved prompts opens from a panel row but is positioned against the footer,
+  // so closing the panel alone would leave it on screen with its trigger gone.
+  const savedPopup=$('savedPromptsPopup');
+  if(savedPopup&&savedPopup.style.display!=='none'){
+    savedPopup.style.display='none';
+    const savedBtn=$('btnSavedPrompts');
+    if(savedBtn) savedBtn.setAttribute('aria-expanded','false');
+  }
+  const btn=$('composerMobileConfigBtn');
+  if(btn&&typeof btn.focus==='function'){try{btn.focus({preventScroll:true});}catch(_){btn.focus();}}
 });
 
+// The panel used to be phone-only, so crossing 640px simply closed it and its
+// dropdowns. It is open at every width now (HWEB-7), so a resize has to move
+// the footer-anchored dropdowns instead. The model, profile and toolsets
+// dropdowns already have their own resize handlers.
 window.addEventListener('resize',function(){
-  if(window.matchMedia && !window.matchMedia('(max-width: 640px)').matches){
-    closeMobileComposerConfig();
-    closeModelDropdown();
-    closeReasoningDropdown();
-    if(typeof closeWsDropdown==='function') closeWsDropdown();
-  }
+  const reasoning=$('composerReasoningDropdown');
+  if(reasoning&&reasoning.classList.contains('open')&&typeof _positionReasoningDropdown==='function') _positionReasoningDropdown();
+  const ws=$('composerWsDropdown');
+  if(ws&&ws.classList.contains('open')&&typeof _positionComposerWsDropdown==='function') _positionComposerWsDropdown();
 });
 
 // ── Scroll pinning ──────────────────────────────────────────────────────────
@@ -7308,7 +7393,7 @@ function _clearActivityElapsedTimer(){
   _activityElapsedTimerGroup=null;
 }
 
-const _MOBILE_CONFIG_BASE_LABEL='Workspace, model, quota, reasoning, and context settings';
+const _MOBILE_CONFIG_BASE_LABEL='Composer settings and secondary controls';
 
 function _setCtxCompressButton(btn,text){
   if(!btn)return;
@@ -11787,6 +11872,7 @@ function syncTopbar(){
     // Update profile chip even when no session is active (e.g. right after profile switch)
     const _profileLabel=$('profileChipLabel');
     if(_profileLabel) _profileLabel.textContent=S.activeProfile||'default';
+    if(typeof _syncComposerOverflowLabels==='function') _syncComposerOverflowLabels();
     const _titleLabel=$('titlebarProfileLabel');
     if(_titleLabel) _titleLabel.textContent=S.activeProfile||'default';
     return;
@@ -11914,6 +12000,7 @@ function syncTopbar(){
   // unaffected by this line.
   const profileLabel=$('profileChipLabel');
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
+  if(typeof _syncComposerOverflowLabels==='function') _syncComposerOverflowLabels();
   const titleLabel=$('titlebarProfileLabel');
   if(titleLabel) titleLabel.textContent=S.activeProfile||'default';
 }
@@ -12005,8 +12092,57 @@ function isTpsDisplayEnabled(){
 function _assistantRoleHtml(tsTitle='', tpsText=''){
   const _bn=assistantDisplayName();
   const tps=(isTpsDisplayEnabled()&&tpsText)?`<span class="msg-tps-inline" title="Tokens per second">${esc(tpsText)}</span>`:'';
-  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant">${esc(_bn.charAt(0).toUpperCase())}</div><span class="msg-role-name">${esc(_bn)}</span>${tps}</div>`;
+  // HWEB-4: no avatar, and the name is exposed to assistive tech only — left
+  // alignment already identifies the speaker. The row survives as the container
+  // for the live TPS chip and for the transparent-stream collapse name tag
+  // (which CSS re-reveals; there the tag is a control, not identity chrome).
+  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><span class="msg-role-name">${esc(_bn)}</span>${tps}</div>`;
 }
+// ── HWEB-4: message-action overflow dismissal ────────────────────────────
+// The overflow is a native <details>, so open/close, Enter/Space and focus are
+// the platform's job. Only light dismissal has to be added: one open menu at a
+// time, close on outside click or on activating an item, and Escape returns
+// focus to the summary that opened it.
+function _closeMessageActionMenus(except){
+  document.querySelectorAll('details.msg-more[open]').forEach(d=>{ if(d!==except) d.open=false; });
+}
+document.addEventListener('click',e=>{
+  if(!document.querySelector('details.msg-more[open]')) return;
+  const target=e.target;
+  const summary=(target&&target.closest)?target.closest('details.msg-more > summary'):null;
+  // A click on a summary keeps that menu (the browser toggles it after this
+  // handler); a click on an item or outside closes everything.
+  _closeMessageActionMenus(summary?summary.parentElement:null);
+});
+document.addEventListener('keydown',e=>{
+  if(e.key!=='Escape') return;
+  const open=document.querySelector('details.msg-more[open]');
+  if(!open) return;
+  const summary=open.querySelector('summary');
+  _closeMessageActionMenus(null);
+  if(summary&&summary.focus) summary.focus();
+});
+// The menu opens upward so it never fights the composer, but `.messages` is a
+// scroller: overflow past its start edge is clipped AND unreachable (scrollTop
+// cannot go below 0), while end-side overflow can always be scrolled to. So on
+// a short transcript, where the first assistant footer can sit closer to the top
+// than the menu is tall, drop it below the trigger instead.
+function _placeMessageActionMenu(details){
+  if(!details) return;
+  if(!details.open){details.removeAttribute('data-drop');return;}
+  const menu=details.querySelector('.msg-more-menu');
+  const scroller=details.closest?details.closest('.messages'):null;
+  if(!menu||!scroller||!details.getBoundingClientRect) return;
+  const needed=(menu.offsetHeight||0)+6;
+  const roomAbove=details.getBoundingClientRect().top-scroller.getBoundingClientRect().top;
+  details.setAttribute('data-drop', roomAbove<needed?'down':'up');
+}
+// `toggle` does not bubble, so listen in the capture phase.
+document.addEventListener('toggle',e=>{
+  const el=e.target;
+  if(!el||!el.classList||!el.classList.contains('msg-more')) return;
+  _placeMessageActionMenu(el);
+}, true);
 function _setAssistantTurnTps(turn, tpsText=''){
   if(!turn) return;
   const role=turn.querySelector('.msg-role.assistant');
@@ -15057,7 +15193,7 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   if(!S.session||!S.activeStreamId) return false;
   if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
   if(streamId&&S.activeStreamId!==streamId) return false;
-  $('emptyState').style.display='none';
+  if(typeof hideConversationEmptyState==='function') hideConversationEmptyState();
   let turn=$('liveAssistantTurn');
   if(!turn){
     turn=_createAssistantTurn();
@@ -15154,7 +15290,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   if(!S.session||!S.activeStreamId) return false;
   if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
   if(streamId&&S.activeStreamId!==streamId) return false;
-  $('emptyState').style.display='none';
+  if(typeof hideConversationEmptyState==='function') hideConversationEmptyState();
   let turn=$('liveAssistantTurn');
   if(!turn){
     turn=_createAssistantTurn();
@@ -18254,7 +18390,9 @@ function renderMessages(options){
   // During session switch, S.messages is intentionally cleared while the full
   // message fetch is still in flight. Other async updates can still call
   // renderMessages() in this window. Keep the existing loading placeholder.
-  if(_loadingSessionId===sid&&msgCount===0&&inner) return;
+  // Any load in flight owns the pane, not only one whose sid matches: a switch
+  // clears S.messages before reassigning S.session (HWEB-1).
+  if(_loadingSessionId&&msgCount===0&&inner) return;
   if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
   let cachedRenderSignature=null;
   const hasTransientTranscriptUi=!!(
@@ -18264,7 +18402,7 @@ function renderMessages(options){
 
   const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);
   const visWithIdx=_getVisibleMessagesWithIdx();
-  if(visWithIdx.length||preservedCompressionTaskMessages.length) $('emptyState').style.display='none';
+  if(visWithIdx.length||preservedCompressionTaskMessages.length){ if(typeof hideConversationEmptyState==='function') hideConversationEmptyState(); }
   else showConversationEmptyState();
   const virtualWindow=virtualFallback
     ? {virtualized:false,start:0,end:visWithIdx.length,topPad:0,bottomPad:0,total:visWithIdx.length,tailStart:visWithIdx.length}
@@ -18723,8 +18861,11 @@ function renderMessages(options){
     const statusHtml = (!isUser&&m._statusCard) ? _statusCardHtml(m._statusCard) : '';
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
-    const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
-    const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
+    // HWEB-4: the assistant's secondary actions live inside the overflow menu,
+    // so they carry a visible label there (.msg-action-label is display:none on
+    // the inline icon buttons that stay in the footer).
+    const undoBtn  = isLastAssistant ? `<button class="msg-action-btn msg-more-item" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}<span class="msg-action-label">${esc(t('undo_exchange'))}</span></button>` : '';
+    const retryBtn = isLastAssistant ? `<button class="msg-action-btn msg-more-item" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}<span class="msg-action-label">${esc(t('regenerate'))}</span></button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
     const readOnlySession=typeof _isReadOnlySession==='function'
       ? _isReadOnlySession(S.session)
@@ -18732,8 +18873,8 @@ function renderMessages(options){
     const branchableReadOnlySession=typeof _isBranchableReadOnlySession==='function'
       ? _isBranchableReadOnlySession(S.session)
       : false;
-    const forkBtn  = (readOnlySession&&!branchableReadOnlySession) ? '' : `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1})">${li('git-branch',13)}</button>`;
-    const ttsBtn   = !isUser ? `<button class="msg-action-btn msg-tts-btn" title="${t('tts_listen')||'Listen'}" onclick="speakMessage(this)">${li('volume-2',13)}</button>` : '';
+    const forkBtn  = (readOnlySession&&!branchableReadOnlySession) ? '' : `<button class="msg-action-btn${isUser?'':' msg-more-item'}" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1})">${li('git-branch',13)}<span class="msg-action-label">${esc(t('fork_from_here'))}</span></button>`;
+    const ttsBtn   = !isUser ? `<button class="msg-action-btn msg-tts-btn msg-more-item" title="${t('tts_listen')||'Listen'}" onclick="speakMessage(this)">${li('volume-2',13)}<span class="msg-action-label">${esc(t('tts_listen')||'Listen')}</span></button>` : '';
     const tsVal=m._ts||m.timestamp;
     // _formatInServerTz handles fractional-hour offsets (India +0530 etc.)
     // correctly via offset arithmetic; bare toLocaleString is the browser-tz fallback.
@@ -18750,7 +18891,17 @@ function renderMessages(options){
     const questionJumpBtn = (_qJumpTarget!==undefined&&_qJumpTarget!==null)
       ? _questionJumpButtonHtml(_qJumpTarget, assistantRawIdxByQuestionRawIdx.get(_qJumpTarget)??rawIdx)
       : '';
-    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
+    // HWEB-4: assistant rows keep Copy directly available and fold the
+    // secondary actions (listen / fork / retry / undo) into one native
+    // <details> overflow, so the answer is not preceded or trailed by a full
+    // toolbar. User rows keep their existing inline controls.
+    const moreItems = isUser ? '' : `${ttsBtn}${forkBtn}${retryBtn}${undoBtn}`;
+    const moreLabel = t('more_actions');
+    const moreBtn = moreItems
+      ? `<details class="msg-more"><summary class="msg-action-btn msg-more-btn" title="${moreLabel}" aria-label="${moreLabel}">${li('more-horizontal',13)}</summary><div class="msg-more-menu">${moreItems}</div></details>`
+      : '';
+    const actionsHtml = isUser ? `${editBtn}${forkBtn}${copyBtn}` : `${copyBtn}${moreBtn}`;
+    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${actionsHtml}</span>${questionJumpBtn}</div>`;
 
     if(_isContextCompactionMessage(m)){
       continue;
@@ -18897,10 +19048,13 @@ function renderMessages(options){
         if(blocks) blocks.innerHTML='';
         for(const attr of _recycleResetAttrs) recycled.removeAttribute(attr);
         const role=recycled.querySelector('.msg-role.assistant');
-        if(role) role.outerHTML=_assistantRoleHtml(tsTitle, isTpsDisplayEnabled()?_formatTurnTps(m._turnTps):'');
+        // HWEB-4: settled TPS renders in the final-response metadata footer
+        // below, not as a chip above the answer. Only the live turn still gets
+        // a header chip, stamped by _setLiveAssistantTps while it streams.
+        if(role) role.outerHTML=_assistantRoleHtml(tsTitle, '');
         currentAssistantTurn=recycled;
       }else{
-        currentAssistantTurn=_createAssistantTurn(tsTitle, isTpsDisplayEnabled()?_formatTurnTps(m._turnTps):'');
+        currentAssistantTurn=_createAssistantTurn(tsTitle, '');
       }
       currentAssistantTurn.dataset.role='assistant';
       if(S.session) currentAssistantTurn.dataset.sessionId=S.session.session_id;
@@ -19603,12 +19757,15 @@ function renderMessages(options){
       const compactWorklogForMessage=isCompactWorklogMode()&&(toolCallAssistantIdxs.has(mi)||assistantThinking.has(mi));
       const durationText=compactWorklogForMessage?'':_formatTurnDuration(msg._turnDuration);
       const usedModelText=_usedModelTurnChipLabel(msg);
-      if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText&&!usedModelText) continue;
+      // HWEB-4: TPS moved off the (removed) assistant header into this settled
+      // metadata row, beside duration/model/usage.
+      const tpsText=isTpsDisplayEnabled()?_formatTurnTps(msg._turnTps):'';
+      if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText&&!usedModelText&&!tpsText) continue;
       const seg=assistantSegments.get(mi);
       const row=seg?seg.closest('.assistant-turn'):null;
       const footerRows=row?row.querySelectorAll('.msg-foot'):[];
       const targetFoot=footerRows.length?footerRows[footerRows.length-1]:null;
-      if(!targetFoot||targetFoot.querySelector('.msg-usage-inline,.msg-duration-inline,.msg-gateway-inline,.gateway-failover-inline,.msg-model-warning-inline,.msg-used-model-inline')) continue;
+      if(!targetFoot||targetFoot.querySelector('.msg-usage-inline,.msg-duration-inline,.msg-gateway-inline,.gateway-failover-inline,.msg-model-warning-inline,.msg-used-model-inline,.msg-tps-inline')) continue;
       const fragments=[];
       if(modelWarningText){
         const warning=document.createElement('span');
@@ -19633,6 +19790,13 @@ function renderMessages(options){
         duration.className='msg-duration-inline';
         duration.textContent=`Done in ${durationText}`;
         fragments.push(duration);
+      }
+      if(tpsText){
+        const tps=document.createElement('span');
+        tps.className='msg-tps-inline';
+        tps.title='Tokens per second';
+        tps.textContent=tpsText;
+        fragments.push(tps);
       }
       // The transparent turn footer owns the model label (.lf-model) whenever
       // the turn has transparent event rows — skip the generic chip there so
@@ -20960,7 +21124,7 @@ function ensureLiveWorklogShell(){
     _dedupeLiveProcessedWorklogAnchors($('liveAssistantTurn'));
     return $('liveAssistantTurn');
   }
-  $('emptyState').style.display='none';
+  if(typeof hideConversationEmptyState==='function') hideConversationEmptyState();
   const compactWorklog=typeof isCompactWorklogMode==='function'&&isCompactWorklogMode();
   if(!compactWorklog&&!isSimplifiedToolCalling()){
     appendThinking();
@@ -21478,7 +21642,12 @@ function loadCsvInline(container){
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         const preview=buildCsvTablePreview(path, text, downloadUrl);
+        // The table lands after renderMessages() already ran the enhancer, so a
+        // message-level CSV preview would otherwise miss the sorting/filtering
+        // that structured-data mode is supposed to carry (HWEB-6).
+        const host=el.parentElement;
         el.outerHTML=preview.html||_csvPreviewErrorHtml(path, preview.errorKey||'csv_error', snap);
+        if(host&&typeof enhanceMarkdownTables==='function') enhanceMarkdownTables(host);
       })
       .catch(()=>{
         el.outerHTML=_csvPreviewErrorHtml(path, 'csv_error', snap);
@@ -21971,8 +22140,7 @@ function appendThinking(text='', options){
     _renderLiveAnchorActivitySceneForStream(S.activeStreamId, S.session.session_id);
     return;
   }
-  const empty=$('emptyState');
-  if(empty) empty.style.display='none';
+  if(typeof hideConversationEmptyState==='function') hideConversationEmptyState();
   if(!isSimplifiedToolCalling()){
     let row=$('thinkingRow');
     if(!row){

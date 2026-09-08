@@ -2600,20 +2600,6 @@ $('msg').addEventListener('paste',e=>{
   e.preventDefault();
   _attachLargePastedText(pastedTextFile);
 });
-document.querySelectorAll('.suggestion').forEach(btn=>{
-  btn.onclick=()=>{$('msg').value=btn.dataset.msg;send();};
-});
-
-function applyEmptyStateSuggestionPref(){
-  if(!$('emptyState')) return;
-  $('emptyState').classList.toggle('no-suggestions',window._hideEmptyStateSuggestions===true);
-}
-
-function applyEmptyStatePanelPref(){
-  if(!$('emptyState')) return;
-  $('emptyState').classList.toggle('no-welcome',window._hideEmptyStatePanel===true);
-}
-
 window.addEventListener('resize',()=>{
   _syncWorkspacePanelInlineWidth();
   syncWorkspacePanelState();
@@ -3070,25 +3056,30 @@ function applyBotName(){
   if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
 }
 
+// `overflowSelector` is the control's row inside #composerMobileConfigPanel.
+// Order is applied per parent, so a def with both selectors keeps the footer
+// chip and the overflow row in the same user-chosen sequence. (HWEB-7)
 const _COMPOSER_CONTROL_TOGGLE_DEFS=[
   {key:'hide_composer_attach',label:'Attach',labelKey:'composer_control_attach',selectors:['#btnAttach'],orderSelector:'#btnAttach',orderGroup:'left'},
-  {key:'hide_composer_saved_prompts',label:'Saved prompts',labelKey:'composer_control_saved_prompts',selectors:['#btnSavedPrompts'],orderSelector:'#btnSavedPrompts',orderGroup:'left'},
   {key:'hide_composer_mic',label:'Mic',labelKey:'composer_control_mic',selectors:['#btnMic'],orderSelector:'#btnMic',orderGroup:'left'},
-  {key:'hide_composer_profile',label:'Profile',labelKey:'composer_control_profile',selectors:['#profileChipWrap'],orderSelector:'#profileChipWrap',orderGroup:'left'},
-  {key:'hide_composer_workspace',label:'Workspace',labelKey:'composer_control_workspace',selectors:['.composer-ws-wrap','#composerMobileWorkspaceAction'],orderSelector:'.composer-ws-wrap',orderGroup:'left'},
-  {key:'hide_composer_model',label:'Model',labelKey:'composer_control_model',selectors:['.composer-model-wrap','#composerMobileModelAction'],orderSelector:'.composer-model-wrap',orderGroup:'left'},
-  {key:'hide_composer_reasoning',label:'Reasoning',labelKey:'composer_control_reasoning',selectors:['#composerReasoningWrap','#composerMobileReasoningAction'],orderSelector:'#composerReasoningWrap',orderGroup:'left'},
+  {key:'hide_composer_profile',label:'Profile',labelKey:'composer_control_profile',selectors:['#profileChipWrap','#composerMobileProfileAction'],orderSelector:'#profileChipWrap',overflowSelector:'#composerMobileProfileAction',orderGroup:'left'},
+  {key:'hide_composer_workspace',label:'Workspace',labelKey:'composer_control_workspace',selectors:['.composer-ws-wrap','#composerMobileWorkspaceAction'],orderSelector:'.composer-ws-wrap',overflowSelector:'#composerMobileWorkspaceAction',orderGroup:'left'},
+  {key:'hide_composer_model',label:'Model',labelKey:'composer_control_model',selectors:['.composer-model-wrap','#composerMobileModelAction'],orderSelector:'.composer-model-wrap',overflowSelector:'#composerMobileModelAction',orderGroup:'left'},
+  {key:'hide_composer_reasoning',label:'Reasoning',labelKey:'composer_control_reasoning',selectors:['#composerReasoningWrap','#composerMobileReasoningAction'],orderSelector:'#composerReasoningWrap',overflowSelector:'#composerMobileReasoningAction',orderGroup:'left'},
+  {key:'hide_composer_saved_prompts',label:'Saved prompts',labelKey:'composer_control_saved_prompts',selectors:['#btnSavedPrompts'],orderSelector:'#btnSavedPrompts',orderGroup:'left'},
   {key:'hide_composer_context',label:'Context',labelKey:'composer_control_context',selectors:['#ctxIndicatorWrap','#composerMobileContextAction'],orderSelector:'#ctxIndicatorWrap',orderGroup:'right'},
 ];
 window._COMPOSER_CONTROL_TOGGLE_DEFS=_COMPOSER_CONTROL_TOGGLE_DEFS;
 
+// The overflow button itself is deliberately absent: it is the only route to
+// the controls the panel owns, so hiding it would strand them. Its settings key
+// stays registered in api/config.py so older settings.json files still load.
 const _COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS=[
   {key:'hide_composer_voice_mode',label:'Voice mode',labelKey:'composer_control_voice_mode',selectors:['#btnVoiceMode'],orderSelector:'#btnVoiceMode',orderGroup:'left'},
   {key:'hide_composer_yolo',label:'YOLO',labelKey:'composer_control_yolo',selectors:['#yoloPill'],orderSelector:'#yoloPill',orderGroup:'left'},
   {key:'hide_composer_bg_badge',label:'Background badge',labelKey:'composer_control_bg_badge',selectors:['#bgBadge'],orderSelector:'#bgBadge',orderGroup:'right'},
-  {key:'hide_composer_mobile_config',label:'Mobile config',labelKey:'composer_control_mobile_config',selectors:['#composerMobileConfigBtn'],orderSelector:'#composerMobileConfigBtn',orderGroup:'left'},
-  {key:'hide_composer_quota_chip',label:'Quota chip',labelKey:'composer_control_quota_chip',selectors:['#providerQuotaChip','#composerMobileQuotaAction'],orderSelector:'#providerQuotaChip',orderGroup:'left'},
-  {key:'hide_composer_toolsets',label:'Toolsets',labelKey:'composer_control_toolsets',selectors:['#composerToolsetsWrap'],orderSelector:'#composerToolsetsWrap',orderGroup:'left'},
+  {key:'hide_composer_quota_chip',label:'Quota chip',labelKey:'composer_control_quota_chip',selectors:['#providerQuotaChip','#composerMobileQuotaAction'],orderSelector:'#providerQuotaChip',overflowSelector:'#composerMobileQuotaAction',orderGroup:'left'},
+  {key:'hide_composer_toolsets',label:'Toolsets',labelKey:'composer_control_toolsets',selectors:['#composerToolsetsWrap','#composerMobileToolsetsAction'],orderSelector:'#composerToolsetsWrap',overflowSelector:'#composerMobileToolsetsAction',orderGroup:'left'},
   {key:'hide_composer_status',label:'Status',labelKey:'composer_control_status',selectors:['#composerStatus'],orderSelector:'#composerStatus',orderGroup:'right'},
 ];
 window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS=_COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS;
@@ -3127,11 +3118,15 @@ function _applyComposerControlOrder(order){
   window._composerControlOrder=_sanitizeComposerControlOrder(order);
   const grouped=new Map();
   _orderedComposerControlDefs(window._composerControlOrder).forEach(def=>{
-    const node=document.querySelector(def.orderSelector||def.selectors&&def.selectors[0]);
-    if(!node||!node.parentNode) return;
-    const parent=node.parentNode;
-    if(!grouped.has(parent)) grouped.set(parent,[]);
-    grouped.get(parent).push(node);
+    const selectors=[def.orderSelector||def.selectors&&def.selectors[0],def.overflowSelector];
+    selectors.forEach(selector=>{
+      if(!selector) return;
+      const node=document.querySelector(selector);
+      if(!node||!node.parentNode) return;
+      const parent=node.parentNode;
+      if(!grouped.has(parent)) grouped.set(parent,[]);
+      grouped.get(parent).push(node);
+    });
   });
   grouped.forEach((nodes,parent)=>{
     if(!nodes.length) return;
@@ -3191,13 +3186,12 @@ function _applyComposerFooterVisibilitySettings(){
   if(hidden.hide_composer_model&&typeof closeModelDropdown==='function') closeModelDropdown();
   if(hidden.hide_composer_reasoning&&typeof closeReasoningDropdown==='function') closeReasoningDropdown();
   if(hidden.hide_composer_toolsets&&typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
-  if(hidden.hide_composer_mobile_config&&typeof closeMobileComposerConfig==='function') closeMobileComposerConfig();
 
   // Hide the divider when all left-group buttons before it are hidden
   // Stops a lone vertical separator from appearing when attach/saved-prompts/mic/voice are all hidden.
   const _divider=document.querySelector('.composer-divider');
   if(_divider){
-    const _leftBtnSelectors=['#btnAttach','#btnSavedPrompts','#btnMic','#btnVoiceMode'];
+    const _leftBtnSelectors=['#btnAttach','#btnMic'];
     const _allLeftHidden=_leftBtnSelectors.every(sel=>{
       const el=document.querySelector(sel);
       return !el||el.classList.contains('composer-control-hidden')||el.style.display==='none';
@@ -3305,10 +3299,6 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._showConversationOutline=s.show_conversation_outline===true;
     document.documentElement.dataset.conversationOutline=window._showConversationOutline?'enabled':'disabled';
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
-    window._hideEmptyStateSuggestions=s.hide_empty_state_suggestions===true;
-    applyEmptyStateSuggestionPref();
-    window._hideEmptyStatePanel=s.hide_empty_state_panel===true;
-    applyEmptyStatePanelPref();
     // #4343: transcript virtualization is EXPERIMENTAL/opt-IN (default OFF).
     // #4346 Phase B (footer-jitter suppression during virtual-scroll
     // measurement re-renders) resolved the scroll-up flicker root cause,
@@ -3469,10 +3459,6 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._showConversationOutline=false;
     document.documentElement.dataset.conversationOutline='disabled';
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
-    window._hideEmptyStateSuggestions=false;
-    applyEmptyStateSuggestionPref();
-    window._hideEmptyStatePanel=false;
-    applyEmptyStatePanelPref();
     window._virtualizeTranscript=false;  // settings-load failed: default-OFF (experimental/opt-in) (#4343)
     window._showTps=false;
     window._fadeTextEffect=false;
@@ -3632,6 +3618,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
+  if(typeof _syncComposerOverflowLabels==='function') _syncComposerOverflowLabels();
   const titleLabel=$('titlebarProfileLabel');
   if(titleLabel) titleLabel.textContent=S.activeProfile||'default';
   const profileIntent=(typeof _profileQueryIntentFromLocation==='function')?_profileQueryIntentFromLocation():null;

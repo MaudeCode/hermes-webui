@@ -23,10 +23,18 @@ The primary layout is three-panel:
 - center panel for chat,
 - right panel for workspace file browsing and previews.
 
-Model, profile, workspace, attachments, voice input, context usage, Stop, and
-Send controls live in the composer footer. Settings and session-level tools live
-in the Hermes Control Center. Preserve this shape unless the change explicitly
-justifies a different interaction model.
+The composer footer carries only what the current message needs: attachments,
+dictation, the selected model, the active reasoning mode, context usage, and
+Stop/Send. Profile, workspace, toolsets, saved prompts, voice mode and provider
+quota live one level down, in the composer's overflow menu
+(`#composerMobileConfigBtn` / `#composerMobileConfigPanel`) — one menu at every
+width, not a second desktop-only surface. Saved prompts is the exception: it
+stays a desktop-only affordance (#3571) and is absent from the menu at phone
+widths. Settings and session-level tools live
+in the Hermes Control Center. Pending attachments and action-required states
+(approvals, clarifications, the queue card) never move into overflow. Preserve
+this shape unless the change explicitly justifies a different interaction
+model.
 
 ## Core feeling: calm developer console
 
@@ -52,10 +60,18 @@ must notice and respond to them.
 A chat turn should read as one coherent story:
 
 1. User message: right-aligned, compact bubble.
-2. Assistant content: left-aligned, prose-first, not a heavy bubble.
+2. Assistant content: left-aligned, prose-first, not a heavy bubble. No avatar
+   or repeated name row — alignment identifies the speaker, and the assistant
+   role stays announced to assistive tech through visually hidden text.
 3. Tool, thinking, progress, and context traces: quiet disclosure rows inside or
    adjacent to the assistant turn.
 4. Raw logs and verbose details: hidden until explicitly expanded.
+5. Per-turn technical metadata (duration, throughput, model, token usage,
+   timestamp) sits in one footer row under the answer, not above it.
+
+Message actions follow the same rule: Copy stays directly on the response, and
+the secondary actions fold into one overflow control rather than a persistent
+toolbar.
 
 Do not render every internal event as a first-class chat card. A turn that used
 many tools should summarize the work as inspectable activity, not make the user
@@ -130,6 +146,31 @@ intent.
 Keep scale tight. Avoid introducing near-duplicate one-off font sizes, colors,
 radius values, or spacing values when an existing token works.
 
+Chat prose has one typographic authority: `--message-body-font-size` (with
+`--message-body-line-height`). Markdown headings inside `.msg-body` size in `em`
+so the Small / Large / Extra Large preference scales them from that one step,
+and every prose block — paragraph, list, blockquote, heading — shares a single
+`0.65em` gap with no outer margin on the first or last block. A message is a
+turn in a conversation, not a document: no divider rules under headings, no
+uppercase heading styling. A skin may repaint prose, but must not reintroduce
+its own prose size or spacing scale.
+
+### Code blocks and tables in chat
+
+Code and tables are quoted content inside prose, not cards competing with it. A
+chat code block uses `10px 12px` padding and an `8px` radius (matching the
+`.pre-header` it sits under) and keeps its size on
+`--message-pre-code-font-size`; Prism highlighting, the Copy button, horizontal
+scrolling on desktop and wrapping under 640px all stay.
+
+An ordinary markdown table is a reading table: row separators only, no cell
+grid, no header fill, no zebra rows. Columns take their natural width with a
+`10ch` floor, so a wide table scrolls inside the reading column instead of
+squeezing columns to an unreadable width. Sorting and filtering chrome belongs
+to the explicit structured-data mode — a ```` ```csv ```` fence or a CSV
+preview, both rendered into `.csv-table-wrap` — and must not appear on prose
+tables.
+
 ## Color, depth, and shape
 
 Use one accent at a time. Semantic colors are for semantic state: success,
@@ -199,6 +240,18 @@ floating control that carries a visible label. The secondary edge affordances �
 the optional Start jump button and the outline FAB — use `--chat-col-inset` to
 ride the column's right edge instead of the pane's, and stack vertically so a
 taller composer cannot make them collide.
+
+The **left** gutter carries the turn minimap (`#outlineMinimap`): one 9×2px mark
+per loaded user turn, dividing the rail evenly so mark *k* sits ~*k*/*N* through
+the conversation. It is part of the conversation-outline feature — same
+`show_conversation_outline` preference, same `_buildEntries()` turns, same
+`_jumpToMessage()` jump — with the labelled panel as its keyboard/touch fallback.
+The rail is `pointer-events:none` (only the marks and never the hover preview
+take pointer events) so it cannot intercept a transcript selection, and
+`static/outline.js` hides it whenever the measured gutter drops below 52px, the
+viewport is under 900px, full-width chat leaves no gutter, or fewer than four
+turns are loaded. The current turn is a static width/colour change driven by one
+`IntersectionObserver` over the rendered user rows — never a running animation.
 
 User bubbles are right-aligned inside that column and may use up to 80% of it
 (90% under 600px), sized as a percentage of `--msg-max` rather than of the

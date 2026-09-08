@@ -17,7 +17,7 @@
     --radius-sm:4px;--radius-md:8px;--radius-card:8px;--radius-lg:12px;--radius-pill:999px;
     --space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;
     --font-size-xs:11px;--font-size-sm:12px;--font-size-md:14px;
-    --message-body-font-size:14px;--message-body-line-height:1.75;--message-code-font-size:12.5px;--message-pre-code-font-size:13px;--message-table-font-size:12px;
+    --message-body-font-size:14px;--message-body-line-height:1.55;--message-code-font-size:12.5px;--message-pre-code-font-size:13px;--message-table-font-size:12px;
     --file-tree-toggle-width:10px;
     --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
     --font-conversation:var(--font-ui);
@@ -52,24 +52,6 @@
   :root[data-font-size="small"] .msg-body { font-size: 12px; }
   :root[data-font-size="large"] .msg-body { font-size: 16px; }
   :root[data-font-size="xlarge"] .msg-body { font-size: 18px; }
-  :root[data-font-size="small"] .msg-body h1 { font-size: 21px; }
-  :root[data-font-size="large"] .msg-body h1 { font-size: 27px; }
-  :root[data-font-size="xlarge"] .msg-body h1 { font-size: 30px; }
-  :root[data-font-size="small"] .msg-body h2 { font-size: 17px; }
-  :root[data-font-size="large"] .msg-body h2 { font-size: 23px; }
-  :root[data-font-size="xlarge"] .msg-body h2 { font-size: 26px; }
-  :root[data-font-size="small"] .msg-body h3 { font-size: 15px; }
-  :root[data-font-size="large"] .msg-body h3 { font-size: 20px; }
-  :root[data-font-size="xlarge"] .msg-body h3 { font-size: 22px; }
-  :root[data-font-size="small"] .msg-body h4 { font-size: 13px; }
-  :root[data-font-size="large"] .msg-body h4 { font-size: 17px; }
-  :root[data-font-size="xlarge"] .msg-body h4 { font-size: 19px; }
-  :root[data-font-size="small"] .msg-body h5 { font-size: 12px; }
-  :root[data-font-size="large"] .msg-body h5 { font-size: 16px; }
-  :root[data-font-size="xlarge"] .msg-body h5 { font-size: 18px; }
-  :root[data-font-size="small"] .msg-body h6 { font-size: 11px; }
-  :root[data-font-size="large"] .msg-body h6 { font-size: 15px; }
-  :root[data-font-size="xlarge"] .msg-body h6 { font-size: 17px; }
   :root[data-font-size="small"] .msg-body code { font-size: 10.5px; }
   :root[data-font-size="large"] .msg-body code { font-size: 14.5px; }
   :root[data-font-size="xlarge"] .msg-body code { font-size: 16px; }
@@ -84,9 +66,6 @@
   :root[data-font-size="small"] .msg-role { font-size: 10px; }
   :root[data-font-size="large"] .msg-role { font-size: 13px; }
   :root[data-font-size="xlarge"] .msg-role { font-size: 15px; }
-  :root[data-font-size="small"] .role-icon { width: 18px; height: 18px; font-size: 8px; }
-  :root[data-font-size="large"] .role-icon { width: 22px; height: 22px; font-size: 10px; }
-  :root[data-font-size="xlarge"] .role-icon { width: 24px; height: 24px; font-size: 11px; }
   :root[data-font-size="small"] .msg-role-name { font-size: 11px; }
   :root[data-font-size="large"] .msg-role-name { font-size: 14px; }
   :root[data-font-size="xlarge"] .msg-role-name { font-size: 16px; }
@@ -210,10 +189,7 @@
   :root.dark[data-skin="graphite"] .composer-box{box-shadow:0 1px 2px rgba(0,0,0,0.28);}
   :root[data-skin="graphite"] .composer-box:focus-within{border-color:var(--accent)!important;box-shadow:0 0 0 2px var(--focus-ring)!important;}
   :root[data-skin="graphite"] textarea#msg{font-family:var(--font-ui)!important;font-size:14px;font-weight:430;letter-spacing:0;line-height:1.45;}
-  :root[data-skin="graphite"] .msg-body{font-family:var(--font-conversation);font-size:13px;font-weight:430;letter-spacing:0;line-height:1.6;}
-  :root[data-skin="graphite"][data-font-size="small"] .msg-body{font-size:11.5px;line-height:1.6;}
-  :root[data-skin="graphite"][data-font-size="large"] .msg-body{font-size:15px;line-height:1.62;}
-  :root[data-skin="graphite"][data-font-size="xlarge"] .msg-body{font-size:17px;line-height:1.62;}
+  :root[data-skin="graphite"] .msg-body{font-family:var(--font-conversation);font-weight:430;letter-spacing:0;}
   :root[data-skin="graphite"] .msg-body code{font-size:.92em;}
   :root[data-skin="graphite"] .msg-body code,
   :root[data-skin="graphite"] .msg-body pre,
@@ -336,10 +312,7 @@
   :root.dark[data-skin="codex"] .composer-box{box-shadow:0 1px 2px rgba(0,0,0,0.28);}
   :root[data-skin="codex"] .composer-box:focus-within{border-color:var(--accent)!important;box-shadow:0 0 0 2px var(--focus-ring)!important;}
   :root[data-skin="codex"] textarea#msg{font-family:var(--font-ui)!important;font-size:14px;font-weight:430;letter-spacing:0;line-height:1.45;}
-  :root[data-skin="codex"] .msg-body{font-family:var(--font-conversation);font-size:13px;font-weight:430;letter-spacing:0;line-height:1.6;}
-  :root[data-skin="codex"][data-font-size="small"] .msg-body{font-size:11.5px;line-height:1.6;}
-  :root[data-skin="codex"][data-font-size="large"] .msg-body{font-size:15px;line-height:1.62;}
-  :root[data-skin="codex"][data-font-size="xlarge"] .msg-body{font-size:17px;line-height:1.62;}
+  :root[data-skin="codex"] .msg-body{font-family:var(--font-conversation);font-weight:430;letter-spacing:0;}
   :root[data-skin="codex"] .msg-body code{font-size:.92em;}
   :root[data-skin="codex"] .msg-body code,
   :root[data-skin="codex"] .msg-body pre,
@@ -462,10 +435,7 @@
   :root.dark[data-skin="terracotta"] .composer-box{box-shadow:0 1px 2px rgba(0,0,0,0.28);}
   :root[data-skin="terracotta"] .composer-box:focus-within{border-color:var(--accent)!important;box-shadow:0 0 0 2px var(--focus-ring)!important;}
   :root[data-skin="terracotta"] textarea#msg{font-family:var(--font-ui)!important;font-size:14px;font-weight:430;letter-spacing:0;line-height:1.45;}
-  :root[data-skin="terracotta"] .msg-body{font-family:var(--font-conversation);font-size:13px;font-weight:430;letter-spacing:0;line-height:1.6;}
-  :root[data-skin="terracotta"][data-font-size="small"] .msg-body{font-size:11.5px;line-height:1.6;}
-  :root[data-skin="terracotta"][data-font-size="large"] .msg-body{font-size:15px;line-height:1.62;}
-  :root[data-skin="terracotta"][data-font-size="xlarge"] .msg-body{font-size:17px;line-height:1.62;}
+  :root[data-skin="terracotta"] .msg-body{font-family:var(--font-conversation);font-weight:430;letter-spacing:0;}
   :root[data-skin="terracotta"] .msg-body code{font-size:.92em;}
   :root[data-skin="terracotta"] .msg-body code,
   :root[data-skin="terracotta"] .msg-body pre,
@@ -588,10 +558,7 @@
   :root.dark[data-skin="github"] .composer-box{box-shadow:0 1px 2px rgba(0,0,0,0.28);}
   :root[data-skin="github"] .composer-box:focus-within{border-color:var(--accent)!important;box-shadow:0 0 0 2px var(--focus-ring)!important;}
   :root[data-skin="github"] textarea#msg{font-family:var(--font-ui)!important;font-size:14px;font-weight:430;letter-spacing:0;line-height:1.45;}
-  :root[data-skin="github"] .msg-body{font-family:var(--font-conversation);font-size:13px;font-weight:430;letter-spacing:0;line-height:1.6;}
-  :root[data-skin="github"][data-font-size="small"] .msg-body{font-size:11.5px;line-height:1.6;}
-  :root[data-skin="github"][data-font-size="large"] .msg-body{font-size:15px;line-height:1.62;}
-  :root[data-skin="github"][data-font-size="xlarge"] .msg-body{font-size:17px;line-height:1.62;}
+  :root[data-skin="github"] .msg-body{font-family:var(--font-conversation);font-weight:430;letter-spacing:0;}
   :root[data-skin="github"] .msg-body code{font-size:.92em;}
   :root[data-skin="github"] .msg-body code,
   :root[data-skin="github"] .msg-body pre,
@@ -956,8 +923,7 @@
   :root[data-skin="geist-contrast"] .chip:hover,
   :root[data-skin="geist-contrast"] .profile-opt:hover,
   :root[data-skin="geist-contrast"] .ws-opt:hover,
-  :root[data-skin="geist-contrast"] .file-item:hover,
-  :root[data-skin="geist-contrast"] .suggestion:hover{background:var(--hover-bg)!important;}
+  :root[data-skin="geist-contrast"] .file-item:hover{background:var(--hover-bg)!important;}
   :root[data-skin="geist-contrast"] .session-item.active,
   :root[data-skin="geist-contrast"] .nav-tab.active,
   :root[data-skin="geist-contrast"] .rail-btn.active,
@@ -1030,8 +996,6 @@
   :root[data-skin="geist-contrast"] .logo,
   :root[data-skin="geist-contrast"] .sidebar-header .logo{background:var(--surface-subtle)!important;color:var(--accent-text)!important;border:1px solid var(--border2)!important;border-radius:8px!important;box-shadow:none!important;font-weight:650!important;}
   :root[data-skin="geist-contrast"] .msg-row[data-role="user"] .msg-body{background:var(--surface-subtle)!important;border:1px solid var(--border)!important;border-radius:10px!important;}
-  :root[data-skin="geist-contrast"] .suggestion{background:var(--surface)!important;border-color:var(--border)!important;color:var(--muted)!important;transition:background .15s ease,border-color .15s ease,color .15s ease!important;}
-  :root[data-skin="geist-contrast"] .suggestion:hover{border-color:var(--border2)!important;color:var(--text)!important;}
   :root[data-skin="geist-contrast"] .msg-body a,
   :root[data-skin="geist-contrast"] .preview-md a,
   :root[data-skin="geist-contrast"] .empty-state a,
@@ -1376,8 +1340,6 @@
   :root:not(.dark) .session-action-opt.is-active{background:var(--accent-bg);}
   :root:not(.dark) .msg-role.user{color:var(--accent-text);}
   :root:not(.dark) .msg-role.assistant{color:var(--muted);}
-  :root:not(.dark) .role-icon.user{background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent-bg-strong);}
-  :root:not(.dark) .role-icon.assistant{background:var(--surface);color:var(--muted);border-color:var(--border);}
   :root:not(.dark) .project-chip{border-color:rgba(0,0,0,.12);background:rgba(0,0,0,.04);}
   :root:not(.dark) .project-chip:hover{background:var(--hover-bg);color:var(--text);}
   :root:not(.dark) .project-chip.active{background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent-bg-strong);}
@@ -1414,15 +1376,13 @@
   :root:not(.dark) .composer-wrap::before{background:linear-gradient(to bottom,transparent,var(--sidebar));}
   :root:not(.dark) .composer-box{background:var(--bg);border-color:rgba(0,0,0,.12);}
   :root:not(.dark) .composer-box:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg);}
-  :root:not(.dark) .suggestion{border-color:rgba(0,0,0,.08);}
-  :root:not(.dark) .suggestion:hover{background:var(--accent-bg);border-color:var(--accent-bg-strong);}
   :root:not(.dark) .tool-card{border-color:rgba(0,0,0,.08);}
   :root:not(.dark) .tool-card:hover{border-color:rgba(0,0,0,.15);}
   :root:not(.dark) .icon-btn:hover{background:rgba(0,0,0,.06);}
   :root:not(.dark) .panel-icon-btn:hover{background:rgba(0,0,0,.06);}
   :root:not(.dark) .file-item:hover{background:rgba(0,0,0,.04);}
   :root:not(.dark) .preview-md th{background:rgba(0,0,0,.04);}
-  :root:not(.dark) .msg-body th{background:rgba(0,0,0,.04);}
+  :root:not(.dark) .msg-body th{border-bottom-color:rgba(0,0,0,.16);}
   :root:not(.dark) .preview-md td{border-color:rgba(0,0,0,.08);}
   :root:not(.dark) .msg-body td{border-color:rgba(0,0,0,.08);}
   :root:not(.dark) .preview-badge.code{background:rgba(0,0,0,.05);}
@@ -2312,27 +2272,39 @@
   .msg-role{font-size:12px;font-weight:500;letter-spacing:.01em;margin-bottom:8px;display:flex;align-items:center;gap:8px;}
   .msg-role.user{color:var(--accent);}
   .msg-role.assistant{color:var(--accent-text);opacity:.6;}
-  .role-icon{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;flex-shrink:0;}
-  .role-icon.user{background:var(--accent-bg);color:var(--accent-text);border:1px solid var(--accent-bg-strong);}
-  .role-icon.assistant{background:var(--accent-bg-strong);color:var(--accent-text);border:1px solid var(--accent-bg-strong);}
   .msg-body{font-family:var(--font-conversation);font-size:var(--message-body-font-size);line-height:var(--message-body-line-height);color:var(--text);padding-left:30px;max-width:var(--msg-max);overflow-wrap:anywhere;}
-  .msg-body p{margin-bottom:10px;}.msg-body p:last-child{margin-bottom:0;}
+  /* Conversation block rhythm: one shared gap for every prose block, so a chat
+     answer reads as speech rather than as a standalone document. The gap is
+     computed from --message-body-font-size rather than written as `em`: on a
+     heading, `em` would resolve against the heading's own larger size and
+     collapse to a bigger gap, so the rhythm would vary by heading level.
+     Adjacent margins collapse to one gap. */
+  .msg-body p,.msg-body ul,.msg-body ol,.msg-body blockquote,
+  .msg-body h1,.msg-body h2,.msg-body h3,.msg-body h4,.msg-body h5,.msg-body h6{margin-block:calc(var(--message-body-font-size) * .65);}
+  /* No outer margin: a message must not carry empty space above or below it.
+     `.msg-clip` (the long-user-message collapse wrapper) sits between .msg-body
+     and the prose, so the boundary reset has to reach through it — otherwise
+     the clipped box carries the gap inside its own fixed max-height. */
+  .msg-body > :first-child,.msg-body > .msg-clip > :first-child{margin-top:0;}
+  .msg-body > :last-child,.msg-body > .msg-clip > :last-child,
+  .msg-body li > :last-child{margin-bottom:0;}
   .msg-body td p,.msg-body th p{margin:0;}
-  .msg-body ul,.msg-body ol{margin:6px 0 10px 20px;}.msg-body li{margin-bottom:3px;}
+  .msg-body ul,.msg-body ol{margin-left:20px;}.msg-body li{margin-bottom:.15em;}
+  .msg-body li > ul,.msg-body li > ol{margin-block:0;}
   .msg-body h1,.msg-body h2,.msg-body h3,.msg-body h4,.msg-body h5,.msg-body h6{font-weight:700;color:var(--strong,var(--text));line-height:1.3;}
-  .msg-body h1{font-size:24px;margin:24px 0 12px;border-bottom:1px solid var(--border);padding-bottom:6px;}
-  .msg-body h2{font-size:20px;margin:22px 0 10px;border-bottom:1px solid var(--border);padding-bottom:4px;}
-  .msg-body h3{font-size:17px;margin:20px 0 8px;}
-  .msg-body h4{font-size:15px;margin:18px 0 8px;}
-  .msg-body h5{font-size:14px;margin:16px 0 6px;text-transform:uppercase;letter-spacing:0.04em;}
-  .msg-body h6{font-size:13px;margin:14px 0 6px;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em;}
-  /* First-heading-of-message: collapse the top margin so it doesn't push the
-     entire message down (the row already has spacing). */
-  .msg-body > h1:first-child,.msg-body > h2:first-child,.msg-body > h3:first-child,
-  .msg-body > h4:first-child,.msg-body > h5:first-child,.msg-body > h6:first-child{margin-top:0;}
+  /* Restrained chat scale, relative to the body size token (no borders, no
+     uppercase label styling — those read as documentation chrome). */
+  .msg-body h1{font-size:1.35em;}
+  .msg-body h2{font-size:1.22em;}
+  .msg-body h3{font-size:1.12em;}
+  .msg-body h4{font-size:1.05em;}
+  .msg-body h5{font-size:1em;}
+  .msg-body h6{font-size:.95em;color:var(--muted);}
   .msg-body strong{color:var(--strong);font-weight:600;}.msg-body em{color:var(--em);font-style:italic;}
   .msg-body code{font-family:var(--font-mono);font-size:var(--message-code-font-size);background:var(--code-inline-bg);padding:1px 5px;border-radius:4px;color:var(--code-text);}
-  .msg-body pre{background:var(--code-bg);border:1px solid var(--border);border-radius:10px;padding:14px 16px;overflow-x:auto;contain:content;margin:10px 0;}
+  /* HWEB-6: a code block is a quote inside prose, not a card. Tight padding and
+     an 8px radius; the size stays on --message-pre-code-font-size. */
+  .msg-body pre{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px;overflow-x:auto;contain:content;margin:10px 0;}
   .msg-body pre code{background:none;padding:0;border-radius:0;color:var(--pre-text);font-size:var(--message-pre-code-font-size);line-height:1.6;}
   .msg-body pre.md-source-block,.preview-md pre.md-source-block{white-space:pre-wrap;overflow-x:hidden;overflow-wrap:anywhere;}
   .msg-body pre.md-source-block code,.preview-md pre.md-source-block code{display:block;white-space:inherit;overflow-wrap:anywhere;word-break:break-word;}
@@ -2385,12 +2357,16 @@
     .msg-body pre code .token,.preview-md pre code .token{white-space:inherit !important;overflow-wrap:anywhere !important;word-break:inherit !important;}
     .diff-block .diff-line{white-space:pre-wrap !important;overflow-wrap:anywhere !important;word-break:break-word !important;}
   }
-  .pre-header{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:8px 16px 8px;background:var(--input-bg);border-radius:10px 10px 0 0;border:1px solid var(--border);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px;}
+  .pre-header{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:6px 12px;background:var(--input-bg);border-radius:8px 8px 0 0;border:1px solid var(--border);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px;}
   .pre-header::before{content:'';width:8px;height:8px;border-radius:50%;background:var(--muted);opacity:.4;}
-  .msg-body .pre-header+pre{border-radius:0 0 10px 10px;border-top:none;margin-top:0;}
+  .msg-body .pre-header+pre{border-radius:0 0 8px 8px;border-top:none;margin-top:0;}
   /* Diff/patch viewer */
   .diff-block{margin:0;counter-reset:diff-line;}
-  .diff-block .diff-line{display:block;padding:0 16px;min-height:1.4em;white-space:pre;}
+  /* The +/- tint is per line, so the block itself carries no side padding — each
+     line's own 12px inset matches the surrounding code-block padding. Needs the
+     .msg-body/.preview-md prefix to outrank `.msg-body pre`/`.preview-md pre`. */
+  .msg-body pre.diff-block,.preview-md pre.diff-block{padding-left:0;padding-right:0;}
+  .diff-block .diff-line{display:block;padding:0 12px;min-height:1.4em;white-space:pre;}
   .diff-block .diff-plus{background:rgba(34,197,94,.1);color:#22c55e;}
   .diff-block .diff-minus{background:rgba(239,68,68,.1);color:#ef4444;}
   .diff-block .diff-hunk{color:var(--muted);font-style:italic;background:rgba(99,102,241,.06);}
@@ -2418,17 +2394,26 @@
   .tree-null{color:var(--muted);font-style:italic;}
   .tree-comma{color:var(--muted);}
   .tree-item{line-height:1.6;}
-  .msg-body blockquote{border-left:3px solid var(--blue);padding-left:14px;color:var(--muted);font-style:italic;margin:10px 0;}
+  .msg-body blockquote{border-left:3px solid var(--blue);padding-left:14px;color:var(--muted);font-style:italic;}
   .msg-body blockquote p{margin:0;}
   .msg-body a{color:var(--blue);text-decoration:underline;}
   .msg-body hr{border:none;border-top:1px solid var(--border);margin:14px 0;}
   /* HWEB-2: a wide markdown table must scroll inside the reading column, not
      escape it — .messages clips horizontally, so an escaped table loses its
-     right-hand columns entirely. Same containment .csv-table-wrap gives CSV. */
-  .msg-body table{border-collapse:collapse;display:block;width:100%;max-width:100%;overflow-x:auto;margin:8px 0;font-size:12px;}
-  .msg-body th{background:rgba(255,255,255,.07);padding:6px 10px;text-align:left;font-weight:600;border:1px solid var(--border2);}
-  .msg-body td{padding:5px 10px;border:1px solid rgba(255,255,255,.06);}
-  .msg-body tr:nth-child(even){background:rgba(255,255,255,.03);}
+     right-hand columns entirely. Same containment .csv-table-wrap gives CSV.
+     HWEB-6: an ordinary markdown table is a reading table — row separators, no
+     cell grid, no header fill, no zebra. `width:max-content` lets columns take
+     their natural width and the block scroll when the content is wider than the
+     reading column, instead of squeezing every column to fit. */
+  .msg-body table{border-collapse:collapse;display:block;width:max-content;max-width:100%;overflow-x:auto;margin:8px 0;font-size:12px;}
+  .msg-body th{padding:6px 10px;text-align:left;font-weight:600;color:var(--muted);border:0;border-bottom:1px solid var(--border2);}
+  .msg-body td{padding:5px 10px;border:0;border-bottom:1px solid var(--border);}
+  .msg-body tbody tr:last-child td{border-bottom:0;}
+  /* A table column narrower than ~10 characters (box-sizing:border-box, so the
+     20px of cell padding is inside that) is unreadable, so a many-column table
+     scrolls — the block above already clips and scrolls — instead of being
+     squeezed into the reading column a letter wide. */
+  .msg-body th,.msg-body td{min-width:10ch;}
   .markdown-table-filter{display:block;width:min(260px,100%);margin:8px 0 4px;padding:5px 8px;border:1px solid var(--border2);border-radius:6px;background:var(--input-bg);color:var(--text);font:inherit;font-family:var(--font-ui);font-size:12px;}
   .markdown-table-filter:focus{outline:1px solid var(--accent);outline-offset:1px;}
   .markdown-table-sort{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;min-height:20px;padding:0;border:0;background:transparent;color:inherit;font:inherit;font-weight:inherit;text-align:left;cursor:pointer;}
@@ -2556,34 +2541,15 @@
   .dot{width:6px;height:6px;border-radius:50%;background:var(--blue);opacity:.3;animation:pulse 1.4s ease-in-out infinite;}
   .dot:nth-child(2){animation-delay:.22s;}.dot:nth-child(3){animation-delay:.44s;}
   @keyframes pulse{0%,80%,100%{opacity:.2;transform:scale(.8)}40%{opacity:.8;transform:scale(1)}}
-  .empty-state{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:40px;color:var(--muted);}
+  /* HWEB-1: an empty new conversation is a headline sitting directly on top of
+     the one real composer, both floated toward the middle of the chat column by
+     the #mainChat.composer-hero spacer below. */
+  .empty-state{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;padding:24px 20px 4px;color:var(--muted);}
   html[data-session-boot="1"] .empty-state{display:none}
-  .empty-state.no-suggestions .suggestion-grid{display:none}
-  .empty-state.no-welcome{display:none}
-  /* Empty-state brand mark: a free-breathing winged caduceus with a soft
-     "spirit" bloom behind it — no app-icon tile. Glow + mark gradient are
-     tuned separately for dark vs light themes (see --logo-glow / .hm-g* below). */
-  .empty-logo{position:relative;display:flex;align-items:center;justify-content:center;margin-bottom:10px;background:none;border:none;border-radius:0;box-shadow:none;}
-  .empty-logo::before{content:"";position:absolute;left:50%;top:50%;width:190px;height:190px;transform:translate(-50%,-50%);border-radius:50%;background:var(--logo-glow);z-index:0;pointer-events:none;}
-  .empty-logo svg{position:relative;z-index:1;width:88px;height:88px;display:block;}
-  /* Light themes (default :root): deeper, richer gradient holds contrast on
-     a pale background; cooler, restrained bloom. */
-  :root .empty-logo .hm-g0{stop-color:#0AA6CC;}
-  :root .empty-logo .hm-g1{stop-color:#1E63D6;}
-  :root{--logo-glow:radial-gradient(circle,rgba(30,99,214,0.15) 0%,rgba(10,166,204,0.07) 45%,transparent 70%);}
-  /* Dark themes: bright cyan→blue mark with a luminous bloom. */
-  :root.dark .empty-logo .hm-g0{stop-color:#08EBF1;}
-  :root.dark .empty-logo .hm-g1{stop-color:#3889FD;}
-  :root.dark{--logo-glow:radial-gradient(circle,rgba(8,235,241,0.20) 0%,rgba(56,137,253,0.15) 38%,transparent 72%);}
-  @media (prefers-reduced-motion: no-preference){
-    html:not([data-session-boot="1"]) .empty-logo svg{animation:emptyLogoRise .5s ease-out both;}
-    @keyframes emptyLogoRise{from{opacity:0;transform:translateY(6px) scale(.96);}to{opacity:1;transform:none;}}
-  }
-  .empty-state h2{font-size:20px;color:var(--text);font-weight:700;letter-spacing:-.02em;}
-  .empty-state p{font-size:14px;text-align:center;max-width:320px;}
-  .suggestion-grid{display:flex;flex-direction:column;gap:8px;margin-top:12px;width:100%;max-width:380px;}
-  .suggestion{padding:12px 14px;background:var(--input-bg);border:1px solid var(--border);border-radius:10px;font-size:13px;color:var(--muted);cursor:pointer;transition:all .15s;text-align:left;}
-  .suggestion:hover{background:var(--accent-bg);color:var(--text);border-color:var(--accent-bg);transform:translateX(2px);}
+  /* The workspace name is only known once boot settles, so the headline fades in
+     rather than painting a generic line and then rewriting it. */
+  .empty-hero-title{font-size:26px;line-height:1.25;color:var(--text);font-weight:600;letter-spacing:-.02em;text-align:center;max-width:var(--msg-max);opacity:0;transition:opacity .2s ease;}
+  .empty-hero-title.ready{opacity:1;}
   /* ── Composer ── */
   .composer-wrap{padding:12px 20px 16px;background:var(--bg);flex-shrink:0;}
   .composer-box{max-width:var(--msg-max);margin:0 auto;background:linear-gradient(var(--input-bg),var(--input-bg)),var(--bg);border:1px solid var(--border2);border-radius:16px;display:flex;flex-direction:column;transition:border-color .2s,box-shadow .2s;position:relative;z-index:2;}
@@ -2691,23 +2657,47 @@
   .provider-quota-chip:hover{background:rgba(34,197,94,.16);border-color:rgba(34,197,94,.35);}
   .provider-quota-chip-dot{width:6px;height:6px;border-radius:999px;background:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.12);flex:0 0 auto;}
   .provider-quota-chip-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-  /* Increased specificity (.icon-btn.composer-mobile-config-btn) to win the cascade
-     against the later-in-source `.icon-btn { display:flex }` rule that this element
-     also matches. Without this, the button shows at desktop width — see #1381 review. */
-  .icon-btn.composer-mobile-config-btn{display:none;}
+  /* HWEB-7: the config panel is the composer's single overflow surface at every
+     width, so its button is always present. Increased specificity
+     (.icon-btn.composer-mobile-config-btn) keeps it ahead of the later-in-source
+     `.icon-btn { display:flex }` rule this element also matches. */
+  .icon-btn.composer-mobile-config-btn{position:relative;display:inline-flex;flex-shrink:0;}
+  /* The ring doubles as the context readout only where the standalone
+     #ctxIndicatorWrap is hidden (cf-burger / phone). Everywhere else the button
+     wears a plain overflow glyph so it does not compete with that indicator. */
+  #composerMobileCtxRing{display:none;}
+  .composer-config-glyph{display:block;}
   .composer-mobile-config-btn.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--text);opacity:1;}
-  .composer-mobile-config-panel{display:none;position:absolute;left:8px;right:8px;bottom:calc(100% + 6px);z-index:180;padding:8px;gap:8px;align-items:stretch;justify-content:flex-start;flex-wrap:wrap;background:var(--surface);border:1px solid var(--border2);border-radius:12px;box-shadow:0 -6px 28px rgba(0,0,0,.35);overflow:visible;}
+  /* HWEB-7: profile, workspace, toolsets and quota are configuration, not
+     per-message controls — they live in the overflow panel at every width so the
+     footer keeps only attach, dictation, model, reasoning, context and send. */
+  .composer-left > #profileChipWrap,
+  .composer-left > .composer-ws-wrap,
+  .composer-left > .composer-toolsets-wrap,
+  .composer-left > #providerQuotaChip{display:none!important;}
+  .composer-mobile-config-panel{display:none;position:absolute;left:8px;right:auto;width:min(360px,calc(100% - 16px));bottom:calc(100% + 6px);z-index:180;padding:8px;gap:8px;align-items:stretch;justify-content:flex-start;flex-wrap:wrap;background:var(--surface);border:1px solid var(--border2);border-radius:12px;box-shadow:0 -6px 28px rgba(0,0,0,.35);overflow:visible;}
   .composer-mobile-config-panel.open{display:flex;}
-  .composer-mobile-config-action{box-sizing:border-box;display:inline-flex;align-items:center;gap:10px;min-width:0;min-height:44px;padding:8px 10px;border-radius:10px;border:1px solid transparent;background:transparent;color:var(--muted);font:inherit;text-align:left;cursor:pointer;overflow:hidden;}
+  .composer-mobile-config-action{box-sizing:border-box;display:inline-flex;align-items:center;gap:10px;flex:1 1 100%;min-width:0;min-height:44px;padding:8px 10px;border-radius:10px;border:1px solid var(--border);background:var(--input-bg);color:var(--muted);font:inherit;text-align:left;cursor:pointer;overflow:hidden;}
+  /* Saved prompts and voice mode moved into the panel as plain icon buttons.
+     In the full-width menu they read as labelled rows; the narrow pill layout
+     below drops them back to a 44px icon square. */
+  .composer-mobile-config-panel .icon-btn{box-sizing:border-box;flex:1 1 100%;justify-content:flex-start;text-align:left;gap:10px;width:auto;height:auto;min-width:0;min-height:44px;padding:8px 10px;background:var(--input-bg);border:1px solid var(--border);border-radius:10px;opacity:1;}
+  .composer-mobile-config-panel .icon-btn .composer-mobile-config-value{flex:1 1 auto;}
+  /* Model, reasoning and context stay on the footer itself; their panel rows
+     are the fallback for the widths where the footer hides them. */
+  #composerMobileModelAction,
+  #composerMobileReasoningAction,
+  #composerMobileContextAction{display:none;}
   .composer-mobile-config-action.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--text);}
   .composer-mobile-config-copy{display:flex;flex-direction:column;gap:1px;min-width:0;line-height:1.2;}
-  /* The kicker labels (WORKSPACE / MODEL / REASONING / CONTEXT) duplicate the
-     meaning the row icon already conveys, and at iPhone 14 width (390px) the
-     ~60px copy column truncates them. Hide them inside the open panel — the
-     icon + value gives a cleaner two-row layout per pill. The .context row
-     keeps its kicker because it stretches to 100% width and has more value
-     content (usage / tokens / threshold). See #1381 review feedback. */
-  .composer-mobile-config-action:not(.composer-mobile-context-action) .composer-mobile-config-kicker{display:none;}
+  /* The kicker labels (PROFILE / WORKSPACE / MODEL / …) are what make an
+     overflow row self-describing, so the full-width menu shows them. In the
+     wrapped two-up pill layout (cf-burger / phone) the ~60px copy column
+     truncates them at iPhone 14 width, so there they stay hidden and the icon
+     carries the meaning — the .context row keeps its kicker in both layouts
+     because it always stretches to 100% and has more value content. (#1381)
+     HWEB-7 promoted the panel to every width; the hide rules moved to the
+     narrow stages below. */
   .composer-mobile-config-kicker{font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);}
   .composer-mobile-config-value{font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .composer-mobile-context-action{flex:1 0 100%;align-items:flex-start;cursor:default;overflow:visible;}
@@ -3034,8 +3024,6 @@
   .composer-footer.cf-icons .composer-model-label,
   .composer-footer.cf-icons #composerModelLabel{display:none;}
   .composer-footer.cf-icons .composer-model-chip{max-width:none;padding-left:10px;padding-right:8px;gap:4px;}
-  .composer-footer.cf-icons #btnSavedPrompts,
-  .composer-footer.cf-icons .saved-prompts-popup{display:none!important;}
   .composer-footer.cf-icons .composer-divider{display:none;}
 
   .composer-footer.cf-burger .composer-left{gap:8px;}
@@ -3048,9 +3036,19 @@
   .composer-footer.cf-burger .composer-left > .composer-toolsets-wrap{display:none!important;}
   .composer-footer.cf-burger .composer-mobile-config-btn{box-sizing:border-box;position:relative;display:inline-flex!important;width:44px;height:44px;min-width:44px;min-height:44px;flex-shrink:0;}
   .composer-footer.cf-burger .composer-mobile-config-panel.open{display:flex;}
-  .composer-footer.cf-burger .composer-mobile-config-action{flex:1 1 0;min-height:44px;min-width:0;background:var(--input-bg);border-color:var(--border);}
+  .composer-footer.cf-burger .composer-mobile-config-action{flex:1 1 calc(50% - 4px);min-height:44px;min-width:0;background:var(--input-bg);border-color:var(--border);}
+  .composer-footer.cf-burger .composer-mobile-config-panel .icon-btn{flex:0 0 44px;width:44px;justify-content:center;padding:0;}
+  .composer-footer.cf-burger .composer-mobile-config-panel .icon-btn .composer-mobile-config-value{display:none;}
+  .composer-footer.cf-burger .composer-mobile-config-action:not(.composer-mobile-context-action) .composer-mobile-config-kicker{display:none;}
   .composer-footer.cf-burger .composer-mobile-context-action{flex:1 0 100%;}
   .composer-footer.cf-burger .ctx-indicator-wrap{display:none!important;}
+  /* The footer chips are gone at this stage, so the panel rows take over — and
+     the button's ring becomes the only context readout. */
+  .composer-footer.cf-burger #composerMobileModelAction,
+  .composer-footer.cf-burger #composerMobileReasoningAction{display:inline-flex;}
+  .composer-footer.cf-burger #composerMobileContextAction{display:flex;}
+  .composer-footer.cf-burger #composerMobileCtxRing{display:block;}
+  .composer-footer.cf-burger .composer-config-glyph{display:none;}
 
   /* Show session-toolsets chip ONLY when the composer-footer container is wide
      enough to comfortably accommodate it (workspace+model+reasoning+profile+
@@ -3171,9 +3169,19 @@
        narrow mobile composer (Nathan 2026-06-09). Hide the button + popup. */
     #btnSavedPrompts,.saved-prompts-popup{display:none!important;}
     .composer-mobile-config-btn{box-sizing:border-box;position:relative;display:inline-flex!important;width:44px;height:44px;min-width:44px;min-height:44px;flex-shrink:0;}
+    #composerMobileCtxRing{display:block;}
+    .composer-mobile-config-btn .composer-config-glyph{display:none;}
+    .composer-mobile-config-panel{right:8px;width:auto;}
     .composer-mobile-config-panel.open{display:flex;}
-    .composer-mobile-config-action{box-sizing:border-box;flex:1 1 0;min-height:44px;min-width:0;background:var(--input-bg);border-color:var(--border);}
+    .composer-mobile-config-action{box-sizing:border-box;flex:1 1 calc(50% - 4px);min-height:44px;min-width:0;background:var(--input-bg);border-color:var(--border);}
+    .composer-mobile-config-panel .icon-btn{flex:0 0 44px;width:44px;justify-content:center;padding:0;}
+    .composer-mobile-config-panel .icon-btn .composer-mobile-config-value{display:none;}
+    .composer-mobile-config-action:not(.composer-mobile-context-action) .composer-mobile-config-kicker{display:none;}
     .composer-mobile-context-action{flex:1 0 100%;}
+    /* The footer chips are hidden here, so the panel rows are the only surface. */
+    #composerMobileModelAction,
+    #composerMobileReasoningAction{display:inline-flex;}
+    #composerMobileContextAction{display:flex;}
     /* icon-only composer chips continue below mobile widths */
     .composer-divider{display:none;}
     .composer-status{flex:0 1 auto;min-width:0;max-width:96px;font-size:10px;text-align:right;}
@@ -3251,10 +3259,7 @@
     .session-item.streaming,.session-item.unread{padding-right:40px;}
     .session-actions{opacity:1;pointer-events:auto;}
     /* Empty state */
-    .empty-state h2{font-size:18px;}
-    .empty-state p{font-size:13px;}
-    .suggestion-grid{max-width:100%!important;}
-    .suggestion{font-size:12px;padding:10px 12px;}
+    .empty-hero-title{font-size:21px;}
   }
 
   @media (hover:none) and (pointer:coarse){
@@ -3493,6 +3498,41 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
 .msg-tts-btn[data-speaking="1"]{color:var(--accent);animation:tts-pulse 1s ease-in-out infinite;}
 @keyframes tts-pulse{0%,100%{opacity:1}50%{opacity:.5}}
 
+/* ── HWEB-4: message-action overflow ──────────────────────────────────────
+   Copy stays inline on the response; listen / fork / retry / undo fold into a
+   native <details> so a settled turn shows one quiet control instead of a
+   five-button toolbar. Labels only render inside the menu. */
+.msg-action-label{display:none;}
+.msg-more{position:relative;display:inline-flex;}
+.msg-more > summary{display:inline-flex;align-items:center;list-style:none;cursor:pointer;}
+.msg-more > summary::-webkit-details-marker{display:none;}
+.msg-more > summary::marker{content:'';}
+.msg-more[open] > summary{color:var(--accent-text);background:var(--accent-bg);}
+/* Logical inset, not `left:0`: under .chat-content-rtl the footer's flex-start
+   puts the trigger at the right edge, and a physically-left-anchored menu would
+   grow outward into `.messages{overflow-x:hidden}`. */
+.msg-more-menu{position:absolute;bottom:calc(100% + 6px);inset-inline-start:0;inset-inline-end:auto;z-index:40;display:flex;flex-direction:column;gap:2px;min-width:170px;max-width:min(260px,calc(100vw - 24px));padding:4px;border:1px solid var(--border2);border-radius:10px;background:var(--surface);box-shadow:0 10px 26px rgba(0,0,0,.26);}
+/* The menu opens upward by default, but `.messages` is a scroller and its
+   start-side overflow is unreachable — a menu taller than the space above its
+   trigger would be clipped with no way to scroll to it. _placeMessageActionMenu
+   stamps data-drop="down" in that case; end-side overflow is scrollable. */
+.msg-more[data-drop="down"] .msg-more-menu{bottom:auto;top:calc(100% + 6px);}
+.msg-more-menu .msg-more-item{align-items:center;gap:8px;width:100%;padding:7px 9px;border-radius:7px;font-size:12.5px;text-align:left;white-space:nowrap;}
+.msg-more-menu .msg-action-label{display:inline;}
+/* Listen is still gated on body.tts-enabled, so `display` is set per row rather
+   than on the shared rule — a blanket display:flex here would outrank
+   `.msg-tts-btn{display:none}` and leak the control when TTS is off. The gate
+   is restated at menu scope because the mobile `.msg-action-btn` rule is later
+   in the sheet and equally specific to the bare `.msg-tts-btn` one. */
+.msg-more-menu .msg-more-item:not(.msg-tts-btn){display:flex;}
+.msg-more-menu .msg-tts-btn{display:none;}
+body.tts-enabled .msg-more-menu .msg-tts-btn{display:flex;}
+/* Read-only sessions drop Fork, and a non-terminal turn has no Retry/Undo, so
+   with TTS off the overflow can end up with nothing to show. Hide the trigger
+   rather than open an empty menu. */
+body:not(.tts-enabled) .msg-more:not(:has(.msg-more-item:not(.msg-tts-btn))){display:none;}
+.msg-more-menu .msg-more-item:focus-visible{outline:2px solid var(--blue);outline-offset:-2px;}
+
 /* ── Edit message inline ── */
 .msg-edit-area{width:100%;background:rgba(255,255,255,.05);border:1px solid var(--accent-bg);border-radius:8px;color:var(--text);padding:10px 12px;font-size:14px;font-family:var(--font-conversation);line-height:1.6;resize:none;outline:none;min-height:60px;box-sizing:border-box;box-shadow:0 0 0 3px var(--accent-bg);margin-top:4px;}
 .msg-edit-bar{display:flex;gap:8px;margin-top:8px;margin-bottom:4px;}
@@ -3553,6 +3593,27 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
 .composer-wrap{padding:10px 20px 14px;position:relative;z-index:10;}
 .composer-wrap::before{content:"";position:absolute;left:0;right:0;bottom:100%;height:32px;background:linear-gradient(to bottom,transparent,var(--bg));pointer-events:none;}
 
+/* HWEB-1 new-conversation hero: a trailing flex spacer inside #mainChat lifts
+   the composer off the bottom edge. flex-grow is interpolable, so docking after
+   the first message is a pure CSS transition on a composer that never moves in
+   the DOM (and so never loses its draft, selection or focus).
+   #mainChat ships .composer-hero in the markup so a fresh new chat paints the
+   hero on the first frame; a returning session's data-session-boot flag holds
+   the composer docked until the transcript resolves. */
+#mainChat::after{content:"";flex:0 1 0;transition:flex-grow .34s cubic-bezier(.22,.61,.36,1);}
+#mainChat.composer-hero::after{flex-grow:1;}
+html[data-session-boot="1"] #mainChat.composer-hero::after{flex-grow:0;}
+/* Docked, .composer-wrap is a footer: light mode and six skins paint it
+   var(--sidebar) with a top border, and its ::before fades the transcript into
+   it. Mid-column that footer chrome reads as a band and a rule drawn across the
+   conversation, so hero mode lifts only the .composer-box out of it. */
+html:not([data-session-boot="1"]) #mainChat.composer-hero .composer-wrap{background:transparent!important;border-top-color:transparent!important;box-shadow:none!important;}
+html:not([data-session-boot="1"]) #mainChat.composer-hero .composer-wrap::before{display:none;}
+@media (prefers-reduced-motion:reduce){
+  #mainChat::after{transition:none;}
+  .empty-hero-title{transition:none;}
+}
+
 @media (hover:none) and (pointer:coarse){
   .composer-wrap{padding-bottom:calc(14px + var(--keyboard-bottom-inset, 0px));}
 }
@@ -3567,12 +3628,6 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
 :root.dark .topbar{border-bottom:1px solid rgba(255,255,255,.07);}
 
 
-
-/* Suggestion grid: consistent width */
-.suggestion-grid{width:100%;max-width:400px;}
-
-/* Empty state: add subtle gradient behind logo */
-.empty-state{background:radial-gradient(ellipse at 50% 20%,var(--accent-bg) 0%,transparent 60%);}
 
 /* Remove old status-text from composer (kept for error messages only) */
 .status-text{font-size:11px;color:var(--muted);padding-left:2px;display:none;}
@@ -6131,11 +6186,29 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
 .msg-row[data-editing="1"] .msg-edit-area,
 .msg-row[data-editing="1"] .msg-edit-bar { margin-left: var(--msg-rail); }
 
-/* Quieter, always-visible role header (smaller avatar, always-visible timestamp) */
+/* Quieter, always-visible role header (always-visible timestamp) */
 .msg-role { font-size: 11px; font-weight: 500; margin-bottom: 6px; opacity: .8; letter-spacing: 0; }
 .msg-role:hover { opacity: 1; }
 .msg-role-name { font-size: 12px; }
-.role-icon { width: 20px; height: 20px; font-size: 9px; }
+/* ── HWEB-4: no repeated assistant identity chrome ──────────────────────────
+   Left alignment identifies the speaker and the metadata footer carries the
+   technical detail, so the header renders nothing. The row stays in the DOM
+   as the per-turn assistant-role announcement for assistive tech and as the
+   container for the live TPS chip and the transparent-stream collapse tag. */
+.msg-role.assistant { margin-bottom: 0; }
+.msg-role.assistant:has(.msg-tps-inline) { margin-bottom: 6px; }
+.msg-role.assistant .msg-role-name {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%);
+  white-space: nowrap; border: 0;
+}
+/* Transparent stream keeps the visible name tag: there it is the turn's
+   collapse control (name + chevron), not repeated identity chrome. */
+.assistant-turn[data-transparent-turn-toggle-bound="1"] .msg-role.assistant { margin-bottom: 6px; }
+.assistant-turn[data-transparent-turn-toggle-bound="1"] .msg-role.assistant .msg-role-name {
+  position: static; width: auto; height: auto; padding: 0; margin: 0;
+  overflow: visible; clip: auto; clip-path: none;
+}
 .msg-tps-inline {
   display: inline-flex;
   align-items: center;
@@ -6313,6 +6386,13 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
   justify-content: flex-start;
   gap: 8px;
 }
+.msg-foot .msg-tps-inline {
+  border: 0;
+  padding: 0;
+  margin-left: 0;
+  background: none;
+}
+.msg-foot .msg-tps-inline,
 .msg-usage-inline,
 .msg-duration-inline,
 .msg-gateway-inline,
@@ -6412,6 +6492,13 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
   opacity: 1;
 }
 
+/* HWEB-4: an open overflow menu keeps its footer visible on its own — the
+   pointer has left the row the moment the menu is reached with the keyboard,
+   and on touch there is no hover at all. */
+.msg-foot:has(.msg-more[open]) { opacity: 1; }
+.msg-foot:has(.msg-more[open]) .msg-actions,
+.msg-foot:has(.msg-more[open]) .msg-time { opacity: 1; pointer-events: auto; }
+
 /* Hide footer while editing to keep the edit bar the only footer-level affordance */
 .msg-row[data-editing="1"] .msg-foot { display: none; }
 
@@ -6488,8 +6575,6 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
 .assistant-segment[data-error="1"] .msg-body p em { font-style: normal; color: inherit; }
 .msg-row[data-error="1"] .msg-role,
 .assistant-segment[data-error="1"] .msg-role { color: var(--accent); opacity: 1; }
-.msg-row[data-error="1"] .role-icon,
-.assistant-segment[data-error="1"] .role-icon { background: rgba(239,83,80,.12); color: var(--error); border-color: var(--error); }
 
 /* ── Day-change separator ── */
 .load-older-indicator{cursor:pointer;color:var(--accent-text,var(--blue));font-size:13px;padding:10px 0;text-align:center;user-select:none;}
@@ -6727,7 +6812,12 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
   .assistant-turn .msg-foot{opacity:1;}
   .msg-actions{opacity:1;}
   .msg-actions{gap:4px;}
+  /* HWEB-4: the metadata footer fades its actions until hover, which never
+     arrives on touch — Copy and the overflow have to stay reachable there. */
+  .msg-foot-with-usage .msg-time,
+  .msg-foot-with-usage .msg-actions{opacity:1;pointer-events:auto;}
   .msg-action-btn{min-width:40px;min-height:40px;padding:8px;display:inline-flex;align-items:center;justify-content:center;}
+  .msg-more-menu .msg-more-item{min-height:44px;justify-content:flex-start;padding:8px 10px;}
 }
 
 /* ── /btw ephemeral side-question bubble ── */
@@ -7453,8 +7543,65 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
   100%{background:transparent;}
 }
 .outline-jump-flash{animation:outline-flash 1.2s ease-out forwards;}
+
+/* -- Turn minimap (HWEB-12) ---------------------------------------------- */
+/* A rail of one mark per loaded user turn, parked in the empty gutter to the
+   LEFT of the reading column (the right gutter already carries the Start jump
+   and the outline FAB). Positioned from the same --msg-max the column uses, so
+   full-width chat collapses the offset and outline.js hides the rail. The rail
+   itself is pointer-events:none so it never eats a transcript text selection;
+   only the marks take pointer events, and the preview card stays inert. */
+#outlineMinimap{
+  position:absolute;z-index:11;
+  right:calc(50% + var(--msg-max) / 2 + 20px);
+  top:10%;height:74%;width:20px;
+  display:flex;flex-direction:column;justify-content:center;align-items:flex-end;
+  pointer-events:none;user-select:none;
+}
+#outlineMinimap[hidden]{display:none;}
+/* flex:1 1 0 with no min/max height: the marks always divide the rail evenly,
+   so mark k sits ~k/N of the way down the conversation at any turn count, and a
+   long transcript compresses instead of overflowing. The band is the hit target;
+   the 2px dash inside it is what the reader sees. */
+.outline-mark{
+  pointer-events:auto;
+  flex:1 1 0;min-height:0;width:100%;
+  display:flex;align-items:center;justify-content:flex-end;
+  background:none;border:none;padding:0;margin:0;cursor:pointer;
+  position:relative;
+}
+.outline-mark::before{
+  content:"";display:block;height:2px;width:9px;border-radius:1px;
+  background:var(--border2);
+  transition:width .12s ease,background .12s ease;
+}
+/* The current turn is a static width/colour change, never a running animation. */
+.outline-mark[aria-current="true"]::before{width:16px;background:var(--accent);}
+.outline-mark:hover::before,.outline-mark:focus-visible::before{width:16px;background:var(--text);}
+.outline-mark:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px;border-radius:3px;}
+.outline-mark-preview{
+  position:absolute;left:100%;margin-left:12px;top:0;
+  width:min(300px,26vw);
+  padding:8px 10px;border-radius:8px;
+  background:var(--surface);border:1px solid var(--border2);
+  box-shadow:0 6px 24px rgba(0,0,0,.22);
+  pointer-events:none;
+}
+.outline-mark-preview[hidden]{display:none;}
+.outline-preview-user{
+  font-size:12px;line-height:1.45;color:var(--text);font-weight:600;
+  overflow-wrap:anywhere;
+}
+.outline-preview-reply{
+  margin-top:6px;padding-top:6px;border-top:1px solid var(--border-subtle);
+  font-size:12px;line-height:1.45;color:var(--muted);overflow-wrap:anywhere;
+}
+@media (prefers-reduced-motion:reduce){
+  .outline-mark::before{transition:none;}
+  .outline-jump-flash{animation:none;}
+}
 @media(max-width:900px){
-  #outlineToggleBtn,#outlinePanelWrapper{display:none!important;}
+  #outlineToggleBtn,#outlinePanelWrapper,#outlineMinimap{display:none!important;}
 }
 
 /* Settings search */

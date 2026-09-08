@@ -6036,6 +6036,12 @@ function syncWorkspaceDisplays(){
   // Only show workspace label once boot has finished to prevent
   // flash of "No workspace" before the saved session finishes loading.
   if(composerLabel) composerLabel.textContent=S._bootReady?label:'';
+  // HWEB-1: the new-conversation hero headline names the same resolved workspace.
+  const heroTitle=$('emptyHeroTitle');
+  if(heroTitle){
+    heroTitle.textContent=(S._bootReady&&hasWorkspace)?t('empty_hero_title_workspace',label):t('empty_hero_title');
+    heroTitle.classList.toggle('ready',!!S._bootReady);
+  }
   if(mobileLabel) mobileLabel.textContent=S._bootReady?label:'';
   const composerExpanded=!!(composerDropdown&&composerDropdown.classList.contains('open'));
   if(composerChip){
@@ -6110,11 +6116,12 @@ function _renderWorkspaceAction(label, meta, iconSvg, onClick){
 function _positionComposerWsDropdown(){
   const dd=$('composerWsDropdown');
   const chip=$('composerWorkspaceGroup')||$('composerWorkspaceChip');
-  const mobileAction=$('composerMobileWorkspaceAction');
-  const panel=$('composerMobileConfigPanel');
   const footer=document.querySelector('.composer-footer');
-  // While the mobile config panel is open, anchor to #composerMobileWorkspaceAction instead of only the desktop workspace chip.
-  const anchor=(panel&&panel.classList.contains('open')&&mobileAction)?mobileAction:chip;
+  // The workspace chip left the footer row in HWEB-7, so the open panel's row is
+  // normally the anchor — but only when it is actually laid out.
+  // No fallback to a hidden node: anchoring to a zero rect is what puts the
+  // dropdown at the footer's left edge. Same contract as the toolsets path.
+  const anchor=_composerOverflowAnchor('composerMobileWorkspaceAction',chip);
   if(!dd||!anchor||!footer)return;
   const chipRect=anchor.getBoundingClientRect();
   const footerRect=footer.getBoundingClientRect();
@@ -6271,6 +6278,13 @@ function toggleComposerWsDropdown(){
     if(typeof closeModelDropdown==='function') closeModelDropdown();
     if(typeof closeReasoningDropdown==='function') closeReasoningDropdown();
     loadWorkspaceList().then(data=>{
+      // The panel can close while /api/workspaces is in flight. Re-resolving the
+      // anchor is the cancellation check: with the panel closed and the footer
+      // chip hidden at every width (HWEB-7) nothing is laid out, so opening here
+      // would strand the dropdown at the footer's left edge with no trigger. If
+      // the user reopened the panel meanwhile, an anchor exists and opening is
+      // still the right outcome.
+      if(!_composerOverflowAnchor('composerMobileWorkspaceAction',chip)) return;
       renderWorkspaceDropdownInto(dd, data.workspaces, S.session?.workspace||S._profileDefaultWorkspace||data.last||'');
       _setWorkspaceDropdownOpenState(dd,true);
       _positionComposerWsDropdown();
@@ -7258,8 +7272,13 @@ function toggleProfileDropdown(e) {
   if (dd.classList.contains('open')) { closeProfileDropdown(); return; }
   closeWsDropdown(); // close workspace dropdown if open
   if(typeof closeModelDropdown==='function') closeModelDropdown();
-  // Track which element triggered the dropdown for positioning
-  _profileDropdownTrigger = (e && e.currentTarget) || $('profileChip');
+  // Track which element triggered the dropdown for positioning. The composer
+  // chip lives in the overflow panel now (HWEB-7), so an open panel's row is
+  // the anchor whenever the click did not come from a real element.
+  const _panel = $('composerMobileConfigPanel');
+  const _overflowRow = (_panel && _panel.classList.contains('open')) ? $('composerMobileProfileAction') : null;
+  _profileDropdownTrigger = (e && e.currentTarget) || _overflowRow || $('profileChip');
+  if (_overflowRow) { _overflowRow.classList.add('active'); _overflowRow.setAttribute('aria-expanded', 'true'); }
   const openGen = ++_profileDropdownOpenGeneration;
   const cached = _profileDropdownBestCachedData();
 
@@ -7299,9 +7318,11 @@ function closeProfileDropdown() {
   if(chip) chip.classList.remove('active');
   const tbtn=$('titlebarProfileBtn');
   if(tbtn) tbtn.classList.remove('active');
+  const row=$('composerMobileProfileAction');
+  if(row){ row.classList.remove('active'); row.setAttribute('aria-expanded','false'); }
 }
 document.addEventListener('click', e => {
-  if (!e.target.closest('#profileChipWrap') && !e.target.closest('#titlebarProfileBtn') && !e.target.closest('#profileDropdown')) closeProfileDropdown();
+  if (!e.target.closest('#profileChipWrap') && !e.target.closest('#composerMobileProfileAction') && !e.target.closest('#titlebarProfileBtn') && !e.target.closest('#profileDropdown')) closeProfileDropdown();
 });
 window.addEventListener('resize',()=>{
   const dd=$('profileDropdown');
@@ -7367,6 +7388,10 @@ async function switchToProfile(name) {
   if (_titlebarBtn) { _titlebarBtn.classList.add('switching'); _titlebarBtn.disabled = true; }
   // Optimistic name update — shows the target name right away
   if (_chipLabel) _chipLabel.textContent = name;
+  // The overflow panel stays open across a switch (clicks in #profileDropdown
+  // are exempt from its click-away), so its row has to follow the chip here
+  // rather than waiting for the next open. (HWEB-7)
+  if (typeof _syncComposerOverflowLabels === 'function') _syncComposerOverflowLabels();
   if (_titlebarLabel) _titlebarLabel.textContent = name;
 
   // ── Clear stale content + show loading skeletons immediately (#4662) ───────
@@ -7616,6 +7641,7 @@ async function switchToProfile(name) {
   } catch (e) {
     // Revert the optimistic name update on error
     if (_switchGen === _profileSwitchGeneration && _chipLabel) _chipLabel.textContent = _prevProfileName;
+    if (typeof _syncComposerOverflowLabels === 'function') _syncComposerOverflowLabels();
     if (_switchGen === _profileSwitchGeneration && _titlebarLabel) _titlebarLabel.textContent = _prevProfileName;
     if (_switchGen === _profileSwitchGeneration) showToast(t('switch_failed') + e.message);
     // The switch failed, so we're still on the previous profile and its caches
@@ -9081,10 +9107,6 @@ function _preferencesPayloadFromUi(){
   if(showQuotaChipCb) payload.show_quota_chip=showQuotaChipCb.checked;
   const showConversationOutlineCb=$('settingsShowConversationOutline');
   if(showConversationOutlineCb) payload.show_conversation_outline=showConversationOutlineCb.checked;
-  const hideSuggestionsCb=$('settingsHideSuggestions');
-  if(hideSuggestionsCb) payload.hide_empty_state_suggestions=hideSuggestionsCb.checked;
-  const hideEmptyStatePanelCb=$('settingsHideEmptyStatePanel');
-  if(hideEmptyStatePanelCb) payload.hide_empty_state_panel=hideEmptyStatePanelCb.checked;
   const virtualizeTranscriptCb=$('settingsVirtualizeTranscript');
   if(virtualizeTranscriptCb){
     payload.virtualize_transcript=virtualizeTranscriptCb.checked;
@@ -9269,14 +9291,6 @@ async function _autosavePreferencesSettings(payload){
       window._showTps=!!(saved&&saved.show_tps);
       if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
       if(typeof renderMessages==='function') renderMessages();
-    }
-    if(payload&&payload.hide_empty_state_suggestions!==undefined){
-      window._hideEmptyStateSuggestions=!!(saved&&saved.hide_empty_state_suggestions);
-      if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
-    }
-    if(payload&&payload.hide_empty_state_panel!==undefined){
-      window._hideEmptyStatePanel=!!(saved&&saved.hide_empty_state_panel);
-      if(typeof applyEmptyStatePanelPref==='function') applyEmptyStatePanelPref();
     }
     if(payload&&payload.show_conversation_outline!==undefined){
       window._showConversationOutline=!!(saved&&saved.show_conversation_outline);
@@ -9737,28 +9751,6 @@ async function loadSettingsPanel(){
       showQuotaChipCb.addEventListener('change',()=>{
         window._showQuotaChip=showQuotaChipCb.checked;
         if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
-        _schedulePreferencesAutosave();
-      },{once:false});
-    }
-    const hideSuggestionsCb=$('settingsHideSuggestions');
-    if(hideSuggestionsCb){
-      hideSuggestionsCb.checked=settings.hide_empty_state_suggestions===true;
-      window._hideEmptyStateSuggestions=hideSuggestionsCb.checked;
-      if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
-      hideSuggestionsCb.addEventListener('change',()=>{
-        window._hideEmptyStateSuggestions=hideSuggestionsCb.checked;
-        if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
-        _schedulePreferencesAutosave();
-      },{once:false});
-    }
-    const hideEmptyStatePanelCb=$('settingsHideEmptyStatePanel');
-    if(hideEmptyStatePanelCb){
-      hideEmptyStatePanelCb.checked=settings.hide_empty_state_panel===true;
-      window._hideEmptyStatePanel=hideEmptyStatePanelCb.checked;
-      if(typeof applyEmptyStatePanelPref==='function') applyEmptyStatePanelPref();
-      hideEmptyStatePanelCb.addEventListener('change',()=>{
-        window._hideEmptyStatePanel=hideEmptyStatePanelCb.checked;
-        if(typeof applyEmptyStatePanelPref==='function') applyEmptyStatePanelPref();
         _schedulePreferencesAutosave();
       },{once:false});
     }

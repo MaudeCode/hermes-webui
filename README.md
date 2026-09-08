@@ -6,9 +6,11 @@ Hermes WebUI is a lightweight, dark-themed web app interface in your browser for
 Full parity with the CLI experience - everything you can do from a terminal, you can do from this UI. No build step, no framework, no bundler. Just Python and vanilla JS.
 
 Layout: three-panel. Left sidebar for sessions and navigation, center for chat,
-right for workspace file browsing. Model, profile, and workspace controls live in
-the **composer footer** — always visible while composing. A circular context ring
-shows token usage at a glance. All settings and session tools are in the
+right for workspace file browsing. The **composer footer** keeps the controls the
+current message needs — attach, dictation, model, reasoning mode, context usage
+and Send — and folds profile, workspace, toolsets, saved prompts, voice mode and
+quota into one overflow menu next to them. A circular context ring shows token
+usage at a glance. All settings and session tools are in the
 **Hermes Control Center** (launcher at the sidebar bottom).
 
 Setup Hermes so you can access it natively on every device:
@@ -258,7 +260,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Hidden when browser doesn't support Web Speech API (Chrome, Edge, Safari)
 
 ### Profiles
-- Profile chip in the **composer footer** -- dropdown showing all profiles with gateway status and model info
+- Profile row in the **composer overflow menu** -- dropdown showing all profiles with gateway status and model info
 - Gateway status dots (green = running), model info, skill count per profile
 - Profiles management panel -- create, switch, and delete profiles from the sidebar
 - Clone config from active profile on create
