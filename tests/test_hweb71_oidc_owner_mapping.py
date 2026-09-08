@@ -756,6 +756,63 @@ def test_a_cached_config_snapshot_is_not_trusted_once_unreadable(monkeypatch, tm
         auth.invalidate_session(legacy)
 
 
+def test_a_preserved_mtime_owner_policy_replace_revokes_existing_sessions(monkeypatch, tmp_path):
+    """HWEB-81: editing owner_values to another same-length value while the
+    replace restores mtime kept the previous policy authoritative, so the
+    sessions the operator meant to revoke stayed owners. The parse cache now
+    keys on file identity too, so the next authorization check sees the change.
+    """
+    import api.auth as auth
+    import api.auth_oidc as auth_oidc
+    import api.config as config
+    import api.profiles as profiles
+
+    _configure(monkeypatch, owner_claim=None, owner_values=None)
+    monkeypatch.setattr(auth_oidc, "_load_operator_config", _REAL_LOAD_OPERATOR_CONFIG)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "webui_oidc:\n  owner_claim: groups\n  owner_values: [group-aaa]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_CONFIG_PATH", str(config_path))
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    with config._yaml_file_cache_lock:
+        config._yaml_file_cache.clear()
+
+    cfg = auth_oidc._resolve_oidc_config()
+    assert cfg["owner_values"] == ["group-aaa"]
+    cookie = auth.create_session(
+        auth_type="oidc",
+        username="owner",
+        oidc_binding=auth_oidc._oidc_profile_binding(cfg, None, owner=True),
+    )
+
+    try:
+        assert auth.session_can_manage_server(auth.get_session_info(cookie)) is True
+
+        original = config_path.stat()
+        replacement = tmp_path / "config.yaml.new"
+        replacement.write_text(
+            "webui_oidc:\n  owner_claim: groups\n  owner_values: [group-bbb]\n",
+            encoding="utf-8",
+        )
+        assert replacement.stat().st_size == original.st_size, "test setup: sizes must match"
+        os.replace(replacement, config_path)
+        os.utime(config_path, ns=(original.st_atime_ns, original.st_mtime_ns))
+        assert config_path.stat().st_mtime_ns == original.st_mtime_ns, (
+            "test setup: the replace must be invisible to a (mtime_ns, size) key"
+        )
+
+        assert auth_oidc._resolve_oidc_config()["owner_values"] == ["group-bbb"], (
+            "the replaced owner policy was served from the stale parse cache"
+        )
+        assert auth.session_can_manage_server(auth.get_session_info(cookie)) is False, (
+            "a session minted under the old owner group kept owner authority"
+        )
+    finally:
+        auth.invalidate_session(cookie)
+
+
 def test_profile_dotenv_cannot_supply_an_interpolated_login_allowlist(monkeypatch, tmp_path):
     """The same protection covers the settings that predate the owner policy."""
     import api.auth_oidc as auth_oidc
