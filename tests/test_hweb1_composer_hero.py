@@ -406,8 +406,46 @@ def test_subpath_session_link_never_paints_the_hero_first():
             }""",
             {"yes": routes, "no": not_sessions},
         )
-        assert all(detected["yes"]), list(zip(routes, detected["yes"]))
-        assert not any(detected["no"]), list(zip(not_sessions, detected["no"]))
+        assert all(detected["yes"]), list(zip(routes, detected["yes"], strict=True))
+        assert not any(detected["no"]), list(zip(not_sessions, detected["no"], strict=True))
+
+
+def test_overlapping_rerender_cannot_restore_the_hero_during_a_session_load():
+    """A cross-session load clears S.messages long before it reassigns S.session.
+
+    Through that window ``sid`` is still the departing session while
+    ``_loadingSessionId`` is the destination, so a guard keyed on their equality
+    misses. Any rerender that lands there (a settling Preferences autosave calls
+    ``renderMessages()``) would wipe the loading placeholder and re-enter the
+    hero over the load — and stay there if the fetch then failed.
+    """
+    with _page() as page:
+        page.wait_for_function(
+            "() => typeof S !== 'undefined' && S._bootReady === true", timeout=20000
+        )
+        state = page.evaluate(
+            """() => {
+              window.api = () => new Promise(() => {});  // hang the load
+              // Depart a session that is not the one being loaded: this is what
+              // opens the mismatched-id window.
+              S.session = { session_id: 'hweb1-departing', workspace: '', messages: [] };
+              S.messages = [];
+              loadSession('hweb1-destination');
+              // The overlapping rerender.
+              renderMessages();
+              const chat = document.getElementById('mainChat');
+              const empty = document.getElementById('emptyState');
+              const inner = document.getElementById('msgInner');
+              return {
+                hero: chat.classList.contains('composer-hero'),
+                emptyVisible: empty.getClientRects().length > 0,
+                keptPlaceholder: inner.textContent.includes('Loading conversation'),
+              };
+            }"""
+        )
+        assert not state["hero"], state
+        assert not state["emptyVisible"], state
+        assert state["keptPlaceholder"], state
 
 
 def test_reduced_motion_removes_the_dock_transition():

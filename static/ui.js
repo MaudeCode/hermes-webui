@@ -18041,7 +18041,13 @@ function renderMessages(options){
   // During session switch, S.messages is intentionally cleared while the full
   // message fetch is still in flight. Other async updates can still call
   // renderMessages() in this window. Keep the existing loading placeholder.
-  if(_loadingSessionId===sid&&msgCount===0&&inner) return;
+  // Matching _loadingSessionId against sid is not enough: a cross-session load
+  // clears S.messages before it reassigns S.session, so through that window sid
+  // is still the DEPARTING session while _loadingSessionId is the destination.
+  // An overlapping rerender (a settling Preferences autosave, say) would miss
+  // the guard, wipe the placeholder and re-enter the hero over the load — and
+  // stay there if the fetch then failed. Any load in flight owns the pane.
+  if(_loadingSessionId&&msgCount===0&&inner) return;
   if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
   let cachedRenderSignature=null;
   const hasTransientTranscriptUi=!!(

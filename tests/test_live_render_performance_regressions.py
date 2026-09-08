@@ -460,7 +460,10 @@ def test_returning_session_boot_does_not_animate_transient_empty_state():
     css = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
     ui = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
     assert "document.documentElement.dataset.sessionBoot='1'" in html
-    assert "location.pathname.indexOf('/session/')===0" in html
+    # HWEB-1: the marker is matched anywhere in the path so subpath mounts such
+    # as /hermes/session/<id> set the flag too, not only /session/<id>.
+    boot = next(line for line in html.splitlines() if "dataset.sessionBoot='1'" in line)
+    assert "indexOf('/session/')>=0" in boot, boot
     assert "localStorage.getItem('hermes-webui-session')" in html
     assert 'html[data-session-boot="1"] .empty-state{display:none}' in css
     # HWEB-1 replaced the logo rise with the composer hero. The flag now also has
