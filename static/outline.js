@@ -70,6 +70,10 @@ function _ensureOutlineMessagesLoaded(sid) {
   return _ensureAllMessagesLoaded().then(function() {
     if (!S.session || S.session.session_id !== sid) return false;
     _expandOutlineRenderWindow();
+    // The load did a wholesale replace of S.messages; until the transcript is
+    // rebuilt every row id still encodes the OLD index, so any msg-user-<i>
+    // lookup would resolve to a different message.
+    if (typeof renderMessages === 'function') renderMessages({ preserveScroll: true });
     return true;
   }).catch(function() {
     return false;
@@ -96,6 +100,16 @@ function _excerptText(content, maxLen) {
 function _jumpToMessage(rawIdx) {
   const sid = _currentSid();
   if (!sid) return;
+
+  // For about a second after a session opens, the load-time bottom settle keeps
+  // re-claiming the scroller (ResizeObserver + timers + rAF). Without taking
+  // jump ownership the way ui.js's own question jump does, that settle wins the
+  // race and a jump made right after load silently snaps back to the tail.
+  if (typeof _cancelBottomSettle === 'function') _cancelBottomSettle();
+  const scroller = document.getElementById('messages');
+  if (scroller && typeof _beginMessageJumpScroll === 'function') {
+    _beginMessageJumpScroll(scroller);
+  }
 
   const rowId = 'msg-user-' + rawIdx;
   const row   = document.getElementById(rowId);
@@ -348,14 +362,35 @@ function _reobserveMinimapRows() {
   }
 }
 
-// The nearest visible turn is the earliest user row still on screen. When no
-// user row is visible (a long answer fills the viewport) the last one sticks,
-// which is exactly the turn the reader is inside.
+// The last turn that starts at or above the viewport's top edge. Used only when
+// nothing intersects, so the O(turns) rect read never runs on a normal scroll.
+function _precedingRenderedTurn() {
+  const scroller = document.getElementById('messages');
+  if (!scroller) return null;
+  const top = scroller.getBoundingClientRect().top;
+  let best = null;
+  for (let i = 0; i < _minimapEntries.length; i++) {
+    const row = document.getElementById('msg-user-' + _minimapEntries[i].rawIdx);
+    if (!row) continue;
+    if (row.getBoundingClientRect().top > top) break;   // entries are in order
+    best = _minimapEntries[i].rawIdx;
+  }
+  return best;
+}
+
+// The nearest visible turn is the earliest user row still on screen. When a long
+// answer fills the viewport nothing intersects, so fall back to geometry: the
+// turn that answer belongs to. Deriving it rather than keeping the last active
+// mark is what makes a first paint, a session switch and a programmatic jump
+// (which skip the intermediate scroll states an observer would have reported)
+// all land on the turn the reader is actually inside.
 function _syncMinimapActive() {
   let next = null;
   _minimapVisible.forEach(function(idx) {
     if (next === null || idx < next) next = idx;
   });
+  if (next === null) next = _precedingRenderedTurn();
+  if (next === null) next = _minimapActive;   // scrolled above the first loaded turn
   if (next === null || next === _minimapActive) return;
   _minimapActive = next;
   const el = _minimapEl();
@@ -421,10 +456,12 @@ function _renderMinimapMarks(entries) {
   if (!el) return;
   const active = _minimapActive;
   // A jump into unloaded history re-renders the transcript, which rebuilds the
-  // marks under a keyboard user's feet. Put focus back on the same turn.
-  const focused = el.contains(document.activeElement) && document.activeElement.dataset
-    ? Number(document.activeElement.dataset.rawIdx)
-    : null;
+  // marks under a keyboard user's feet. Put focus back on the same TURN: older
+  // messages arriving ahead of it shift every rawIdx, but not its distance from
+  // the end of the list.
+  const before = _minimapMarks();
+  const focusedAt = before.indexOf(document.activeElement);
+  const focusedFromEnd = focusedAt >= 0 ? before.length - 1 - focusedAt : -1;
   el.innerHTML = entries.map(function(e) {
     const label = _escHtml(t('outline_minimap_mark', e.label, e.excerpt));
     const current = e.rawIdx === active ? ' aria-current="true"' : '';
@@ -437,12 +474,10 @@ function _renderMinimapMarks(entries) {
   for (let i = 0; i < marks.length; i++) {
     if (Number(marks[i].dataset.rawIdx) === active) { stop = marks[i]; break; }
   }
-  if (focused !== null && isFinite(focused)) {
-    for (let i = 0; i < marks.length; i++) {
-      if (Number(marks[i].dataset.rawIdx) === focused) { stop = marks[i]; break; }
-    }
-    stop.tabIndex = 0;
-    stop.focus();
+  if (focusedFromEnd >= 0) {
+    const refocus = marks[marks.length - 1 - focusedFromEnd] || marks[marks.length - 1];
+    refocus.tabIndex = 0;
+    refocus.focus();
     return;
   }
   stop.tabIndex = 0;
@@ -489,6 +524,7 @@ function _syncMinimap() {
     return;
   }
   _reobserveMinimapRows();
+  if (_minimapActive === null) _syncMinimapActive();
 }
 
 function _scheduleMinimapSync() {

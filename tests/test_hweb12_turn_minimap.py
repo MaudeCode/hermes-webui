@@ -49,17 +49,19 @@ _SETUP_JS = """
 
   if (opts.fullWidth) doc.documentElement.dataset.chatWidth = 'full';
   else delete doc.documentElement.dataset.chatWidth;
+  // Pin the chat pane's width: an open workspace panel narrows it, and whether
+  // it starts open depends on saved state the assertions should not ride on.
+  doc.documentElement.dataset.workspacePanel = 'closed';
 
-  const enabled = opts.enabled !== false;
-  window._showConversationOutline = enabled;
-  window.clearInterval(window.__hweb12Pin || 0);
   // boot.js re-applies the persisted preference when its settings request
-  // lands, which would flip the flag mid-test. Pin it for the run instead.
-  window.__hweb12Pin = window.setInterval(function() {
-    if (window._showConversationOutline === enabled) return;
-    window._showConversationOutline = enabled;
-    applyConversationOutlinePreference();
-  }, 100);
+  // lands, which would flip the flag mid-test. Pin it behind an accessor whose
+  // setter ignores writes, so the value cannot change under a running assertion.
+  const enabled = opts.enabled !== false;
+  Object.defineProperty(window, '_showConversationOutline', {
+    configurable: true,
+    get: function() { return enabled; },
+    set: function() {},
+  });
   // A fresh session id per setup, so no minimap state leaks between tests
   // (the real equivalent is switching sessions, which tears the rail down).
   window.__hweb12Run = (window.__hweb12Run || 0) + 1;
@@ -95,11 +97,18 @@ _MEASURE_JS = """
     mapPointerEvents: getComputedStyle(map).pointerEvents,
     markPointerEvents: marks.length ? getComputedStyle(marks[0]).pointerEvents : null,
     mapUserSelect: getComputedStyle(map).userSelect,
+    gutter: document.getElementById('msgInner').getBoundingClientRect().left -
+            map.parentElement.getBoundingClientRect().left,
     markAnimation: marks.length ? getComputedStyle(marks[0]).animationName : null,
     markBoxes: marks.map(box),
   };
 }
 """
+
+
+# Wide enough that the rail still has a gutter with the sidebar AND the
+# workspace panel open, which is the CI runner's first-run layout.
+_WIDE = 1920
 
 
 @pytest.fixture(scope="module")
@@ -119,7 +128,7 @@ def page():
         pytest.skip(f"chromium unavailable for browser measurement: {exc}")
 
     try:
-        p = browser.new_page(viewport={"width": 1440, "height": 900})
+        p = browser.new_page(viewport={"width": _WIDE, "height": 900})
         p.goto(BASE, wait_until="domcontentloaded")
         p.wait_for_selector("#composerBox", timeout=15000)
         yield p
@@ -128,13 +137,35 @@ def page():
         playwright.stop()
 
 
-def _setup(page, *, turns=_TURNS, enabled=True, full_width=False, width=1440):
+def _setup(page, *, turns=_TURNS, enabled=True, full_width=False, width=_WIDE):
     page.set_viewport_size({"width": width, "height": 900})
     page.evaluate(
         _SETUP_JS,
         {"turns": turns, "enabled": enabled, "fullWidth": full_width},
     )
     return page.evaluate(_MEASURE_JS)
+
+
+def _settle(page):
+    """Stop the app's load-time bottom settle, which keeps re-claiming the scroller.
+
+    Injecting a transcript restarts it; left running, its ResizeObserver and
+    timers yank scrollTop back to the tail mid-assertion. The product cancels it
+    the same way before a jump (see _jumpToMessage).
+    """
+    page.evaluate(
+        "() => { if (typeof _cancelBottomSettle === 'function') _cancelBottomSettle(); }"
+    )
+    page.wait_for_timeout(50)
+
+
+def _setup_visible(page, **kwargs):
+    """Setup for the interaction tests: fail on the measurement, not on a timeout."""
+    m = _setup(page, **kwargs)
+    _settle(page)
+    assert m["hidden"] is False, m
+    assert m["markCount"] == kwargs.get("turns", _TURNS), m
+    return m
 
 
 def test_one_mark_per_loaded_user_turn_in_chronological_order(page):
@@ -185,8 +216,44 @@ def test_the_nearest_visible_turn_is_marked_without_animation(page):
     assert later["current"] and later["current"][0] > 0, later
 
 
+def test_a_turn_is_current_even_when_no_user_row_is_on_screen(page):
+    """A long answer can fill the viewport; the turn it belongs to stays marked."""
+    _setup_visible(page)
+    page.evaluate(
+        """() => {
+          const row = document.getElementById('msg-user-6');
+          // An answer tall enough to fill the viewport on its own.
+          row.nextElementSibling.style.minHeight = '2400px';
+          const el = document.getElementById('messages');
+          // Take the scroller the way the app itself does before moving a
+          // reader; a fresh session is still pinned, and growing a row would
+          // otherwise snap straight back to the tail.
+          if (typeof _cancelBottomSettle === 'function') _cancelBottomSettle();
+          if (typeof _beginMessageJumpScroll === 'function') _beginMessageJumpScroll(el);
+          el.scrollTop += row.getBoundingClientRect().top - el.getBoundingClientRect().top
+                          + row.offsetHeight + 600;
+        }"""
+    )
+    page.wait_for_timeout(300)
+    parked = page.evaluate(
+        """() => {
+          const el = document.getElementById('messages');
+          const s = el.getBoundingClientRect();
+          return Array.from(document.querySelectorAll('[id^="msg-user-"]')).filter(r => {
+            const b = r.getBoundingClientRect();
+            return b.top < s.bottom && b.bottom > s.top;
+          }).map(r => r.id);
+        }"""
+    )
+    assert parked == [], parked   # precondition: no user row is on screen
+    m = page.evaluate(_MEASURE_JS)
+    assert m["current"] == [6], m
+    assert m["tabStops"].count(0) == 1, m
+    assert m["tabStops"][3] == 0, m   # the 4th mark is rawIdx 6
+
+
 def test_hover_and_focus_preview_show_the_question_and_its_final_answer(page):
-    _setup(page)
+    _setup_visible(page)
     page.hover(".outline-mark:nth-of-type(3)")
     page.wait_for_timeout(120)
     preview = page.evaluate(
@@ -230,7 +297,7 @@ def test_hover_and_focus_preview_show_the_question_and_its_final_answer(page):
 
 
 def test_activating_a_mark_anchors_its_user_message_in_view(page):
-    _setup(page)
+    _setup_visible(page)
     before = page.evaluate(
         """() => {
           const row = document.getElementById('msg-user-10');
@@ -261,7 +328,7 @@ def test_activating_a_mark_anchors_its_user_message_in_view(page):
 
 
 def test_keyboard_arrows_walk_the_rail_and_activate_a_turn(page):
-    _setup(page)
+    _setup_visible(page)
     page.evaluate("() => document.querySelectorAll('.outline-mark')[0].focus()")
     page.keyboard.press("ArrowDown")
     page.keyboard.press("ArrowDown")
@@ -291,7 +358,7 @@ def test_keyboard_arrows_walk_the_rail_and_activate_a_turn(page):
 
 def test_focus_survives_the_rebuild_a_jump_into_history_triggers(page):
     """Loading older history re-renders the marks; the keyboard user keeps their place."""
-    _setup(page)
+    _setup_visible(page)
     page.evaluate("() => document.querySelectorAll('.outline-mark')[3].focus()")
     # A jump into unloaded history prepends turns and rebuilds every mark.
     page.evaluate(
@@ -311,8 +378,8 @@ def test_focus_survives_the_rebuild_a_jump_into_history_triggers(page):
         }"""
     )
     assert state["count"] == _TURNS + 1, state
-    # Same rawIdx as before the rebuild - identity is the absolute message index.
-    assert state["focusedRawIdx"] == 6, state
+    # Same TURN as before the rebuild: the prepend shifted its rawIdx 6 -> 8.
+    assert state["focusedRawIdx"] == 8, state
     assert state["tabStops"].count(0) == 1, state
 
 
@@ -333,49 +400,41 @@ def test_the_rail_hides_when_it_cannot_help(page, label, kwargs):
 
 def test_a_mark_still_lands_on_its_own_turn_after_unloaded_history_arrives(page):
     """A truncated session numbers rows from the tail; the full load renumbers them."""
-    _setup(page)
+    _setup_visible(page)
     page.evaluate(
         """() => {
           // The session still has older messages the initial tail window skipped.
           _messagesTruncated = true;
+          // Replaces S.messages and nothing else, exactly like the real one:
+          // every row in the DOM still carries its pre-load index afterwards.
           window._ensureAllMessagesLoaded = function() {
             S.messages = [{ role: 'user', content: 'Older question' },
                           { role: 'assistant', content: 'Older answer' }].concat(S.messages);
-            let html = '';
-            S.messages.forEach(function(m, i) {
-              if (m.role === 'user') {
-                html += '<div class="msg-row" data-role="user" id="msg-user-' + i +
-                        '"><div class="msg-body"><p>' + m.content + '</p></div></div>';
-              } else {
-                html += '<div class="msg-row" data-role="assistant"><div class="msg-body"><p>' +
-                        ('Filler. '.repeat(240)) + '</p></div></div>';
-              }
-            });
-            document.getElementById('msgInner').innerHTML = html;
             _messagesTruncated = false;
-            return Promise.resolve(true);
+            return Promise.resolve();
           };
-          // Force the jump through the recovery path: drop the target row.
-          const row = document.getElementById('msg-user-10');
-          if (row) row.remove();
         }"""
     )
     page.click(".outline-mark:nth-of-type(6)")   # the 6th user turn
-    page.wait_for_timeout(1200)
+    page.wait_for_timeout(600)
     landed = page.evaluate(
         """() => {
-          const el = document.getElementById('messages');
-          const s = el.getBoundingClientRect();
-          const rows = Array.from(document.querySelectorAll('[id^="msg-user-"]'));
-          const hit = rows.filter(r => {
-            const b = r.getBoundingClientRect();
-            return b.top < s.bottom && b.bottom > s.top;
-          });
-          return hit.map(r => r.textContent.trim());
+          // _flashRow() marks the row the jump actually resolved to.
+          const row = document.querySelector('.outline-jump-flash');
+          const twelve = document.getElementById('msg-user-12');
+          return {
+            id: row ? row.id : null,
+            text: row ? row.textContent.trim().slice(0, 40) : null,
+            twelve: twelve ? twelve.textContent.trim().slice(0, 40) : null,
+          };
         }"""
     )
-    # Index 10 in the reloaded transcript is turn 5; the mark must still be turn 6.
-    assert any("Question number 6" in text for text in landed), landed
+    # Index 10 in the reloaded transcript is turn 5; the mark must still be turn 6,
+    # which the prepend moved to index 12.
+    assert landed["id"] == "msg-user-12", landed
+    assert "Question number 6" in (landed["text"] or ""), landed
+    # The transcript was rebuilt too, so the row id and the index agree.
+    assert "Question number 6" in (landed["twelve"] or ""), landed
     _setup(page)  # restore the shared page for the next test
 
 
@@ -401,6 +460,10 @@ def test_reuses_the_outline_mechanism_rather_than_a_second_index():
     assert "function _minimapAllowed() {\n  return _outlineAllowed();\n}" in OUTLINE_JS
     assert "_jumpToMessage(rawIdx);" in OUTLINE_JS
     assert "_ensureOutlineMessagesLoaded(sid).then" in OUTLINE_JS
+    # The jump takes scroller ownership the same way ui.js's question jump does,
+    # or the load-time bottom settle snaps the reader back to the tail.
+    assert "_cancelBottomSettle();" in OUTLINE_JS
+    assert "_beginMessageJumpScroll(scroller);" in OUTLINE_JS
     # One IntersectionObserver over the rendered user rows - no scroll-time scan.
     assert OUTLINE_JS.count("new IntersectionObserver") == 1
     assert "root: document.getElementById('messages')" in OUTLINE_JS
