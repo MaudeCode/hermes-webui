@@ -641,7 +641,11 @@ def test_recycled_assistant_turn_clears_live_anchor_attrs_before_role_refresh():
     recycle = recycle[recycle.index("if(!currentAssistantTurn){"):]
 
     loop_idx = recycle.index("for(const attr of _recycleResetAttrs) recycled.removeAttribute(attr);")
-    refresh_idx = recycle.index("if(role) role.outerHTML=_assistantRoleHtml(tsTitle, isTpsDisplayEnabled()?_formatTurnTps(m._turnTps):'');")
+    # HWEB-4 dropped the TPS argument from the settled header call (TPS renders in
+    # the metadata footer now). Anchor on the assignment, not the argument list,
+    # so this keeps guarding the reset-before-refresh order rather than the call
+    # signature.
+    refresh_idx = recycle.index("if(role) role.outerHTML=_assistantRoleHtml(")
     assert loop_idx < refresh_idx
 
 

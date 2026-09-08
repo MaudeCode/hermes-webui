@@ -52,10 +52,18 @@ must notice and respond to them.
 A chat turn should read as one coherent story:
 
 1. User message: right-aligned, compact bubble.
-2. Assistant content: left-aligned, prose-first, not a heavy bubble.
+2. Assistant content: left-aligned, prose-first, not a heavy bubble. No avatar
+   or repeated name row — alignment identifies the speaker, and the assistant
+   role stays announced to assistive tech through visually hidden text.
 3. Tool, thinking, progress, and context traces: quiet disclosure rows inside or
    adjacent to the assistant turn.
 4. Raw logs and verbose details: hidden until explicitly expanded.
+5. Per-turn technical metadata (duration, throughput, model, token usage,
+   timestamp) sits in one footer row under the answer, not above it.
+
+Message actions follow the same rule: Copy stays directly on the response, and
+the secondary actions fold into one overflow control rather than a persistent
+toolbar.
 
 Do not render every internal event as a first-class chat card. A turn that used
 many tools should summarize the work as inspectable activity, not make the user

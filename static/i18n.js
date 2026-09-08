@@ -1212,6 +1212,7 @@ const LOCALES = {
     settings_desc_sound: 'Play a sound when the assistant finishes a response.',
     // TTS (#499)
     tts_listen: 'Listen',
+    more_actions: 'More actions',
     tts_not_supported: 'Speech synthesis not supported in this browser.',
     settings_label_tts: 'Text-to-Speech for responses',
     settings_desc_tts: "Show a speaker button on each assistant message to read it aloud using your browser's speech synthesis.",
@@ -3013,6 +3014,7 @@ const LOCALES = {
     settings_desc_sound: 'Riproduci un suono quando l\'assistente termina una risposta.',
     // TTS (#499)
     tts_listen: 'Ascolta',
+    more_actions: 'Altre azioni',
     tts_not_supported: 'Sintesi vocale non supportata in questo browser.',
     settings_label_tts: 'Sintesi vocale per le risposte',
     settings_desc_tts: 'Mostra un pulsante altoparlante su ogni messaggio dell\'assistente per leggerlo ad alta voce usando la sintesi vocale del browser.',
@@ -4814,6 +4816,7 @@ const LOCALES = {
     settings_desc_sound: 'アシスタントが応答を完了したときに音を鳴らします。',
     // TTS (#499)
     tts_listen: '読み上げ',
+    more_actions: 'その他の操作',
     tts_not_supported: 'このブラウザは音声合成に対応していません。',
     settings_label_tts: '応答の読み上げ (TTS)',
     settings_desc_tts: 'アシスタントの各メッセージにスピーカーボタンを表示し、ブラウザの音声合成で読み上げます。',
@@ -7082,6 +7085,7 @@ const LOCALES = {
     html_sandbox_label: 'Предпросмотр HTML',
     // TTS (#499)
     tts_listen: 'Прослушать',
+    more_actions: 'Другие действия',
     tts_not_supported: 'Синтез речи не поддерживается',
     settings_label_tts: 'Синтез речи для ответов',
     settings_desc_tts: 'Показать кнопку динамика на сообщениях ассистента',
@@ -8840,6 +8844,7 @@ const LOCALES = {
     html_sandbox_label: 'Vista previa de HTML',
     // TTS (#499)
     tts_listen: 'Escuchar',
+    more_actions: 'Más acciones',
     tts_not_supported: 'Síntesis de voz no disponible',
     settings_label_tts: 'Texto a voz para respuestas',
     settings_desc_tts: 'Mostrar botón de altavoz en mensajes del asistente',
@@ -10575,6 +10580,7 @@ const LOCALES = {
     html_sandbox_label: 'HTML-Vorschau',
     // TTS (#499)
     tts_listen: 'Anhören',
+    more_actions: 'Weitere Aktionen',
     tts_not_supported: 'Sprachsynthese nicht verfügbar',
     settings_label_tts: 'Text-zu-Sprache für Antworten',
     settings_desc_tts: 'Lautsprecher-Symbol auf Assistenten-Nachrichten anzeigen',
@@ -12305,6 +12311,7 @@ const LOCALES = {
     excalidraw_simplified: '简化 SVG 预览 — 与 Excalidraw 画布不完全相同',
     // TTS (#499)
     tts_listen: '收听',
+    more_actions: '更多操作',
     tts_not_supported: '语音合成不可用',
     settings_label_tts: '回复语音合成',
     settings_desc_tts: '在助手消息上显示扬声器按钮',
@@ -13595,6 +13602,7 @@ const LOCALES = {
     settings_desc_sound: '助理完成回覆時播放音效。',
     // TTS (#499)
     tts_listen: '收聽',
+    more_actions: '更多操作',
     tts_not_supported: '語音合成無法使用',
     settings_label_tts: '回覆語音合成',
     settings_desc_tts: '在每則助理訊息上顯示喇叭按鈕，使用瀏覽器語音合成功能朗讀內容。',
@@ -15712,6 +15720,7 @@ const LOCALES = {
     approval_skip_all_title: 'Pular todos prompts de aprovação nesta sessão',
     // TTS (#499)
     tts_listen: 'Ouvir',
+    more_actions: 'Mais ações',
     tts_not_supported: 'Síntese de voz não disponível',
     settings_label_tts: 'Texto para voz nas respostas',
     settings_desc_tts: 'Mostrar botão de alto-falante nas mensagens do assistente',
@@ -17506,6 +17515,7 @@ const LOCALES = {
     excalidraw_simplified: '단순화된 SVG 미리보기 — Excalidraw 캔버스와 픽셀 동일하지 않음',
     // TTS (#499)
     tts_listen: '듣기',
+    more_actions: '추가 작업',
     tts_not_supported: '음성 합성을 사용할 수 없습니다',
     settings_label_tts: '답변 음성 합성',
     settings_desc_tts: '도움말 메시지에 스피커 버튼 표시',
@@ -18782,6 +18792,7 @@ const LOCALES = {
     settings_label_sound: 'Son de notification',
     settings_desc_sound: 'Jouer un son lorsque l\'assistant termine une réponse.',
     tts_listen: 'Écouter',
+    more_actions: 'Plus d\'actions',
     tts_not_supported: 'La synthèse vocale n\'est pas prise en charge dans ce navigateur.',
     settings_label_tts: 'Synthèse vocale pour les réponses',
     settings_desc_tts: 'Afficher un bouton haut-parleur sur chaque message de l\'assistant pour le lire à voix haute en utilisant la synthèse vocale de votre navigateur.',
@@ -20556,6 +20567,7 @@ const LOCALES = {
     tool_target_skill_suffix: 'dovednost',
     transcript: 'Transkript',
     tts_listen: 'Poslouchat',
+    more_actions: 'Další akce',
     tts_not_supported: 'Syntéza řeči není v tomto prohlížeči podporována.',
     upload_failed: 'Nahrání selhalo: ',
     upload_too_large: (maxMb, fileMb) => `Soubor je příliš velký (${fileMb} MB). Maximální velikost nahrávání je ${maxMb} MB.`,
@@ -22833,6 +22845,7 @@ const LOCALES = {
     excalidraw_simplified: 'Basitleştirilmiş SVG önizlemesi — Excalidraw tuvaliyle piksel açısından aynı değil',
     // TTS (#499)
     tts_listen: 'Dinlemek',
+    more_actions: 'Diğer eylemler',
     tts_not_supported: 'Konuşma sentezi bu tarayıcıda desteklenmiyor.',
     settings_label_tts: 'Yanıtlar için Metinden Konuşmaya',
     settings_desc_tts: 'Yardım mesajlarında hoparlör düğmesini göster',
@@ -24102,6 +24115,7 @@ const LOCALES = {
     settings_desc_sound: 'Odtwórz dźwięk, gdy asystent zakończy generowanie odpowiedzi.',
     // TTS (#499)
     tts_listen: 'Słuchaj',
+    more_actions: 'Więcej akcji',
     tts_not_supported: 'Synteza mowy nie jest obsługiwana w tej przeglądarce.',
     settings_label_tts: 'Zamiana tekstu na mowę (TTS) dla odpowiedzi',
     settings_desc_tts: 'Pokaż przycisk głośnika przy każdej wiadomości asystenta, aby przeczytać ją na głos przy użyciu syntezy mowy w przeglądarce.',
@@ -25733,6 +25747,7 @@ const LOCALES = {
     settings_desc_sound: 'Phát âm thanh khi assistant hoàn tất phản hồi.',
     // TTS (#499)
     tts_listen: 'Nghe',
+    more_actions: 'Thao tác khác',
     tts_not_supported: 'Trình duyệt này không hỗ trợ tổng hợp giọng nói.',
     settings_label_tts: 'Chuyển văn bản thành giọng nói cho phản hồi',
     settings_desc_tts: "Hiển thị nút loa trên mỗi tin nhắn assistant để đọc to bằng chức năng speech synthesis của trình duyệt.",

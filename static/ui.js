@@ -11773,8 +11773,57 @@ function isTpsDisplayEnabled(){
 function _assistantRoleHtml(tsTitle='', tpsText=''){
   const _bn=assistantDisplayName();
   const tps=(isTpsDisplayEnabled()&&tpsText)?`<span class="msg-tps-inline" title="Tokens per second">${esc(tpsText)}</span>`:'';
-  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant">${esc(_bn.charAt(0).toUpperCase())}</div><span class="msg-role-name">${esc(_bn)}</span>${tps}</div>`;
+  // HWEB-4: no avatar, and the name is exposed to assistive tech only — left
+  // alignment already identifies the speaker. The row survives as the container
+  // for the live TPS chip and for the transparent-stream collapse name tag
+  // (which CSS re-reveals; there the tag is a control, not identity chrome).
+  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><span class="msg-role-name">${esc(_bn)}</span>${tps}</div>`;
 }
+// ── HWEB-4: message-action overflow dismissal ────────────────────────────
+// The overflow is a native <details>, so open/close, Enter/Space and focus are
+// the platform's job. Only light dismissal has to be added: one open menu at a
+// time, close on outside click or on activating an item, and Escape returns
+// focus to the summary that opened it.
+function _closeMessageActionMenus(except){
+  document.querySelectorAll('details.msg-more[open]').forEach(d=>{ if(d!==except) d.open=false; });
+}
+document.addEventListener('click',e=>{
+  if(!document.querySelector('details.msg-more[open]')) return;
+  const target=e.target;
+  const summary=(target&&target.closest)?target.closest('details.msg-more > summary'):null;
+  // A click on a summary keeps that menu (the browser toggles it after this
+  // handler); a click on an item or outside closes everything.
+  _closeMessageActionMenus(summary?summary.parentElement:null);
+});
+document.addEventListener('keydown',e=>{
+  if(e.key!=='Escape') return;
+  const open=document.querySelector('details.msg-more[open]');
+  if(!open) return;
+  const summary=open.querySelector('summary');
+  _closeMessageActionMenus(null);
+  if(summary&&summary.focus) summary.focus();
+});
+// The menu opens upward so it never fights the composer, but `.messages` is a
+// scroller: overflow past its start edge is clipped AND unreachable (scrollTop
+// cannot go below 0), while end-side overflow can always be scrolled to. So on
+// a short transcript, where the first assistant footer can sit closer to the top
+// than the menu is tall, drop it below the trigger instead.
+function _placeMessageActionMenu(details){
+  if(!details) return;
+  if(!details.open){details.removeAttribute('data-drop');return;}
+  const menu=details.querySelector('.msg-more-menu');
+  const scroller=details.closest?details.closest('.messages'):null;
+  if(!menu||!scroller||!details.getBoundingClientRect) return;
+  const needed=(menu.offsetHeight||0)+6;
+  const roomAbove=details.getBoundingClientRect().top-scroller.getBoundingClientRect().top;
+  details.setAttribute('data-drop', roomAbove<needed?'down':'up');
+}
+// `toggle` does not bubble, so listen in the capture phase.
+document.addEventListener('toggle',e=>{
+  const el=e.target;
+  if(!el||!el.classList||!el.classList.contains('msg-more')) return;
+  _placeMessageActionMenu(el);
+}, true);
 function _setAssistantTurnTps(turn, tpsText=''){
   if(!turn) return;
   const role=turn.querySelector('.msg-role.assistant');
@@ -18491,8 +18540,11 @@ function renderMessages(options){
     const statusHtml = (!isUser&&m._statusCard) ? _statusCardHtml(m._statusCard) : '';
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
-    const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
-    const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
+    // HWEB-4: the assistant's secondary actions live inside the overflow menu,
+    // so they carry a visible label there (.msg-action-label is display:none on
+    // the inline icon buttons that stay in the footer).
+    const undoBtn  = isLastAssistant ? `<button class="msg-action-btn msg-more-item" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}<span class="msg-action-label">${esc(t('undo_exchange'))}</span></button>` : '';
+    const retryBtn = isLastAssistant ? `<button class="msg-action-btn msg-more-item" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}<span class="msg-action-label">${esc(t('regenerate'))}</span></button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
     const readOnlySession=typeof _isReadOnlySession==='function'
       ? _isReadOnlySession(S.session)
@@ -18500,8 +18552,8 @@ function renderMessages(options){
     const branchableReadOnlySession=typeof _isBranchableReadOnlySession==='function'
       ? _isBranchableReadOnlySession(S.session)
       : false;
-    const forkBtn  = (readOnlySession&&!branchableReadOnlySession) ? '' : `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1})">${li('git-branch',13)}</button>`;
-    const ttsBtn   = !isUser ? `<button class="msg-action-btn msg-tts-btn" title="${t('tts_listen')||'Listen'}" onclick="speakMessage(this)">${li('volume-2',13)}</button>` : '';
+    const forkBtn  = (readOnlySession&&!branchableReadOnlySession) ? '' : `<button class="msg-action-btn${isUser?'':' msg-more-item'}" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1})">${li('git-branch',13)}<span class="msg-action-label">${esc(t('fork_from_here'))}</span></button>`;
+    const ttsBtn   = !isUser ? `<button class="msg-action-btn msg-tts-btn msg-more-item" title="${t('tts_listen')||'Listen'}" onclick="speakMessage(this)">${li('volume-2',13)}<span class="msg-action-label">${esc(t('tts_listen')||'Listen')}</span></button>` : '';
     const tsVal=m._ts||m.timestamp;
     // _formatInServerTz handles fractional-hour offsets (India +0530 etc.)
     // correctly via offset arithmetic; bare toLocaleString is the browser-tz fallback.
@@ -18518,7 +18570,17 @@ function renderMessages(options){
     const questionJumpBtn = (_qJumpTarget!==undefined&&_qJumpTarget!==null)
       ? _questionJumpButtonHtml(_qJumpTarget, assistantRawIdxByQuestionRawIdx.get(_qJumpTarget)??rawIdx)
       : '';
-    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
+    // HWEB-4: assistant rows keep Copy directly available and fold the
+    // secondary actions (listen / fork / retry / undo) into one native
+    // <details> overflow, so the answer is not preceded or trailed by a full
+    // toolbar. User rows keep their existing inline controls.
+    const moreItems = isUser ? '' : `${ttsBtn}${forkBtn}${retryBtn}${undoBtn}`;
+    const moreLabel = t('more_actions');
+    const moreBtn = moreItems
+      ? `<details class="msg-more"><summary class="msg-action-btn msg-more-btn" title="${moreLabel}" aria-label="${moreLabel}">${li('more-horizontal',13)}</summary><div class="msg-more-menu">${moreItems}</div></details>`
+      : '';
+    const actionsHtml = isUser ? `${editBtn}${forkBtn}${copyBtn}` : `${copyBtn}${moreBtn}`;
+    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${actionsHtml}</span>${questionJumpBtn}</div>`;
 
     if(_isContextCompactionMessage(m)){
       continue;
@@ -18665,10 +18727,13 @@ function renderMessages(options){
         if(blocks) blocks.innerHTML='';
         for(const attr of _recycleResetAttrs) recycled.removeAttribute(attr);
         const role=recycled.querySelector('.msg-role.assistant');
-        if(role) role.outerHTML=_assistantRoleHtml(tsTitle, isTpsDisplayEnabled()?_formatTurnTps(m._turnTps):'');
+        // HWEB-4: settled TPS renders in the final-response metadata footer
+        // below, not as a chip above the answer. Only the live turn still gets
+        // a header chip, stamped by _setLiveAssistantTps while it streams.
+        if(role) role.outerHTML=_assistantRoleHtml(tsTitle, '');
         currentAssistantTurn=recycled;
       }else{
-        currentAssistantTurn=_createAssistantTurn(tsTitle, isTpsDisplayEnabled()?_formatTurnTps(m._turnTps):'');
+        currentAssistantTurn=_createAssistantTurn(tsTitle, '');
       }
       currentAssistantTurn.dataset.role='assistant';
       if(S.session) currentAssistantTurn.dataset.sessionId=S.session.session_id;
@@ -19371,12 +19436,15 @@ function renderMessages(options){
       const compactWorklogForMessage=isCompactWorklogMode()&&(toolCallAssistantIdxs.has(mi)||assistantThinking.has(mi));
       const durationText=compactWorklogForMessage?'':_formatTurnDuration(msg._turnDuration);
       const usedModelText=_usedModelTurnChipLabel(msg);
-      if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText&&!usedModelText) continue;
+      // HWEB-4: TPS moved off the (removed) assistant header into this settled
+      // metadata row, beside duration/model/usage.
+      const tpsText=isTpsDisplayEnabled()?_formatTurnTps(msg._turnTps):'';
+      if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText&&!usedModelText&&!tpsText) continue;
       const seg=assistantSegments.get(mi);
       const row=seg?seg.closest('.assistant-turn'):null;
       const footerRows=row?row.querySelectorAll('.msg-foot'):[];
       const targetFoot=footerRows.length?footerRows[footerRows.length-1]:null;
-      if(!targetFoot||targetFoot.querySelector('.msg-usage-inline,.msg-duration-inline,.msg-gateway-inline,.gateway-failover-inline,.msg-model-warning-inline,.msg-used-model-inline')) continue;
+      if(!targetFoot||targetFoot.querySelector('.msg-usage-inline,.msg-duration-inline,.msg-gateway-inline,.gateway-failover-inline,.msg-model-warning-inline,.msg-used-model-inline,.msg-tps-inline')) continue;
       const fragments=[];
       if(modelWarningText){
         const warning=document.createElement('span');
@@ -19401,6 +19469,13 @@ function renderMessages(options){
         duration.className='msg-duration-inline';
         duration.textContent=`Done in ${durationText}`;
         fragments.push(duration);
+      }
+      if(tpsText){
+        const tps=document.createElement('span');
+        tps.className='msg-tps-inline';
+        tps.title='Tokens per second';
+        tps.textContent=tpsText;
+        fragments.push(tps);
       }
       // The transparent turn footer owns the model label (.lf-model) whenever
       // the turn has transparent event rows — skip the generic chip there so

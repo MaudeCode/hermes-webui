@@ -88,12 +88,19 @@ class TestTtsSpeakerButton:
             "TTS button should have user-check guard"
 
     def test_tts_button_in_footer(self):
-        """ttsBtn must be included in the msg-actions span."""
+        """ttsBtn must reach the footer through the message-action overflow.
+
+        HWEB-4 folded listen/fork/retry/undo behind one `.msg-more` overflow so
+        the footer no longer renders a five-button toolbar. Listen must still be
+        reachable there — it just is not an inline sibling of Copy any more.
+        """
         src = _read('ui.js')
-        # The footHtml line should include ttsBtn
+        more_lines = [l for l in src.splitlines() if 'moreItems' in l and 'ttsBtn' in l]
+        assert more_lines, "ttsBtn not included in the message-action overflow items"
+        assert 'msg-more-menu' in src, "the overflow menu container is missing from ui.js"
         foot_lines = [l for l in src.splitlines() if 'footHtml' in l and 'msg-actions' in l]
-        assert any('ttsBtn' in l for l in foot_lines), \
-            "ttsBtn not included in footHtml msg-actions"
+        assert any('moreBtn' in l or 'actionsHtml' in l for l in foot_lines), \
+            "the overflow trigger is not rendered in the footHtml msg-actions span"
 
     def test_tts_button_uses_volume_icon(self):
         """Speaker button should use volume-2 icon."""
