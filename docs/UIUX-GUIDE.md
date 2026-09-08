@@ -200,6 +200,18 @@ the optional Start jump button and the outline FAB — use `--chat-col-inset` to
 ride the column's right edge instead of the pane's, and stack vertically so a
 taller composer cannot make them collide.
 
+The **left** gutter carries the turn minimap (`#outlineMinimap`): one 9×2px mark
+per loaded user turn, dividing the rail evenly so mark *k* sits ~*k*/*N* through
+the conversation. It is part of the conversation-outline feature — same
+`show_conversation_outline` preference, same `_buildEntries()` turns, same
+`_jumpToMessage()` jump — with the labelled panel as its keyboard/touch fallback.
+The rail is `pointer-events:none` (only the marks and never the hover preview
+take pointer events) so it cannot intercept a transcript selection, and
+`static/outline.js` hides it whenever the measured gutter drops below 52px, the
+viewport is under 900px, full-width chat leaves no gutter, or fewer than four
+turns are loaded. The current turn is a static width/colour change driven by one
+`IntersectionObserver` over the rendered user rows — never a running animation.
+
 User bubbles are right-aligned inside that column and may use up to 80% of it
 (90% under 600px), sized as a percentage of `--msg-max` rather than of the
 center pane. Length is handled by progressive disclosure, not by a narrower

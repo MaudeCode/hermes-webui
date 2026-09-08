@@ -1,0 +1,437 @@
+"""HWEB-12 - a user-turn timeline minimap in the chat reading column's gutter.
+
+The rail is an extension of the shipped conversation-outline mechanism
+(``static/outline.js``): the same ``_buildEntries()`` turns, the same
+``_jumpToMessage()`` loader/jump, the same ``_outlineAllowed()`` preference and
+desktop gate. Only the presentation is new, so the assertions split the same way
+the sibling suites do - real-browser measurements for the geometry, visibility
+and interaction contract, source-level assertions for the state machine.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import pytest
+
+from tests._pytest_port import BASE
+
+REPO = Path(__file__).resolve().parents[1]
+OUTLINE_JS = (REPO / "static" / "outline.js").read_text(encoding="utf-8")
+INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
+STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
+I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+
+# Locale blocks in static/i18n.js (en, it, ja, ru, es, de, zh, zh-Hant, pt, ko,
+# fr, cs, tr, pl, vi). Every user-visible string must exist in all of them.
+LOCALE_COUNT = 15
+
+# Enough turns to clear MINIMAP_MIN_MARKS with room to spare.
+_TURNS = 8
+
+_SETUP_JS = """
+(opts) => {
+  const doc = document;
+  const msgs = [];
+  let html = '';
+  for (let i = 0; i < opts.turns; i++) {
+    msgs.push({ role: 'user', content: 'Question number ' + (i + 1) });
+    html += '<div class="msg-row" data-role="user" id="msg-user-' + (msgs.length - 1) +
+            '"><div class="msg-body"><p>Question number ' + (i + 1) + '</p></div></div>';
+    msgs.push({ role: 'assistant', content: 'Answer number ' + (i + 1) });
+    html += '<div class="msg-row" data-role="assistant"><div class="msg-body"><p>' +
+            ('Filler line for turn ' + (i + 1) + '. ').repeat(80) + '</p></div></div>';
+  }
+  doc.getElementById('msgInner').innerHTML = html;
+  const empty = doc.getElementById('emptyState');
+  if (empty) empty.style.display = 'none';
+
+  if (opts.fullWidth) doc.documentElement.dataset.chatWidth = 'full';
+  else delete doc.documentElement.dataset.chatWidth;
+
+  const enabled = opts.enabled !== false;
+  window._showConversationOutline = enabled;
+  window.clearInterval(window.__hweb12Pin || 0);
+  // boot.js re-applies the persisted preference when its settings request
+  // lands, which would flip the flag mid-test. Pin it for the run instead.
+  window.__hweb12Pin = window.setInterval(function() {
+    if (window._showConversationOutline === enabled) return;
+    window._showConversationOutline = enabled;
+    applyConversationOutlinePreference();
+  }, 100);
+  // A fresh session id per setup, so no minimap state leaks between tests
+  // (the real equivalent is switching sessions, which tears the rail down).
+  window.__hweb12Run = (window.__hweb12Run || 0) + 1;
+  S.session = { session_id: 'hweb12-test-' + window.__hweb12Run };
+  S.messages = msgs;
+  applyConversationOutlinePreference();
+  doc.getElementById('messages').scrollTop = 0;
+  return msgs.length;
+}
+"""
+
+_MEASURE_JS = """
+() => {
+  const box = (el) => {
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { left: r.left, right: r.right, top: r.top, bottom: r.bottom,
+             width: r.width, height: r.height };
+  };
+  const map = document.getElementById('outlineMinimap');
+  const marks = Array.from(map.querySelectorAll('.outline-mark'));
+  return {
+    hidden: map.hidden,
+    map: box(map),
+    column: box(document.getElementById('msgInner')),
+    shell: box(map.parentElement),
+    markCount: marks.length,
+    order: marks.map(m => Number(m.dataset.rawIdx)),
+    labels: marks.map(m => m.getAttribute('aria-label')),
+    tabStops: marks.map(m => m.tabIndex),
+    current: marks.filter(m => m.getAttribute('aria-current') === 'true')
+                  .map(m => Number(m.dataset.rawIdx)),
+    mapPointerEvents: getComputedStyle(map).pointerEvents,
+    markPointerEvents: marks.length ? getComputedStyle(marks[0]).pointerEvents : null,
+    mapUserSelect: getComputedStyle(map).userSelect,
+    markAnimation: marks.length ? getComputedStyle(marks[0]).animationName : null,
+    markBoxes: marks.map(box),
+  };
+}
+"""
+
+
+@pytest.fixture(scope="module")
+def page():
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run `playwright install chromium`")
+
+    playwright = sync_playwright().start()
+    try:
+        browser = playwright.chromium.launch(
+            headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
+        )
+    except Exception as exc:  # pragma: no cover - no browser binary in sandbox
+        playwright.stop()
+        pytest.skip(f"chromium unavailable for browser measurement: {exc}")
+
+    try:
+        p = browser.new_page(viewport={"width": 1440, "height": 900})
+        p.goto(BASE, wait_until="domcontentloaded")
+        p.wait_for_selector("#composerBox", timeout=15000)
+        yield p
+    finally:
+        browser.close()
+        playwright.stop()
+
+
+def _setup(page, *, turns=_TURNS, enabled=True, full_width=False, width=1440):
+    page.set_viewport_size({"width": width, "height": 900})
+    page.evaluate(
+        _SETUP_JS,
+        {"turns": turns, "enabled": enabled, "fullWidth": full_width},
+    )
+    return page.evaluate(_MEASURE_JS)
+
+
+def test_one_mark_per_loaded_user_turn_in_chronological_order(page):
+    m = _setup(page)
+    assert m["hidden"] is False, m
+    assert m["markCount"] == _TURNS, m
+    # rawIdx order is the transcript order, and every mark carries a real label.
+    assert m["order"] == sorted(m["order"]), m
+    assert m["order"] == [i * 2 for i in range(_TURNS)], m
+    assert all(label and "Question number" in label for label in m["labels"]), m
+    # Marks divide the rail evenly, so mark k sits ~k/N through the conversation.
+    tops = [b["top"] for b in m["markBoxes"]]
+    assert tops == sorted(tops), m
+    span = m["markBoxes"][-1]["bottom"] - m["markBoxes"][0]["top"]
+    assert span >= m["map"]["height"] - 1, m
+    heights = [b["height"] for b in m["markBoxes"]]
+    assert max(heights) - min(heights) <= 1, m
+
+
+def test_rail_lives_in_the_unused_gutter_and_never_takes_the_transcript(page):
+    m = _setup(page)
+    # Entirely left of the reading column: it can never sit over transcript text.
+    assert m["map"]["right"] <= m["column"]["left"], m
+    assert m["map"]["left"] >= m["shell"]["left"], m
+    # The rail itself is inert; only the marks are hit targets.
+    assert m["mapPointerEvents"] == "none", m
+    assert m["markPointerEvents"] == "auto", m
+    assert m["mapUserSelect"] == "none", m
+
+
+def test_the_nearest_visible_turn_is_marked_without_animation(page):
+    _setup(page)
+    page.wait_for_timeout(200)
+    m = page.evaluate(_MEASURE_JS)
+    # Exactly one mark is current, and it is the first turn while parked at the top.
+    assert m["current"] == [0], m
+    # Distinguishable through a static style change, not a running animation.
+    assert m["markAnimation"] in ("none", None), m
+    # Tab lands on the reader's current turn, the rest are arrow-key reachable.
+    assert m["tabStops"].count(0) == 1, m
+    assert m["tabStops"][0] == 0, m
+
+    # Scrolling down moves the marker to the turn the reader is now inside.
+    page.evaluate("() => { const el = document.getElementById('messages');"
+                  " el.scrollTop = el.scrollHeight; }")
+    page.wait_for_timeout(300)
+    later = page.evaluate(_MEASURE_JS)
+    assert later["current"] and later["current"][0] > 0, later
+
+
+def test_hover_and_focus_preview_show_the_question_and_its_final_answer(page):
+    _setup(page)
+    page.hover(".outline-mark:nth-of-type(3)")
+    page.wait_for_timeout(120)
+    preview = page.evaluate(
+        """() => {
+          const el = document.querySelector('.outline-mark-preview');
+          const r = el.getBoundingClientRect();
+          return {
+            hidden: el.hidden,
+            user: (el.querySelector('.outline-preview-user') || {}).textContent || '',
+            reply: (el.querySelector('.outline-preview-reply') || {}).textContent || '',
+            pointerEvents: getComputedStyle(el).pointerEvents,
+            top: r.top, bottom: r.bottom,
+            shellTop: document.querySelector('.messages-shell').getBoundingClientRect().top,
+            shellBottom: document.querySelector('.messages-shell').getBoundingClientRect().bottom,
+          };
+        }"""
+    )
+    assert preview["hidden"] is False, preview
+    assert "Question number 3" in preview["user"], preview
+    assert "Answer number 3" in preview["reply"], preview
+    # The card floats over the transcript, so it must not swallow clicks there.
+    assert preview["pointerEvents"] == "none", preview
+    # Clamped inside the transcript pane rather than escaping over the header.
+    assert preview["top"] >= preview["shellTop"] - 1, preview
+    assert preview["bottom"] <= preview["shellBottom"] + 1, preview
+
+    # Keyboard focus is an equal path to the same preview.
+    page.evaluate("() => document.querySelector('.outline-mark-preview').dispatchEvent("
+                  "new MouseEvent('pointerout', {bubbles: true}))")
+    page.evaluate("() => document.querySelectorAll('.outline-mark')[5].focus()")
+    page.wait_for_timeout(120)
+    focused = page.evaluate(
+        """() => {
+          const el = document.querySelector('.outline-mark-preview');
+          return { hidden: el.hidden,
+                   user: (el.querySelector('.outline-preview-user') || {}).textContent || '' };
+        }"""
+    )
+    assert focused["hidden"] is False, focused
+    assert "Question number 6" in focused["user"], focused
+
+
+def test_activating_a_mark_anchors_its_user_message_in_view(page):
+    _setup(page)
+    before = page.evaluate(
+        """() => {
+          const row = document.getElementById('msg-user-10');
+          const el = document.getElementById('messages');
+          const r = row.getBoundingClientRect(), s = el.getBoundingClientRect();
+          return { visible: r.top < s.bottom && r.bottom > s.top, scrollTop: el.scrollTop };
+        }"""
+    )
+    assert before["visible"] is False, before
+
+    page.click(".outline-mark:nth-of-type(6)")   # rawIdx 10 -> the 6th user turn
+    page.wait_for_timeout(900)
+    after = page.evaluate(
+        """() => {
+          const row = document.getElementById('msg-user-10');
+          const el = document.getElementById('messages');
+          const r = row.getBoundingClientRect(), s = el.getBoundingClientRect();
+          return {
+            visible: r.top < s.bottom && r.bottom > s.top,
+            offCentre: Math.abs((r.top + r.bottom) / 2 - (s.top + s.bottom) / 2),
+            height: s.height,
+          };
+        }"""
+    )
+    assert after["visible"] is True, after
+    # block:'center' - anchored for reading, not flush against an edge.
+    assert after["offCentre"] < after["height"] * 0.25, after
+
+
+def test_keyboard_arrows_walk_the_rail_and_activate_a_turn(page):
+    _setup(page)
+    page.evaluate("() => document.querySelectorAll('.outline-mark')[0].focus()")
+    page.keyboard.press("ArrowDown")
+    page.keyboard.press("ArrowDown")
+    state = page.evaluate(
+        """() => {
+          const marks = Array.from(document.querySelectorAll('.outline-mark'));
+          return { focused: marks.indexOf(document.activeElement),
+                   tabStops: marks.map(m => m.tabIndex) };
+        }"""
+    )
+    assert state["focused"] == 2, state
+    # Roving tabindex: one tab stop, on the focused mark.
+    assert state["tabStops"].count(0) == 1 and state["tabStops"][2] == 0, state
+
+    page.keyboard.press("End")
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(900)
+    assert page.evaluate(
+        """() => {
+          const row = document.getElementById('msg-user-14');
+          const el = document.getElementById('messages');
+          const r = row.getBoundingClientRect(), s = el.getBoundingClientRect();
+          return r.top < s.bottom && r.bottom > s.top;
+        }"""
+    ), "End + Enter should jump to the last turn"
+
+
+def test_focus_survives_the_rebuild_a_jump_into_history_triggers(page):
+    """Loading older history re-renders the marks; the keyboard user keeps their place."""
+    _setup(page)
+    page.evaluate("() => document.querySelectorAll('.outline-mark')[3].focus()")
+    # A jump into unloaded history prepends turns and rebuilds every mark.
+    page.evaluate(
+        """() => {
+          S.messages = [{ role: 'user', content: 'Older question' },
+                        { role: 'assistant', content: 'Older answer' }].concat(S.messages);
+          applyConversationOutlinePreference();
+        }"""
+    )
+    state = page.evaluate(
+        """() => {
+          const marks = Array.from(document.querySelectorAll('.outline-mark'));
+          const active = document.activeElement;
+          return { count: marks.length,
+                   focusedRawIdx: marks.includes(active) ? Number(active.dataset.rawIdx) : null,
+                   tabStops: marks.map(m => m.tabIndex) };
+        }"""
+    )
+    assert state["count"] == _TURNS + 1, state
+    # Same rawIdx as before the rebuild - identity is the absolute message index.
+    assert state["focusedRawIdx"] == 6, state
+    assert state["tabStops"].count(0) == 1, state
+
+
+@pytest.mark.parametrize(
+    "label,kwargs",
+    [
+        ("too few turns", {"turns": 3}),
+        ("no gutter (full-width chat)", {"full_width": True}),
+        ("narrow / mobile width", {"width": 820}),
+        ("outline preference off", {"enabled": False}),
+    ],
+)
+def test_the_rail_hides_when_it_cannot_help(page, label, kwargs):
+    m = _setup(page, **kwargs)
+    assert m["hidden"] is True, (label, m)
+    _setup(page)  # restore the shared page for the next test
+
+
+def test_a_mark_still_lands_on_its_own_turn_after_unloaded_history_arrives(page):
+    """A truncated session numbers rows from the tail; the full load renumbers them."""
+    _setup(page)
+    page.evaluate(
+        """() => {
+          // The session still has older messages the initial tail window skipped.
+          _messagesTruncated = true;
+          window._ensureAllMessagesLoaded = function() {
+            S.messages = [{ role: 'user', content: 'Older question' },
+                          { role: 'assistant', content: 'Older answer' }].concat(S.messages);
+            let html = '';
+            S.messages.forEach(function(m, i) {
+              if (m.role === 'user') {
+                html += '<div class="msg-row" data-role="user" id="msg-user-' + i +
+                        '"><div class="msg-body"><p>' + m.content + '</p></div></div>';
+              } else {
+                html += '<div class="msg-row" data-role="assistant"><div class="msg-body"><p>' +
+                        ('Filler. '.repeat(240)) + '</p></div></div>';
+              }
+            });
+            document.getElementById('msgInner').innerHTML = html;
+            _messagesTruncated = false;
+            return Promise.resolve(true);
+          };
+          // Force the jump through the recovery path: drop the target row.
+          const row = document.getElementById('msg-user-10');
+          if (row) row.remove();
+        }"""
+    )
+    page.click(".outline-mark:nth-of-type(6)")   # the 6th user turn
+    page.wait_for_timeout(1200)
+    landed = page.evaluate(
+        """() => {
+          const el = document.getElementById('messages');
+          const s = el.getBoundingClientRect();
+          const rows = Array.from(document.querySelectorAll('[id^="msg-user-"]'));
+          const hit = rows.filter(r => {
+            const b = r.getBoundingClientRect();
+            return b.top < s.bottom && b.bottom > s.top;
+          });
+          return hit.map(r => r.textContent.trim());
+        }"""
+    )
+    # Index 10 in the reloaded transcript is turn 5; the mark must still be turn 6.
+    assert any("Question number 6" in text for text in landed), landed
+    _setup(page)  # restore the shared page for the next test
+
+
+def test_markup_and_locale_contract():
+    """The rail ships as static markup with a translated accessible name."""
+    tag = re.search(r'<div id="outlineMinimap".*?</div>', INDEX_HTML, re.S)
+    assert tag, "outlineMinimap markup not found"
+    markup = tag.group(0)
+    assert "hidden" in markup
+    # A toolbar is the ARIA pattern that sanctions roving tabindex + arrow keys.
+    assert 'role="toolbar"' in markup and 'aria-orientation="vertical"' in markup
+    assert 'data-i18n-aria-label="outline_minimap_label"' in markup
+    for key in ("outline_minimap_label:", "outline_minimap_mark:"):
+        assert I18N_JS.count(key) == LOCALE_COUNT, key
+    # The mark label carries both the turn number and its excerpt.
+    assert "outline_minimap_mark: 'Question {0}: {1}'" in I18N_JS
+
+
+def test_reuses_the_outline_mechanism_rather_than_a_second_index():
+    """Turn discovery, jumping and the desktop/preference gate are all shared."""
+    body = OUTLINE_JS[OUTLINE_JS.index("function _syncMinimap()"):]
+    assert "_buildEntries()" in body
+    assert "function _minimapAllowed() {\n  return _outlineAllowed();\n}" in OUTLINE_JS
+    assert "_jumpToMessage(rawIdx);" in OUTLINE_JS
+    assert "_ensureOutlineMessagesLoaded(sid).then" in OUTLINE_JS
+    # One IntersectionObserver over the rendered user rows - no scroll-time scan.
+    assert OUTLINE_JS.count("new IntersectionObserver") == 1
+    assert "root: document.getElementById('messages')" in OUTLINE_JS
+    assert "addEventListener('scroll'" not in OUTLINE_JS
+
+
+def test_mark_identity_survives_streaming_paging_and_session_switches():
+    """Marks are keyed by absolute rawIdx and rebuilt only when the turns change."""
+    # Identity is the absolute message index, the same key the jump path uses.
+    assert "data-raw-idx=\"' + e.rawIdx +" in OUTLINE_JS
+    assert "'msg-user-' + rawIdx" in OUTLINE_JS
+    # A session switch drops every observation before the new marks are built.
+    assert "if (sid !== _minimapSid) {" in OUTLINE_JS
+    assert "_teardownMinimap();" in OUTLINE_JS
+    # Virtualized rows: re-observed on every render, not only on turn changes.
+    assert "_reobserveMinimapRows();" in OUTLINE_JS
+    assert "_scheduleMinimapSync();" in OUTLINE_JS
+    # Streaming re-renders coalesce into one sync per frame.
+    assert "window.requestAnimationFrame ||" in OUTLINE_JS
+    # Unloaded history is only fetched through the existing explicit jump path.
+    assert OUTLINE_JS.count("/api/session") == 1
+
+
+def test_reduced_motion_and_static_active_state():
+    rule = re.search(
+        r"@media \(prefers-reduced-motion:reduce\)\{\s*\.outline-mark::before\{[^}]*\}[^}]*\}",
+        STYLE_CSS,
+    )
+    assert rule, "minimap reduced-motion block not found"
+    assert "transition:none" in rule.group(0)
+    assert ".outline-jump-flash{animation:none;}" in rule.group(0)
+    # The active mark is a width/colour swap, never a keyframe animation.
+    current = re.search(r"\.outline-mark\[aria-current=\"true\"\]::before\{([^}]*)\}", STYLE_CSS)
+    assert current and "animation" not in current.group(1)
