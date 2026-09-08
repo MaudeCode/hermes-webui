@@ -192,7 +192,7 @@ def test_explicit_cancel_call_sites_pass_a_reason():
 
 def test_clarify_pending_never_404s():
     """The whole Part-1 fix rests on /api/clarify/pending returning 200 (with
-    {"pending": None}) for any session — a 404 from that path is ALWAYS either a
+    pending=None) for any session — a 404 from that path is ALWAYS either a
     missing route or an unrelated error. Lock the handler shape."""
     routes = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
     m = re.search(
@@ -207,6 +207,6 @@ def test_clarify_pending_never_404s():
         "{'pending': None} for unknown sessions. If this changes, the front-end "
         "clarify toast logic in messages.js must be revisited."
     )
-    assert '{"pending": None}' in handler_src or "{'pending': None}" in handler_src, (
-        "_handle_clarify_pending should return {'pending': None} for no pending clarify"
+    assert '"pending": None' in handler_src or "'pending': None" in handler_src, (
+        "_handle_clarify_pending should return a pending=None payload for no pending clarify"
     )
