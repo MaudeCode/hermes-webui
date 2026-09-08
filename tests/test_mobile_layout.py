@@ -1288,24 +1288,28 @@ def test_model_and_reasoning_dropdowns_use_mobile_panel_anchors():
     model_start = ui_js.index("function _positionModelDropdown()")
     model_end = ui_js.index("function renderModelDropdown()", model_start)
     model_body = ui_js[model_start:model_end]
-    for expected in (
-        "composerMobileConfigPanel",
-        "composerMobileModelAction",
-        "classList.contains('open')",
-    ):
-        assert expected in model_body, \
-            f"_positionModelDropdown must keep mobile-panel anchor logic ({expected})"
+    assert "_composerOverflowAnchor('composerMobileModelAction'" in model_body, \
+        "_positionModelDropdown must keep mobile-panel anchor logic"
 
     reasoning_start = ui_js.index("function _positionReasoningDropdown()")
     reasoning_end = ui_js.index("function closeReasoningDropdown()", reasoning_start)
     reasoning_body = ui_js[reasoning_start:reasoning_end]
+    assert "_composerOverflowAnchor('composerMobileReasoningAction'" in reasoning_body, \
+        "_positionReasoningDropdown must keep mobile-panel anchor logic"
+
+    # HWEB-7: the panel/laid-out decision is shared, and it is not enough for it
+    # to check `.open` — the model and reasoning rows are display:none at the
+    # widths where the footer keeps its own chip, so an open panel alone would
+    # anchor these pickers to a zero rect.
+    anchor_start = ui_js.index("function _composerOverflowAnchor(")
+    anchor_body = ui_js[anchor_start : ui_js.index("\n}", anchor_start)]
     for expected in (
         "composerMobileConfigPanel",
-        "composerMobileReasoningAction",
         "classList.contains('open')",
+        "offsetParent !== null",
     ):
-        assert expected in reasoning_body, \
-            f"_positionReasoningDropdown must keep mobile-panel anchor logic ({expected})"
+        assert expected in anchor_body, \
+            f"_composerOverflowAnchor must keep mobile-panel anchor logic ({expected})"
 
 
 def test_context_details_live_in_mobile_overflow_panel():
@@ -1411,9 +1415,11 @@ def test_workspace_control_lives_in_mobile_overflow_panel():
     position_body = panels_js[pos_start:pos_end]
     assert "composerMobileWorkspaceAction" in position_body, \
         "workspace dropdown positioning must know the mobile workspace action"
-    assert "composerMobileConfigPanel" in position_body, \
+    # HWEB-7 moved the "is the panel open, and is its row laid out?" decision
+    # into the shared _composerOverflowAnchor resolver.
+    assert "_composerOverflowAnchor(" in position_body, \
         "workspace dropdown positioning must anchor to the mobile panel action while open"
-    assert "anchor to #composerMobileWorkspaceAction" in position_body, \
+    assert "composerMobileWorkspaceAction" in position_body and "anchor" in position_body, \
         "workspace dropdown positioning should document the mobile-panel anchor choice"
 
     toggle_start = panels_js.index("function toggleComposerWsDropdown()")

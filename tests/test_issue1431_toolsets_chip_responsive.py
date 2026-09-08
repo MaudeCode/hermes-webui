@@ -208,10 +208,10 @@ class TestToolsetsDropdownResizeGuard:
             "_toolsetsDropdownAnchor() so it sees the overflow row too"
         )
         anchor = re.search(
-            r"function _toolsetsDropdownAnchor\(\)\s*\{.*?\n\}", js, re.DOTALL
+            r"function _composerOverflowAnchor\([^)]*\)\s*\{.*?\n\}", js, re.DOTALL
         )
         assert anchor and "offsetParent" in anchor.group(0), (
-            "_toolsetsDropdownAnchor must check offsetParent — without it "
+            "_composerOverflowAnchor must check offsetParent — without it "
             "the open dropdown stays open after CSS hides its anchor mid-session "
             "(e.g. workspace-panel toggle crossing 1100px threshold)"
         )

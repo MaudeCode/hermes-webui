@@ -70,7 +70,8 @@ def test_toggle_toolsets_dropdown_opens_without_session_guard():
     assert "_toolsetsDropdownAnchor()" in toggle
     assert "if (!chip)" in toggle
     anchor = _function_body(UI_JS, "function _toolsetsDropdownAnchor")
-    assert "offsetParent !== null" in anchor
+    assert "_composerOverflowAnchor(" in anchor
+    assert "offsetParent !== null" in _function_body(UI_JS, "function _composerOverflowAnchor")
     assert "_populateToolsetsDropdown();" in toggle
 
 

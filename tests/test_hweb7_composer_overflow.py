@@ -38,6 +38,19 @@ OVERFLOW_ROWS = {
 RELOCATED_BUTTONS = ["btnSavedPrompts", "btnVoiceMode"]
 
 
+def _function_body(src: str, signature: str) -> str:
+    start = src.index(signature)
+    depth = 0
+    for i in range(src.index("{", start), len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : i + 1]
+    raise AssertionError(f"function body not found: {signature}")
+
+
 def _panel_markup() -> str:
     start = HTML.index('id="composerMobileConfigPanel"')
     start = HTML.rfind("<div", 0, start)
@@ -152,6 +165,66 @@ def test_toolsets_resize_handler_uses_the_shared_anchor():
     handler = UI_JS[start : UI_JS.index("});", start)]
     assert "_toolsetsDropdownAnchor()" in handler, handler
     assert "$('composerToolsetsChip')" not in handler, handler
+
+
+# Controls that own both a footer chip and an overflow row. Anchoring on the
+# panel's `.open` alone is wrong for these: at the widths where the footer keeps
+# its chip, the row is display:none and has no box.
+DUAL_SURFACE_ANCHORS = [
+    ("_positionModelDropdown", "composerMobileModelAction"),
+    ("_positionReasoningDropdown", "composerMobileReasoningAction"),
+    ("_toolsetsDropdownAnchor", "composerMobileToolsetsAction"),
+]
+
+
+def test_dropdown_anchors_require_the_overflow_row_to_be_laid_out():
+    """`panel.open && row` picks a zero-rect row at any width where the footer
+    still shows the chip, dropping the popup at the footer's left edge."""
+    helper = _function_body(UI_JS, "function _composerOverflowAnchor")
+    assert "offsetParent !== null" in helper, helper
+    assert "classList.contains('open')" in helper, helper
+
+    for fn, row in DUAL_SURFACE_ANCHORS:
+        body = _function_body(UI_JS, f"function {fn}")
+        assert f"_composerOverflowAnchor('{row}'" in body, (
+            f"{fn} must resolve its anchor through _composerOverflowAnchor"
+        )
+        assert "classList.contains('open')" not in body, (
+            f"{fn} still picks the overflow row from the panel's open state alone"
+        )
+
+    ws = _function_body(
+        (REPO / "static" / "panels.js").read_text(encoding="utf-8"),
+        "function _positionComposerWsDropdown",
+    )
+    assert "_composerOverflowAnchor('composerMobileWorkspaceAction'" in ws, ws
+
+
+def test_every_profile_label_write_resyncs_the_overflow_row():
+    """The panel stays open across a profile switch, so a writer that updates
+    #profileChipLabel without resyncing leaves the row showing the old name."""
+    for name in ("ui.js", "panels.js", "boot.js"):
+        src = (REPO / "static" / name).read_text(encoding="utf-8")
+        for m in re.finditer(r"^(.*?)\.textContent\s*=\s*(?!.*titlebar).*$", src, re.M):
+            line = m.group(0)
+            if "profileChipLabel" not in line and not re.search(
+                r"\b_?(_chipLabel|profileLabel|_profileLabel)\b", line
+            ):
+                continue
+            tail = src[m.end() : m.end() + 400]
+            assert "_syncComposerOverflowLabels()" in tail, (
+                f"{name}: this #profileChipLabel write does not resync the "
+                f"overflow row:\n{line.strip()}"
+            )
+
+
+def test_escape_closes_the_saved_prompts_popup_with_the_panel():
+    """Saved prompts is positioned against the footer, not the panel, so closing
+    the panel alone leaves it on screen with its trigger hidden."""
+    start = UI_JS.index("document.addEventListener('keydown',function(e){\n  if(e.key!=='Escape') return;")
+    handler = UI_JS[start : UI_JS.index("\n});", start)]
+    assert "savedPromptsPopup" in handler, handler
+    assert "aria-expanded" in handler, "the trigger's expanded state must reset too"
 
 
 def test_widening_the_window_no_longer_closes_the_panel():

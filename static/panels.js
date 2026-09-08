@@ -6111,10 +6111,10 @@ function _positionComposerWsDropdown(){
   const dd=$('composerWsDropdown');
   const chip=$('composerWorkspaceGroup')||$('composerWorkspaceChip');
   const mobileAction=$('composerMobileWorkspaceAction');
-  const panel=$('composerMobileConfigPanel');
   const footer=document.querySelector('.composer-footer');
-  // While the mobile config panel is open, anchor to #composerMobileWorkspaceAction instead of only the desktop workspace chip.
-  const anchor=(panel&&panel.classList.contains('open')&&mobileAction)?mobileAction:chip;
+  // The workspace chip left the footer row in HWEB-7, so the open panel's row is
+  // normally the anchor — but only when it is actually laid out.
+  const anchor=_composerOverflowAnchor('composerMobileWorkspaceAction',chip)||mobileAction||chip;
   if(!dd||!anchor||!footer)return;
   const chipRect=anchor.getBoundingClientRect();
   const footerRect=footer.getBoundingClientRect();
@@ -7374,6 +7374,10 @@ async function switchToProfile(name) {
   if (_titlebarBtn) { _titlebarBtn.classList.add('switching'); _titlebarBtn.disabled = true; }
   // Optimistic name update — shows the target name right away
   if (_chipLabel) _chipLabel.textContent = name;
+  // The overflow panel stays open across a switch (clicks in #profileDropdown
+  // are exempt from its click-away), so its row has to follow the chip here
+  // rather than waiting for the next open. (HWEB-7)
+  if (typeof _syncComposerOverflowLabels === 'function') _syncComposerOverflowLabels();
   if (_titlebarLabel) _titlebarLabel.textContent = name;
 
   // ── Clear stale content + show loading skeletons immediately (#4662) ───────
@@ -7623,6 +7627,7 @@ async function switchToProfile(name) {
   } catch (e) {
     // Revert the optimistic name update on error
     if (_switchGen === _profileSwitchGeneration && _chipLabel) _chipLabel.textContent = _prevProfileName;
+    if (typeof _syncComposerOverflowLabels === 'function') _syncComposerOverflowLabels();
     if (_switchGen === _profileSwitchGeneration && _titlebarLabel) _titlebarLabel.textContent = _prevProfileName;
     if (_switchGen === _profileSwitchGeneration) showToast(t('switch_failed') + e.message);
     // The switch failed, so we're still on the previous profile and its caches

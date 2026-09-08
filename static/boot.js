@@ -3640,6 +3640,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
+  if(typeof _syncComposerOverflowLabels==='function') _syncComposerOverflowLabels();
   const titleLabel=$('titlebarProfileLabel');
   if(titleLabel) titleLabel.textContent=S.activeProfile||'default';
   const profileIntent=(typeof _profileQueryIntentFromLocation==='function')?_profileQueryIntentFromLocation():null;

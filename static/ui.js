@@ -4258,8 +4258,7 @@ function _positionModelDropdown(){
   const mobileAction=$('composerMobileModelAction');
   const footer=document.querySelector('.composer-footer');
   if(!dd||!footer) return;
-  const panel=$('composerMobileConfigPanel');
-  const anchor=(panel&&panel.classList.contains('open')&&mobileAction)?mobileAction:(chip&&chip.offsetParent?chip:mobileAction);
+  const anchor=_composerOverflowAnchor('composerMobileModelAction',chip)||mobileAction;
   if(!anchor) return;
   const isPhone=typeof window.matchMedia==='function'&&window.matchMedia('(max-width:640px)').matches;
   if(isPhone){
@@ -5683,11 +5682,9 @@ function toggleReasoningDropdown(){
 function _positionReasoningDropdown(){
   const dd=$('composerReasoningDropdown');
   const chip=$('composerReasoningChip');
-  const mobileAction=$('composerMobileReasoningAction');
   const footer=document.querySelector('.composer-footer');
   if(!dd||!chip||!footer) return;
-  const panel=$('composerMobileConfigPanel');
-  const anchor=(panel&&panel.classList.contains('open')&&mobileAction)?mobileAction:chip;
+  const anchor=_composerOverflowAnchor('composerMobileReasoningAction',chip)||chip;
   const chipRect=anchor.getBoundingClientRect();
   const footerRect=footer.getBoundingClientRect();
   let left=chipRect.left-footerRect.left;
@@ -5922,15 +5919,23 @@ function _populateToolsetsDropdown() {
   _renderToolsetsPresetSections({ state, input });
 }
 
-function _toolsetsDropdownAnchor() {
-  // HWEB-7: the toolsets chip lives in the overflow panel, so the open panel's
-  // row is the anchor; the footer chip stays the fallback for any width where
-  // the container query still shows it.
+// HWEB-7: a control can have a footer chip, an overflow row, or both showing,
+// and which one is laid out changes with the fit stage. An open panel is not
+// enough to pick the row — the model, reasoning and context rows are
+// display:none at the widths where the footer keeps its own chip, so anchoring
+// on `.open` alone reads a zero rect and drops the popup at the footer's left
+// edge. Prefer the row only when it actually has a box, then the chip, then
+// nothing (callers close rather than anchor to a zero rect, per #1431).
+function _composerOverflowAnchor(rowId, chip) {
   const panel = $('composerMobileConfigPanel');
-  const action = $('composerMobileToolsetsAction');
-  if (panel && panel.classList.contains('open') && action && action.offsetParent !== null) return action;
-  const chip = $('composerToolsetsChip');
+  const row = $(rowId);
+  if (panel && panel.classList.contains('open') && row && row.offsetParent !== null) return row;
   return (chip && chip.offsetParent !== null) ? chip : null;
+}
+window._composerOverflowAnchor = _composerOverflowAnchor;
+
+function _toolsetsDropdownAnchor() {
+  return _composerOverflowAnchor('composerMobileToolsetsAction', $('composerToolsetsChip'));
 }
 
 function _positionToolsetsDropdown() {
@@ -6133,7 +6138,7 @@ function openMobileComposerConfig(){
   closeModelDropdown();
   closeReasoningDropdown();
   if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
-  _syncComposerOverflowLabels();
+  if(typeof _syncComposerOverflowLabels==='function') _syncComposerOverflowLabels();
   panel.classList.add('open');
   _syncMobileComposerConfigButton(true);
 }
@@ -6192,6 +6197,14 @@ document.addEventListener('keydown',function(e){
   closeReasoningDropdown();
   if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
   if(typeof closeProfileDropdown==='function') closeProfileDropdown();
+  // Saved prompts opens from a panel row but is positioned against the footer,
+  // so closing the panel alone would leave it on screen with its trigger gone.
+  const savedPopup=$('savedPromptsPopup');
+  if(savedPopup&&savedPopup.style.display!=='none'){
+    savedPopup.style.display='none';
+    const savedBtn=$('btnSavedPrompts');
+    if(savedBtn) savedBtn.setAttribute('aria-expanded','false');
+  }
   const btn=$('composerMobileConfigBtn');
   if(btn&&typeof btn.focus==='function'){try{btn.focus({preventScroll:true});}catch(_){btn.focus();}}
 });
@@ -11608,6 +11621,7 @@ function syncTopbar(){
     // Update profile chip even when no session is active (e.g. right after profile switch)
     const _profileLabel=$('profileChipLabel');
     if(_profileLabel) _profileLabel.textContent=S.activeProfile||'default';
+    if(typeof _syncComposerOverflowLabels==='function') _syncComposerOverflowLabels();
     const _titleLabel=$('titlebarProfileLabel');
     if(_titleLabel) _titleLabel.textContent=S.activeProfile||'default';
     return;
@@ -11735,6 +11749,7 @@ function syncTopbar(){
   // unaffected by this line.
   const profileLabel=$('profileChipLabel');
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
+  if(typeof _syncComposerOverflowLabels==='function') _syncComposerOverflowLabels();
   const titleLabel=$('titlebarProfileLabel');
   if(titleLabel) titleLabel.textContent=S.activeProfile||'default';
 }
