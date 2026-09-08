@@ -23,8 +23,37 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
+
+
+@pytest.fixture
+def upd():
+    """Import ``api.updates`` fresh, then put the original module back.
+
+    These tests re-import the module so it picks up a stable CWD. Dropping it
+    from ``sys.modules`` without restoring leaves a second module object live
+    for the rest of the session, each with its own ``WEBUI_VERSION`` computed
+    by its own ``git describe`` call. A module that bound the constant at import
+    time then compares a stale value against whatever product code reads later
+    — which is how the tagless CI checkout produced a 7-character version in one
+    place and an 8-character one in the other.
+    """
+    import api as api_package
+
+    original = sys.modules.get('api.updates')
+    with patch.dict(sys.modules):
+        sys.modules.pop('api.updates', None)
+        try:
+            from api import updates as module
+            yield module
+        finally:
+            # A dotted re-import inside the block would rebind this attribute to
+            # a second module object; patch.dict only restores the mapping.
+            if original is not None:
+                api_package.updates = original
 
 
 # ── 1. Server-side: api.updates._check_repo uses merge-base, not HEAD ──
@@ -83,7 +112,7 @@ def _short_sha(repo, ref):
     return out.stdout.strip()
 
 
-def test_current_sha_is_merge_base_not_local_HEAD(tmp_path, monkeypatch):
+def test_current_sha_is_merge_base_not_local_HEAD(tmp_path, monkeypatch, upd):
     """Reporter's exact scenario: local has unpushed commits, upstream advanced.
 
     Before #1579 fix: current_sha = local HEAD = unpublished SHA → URL 404s.
@@ -96,11 +125,6 @@ def test_current_sha_is_merge_base_not_local_HEAD(tmp_path, monkeypatch):
 
     head_sha = _short_sha(repo, 'HEAD')
     expected_base = _short_sha(repo, 'HEAD~2')  # merge-base in this scenario
-
-    # Import updates with a stable CWD
-    if 'api.updates' in sys.modules:
-        del sys.modules['api.updates']
-    from api import updates as upd
 
     result = upd._check_repo(repo, 'webui')
 
@@ -135,16 +159,13 @@ def test_current_sha_is_merge_base_not_local_HEAD(tmp_path, monkeypatch):
     )
 
 
-def test_current_sha_equals_HEAD_when_no_local_commits(tmp_path):
+def test_current_sha_equals_HEAD_when_no_local_commits(tmp_path, upd):
     """Backward-compat: pure-behind clone (no local-only commits) is unchanged.
 
     merge-base equals HEAD in this case — so the URL is identical to what
     we shipped before #1579.
     """
     repo = _make_throwaway_repo(tmp_path, local_only_commits=0, upstream_advanced=4)
-    if 'api.updates' in sys.modules:
-        del sys.modules['api.updates']
-    from api import updates as upd
     result = upd._check_repo(repo, 'webui')
 
     head_sha = _short_sha(repo, 'HEAD')
@@ -155,15 +176,12 @@ def test_current_sha_equals_HEAD_when_no_local_commits(tmp_path):
     assert result['behind'] == 4
 
 
-def test_current_sha_falls_back_to_None_when_merge_base_fails(tmp_path):
+def test_current_sha_falls_back_to_None_when_merge_base_fails(tmp_path, upd):
     """Defensive: if merge-base errors (shallow clone, no shared history),
     return current_sha=None so the JS link guard suppresses the bad link
     rather than emitting one that 404s.
     """
     repo = _make_throwaway_repo(tmp_path, local_only_commits=0, upstream_advanced=1)
-    if 'api.updates' in sys.modules:
-        del sys.modules['api.updates']
-    from api import updates as upd
 
     # Patch _run_git so any 'merge-base' call returns failure
     real_run = upd._run_git
@@ -224,15 +242,12 @@ def test_whats_new_link_suppressed_when_current_sha_falsy():
 
 # ── 3. End-to-end: simulate the exact reporter URL shape ──
 
-def test_reporter_url_shape_no_longer_produces_invalid_compare_url(tmp_path):
+def test_reporter_url_shape_no_longer_produces_invalid_compare_url(tmp_path, upd):
     """Reporter saw https://github.com/.../compare/c660c7f...86cb22e where
     c660c7f was an unpublished local SHA. After fix, the URL should use
     a SHA that exists upstream.
     """
     repo = _make_throwaway_repo(tmp_path, local_only_commits=2, upstream_advanced=5)
-    if 'api.updates' in sys.modules:
-        del sys.modules['api.updates']
-    from api import updates as upd
     result = upd._check_repo(repo, 'webui')
 
     head_sha = _short_sha(repo, 'HEAD')
