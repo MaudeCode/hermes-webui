@@ -3284,6 +3284,14 @@
     .session-item{padding-right:6px;}
     .session-item.streaming,.session-item.unread{padding-right:40px;}
     .session-item:focus-within,.session-item.menu-open{padding-right:6px;}
+    /* The cluster is hidden here, so the <=640px reservation above must not
+       survive — it would leave a skinned active row an empty 58px gutter.
+       Restore what the skins reserve on their own: their 12px at rest, and
+       40px where the attention indicator shows. */
+    :root[data-skin] .session-item.active{padding-right:12px;}
+    :root[data-skin] .session-item.active.streaming,
+    :root[data-skin] .session-item.active.unread,
+    :root[data-skin] .session-item.active.needs-attention{padding-right:40px;}
   }
 
   @media (max-width: 340px){

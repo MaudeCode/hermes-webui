@@ -253,13 +253,16 @@ def test_every_skin_active_row_reserves_the_same_cluster_width():
         assert attention in STYLE_CSS, f"{skin} attention reservation changed unexpectedly"
 
 
-def _measured_padding_right(skin, width, classes):
+def _measured_padding_right(skin, width, classes, coarse=False):
     """Measure the real cascade: load style.css in Chromium and read the row."""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         pytest.skip("playwright not installed")
+    # The viewport meta matters: without it a mobile context lays out at 980px
+    # and the max-width:640px block never matches.
     html = f"""<!doctype html><html data-skin="{skin}" class="dark"><head>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>{STYLE_CSS}</style></head>
     <body><div class="sidebar"><div class="session-list">
     <div class="session-item {classes}" id="row"><div class="session-text">
@@ -273,7 +276,14 @@ def _measured_padding_right(skin, width, classes):
             browser = p.chromium.launch()
         except Exception:
             pytest.skip("chromium not available")
-        page = browser.new_page(viewport={"width": width, "height": 600})
+        # has_touch + is_mobile is what actually flips (hover:none) and
+        # (pointer:coarse) in Chromium; setEmulatedMedia does not carry them.
+        context = browser.new_context(
+            viewport={"width": width, "height": 600},
+            has_touch=coarse,
+            is_mobile=coarse,
+        )
+        page = context.new_page()
         page.set_content(html)
         page.wait_for_timeout(150)
         value = page.evaluate(
@@ -288,3 +298,12 @@ def _measured_padding_right(skin, width, classes):
 def test_narrow_skinned_active_row_reserves_the_cluster_width(skin, classes):
     """Skin rules outrank the ≤640px reservation, and the cluster is always visible there."""
     assert _measured_padding_right(skin, 480, classes) == "64px"
+
+
+@pytest.mark.parametrize("skin", ["graphite", "codex", "terracotta", "github"])
+@pytest.mark.parametrize(
+    "classes,expected", [("active", "12px"), ("active streaming", "40px")]
+)
+def test_coarse_pointer_skinned_active_row_keeps_its_own_gutter(skin, classes, expected):
+    """The cluster is display:none on touch, so it must reserve nothing there."""
+    assert _measured_padding_right(skin, 480, classes, coarse=True) == expected
