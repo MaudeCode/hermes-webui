@@ -80,12 +80,12 @@ def test_no_test_removes_api_updates_from_the_module_cache():
     earlier in the same shard, so this scan is the deterministic half. It covers
     `del`, `.pop(...)` and `monkeypatch.delitem` rather than one literal form.
     """
-    # `monkeypatch.delitem(sys.modules, ...)` restores the entry at teardown, so
-    # it is the sanctioned way to force a fresh import and is not matched here.
-    # `patch.dict(sys.modules)` is deliberately NOT treated as an escape hatch:
-    # it restores the mapping but not the `api.updates` attribute on the `api`
-    # package, which a dotted re-import inside the block rebinds. Match through
-    # an alias (`import sys as _sys`) by anchoring on `.modules`, not on `sys.`.
+    # Only the unscoped spellings are matched. `monkeypatch.delitem` and
+    # `patch.dict(sys.modules)` at least restore the mapping, so they are not
+    # flagged — but neither restores the `api.updates` attribute on the `api`
+    # package, which a dotted re-import inside the block rebinds. Anything that
+    # re-imports has to put both references back; see the message below.
+    # Match through an alias (`import sys as _sys`) by anchoring on `.modules`.
     patterns = (
         re.compile(r"\bdel\s+\w+\.modules\["),
         re.compile(r"\b\w+\.modules\.pop\("),
@@ -108,9 +108,11 @@ def test_no_test_removes_api_updates_from_the_module_cache():
         "removing api.updates from sys.modules leaves the next dotted import to "
         "execute the module a second time, splitting WEBUI_VERSION across the "
         "session (HWEB-86). `from api import updates` returns the existing "
-        "module anyway, so the eviction buys nothing. Use "
-        "`monkeypatch.delitem(sys.modules, ...)` if you genuinely need a fresh "
-        "import:\n" + "\n".join(offenders)
+        "module anyway, so the eviction buys nothing. If you genuinely need a "
+        "fresh import, restore BOTH references afterwards — `sys.modules"
+        "['api.updates']` and the `updates` attribute on the `api` package. "
+        "`monkeypatch.delitem` and `patch.dict` restore only the first:\n"
+        + "\n".join(offenders)
     )
 
 
@@ -152,6 +154,10 @@ def test_version_detection_handles_a_tagless_checkout(tmp_path):
     git("init", "--quiet")
     git("config", "user.email", "test@example.invalid")
     git("config", "user.name", "HWEB-86 test")
+    # Pin the abbreviation: with a global `core.abbrev=40`, `git describe
+    # --always` legitimately returns the full object id and the shortening
+    # assertion below would fail on a correctly working helper.
+    git("config", "core.abbrev", "7")
     (repo / "file.txt").write_text("hweb86\n", encoding="utf-8")
     git("add", "file.txt")
     git("commit", "--quiet", "-m", "initial")
@@ -166,7 +172,10 @@ def test_version_detection_handles_a_tagless_checkout(tmp_path):
         f"expected an abbreviated SHA of {head}, got {described!r} — the tagless "
         "branch must fall back to the bare commit id"
     )
-    assert described != head, "expected the abbreviated form, not the full SHA"
+    assert described != head, (
+        "expected the abbreviated form, not the full SHA (core.abbrev is pinned "
+        "to 7 above so this does not depend on the developer's git config)"
+    )
 
 
 # Reuse the request harness from the sibling resolver test rather than rebuilding it.
