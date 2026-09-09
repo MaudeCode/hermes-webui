@@ -27,6 +27,15 @@ else
 fi
 PID_FILE="${HERMES_WEBUI_PID_FILE:-${_ctl_runtime_root}/webui.pid}"
 LOG_FILE="${HERMES_WEBUI_LOG_FILE:-${_ctl_runtime_root}/webui.log}"
+# Absolutize before anything uses it. The shell resolves the `>>` redirections
+# below against the invocation directory, but the server is exec'd with a
+# different cwd and resolves the exported HERMES_WEBUI_LOG_FILE against that —
+# so a relative override would have rotation watching a different file, or none,
+# while the real log grew unbounded.
+case "${LOG_FILE}" in
+  /*) ;;
+  *) LOG_FILE="${PWD}/${LOG_FILE}" ;;
+esac
 STATE_FILE="${HERMES_WEBUI_CTL_STATE_FILE:-${_ctl_runtime_root}/webui.ctl.env}"
 DEFAULT_STATE_DIR="${HERMES_WEBUI_STATE_DIR:-${_ctl_runtime_root}/webui}"
 DEFAULT_LAUNCHD_LABEL="${HERMES_WEBUI_LAUNCHD_LABEL:-com.parantoux.hermes-webui}"

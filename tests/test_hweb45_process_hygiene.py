@@ -256,7 +256,10 @@ def _write_shard(
     return path
 
 
-# Above pid_max on every supported platform, so `_pid_is_running` is certain.
+# Above pid_max on every supported platform, so `_pid_is_running` reports it dead
+# and the emptied shard is unlinked. Never use a plausible pid here: CI runs in a
+# container where low pids like 1111 are live, and a live owner is deliberately
+# kept as a zero-byte file instead.
 _DEAD_PID = 4194304
 
 
@@ -394,7 +397,7 @@ class TestTurnJournalRetention:
         assert shard.exists()
 
     def test_a_non_numeric_created_at_keeps_the_session_without_raising(self, tmp_path):
-        """`derive_turn_journal_states` would raise and take the whole pass down."""
+        """The event is unusable evidence, but must not abort the pass."""
         journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
         shard = _write_shard(
             journal_dir,
@@ -485,18 +488,95 @@ class TestTurnJournalRetention:
         assert result["pruned"] == 0
         assert shard.exists()
 
+    def test_a_recovery_finding_keeps_the_session(self, tmp_path):
+        """A sidecar that parses fine can still be `shrunken_live` vs its .bak.
+
+        Only `audit_session_recovery` can see that, which is why the RFC gates
+        pruning on the audit rather than on the sidecar's shape.
+        """
+        journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
+        shrunken = _write_shard(
+            journal_dir, f"shrunk~{_DEAD_PID}.jsonl", age_days=90, events=_settled("t1")
+        )
+        healthy = _write_shard(
+            journal_dir, f"whole~{_DEAD_PID}.jsonl", age_days=90, events=_settled("t2")
+        )
+        # A live sidecar with fewer messages than its backup is `shrunken_live`.
+        _write_sidecar(tmp_path, "shrunk", body=json.dumps({"messages": []}))
+        (tmp_path / "shrunk.json.bak").write_text(
+            json.dumps({"messages": [{"role": "user", "content": "hi"}]}),
+            encoding="utf-8",
+        )
+        _write_sidecar(tmp_path, "whole")
+
+        from api.session_recovery import audit_session_recovery
+
+        audit = audit_session_recovery(tmp_path)
+        assert any(
+            item["session_id"] == "shrunk" for item in audit["items"]
+        ), "fixture must actually produce a recovery finding"
+
+        result = turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
+
+        assert shrunken.exists()
+        assert not healthy.exists()
+        assert result["pruned"] == 1
+
+    def test_an_untrustworthy_audit_retains_everything(self, tmp_path, monkeypatch):
+        """No audit, no pruning — the RFC's precondition cannot be assumed met."""
+        journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
+        shard = _write_shard(
+            journal_dir, f"any~{_DEAD_PID}.jsonl", age_days=90, events=_settled("t1")
+        )
+        _write_sidecar(tmp_path, "any")
+        monkeypatch.setattr(
+            turn_journal, "_sessions_with_recovery_findings", lambda root: None
+        )
+
+        result = turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
+
+        assert result["pruned"] == 0
+        assert shard.exists()
+
+    def test_retention_is_disabled_without_advisory_locks(self, tmp_path, monkeypatch):
+        """Windows has no appender lock, so truncation could erase an append."""
+        journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
+        shard = _write_shard(
+            journal_dir, f"winlike~{_DEAD_PID}.jsonl", age_days=90, events=_settled("t1")
+        )
+        _write_sidecar(tmp_path, "winlike")
+        monkeypatch.setattr(turn_journal, "_fcntl", None)
+
+        result = turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
+
+        assert result["pruned"] == 0
+        assert shard.exists()
+        assert shard.stat().st_size > 0
+
+    def test_a_junk_created_at_no_longer_raises_out_of_derive(self):
+        """It used to take down the retention pass and the recovery audit."""
+        events = [
+            {"event": "submitted", "turn_id": "t1", "created_at": "yesterday"},
+            {"event": "completed", "turn_id": "t1", "created_at": None},
+        ]
+
+        states, collisions = turn_journal.derive_turn_journal_states(events)
+
+        assert set(states) == {"t1"}
+        assert collisions == []
+
     def test_a_turn_completed_under_another_pid_is_prunable(self, tmp_path):
         """Shards merge per session: half a turn read alone must not look pending."""
         journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
         first = _write_shard(
             journal_dir,
-            "split~1111.jsonl",
+            f"split~{_DEAD_PID}.jsonl",
             age_days=90,
             events=[{"event": "submitted", "turn_id": "t1", "created_at": 1}],
         )
         second = _write_shard(
             journal_dir,
-            "split~2222.jsonl",
+            f"split~{_DEAD_PID + 1}.jsonl",
             age_days=90,
             events=[{"event": "completed", "turn_id": "t1", "created_at": 2}],
         )
@@ -511,8 +591,8 @@ class TestTurnJournalRetention:
     def test_one_live_shard_keeps_the_whole_session(self, tmp_path):
         """A session written to yesterday keeps its older shards for the merge."""
         journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
-        old_shard = _write_shard(journal_dir, "chatty~1111.jsonl", age_days=90)
-        new_shard = _write_shard(journal_dir, "chatty~2222.jsonl", age_days=1)
+        old_shard = _write_shard(journal_dir, f"chatty~{_DEAD_PID}.jsonl", age_days=90)
+        new_shard = _write_shard(journal_dir, f"chatty~{_DEAD_PID + 1}.jsonl", age_days=1)
         _write_sidecar(tmp_path, "chatty")
 
         result = turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
@@ -587,6 +667,15 @@ class TestWebuiLogRotation:
         monkeypatch.setenv(logging_hygiene._WEBUI_LOG_FILE_ENV, str(ctl_log))
 
         assert logging_hygiene.webui_log_path() == ctl_log
+
+    def test_ctl_absolutizes_a_relative_log_path(self):
+        """A relative override resolves against the invocation cwd, not the
+        server's — ctl.sh must absolutize before redirecting and exporting."""
+        ctl = (Path(__file__).resolve().parent.parent / "ctl.sh").read_text(
+            encoding="utf-8"
+        )
+        assert 'LOG_FILE="${PWD}/${LOG_FILE}"' in ctl
+        assert 'export HERMES_WEBUI_LOG_FILE="${LOG_FILE}"' in ctl
 
     def test_bootstrap_sink_is_the_fallback(self, monkeypatch):
         from api.config import PORT

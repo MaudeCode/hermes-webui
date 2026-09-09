@@ -129,6 +129,21 @@ def append_turn_journal_event(
     return payload
 
 
+def _safe_created_at(event: dict) -> float:
+    """Coerce an event timestamp, treating junk as epoch rather than raising.
+
+    Every consumer orders events by ``created_at``, and a single hand-edited or
+    crash-torn value used to raise straight out of
+    :func:`derive_turn_journal_states` — taking down the retention pass and
+    ``audit_session_recovery`` with it, on every run, for as long as the value
+    existed. Ordering degrades; nothing else breaks.
+    """
+    try:
+        return float((event or {}).get("created_at") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def read_turn_journal(session_id: str, *, session_dir: Path | None = None) -> dict:
     """Read a session journal, merging all pid-scoped shards and returning valid events plus malformed lines."""
     sid = str(session_id or "").strip()
@@ -164,12 +179,7 @@ def read_turn_journal(session_id: str, *, session_dir: Path | None = None) -> di
                 events.append(event)
             else:
                 malformed.append({"line": line_no, "raw": raw, "shard": shard.name})
-    def _safe_ts(e):
-        try:
-            return float(e.get("created_at") or 0)
-        except (ValueError, TypeError):
-            return 0.0
-    events.sort(key=_safe_ts)
+    events.sort(key=_safe_created_at)
     return {"session_id": str(session_id), "events": events, "malformed": malformed}
 
 
@@ -200,12 +210,12 @@ def derive_turn_journal_states(events: Iterable[dict]) -> tuple[dict[str, dict],
             terminal_events.setdefault(turn_id, []).append(event)
         # Existing latest-by-timestamp derivation
         previous = states.get(turn_id)
-        if previous is None or float(event.get('created_at') or 0) >= float(previous.get('created_at') or 0):
+        if previous is None or _safe_created_at(event) >= _safe_created_at(previous):
             states[turn_id] = event
 
     # Build collision list: turn_ids with more than one terminal event
     collisions = [
-        {'turn_id': tid, 'events': sorted(evts, key=lambda e: float(e.get('created_at') or 0))}
+        {'turn_id': tid, 'events': sorted(evts, key=_safe_created_at)}
         for tid, evts in terminal_events.items()
         if len(evts) > 1
     ]
@@ -325,22 +335,31 @@ def _retention_seconds_from_env() -> float:
     return max(0.0, days) * 24 * 60 * 60
 
 
-def _session_sidecar_is_intact(session_id: str, root: Path) -> bool:
-    """True when the session's live sidecar exists and parses as a mapping.
+def _sessions_with_recovery_findings(root: Path) -> set[str] | None:
+    """Session ids the recovery audit has anything to say about, or ``None``.
 
     ``docs/rfcs/turn-journal.md`` gates pruning on sidecar/index recovery having
-    no findings. Running the full audit from here would invert the dependency —
-    ``api.session_recovery`` imports this module — and rescan the whole state
-    directory on every pass. So check the one condition that makes the journal
-    the sole surviving evidence for a session: a ``{sid}.json`` that is absent
-    or unreadable means the session is awaiting repair, and its journal is what
-    the repair would be built from.
+    no findings, and only the audit knows what a finding is: a live sidecar can
+    parse perfectly and still be ``shrunken_live`` because its ``.json.bak``
+    holds more messages, and index findings are invisible from the file alone.
+
+    Run once per pass, not once per session — the audit walks the whole state
+    directory. The import is local because ``api.session_recovery`` imports this
+    module at load time; by the time retention runs, both are resolved.
+    ``None`` means the audit could not be trusted, and the caller retains
+    everything.
     """
     try:
-        payload = json.loads((root / f"{session_id}.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, ValueError):
-        return False
-    return isinstance(payload, dict)
+        from api.session_recovery import audit_session_recovery  # noqa: PLC0415
+
+        audit = audit_session_recovery(root)
+    except Exception:
+        return None
+    return {
+        str(item.get("session_id") or "")
+        for item in (audit.get("items") or [])
+        if item.get("session_id")
+    }
 
 
 def _event_is_well_formed(event: object) -> bool:
@@ -366,6 +385,21 @@ def _event_is_well_formed(event: object) -> bool:
     return True
 
 
+def _session_sidecar_is_intact(session_id: str, root: Path) -> bool:
+    """True when the session's live sidecar exists and parses as a mapping.
+
+    Complements the recovery-audit gate rather than duplicating it: the audit
+    walks the sidecars it can read, so a `{sid}.json` that is absent or corrupt
+    produces no finding at all — and that is exactly the case where the journal
+    is the session's only surviving evidence.
+    """
+    try:
+        payload = json.loads((root / f"{session_id}.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    return isinstance(payload, dict)
+
+
 def _session_is_prunable(session_id: str, root: Path) -> bool:
     """True only on positive evidence that nothing still needs this journal.
 
@@ -378,7 +412,12 @@ def _session_is_prunable(session_id: str, root: Path) -> bool:
     * a JSON-decodable event missing ``turn_id``, ``event`` or a numeric
       ``created_at``, which the malformed list never sees;
     * a nonterminal turn, which the startup audit still reports as pending;
-    * a missing or unparseable live sidecar, i.e. a session awaiting repair.
+    * a missing or unparseable live sidecar. The recovery audit walks only the
+      sidecars it can parse, so it never reports these — the journal is the
+      session's sole surviving evidence.
+
+    Recovery *findings* are a separate gate, applied once per pass by
+    :func:`_sessions_with_recovery_findings`.
     """
     try:
         journal = read_turn_journal(session_id, session_dir=root)
@@ -392,6 +431,9 @@ def _session_is_prunable(session_id: str, root: Path) -> bool:
     states, _ = derive_turn_journal_states(events)
     if any(not is_terminal_turn_event(event) for event in states.values()):
         return False
+    # The audit gate below is about *recovery* findings; it does not notice a
+    # sidecar that is simply gone or unreadable, because it only walks the
+    # sidecars it can parse. Both checks are needed.
     return _session_sidecar_is_intact(session_id, root)
 
 
@@ -438,12 +480,21 @@ def _release_expired_shard(path: Path, expected_mtime: float) -> bool:
     without a safe liveness probe keeps the (now empty) inode;
     ``delete_turn_journal`` releases it with the session.
 
+Without ``fcntl`` — Windows — :func:`_journal_file_lock` is a documented
+    no-op, so nothing stops a first append from landing between the ``fstat``
+    and the ``truncate`` and being erased. There is no second mechanism to fall
+    back on, because synchronizing here alone would not help: the appender does
+    not take one either. So this fails closed and reclaims nothing on those
+    platforms rather than risking a lost event.
+
     Residual, stated rather than papered over: pid liveness is host-local, so a
     second WebUI process on *another* host sharing this state directory over a
     network filesystem could still be appending to a shard whose pid looks dead
     here. Advisory locks are unreliable on those filesystems regardless, and the
     shard must also have been silent for the whole retention window.
     """
+    if _fcntl is None:
+        return False
     try:
         with open(path, "r+b") as fh:
             with _journal_file_lock(fh):
@@ -479,7 +530,11 @@ def prune_stale_turn_journals(
     * :func:`_session_is_prunable` finds positive evidence the session is
       settled — judged on the *merged* journal, because a turn submitted under
       one pid can be completed under another and half a turn read alone looks
-      pending.
+      pending;
+    * ``audit_session_recovery`` reports nothing about it. That is the RFC's
+      precondition, and only the audit can see a ``shrunken_live`` sidecar or an
+      index finding. It runs once per pass, and an audit that cannot be trusted
+      retains everything.
 
     Every expired shard is emptied under the appender's own advisory lock, and
     the empty file is unlinked only when its owning pid is provably gone — so a
@@ -515,8 +570,18 @@ def prune_stale_turn_journals(
         session_id = stem[:tilde] if tilde > 0 else stem
         by_session.setdefault(session_id, []).append((path, stat))
 
+    if not by_session:
+        return result
+    flagged = _sessions_with_recovery_findings(root)
+    if flagged is None:
+        # The audit is the RFC's precondition; without a trustworthy answer,
+        # retain everything.
+        return result
+
     for session_id, shards in by_session.items():
         if any(stat.st_mtime >= cutoff for _, stat in shards):
+            continue
+        if session_id in flagged:
             continue
         if not _session_is_prunable(session_id, root):
             continue

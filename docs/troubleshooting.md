@@ -195,9 +195,20 @@ another, and half a turn read on its own looks pending:
 - every event carries a `turn_id`, an `event` name and a numeric `created_at` —
   a JSON-decodable line missing those is valid syntax but unusable evidence;
 - the live `{session_id}.json` sidecar exists and parses (a session whose
-  sidecar is gone or corrupt is awaiting repair).
+  sidecar is gone or corrupt is awaiting repair, and the audit below only walks
+  the sidecars it *can* read, so it never reports this case);
+- `audit_session_recovery` reports no finding for it. That is the RFC's
+  precondition and only the audit can see, for example, a `shrunken_live`
+  sidecar that parses perfectly but holds fewer messages than its `.json.bak`.
+  It runs once per pass, and an audit that cannot be trusted retains everything.
 
 Any uncertainty keeps the shards. Deleting the session releases them.
+
+Retention is disabled entirely on platforms without `fcntl` — Windows. The
+appender's advisory lock is a documented no-op there, so nothing would stop a
+first append from landing between the size check and the truncation and being
+erased. There is no second mechanism to reach for, because the appender does
+not take one either.
 
 Every expired shard is emptied in place, under the same advisory lock
 `append_turn_journal_event` takes, with an mtime recheck that aborts if an
