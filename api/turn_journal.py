@@ -26,6 +26,8 @@ TURN_JOURNAL_DIR_NAME = "_turn_journal"
 _TERMINAL_EVENTS = {"completed", "interrupted"}
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _STREAM_TURN_CACHE_MAX = 4096
+_TURN_JOURNAL_RETENTION_DAYS_ENV = "HERMES_WEBUI_TURN_JOURNAL_RETENTION_DAYS"
+_TURN_JOURNAL_DEFAULT_RETENTION_DAYS = 14.0
 _STREAM_TURN_CACHE: "OrderedDict[tuple[str, str], str]" = OrderedDict()
 _STREAM_TURN_CACHE_LOCK = threading.Lock()
 
@@ -309,6 +311,106 @@ def delete_turn_journal(session_id: str, *, session_dir: Path | None = None) -> 
             # Best-effort cleanup; the caller logs the overall delete outcome.
             pass
     return removed
+
+
+def _retention_seconds_from_env() -> float:
+    raw = os.environ.get(
+        _TURN_JOURNAL_RETENTION_DAYS_ENV,
+        str(_TURN_JOURNAL_DEFAULT_RETENTION_DAYS),
+    )
+    try:
+        days = float(raw)
+    except (TypeError, ValueError):
+        days = _TURN_JOURNAL_DEFAULT_RETENTION_DAYS
+    return max(0.0, days) * 24 * 60 * 60
+
+
+def _session_has_pending_turn(session_id: str, root: Path) -> bool:
+    """True when the session's merged journal still holds a nonterminal turn.
+
+    Fails closed: an unreadable or unparseable id counts as pending, so a shard
+    is only ever deleted on positive evidence that nothing is waiting on it.
+    """
+    try:
+        journal = read_turn_journal(session_id, session_dir=root)
+    except (ValueError, OSError):
+        return True
+    states, _ = derive_turn_journal_states(journal.get("events") or [])
+    return any(not is_terminal_turn_event(event) for event in states.values())
+
+
+def prune_stale_turn_journals(
+    *,
+    session_dir: Path | None = None,
+    now: float | None = None,
+    retention_seconds: float | None = None,
+    dry_run: bool = False,
+) -> dict:
+    """Delete settled turn-journal shards nothing has appended to in the window.
+
+    The run journal's retention keys off a terminal run event; the turn journal
+    has no such per-file marker, because a shard stays open for as long as its
+    session might submit another turn. So a shard is expired only when all three
+    hold:
+
+    * it is not owned by the running process — those belong to a session this
+      server can still append to, whatever their age;
+    * no shard of that session has been written to inside the retention window;
+    * the session's *merged* journal has no nonterminal turn left. Judging the
+      merged state rather than one shard matters because a turn submitted under
+      one pid can be completed under another, and half a turn read alone looks
+      pending. A session that keeps a pending turn keeps its shards, exactly
+      like the run journal; ``delete_turn_journal`` releases them when the
+      session is deleted.
+
+    Returns ``{"examined", "pruned", "bytes_reclaimed"}`` counted in shards.
+    ``dry_run`` counts without deleting.
+    """
+    root = Path(session_dir) if session_dir is not None else _default_session_dir()
+    journal_dir = root / TURN_JOURNAL_DIR_NAME
+    retention = float(
+        _retention_seconds_from_env()
+        if retention_seconds is None
+        else max(0.0, retention_seconds)
+    )
+    cutoff = float(now if now is not None else time.time()) - retention
+    result = {"examined": 0, "pruned": 0, "bytes_reclaimed": 0}
+    if not journal_dir.is_dir():
+        return result
+
+    own_suffix = f"~{os.getpid()}.jsonl"
+    by_session: dict[str, list[tuple[Path, os.stat_result]]] = {}
+    for path in sorted(journal_dir.glob("*.jsonl")):
+        try:
+            if not path.is_file():
+                continue
+            stat = path.stat()
+        except OSError:
+            continue
+        result["examined"] += 1
+        stem = path.stem  # "sid~12345" or legacy "sid"
+        tilde = stem.find("~")
+        session_id = stem[:tilde] if tilde > 0 else stem
+        by_session.setdefault(session_id, []).append((path, stat))
+
+    for session_id, shards in by_session.items():
+        if any(path.name.endswith(own_suffix) for path, _ in shards):
+            continue
+        if any(stat.st_mtime >= cutoff for _, stat in shards):
+            continue
+        if _session_has_pending_turn(session_id, root):
+            continue
+        for path, stat in shards:
+            if not dry_run:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    continue
+            result["pruned"] += 1
+            result["bytes_reclaimed"] += int(stat.st_size)
+    return result
 
 
 def is_terminal_turn_event(event: dict) -> bool:

@@ -72,6 +72,14 @@ _REAPER_THREAD: Optional[threading.Thread] = None
 _REAPER_STOP = threading.Event()
 _REAPER_INTERVAL_SECS = 60.0
 
+# Process-hygiene work that has to happen on a timer rather than on whatever
+# request path happens to run next (HWEB-45). The reaper thread is the only
+# always-on periodic tick in the server, so it owns this too: journal
+# retention, WebUI log rotation, idle provider-probe eviction, and reaping any
+# detached external-app spawn that outlived its inline wait.
+_RETENTION_INTERVAL_SECS = 6 * 60 * 60
+_retention_last_run: Optional[float] = None
+
 # Serializes the check-then-start of the module's daemon threads
 # (``start_drain_thread`` / ``start_session_channel_reaper``). Without it two
 # concurrent callers can both observe ``is_alive() == False`` and each spawn a
@@ -438,10 +446,60 @@ def should_emit_session_updated(
     return persisted_count > subscriber_known_count
 
 
+def _run_process_hygiene() -> None:
+    """One hygiene pass: cheap sweeps every tick, retention on a long interval.
+
+    Every step is best-effort — a failure here must never stop the reaper from
+    collecting channels.
+    """
+    global _retention_last_run
+
+    try:
+        from api.logging_hygiene import rotate_webui_log
+        from api.providers import _cleanup_account_usage_probe_workers
+        from api.run_journal import schedule_run_journal_prune
+        from api.subprocess_utils import reap_detached_spawns
+        from api.turn_journal import prune_stale_turn_journals
+    except Exception:
+        logger.warning("Process hygiene imports failed", exc_info=True)
+        return
+
+    def _step(label: str, run) -> None:
+        try:
+            run()
+        except Exception:
+            logger.warning("%s failed", label, exc_info=True)
+
+    # Cheap, every tick. The probe-pool idle window is minutes, so eviction has
+    # to run at tick cadence to mean anything; the other two are one stat() and
+    # a poll() over a set that is empty almost always.
+    _step("provider probe-pool eviction", _cleanup_account_usage_probe_workers)
+    _step("WebUI log rotation", rotate_webui_log)
+    _step("detached spawn reaping", reap_detached_spawns)
+
+    now = time.monotonic()
+    if _retention_last_run is not None and now - _retention_last_run < _RETENTION_INTERVAL_SECS:
+        return
+    _retention_last_run = now
+
+    def _prune_turn_journals() -> None:
+        pruned = prune_stale_turn_journals()
+        if pruned["pruned"]:
+            logger.info(
+                "turn-journal retention pruned %d shards (%d bytes)",
+                pruned["pruned"],
+                pruned["bytes_reclaimed"],
+            )
+
+    _step("run-journal retention", schedule_run_journal_prune)
+    _step("turn-journal retention", _prune_turn_journals)
+
+
 def _reaper_loop() -> None:
     logger.info("SessionChannel reaper thread started")
     while not _REAPER_STOP.is_set():
         try:
+            _run_process_hygiene()
             now = time.time()
             collected: list[str] = []
             with SESSION_CHANNELS_LOCK:

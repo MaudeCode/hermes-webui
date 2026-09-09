@@ -171,6 +171,50 @@ The policy can be adjusted with:
 
 Changing these values does not affect active/nonterminal run recovery.
 
+Retention also runs from the SessionChannel reaper thread, at most once every
+six hours. Before that it fired only after a terminal run event, so a server
+left idle with a large journal directory never reclaimed anything.
+
+---
+
+## Turn-journal storage keeps growing
+
+The turn journal writes one shard per session per server process
+(`_turn_journal/{session_id}~{pid}.jsonl`). The same six-hourly retention pass
+as the run journal deletes a session's shards, but only when all three hold:
+
+- none of them is owned by the running server process — those belong to a
+  session this server can still append to, whatever their age;
+- none of them has been written to in the last 14 days;
+- the session's *merged* journal has no nonterminal turn left.
+
+The merged check matters because a turn submitted under one pid can be completed
+under another, and half a turn read on its own looks pending. A session that
+still holds a pending turn keeps its shards so the startup audit can keep
+reporting it, exactly like a nonterminal run journal; deleting the session
+releases them.
+
+- `HERMES_WEBUI_TURN_JOURNAL_RETENTION_DAYS`, default `14`; set `0` to prune
+  every settled shard not owned by the running process on the next pass.
+
+---
+
+## The `bootstrap-<port>.log` file keeps growing
+
+`bootstrap.py` starts the server with stdout and stderr redirected into
+`{state_dir}/bootstrap-<port>.log` at the file-descriptor level, so no
+in-process log handler owns that sink. Once the file passes 32 MiB the server
+copies it to `bootstrap-<port>.log.1` and truncates the original in place.
+
+Truncation, not rename: every writer holds an inherited `O_APPEND` descriptor on
+the open file, and renaming would leave all of them writing into the rotated
+inode while the new path stayed empty. Lines written during the copy are lost,
+the same trade `logrotate`'s `copytruncate` mode makes. One previous generation
+is kept.
+
+- `HERMES_WEBUI_LOG_MAX_BYTES`, default `33554432` (32 MiB); set `0` to disable
+  rotation.
+
 ---
 
 ## "Context compression exhausted" after a long-running turn

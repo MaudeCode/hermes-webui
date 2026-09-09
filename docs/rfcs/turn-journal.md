@@ -173,7 +173,7 @@ The latter should be diagnostic-only and redact or omit large attachment payload
 2. Add this journal writer in the turn-submission path behind no config flag; it is local-only and append-only.
 3. Add read-only audit reporting for pending journal turns.
 4. Add safe repair for missing user messages and interruption markers.
-5. Once stable, consider pruning completed journal entries older than a retention window, but only after sidecar/index recovery has no findings.
+5. Once stable, consider pruning completed journal entries older than a retention window, but only after sidecar/index recovery has no findings. **Landed (HWEB-45):** `prune_stale_turn_journals` deletes a session's shards once none has been appended to for `HERMES_WEBUI_TURN_JOURNAL_RETENTION_DAYS` (default 14), none is owned by the running process, and the session's merged journal holds no nonterminal turn. The merged view is the unit of judgement, not the shard: a turn submitted under one pid can be completed under another. Sessions with a pending turn keep their shards for the audit, which is the condition item 3 above asks for.
 
 ## Open questions
 
