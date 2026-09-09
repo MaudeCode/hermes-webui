@@ -35,7 +35,7 @@ def _snapshot_hash(sessions: list) -> str:
     return hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
 
 
-def _cheap_change_fingerprint(db_path: Path) -> str | None:
+def _cheap_change_fingerprint(db_path: Path, *, on_error=None) -> str | None:
     """Return an O(1) change signal for ``state.db``, or ``None`` when unreadable.
 
     Two ``MAX(rowid)`` index lookups — the trick already used by
@@ -48,7 +48,15 @@ def _cheap_change_fingerprint(db_path: Path) -> str | None:
     ``MAX(rowid)`` advances on every INSERT. The file stamps move on every
     commit, which covers the in-place UPDATEs (a title rename, an archive flag,
     a ``role`` retag) and the mid-table DELETEs that ``MAX(rowid)`` alone cannot
-    see — so no periodic full-projection parity pass is needed to catch them.
+    see.
+
+    That stamp coverage is very good but not total: in WAL mode a checkpoint can
+    restart the WAL at a size the file already had, and the main-file change
+    counter only advances at checkpoint, so a pure UPDATE in that window is
+    visible solely through mtime — which collides on a coarse-granularity
+    filesystem (the failure mode already documented in ``api/models.py``). The
+    bounded ``GatewayWatcher.PROJECTION_PARITY_INTERVAL`` projection exists for
+    exactly that residue; it is not on the hot path.
 
     Unlike the old fingerprint this is not scoped to sidebar-visible sources, so
     cron/webui write churn invalidates it too. That costs one bounded projection
@@ -56,7 +64,9 @@ def _cheap_change_fingerprint(db_path: Path) -> str | None:
     ``_snapshot_hash`` still suppresses the resulting no-op notification.
 
     Returns ``None`` on any error so the caller falls back to running the full
-    projection rather than risk skipping a change.
+    projection rather than risk skipping a change; ``on_error`` (when given) is
+    called from inside the handler so the failure can be logged with its
+    traceback instead of vanishing.
     """
     try:
         parts: list = []
@@ -89,6 +99,8 @@ def _cheap_change_fingerprint(db_path: Path) -> str | None:
             parts.append(int.from_bytes(header[24:28], 'big') if len(header) >= 28 else None)
         return repr(parts)
     except Exception:
+        if on_error is not None:
+            on_error("change check failed")
         return None
 
 
@@ -106,11 +118,14 @@ def _get_state_db_path(hermes_home: Path | None = None) -> Path:
     return hermes_home / 'state.db'
 
 
-def _get_agent_sessions_from_db(db_path: Path | None = None) -> list | None:
+def _get_agent_sessions_from_db(db_path: Path | None = None, *, on_error=None) -> list | None:
     """Read all non-webui sessions from state.db.
 
     Returns a list of session dicts (including an empty list for a successful
-    empty projection), or ``None`` when the projection fails.
+    empty projection), or ``None`` when the projection fails. A failure here is
+    the watcher's main silent-death mode (a schema change, a permission error),
+    so ``on_error`` — called from inside the handler — is how it reaches the log
+    with its traceback rather than being swallowed into ``None``.
     """
     db_path = Path(db_path) if db_path is not None else _get_state_db_path()
     if not db_path.exists():
@@ -133,6 +148,8 @@ def _get_agent_sessions_from_db(db_path: Path | None = None) -> list | None:
             })
         return sessions
     except Exception:
+        if on_error is not None:
+            on_error("session projection failed")
         return None
 
 
@@ -151,9 +168,15 @@ class GatewayWatcher:
     """
 
     POLL_INTERVAL = 5  # seconds between polls
-    # A poll that keeps failing silently stops the sidebar updating, so it has to
-    # be visible above debug — but at one tick every 5s an unattended failure
-    # would flood the log, so the warning is rate limited to this interval.
+    # Backstop for the one gap the O(1) fingerprint cannot close: a pure UPDATE
+    # committed into a post-checkpoint WAL that neither grows the file nor moves
+    # the main-file change counter, on a filesystem whose mtime granularity
+    # hides it. Rare enough to run 5x less often than the 60s pass it replaces,
+    # and it never runs on the hot path — only when the fingerprint says idle.
+    PROJECTION_PARITY_INTERVAL = 300.0
+    # A watcher failure that stays at debug stops the sidebar updating with
+    # nothing in the log; one that logs every 5s tick floods it. Rate limit the
+    # warning to this interval instead of choosing one of those.
     ERROR_LOG_INTERVAL = 60.0
     SUBSCRIBER_TIMEOUT = 30  # seconds before sending keepalive comment
 
@@ -274,11 +297,34 @@ class GatewayWatcher:
                 except Exception:
                     logger.debug("Failed to send sentinel to dead subscriber")
 
+    def _warn_failure(self, reason: str):
+        """Surface a watcher failure at warning, rate limited, with its traceback.
+
+        Must be called from inside an ``except`` handler so ``exc_info`` resolves.
+        Every failure path routes here — the poll loop, the change check, and the
+        session projection, which is the one that actually swallows a schema or
+        permission error into ``None`` and stalls the sidebar silently.
+        """
+        now = time.monotonic()
+        if now - self._last_error_log_at >= self.ERROR_LOG_INTERVAL:
+            self._last_error_log_at = now
+            logger.warning(
+                "Gateway watcher %s for %s; the session sidebar will not update "
+                "until it recovers",
+                reason,
+                self._state_db_path,
+                exc_info=True,
+            )
+        else:
+            logger.debug("Gateway watcher %s", reason, exc_info=True)
+
     def _poll_once(self, *, now: float | None = None) -> bool:
         """Run one change-detection pass and report whether projection ran.
 
-        The expensive projection runs only when the O(1) fingerprint moved (or
-        could not be read, in which case we fail closed and project).
+        The expensive projection runs when the O(1) fingerprint moved (or could
+        not be read, in which case we fail closed and project), plus one bounded
+        parity pass per ``PROJECTION_PARITY_INTERVAL`` as the backstop described
+        on ``_cheap_change_fingerprint``.
         """
         db_path = self._state_db_path
         # A watcher may start before the agent has created state.db. Publishing an
@@ -292,12 +338,21 @@ class GatewayWatcher:
         ):
             return False
 
-        cheap_fp = _cheap_change_fingerprint(db_path) if db_path.exists() else ''
+        cheap_fp = (
+            _cheap_change_fingerprint(db_path, on_error=self._warn_failure)
+            if db_path.exists()
+            else ''
+        )
         current_time = time.monotonic() if now is None else now
-        if cheap_fp is not None and cheap_fp == self._last_cheap_fp:
+        parity_due = (
+            self._last_full_projection_at is None
+            or current_time - self._last_full_projection_at
+            >= self.PROJECTION_PARITY_INTERVAL
+        )
+        if cheap_fp is not None and cheap_fp == self._last_cheap_fp and not parity_due:
             return False
 
-        sessions = _get_agent_sessions_from_db(db_path)
+        sessions = _get_agent_sessions_from_db(db_path, on_error=self._warn_failure)
         if sessions is None:
             return False
         current_hash = _snapshot_hash(sessions)
@@ -317,16 +372,7 @@ class GatewayWatcher:
             try:
                 self._poll_once()
             except Exception:
-                now = time.monotonic()
-                if now - self._last_error_log_at >= self.ERROR_LOG_INTERVAL:
-                    self._last_error_log_at = now
-                    logger.warning(
-                        "Gateway watcher poll failed; session sidebar updates are "
-                        "stalled until it recovers",
-                        exc_info=True,
-                    )
-                else:
-                    logger.debug("Error in gateway watcher poll loop", exc_info=True)
+                self._warn_failure("poll loop raised")
 
             # Sleep in small increments so we can stop promptly
             for _ in range(self.POLL_INTERVAL * 10):

@@ -515,7 +515,7 @@ def test_poll_loop_skips_projection_when_unchanged(tmp_path, monkeypatch):
 
     projected = []
 
-    def fake_projection(_path):
+    def fake_projection(_path, **_kwargs):
         projected.append(True)
         return [{"session_id": "tg1"}]
 

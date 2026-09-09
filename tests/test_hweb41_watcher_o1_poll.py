@@ -183,6 +183,42 @@ def test_failing_poll_logs_a_rate_limited_warning_and_keeps_running(tmp_path, ca
     assert sum(r.levelno == logging.DEBUG for r in caplog.records) >= attempts - 1
 
 
+def test_swallowed_projection_failure_is_surfaced_at_warning(tmp_path, caplog, monkeypatch):
+    """The silent-death mode the ticket names: ``_get_agent_sessions_from_db``
+    catches every projection exception and returns None, so nothing propagates
+    out of ``_poll_once``. That failure must still reach the log at warning,
+    with its traceback, and the watcher must keep its last good snapshot."""
+    gw = importlib.import_module("api.gateway_watcher")
+    db, conn = _make_db(tmp_path, sessions=1, messages_per_session=2)
+    try:
+        watcher = gw.GatewayWatcher(state_db_path=db)
+        subscriber = watcher.subscribe()
+        assert watcher._poll_once(now=1.0) is True
+        good = subscriber.get_nowait()["sessions"]
+
+        monkeypatch.setattr(
+            gw,
+            "read_importable_agent_session_rows",
+            lambda *a, **kw: (_ for _ in ()).throw(
+                sqlite3.OperationalError("no such column: source")
+            ),
+        )
+        _add_session(conn, "tg-new", mc=1)
+
+        with caplog.at_level(logging.DEBUG, logger=gw.logger.name):
+            assert watcher._poll_once(now=2.0) is False
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1, [r.getMessage() for r in warnings]
+        assert "session projection failed" in warnings[0].getMessage()
+        assert warnings[0].exc_info, "the warning must carry the traceback"
+        assert "no such column" in caplog.text
+        assert watcher._last_sessions == good, "last good snapshot must survive"
+        assert subscriber.empty()
+    finally:
+        conn.close()
+
+
 def test_warning_repeats_once_the_rate_limit_window_elapses(tmp_path, monkeypatch):
     gw = importlib.import_module("api.gateway_watcher")
     watcher = gw.GatewayWatcher(state_db_path=tmp_path / "state.db")
@@ -212,6 +248,37 @@ def test_warning_repeats_once_the_rate_limit_window_elapses(tmp_path, monkeypatc
 
     # Five failures spanning 2.5 windows: warn at 0, then once per elapsed window.
     assert len(warned) == 3, warned
+
+
+def test_parity_projection_backstops_a_fingerprint_that_cannot_move(tmp_path, monkeypatch):
+    """A commit the file stamps cannot see (WAL restart at an unchanged size on a
+    coarse-mtime filesystem) must still surface, bounded by the parity interval
+    rather than waiting for an unrelated write."""
+    gw = importlib.import_module("api.gateway_watcher")
+    db, conn = _make_db(tmp_path, sessions=1, messages_per_session=2)
+    try:
+        watcher = gw.GatewayWatcher(state_db_path=db)
+        subscriber = watcher.subscribe()
+        assert watcher._poll_once(now=1.0) is True
+        assert [s["session_id"] for s in subscriber.get_nowait()["sessions"]] == ["tg0"]
+
+        # Freeze the fingerprint: the change is real but completely invisible to it.
+        monkeypatch.setattr(gw, "_cheap_change_fingerprint", lambda *a, **kw: "frozen")
+        assert watcher._poll_once(now=2.0) is True  # first tick stores "frozen"
+        # A visibility mutation: retagging the source drops the row from the
+        # sidebar projection, which is a change subscribers actually observe
+        # (``_snapshot_hash`` tracks membership/updated_at/message_count).
+        conn.execute("UPDATE sessions SET source = 'cron' WHERE id = 'tg0'")
+        conn.commit()
+
+        before = 2.0 + watcher.PROJECTION_PARITY_INTERVAL - 1.0
+        assert watcher._poll_once(now=before) is False, "the hot path must stay off"
+
+        at_deadline = 2.0 + watcher.PROJECTION_PARITY_INTERVAL
+        assert watcher._poll_once(now=at_deadline) is True
+        assert subscriber.get_nowait()["sessions"] == []
+    finally:
+        conn.close()
 
 
 # ── AC 3: a new session is still seen on the next tick ──────────────────────
