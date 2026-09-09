@@ -44,14 +44,31 @@ def test_tool_event_path_uses_the_throttle_not_a_direct_persist():
     )
 
 
-def test_terminal_paths_flush_instead_of_discarding_the_pending_write():
-    # Cancelling the timer on a terminal event would drop the last tool result
-    # of the turn now that tool events ride the throttle.
-    assert "if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}" not in MESSAGES_JS
-    assert MESSAGES_JS.count("_flushPersist();") >= 6, (
-        "every terminal stream path (fallback, done, apperror, cancel, settled, error) must flush"
+def test_terminal_paths_cancel_the_pending_write_and_deregister_it():
+    # A terminal event is followed by _clearOwnerInflightState() deleting the
+    # entry, so writing up to 1.5 MB first is the exact main-thread cost this
+    # ticket removes. Cancelling must also drop the pagehide registration,
+    # otherwise a finished stream keeps writing on tab close.
+    assert "if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}" not in MESSAGES_JS, (
+        "a bare clearTimeout leaves the stream registered for the pagehide flush"
     )
-    assert "window.addEventListener('pagehide',_flushPendingInflightPersists)" in MESSAGES_JS
+    assert MESSAGES_JS.count("_cancelPendingPersist();") >= 7, (
+        "the six terminal stream paths (fallback, done, apperror, cancel, settled, error) "
+        "plus _clearOwnerInflightState must cancel the pending write"
+    )
+    clear_body = _function_body(MESSAGES_JS, "function _clearOwnerInflightState()")
+    assert "_cancelPendingPersist();" in clear_body, (
+        "deleting the entry must disarm the timer so nothing rewrites it afterwards"
+    )
+
+
+def test_pagehide_flush_is_wired_and_survives_a_partial_window_stub():
+    # Several node test harnesses stub `window` as a plain object, so a bare
+    # `typeof window!=='undefined'` guard throws on load for all of them.
+    assert (
+        "if(typeof window!=='undefined'&&typeof window.addEventListener==='function')"
+        " window.addEventListener('pagehide',_flushPendingInflightPersists);"
+    ) in MESSAGES_JS
 
 
 NODE_SCRIPT = r"""
@@ -116,6 +133,7 @@ function harness() {
     },
     runTimers: () => { const fns = Array.from(timers.values()); timers.clear(); fns.forEach((f) => f()); },
     flush: () => context._flushPersist(),
+    cancel: () => context._cancelPendingPersist(),
     firePagehide: () => pagehide.forEach((f) => f({ persisted: false })),
     load: () => context.loadInflightState('sess-1', 'stream-1'),
     pending: () => context._pendingFlushCount(),
@@ -132,17 +150,20 @@ function harness() {
   assert(h.load().toolCalls.length === 40, 'the single write must carry every tool call');
 }
 
-// 2a. Turn end flushes the pending write immediately.
+// 2a. Turn end disarms the pending write instead of paying for one that
+//     _clearOwnerInflightState() is about to delete.
 {
   const h = harness();
   h.toolEvent('read');
   h.toolEvent('write');
   assert(h.setItemCount() === 0, 'still inside the throttle window');
-  h.flush();
-  assert(h.setItemCount() === 1, 'turn end must write the pending snapshot');
-  assert(h.pending() === 0, 'flushing must deregister the stream from the pagehide set');
+  h.cancel();
+  assert(h.setItemCount() === 0, 'turn end must not write a snapshot it is about to delete');
+  assert(h.pending() === 0, 'turn end must deregister the stream from the pagehide set');
   h.runTimers();
-  assert(h.setItemCount() === 1, 'the cancelled timer must not write a second time');
+  assert(h.setItemCount() === 0, 'the cancelled timer must not fire later');
+  h.firePagehide();
+  assert(h.setItemCount() === 0, 'a finished stream must not write on pagehide');
 }
 
 // 2b. pagehide flushes the pending write.

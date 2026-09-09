@@ -2519,7 +2519,7 @@ function _flushPendingInflightPersists(){
     try{flush();}catch(_){ }
   }
 }
-if(typeof window!=='undefined') window.addEventListener('pagehide',_flushPendingInflightPersists);
+if(typeof window!=='undefined'&&typeof window.addEventListener==='function') window.addEventListener('pagehide',_flushPendingInflightPersists);
 
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
@@ -2759,6 +2759,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _clearOwnerInflightState(){
     if(_isActiveSession() && S.activeStreamId!==streamId) return;
+    // Drop the pending write here too, so no caller can leave a timer armed
+    // that would rewrite the entry after this deletion.
+    _cancelPendingPersist();
     delete INFLIGHT[activeSid];
     clearInflightState(activeSid);
     _clearActivePaneInflightIfOwner();
@@ -2872,14 +2875,23 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       persistInflightState();
     },2000);
   }
-  // Write a pending throttled snapshot now. Terminal paths used to just cancel
-  // the timer; with tool events on the throttle that would drop the last tool
-  // result of the turn, so they flush instead.
-  function _flushPersist(){
+  // Drop a pending throttled write without performing it. Terminal paths use
+  // this because _clearOwnerInflightState() removes the entry moments later:
+  // compacting and writing up to 1.5 MB and then deleting it is exactly the
+  // main-thread cost this throttle exists to avoid. It also keeps the original
+  // guarantee that no write lands after the stream is finalized.
+  function _cancelPendingPersist(){
     if(!_persistTimer) return;
     clearTimeout(_persistTimer);
     _persistTimer=null;
     _INFLIGHT_PERSIST_FLUSHERS.delete(_flushPersist);
+  }
+  // Write a pending throttled snapshot now. Only pagehide needs this: the tab
+  // is going away mid-turn, so the alternative is losing up to 2s of tool and
+  // token progress that nothing else will rewrite.
+  function _flushPersist(){
+    if(!_persistTimer) return;
+    _cancelPendingPersist();
     persistInflightState();
   }
   function _closeSource(source){
@@ -2915,7 +2927,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _finalizeStreamEndFallback(source){
     _clearStreamEndRecovery();
     _flushPendingReasoningRender();
-    _flushPersist();
+    _cancelPendingPersist();
     _cancelThrottledSnapshotTimer();
     _terminalStateReached=true;
     _streamFinalized=true;
@@ -6872,7 +6884,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // S.messages with stale server data (issue #3195).
       _streamFinalized=true;
       _terminalStateReached=true;
-      _flushPersist();
+      _cancelPendingPersist();
       _cancelThrottledSnapshotTimer();
       const _doneData=JSON.parse(e.data);
       const _doneEvent=e;
@@ -7350,7 +7362,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _flushPendingReasoningRender();
       _clearStreamEndRecovery();
       _terminalStateReached=true;
-      _flushPersist();
+      _cancelPendingPersist();
       _cancelThrottledSnapshotTimer();
       _clearAnchorProseIncrementalNode();
       _streamFinalized=true;
@@ -7676,7 +7688,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _flushPendingReasoningRender();
       _clearStreamEndRecovery();
       _terminalStateReached=true;
-      _flushPersist();
+      _cancelPendingPersist();
       _cancelThrottledSnapshotTimer();
       _clearAnchorProseIncrementalNode();
       _streamFinalized=true;
@@ -7852,7 +7864,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!session) return returnStatus?'missing':false;
       if(session.active_stream_id||session.pending_user_message) return returnStatus?'active':false;
       _flushPendingReasoningRender();
-      _flushPersist();
+      _cancelPendingPersist();
       _cancelThrottledSnapshotTimer();
       _clearAnchorProseIncrementalNode();
       _streamFinalized=true;
@@ -7949,7 +7961,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _flushPendingReasoningRender();
     // Opus review Q1: mirror done/apperror/cancel finalization so any pending rAF
     // cannot fire after renderMessages() has settled the DOM with the error message.
-    _flushPersist();
+    _cancelPendingPersist();
     _cancelThrottledSnapshotTimer();
     _clearAnchorProseIncrementalNode();
     _streamFinalized=true;
