@@ -2700,3 +2700,28 @@ def test_git_status_cache_is_invalidated_by_discarding_an_untracked_file(tmp_pat
     assert not (repo / "fresh.txt").exists()
     assert after["totals"]["untracked"] == 0
     assert git_status(repo, use_cache=True)["totals"]["untracked"] == 0
+
+
+def test_git_status_keeps_non_ascii_and_renamed_paths(tmp_path):
+    """`--numstat` C-quotes these paths unless -z is used, which loses them entirely."""
+    from api.workspace_git import git_status
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "caf\u00e9.txt").write_text("one\ntwo\n", encoding="utf-8")
+    (repo / "tab\there.txt").write_text("one\n", encoding="utf-8")
+    (repo / "plain.txt").write_text("keep\n", encoding="utf-8")
+    _commit_all(repo)
+
+    (repo / "caf\u00e9.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
+    (repo / "tab\there.txt").write_text("one\ntwo\n", encoding="utf-8")
+    _git(repo, "mv", "plain.txt", "r\u00e9named.txt")
+
+    status = git_status(repo)
+    by_path = {item["path"]: item for item in status["files"]}
+
+    assert "caf\u00e9.txt" in by_path, by_path
+    assert by_path["caf\u00e9.txt"]["unstaged"] is True
+    assert by_path["caf\u00e9.txt"]["additions"] == 1
+    assert "tab\there.txt" in by_path, by_path
+    assert by_path["tab\there.txt"]["additions"] == 1
+    assert by_path["r\u00e9named.txt"]["old_path"] == "plain.txt"

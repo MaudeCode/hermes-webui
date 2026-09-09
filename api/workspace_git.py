@@ -540,12 +540,32 @@ def _status_code(xy: str, *, untracked: bool = False, renamed: bool = False) -> 
 
 
 def _parse_numstat(text: str, ctx: GitContext) -> dict[str, tuple[int, int, bool]]:
+    """Parse `diff --numstat -z` output.
+
+    Records are `<added>\t<deleted>\t<path>\0`, except renames and copies, which
+    leave the path field empty and follow it with `<old>\0<new>\0`. The NUL form
+    is required: without `-z`, `core.quotePath` C-quotes any path with non-ASCII
+    bytes, a tab, a newline or a backslash, and the quoted spelling would not
+    match the raw path porcelain v2 reports.
+    """
     stats: dict[str, tuple[int, int, bool]] = {}
-    for line in text.splitlines():
-        parts = line.split("\t", 2)
+    tokens = text.split("\0")
+    i = 0
+    while i < len(tokens):
+        record = tokens[i]
+        i += 1
+        if not record:
+            continue
+        parts = record.split("\t", 2)
         if len(parts) < 3:
             continue
         raw_add, raw_del, raw_path = parts
+        if not raw_path:
+            if i + 1 >= len(tokens):
+                break
+            # Key the rename on its destination, matching the porcelain v2 record.
+            raw_path = tokens[i + 1]
+            i += 2
         binary = raw_add == "-" or raw_del == "-"
         additions = 0 if binary else int(raw_add or "0")
         deletions = 0 if binary else int(raw_del or "0")
@@ -567,6 +587,7 @@ def _collect_numstat(ctx: GitContext, cached: bool) -> dict[str, tuple[int, int,
     args = [
         "diff",
         "--numstat",
+        "-z",
         "--no-textconv",
         "--ignore-cr-at-eol",
     ]
