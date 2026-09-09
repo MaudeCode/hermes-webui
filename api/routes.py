@@ -15625,7 +15625,7 @@ def handle_get(handler, parsed) -> bool:
         from api.workspace_git import GitWorkspaceError, git_status
 
         try:
-            status = git_status(Path(s.workspace))
+            status = git_status(Path(s.workspace), use_cache=True)
         except GitWorkspaceError as e:
             return _git_bad(handler, e)
         totals = status.get("totals") or {}
@@ -27266,7 +27266,7 @@ def _handle_git_status(handler, parsed):
     try:
         from api.workspace_git import GitWorkspaceError, git_status
 
-        return j(handler, {"git": git_status(workspace)})
+        return j(handler, {"git": git_status(workspace, use_cache=True)})
     except GitWorkspaceError as e:
         return _git_bad(handler, e)
 

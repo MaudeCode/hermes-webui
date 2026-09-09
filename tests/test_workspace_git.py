@@ -2589,16 +2589,34 @@ def _status_repo(tmp_path):
 
 
 def test_git_status_repeat_call_on_untouched_repo_spawns_no_git_subprocess(tmp_path, monkeypatch):
+    """The read path behind /api/git/status and /api/git-info."""
     from api.workspace_git import git_status
 
     repo = _status_repo(tmp_path)
-    git_status(repo)
+    git_status(repo, use_cache=True)
 
     calls = _count_git_calls(monkeypatch)
-    warm = git_status(repo)
+    warm = git_status(repo, use_cache=True)
 
     assert calls == []
     assert warm["totals"]["changed"] == 2
+
+
+def test_git_status_decision_callers_see_a_new_untracked_file_immediately(tmp_path):
+    """A poll may cache; git_diff and git_discard decide, so they must read fresh."""
+    from api.workspace_git import git_diff, git_discard, git_status
+
+    repo = _status_repo(tmp_path)
+    assert git_status(repo, use_cache=True)["totals"]["untracked"] == 1
+
+    (repo / "late.txt").write_text("late\n", encoding="utf-8")
+
+    diff = git_diff(repo, "late.txt", "unstaged")
+    assert "late" in diff["diff"], diff
+
+    # Without a fresh read this path takes `git restore` instead of unlink and fails.
+    git_discard(repo, ["late.txt"], delete_untracked=True)
+    assert not (repo / "late.txt").exists()
 
 
 def test_git_status_cold_call_reads_the_repo_at_most_three_times(tmp_path, monkeypatch):
@@ -2621,37 +2639,53 @@ def test_git_status_cache_is_invalidated_by_commit_and_index_changes(tmp_path, m
     from api.workspace_git import git_status
 
     repo = _status_repo(tmp_path)
-    assert git_status(repo)["totals"]["staged"] == 0
+    assert git_status(repo, use_cache=True)["totals"]["staged"] == 0
 
     _git(repo, "add", "fresh.txt")
-    after_index = git_status(repo)
+    after_index = git_status(repo, use_cache=True)
     assert after_index["totals"]["staged"] == 1
     assert after_index["totals"]["untracked"] == 0
 
     _git(repo, "commit", "-m", "add fresh")
-    after_commit = git_status(repo)
+    after_commit = git_status(repo, use_cache=True)
     assert after_commit["totals"]["staged"] == 0
 
     calls = _count_git_calls(monkeypatch)
     _git(repo, "checkout", "-b", "sidebranch")
-    assert git_status(repo)["branch"] == "sidebranch"
+    assert git_status(repo, use_cache=True)["branch"] == "sidebranch"
     assert _repository_reads(calls), "a HEAD change must force a fresh read"
 
 
 def test_git_status_cache_expires_so_worktree_edits_surface(tmp_path, monkeypatch):
-    """A plain file edit leaves .git untouched, so only the TTL bounds it."""
+    """A plain file edit leaves .git untouched, so only the TTL bounds the poll."""
     from api import workspace_git as wg
 
     repo = _status_repo(tmp_path)
-    assert wg.git_status(repo)["totals"]["changed"] == 2
+    assert wg.git_status(repo, use_cache=True)["totals"]["changed"] == 2
 
     (repo / "second.txt").write_text("second\n", encoding="utf-8")
 
     monkeypatch.setattr(wg, "STATUS_CACHE_TTL", 60.0)
-    assert wg.git_status(repo)["totals"]["changed"] == 2
+    assert wg.git_status(repo, use_cache=True)["totals"]["changed"] == 2
 
     monkeypatch.setattr(wg, "STATUS_CACHE_TTL", 0.0)
-    assert wg.git_status(repo)["totals"]["changed"] == 3
+    assert wg.git_status(repo, use_cache=True)["totals"]["changed"] == 3
+
+
+def test_git_status_scan_racing_a_mutation_does_not_republish_stale_state(tmp_path):
+    """A scan that read before a mutation must not publish after it."""
+    from api import workspace_git as wg
+
+    repo = _status_repo(tmp_path)
+    ctx = wg.resolve_git_context(repo)
+    stale = {"is_git": True, "branch": "stale", "totals": {"changed": 99}, "files": []}
+
+    generation = wg._status_generation(ctx.repo_root)
+    wg._invalidate_status_cache(ctx.repo_root)
+    wg._store_status(ctx, generation, wg._status_fingerprint(ctx.repo_root), stale)
+
+    assert wg._cached_status(ctx.workspace) is None
+    assert wg.git_status(repo, use_cache=True)["totals"]["changed"] == 2
 
 
 def test_git_status_cache_is_invalidated_by_discarding_an_untracked_file(tmp_path):
@@ -2659,10 +2693,10 @@ def test_git_status_cache_is_invalidated_by_discarding_an_untracked_file(tmp_pat
     from api.workspace_git import git_discard, git_status
 
     repo = _status_repo(tmp_path)
-    assert git_status(repo)["totals"]["untracked"] == 1
+    assert git_status(repo, use_cache=True)["totals"]["untracked"] == 1
 
     after = git_discard(repo, ["fresh.txt"], delete_untracked=True)
 
     assert not (repo / "fresh.txt").exists()
     assert after["totals"]["untracked"] == 0
-    assert git_status(repo)["totals"]["untracked"] == 0
+    assert git_status(repo, use_cache=True)["totals"]["untracked"] == 0

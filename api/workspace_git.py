@@ -148,6 +148,9 @@ _LOCKS_GUARD = threading.Lock()
 _OP_LOCKS: dict[str, threading.Lock] = {}
 _STATUS_CACHE_GUARD = threading.Lock()
 _STATUS_CACHE: dict[str, tuple[float, str, tuple, dict]] = {}
+# Bumped per repository on every mutation, so a scan that read the repository
+# before the mutation cannot publish its payload afterwards.
+_STATUS_GENERATIONS: dict[str, int] = {}
 
 
 @contextmanager
@@ -627,6 +630,11 @@ def _status_fingerprint(repo_root: Path) -> tuple:
     return tuple(parts)
 
 
+def _status_generation(repo_root: Path) -> int:
+    with _STATUS_CACHE_GUARD:
+        return _STATUS_GENERATIONS.get(str(repo_root), 0)
+
+
 def _cached_status(workspace: Path) -> dict | None:
     """The previous payload for this workspace, or None if it may be stale.
 
@@ -648,31 +656,52 @@ def _cached_status(workspace: Path) -> dict | None:
         return copy.deepcopy(payload)
 
 
-def _store_status(ctx: GitContext, fingerprint: tuple, payload: dict) -> None:
+def _store_status(ctx: GitContext, generation: int, fingerprint: tuple, payload: dict) -> None:
+    """Publish a payload, unless a mutation landed while its reads were running.
+
+    `generation` is read before the first git call. A mutation that invalidates
+    and releases its lock in between bumps it, so this scan's pre-mutation view
+    is dropped rather than republished under the post-mutation fingerprint.
+    """
     key = str(ctx.workspace)
+    root = str(ctx.repo_root)
     with _STATUS_CACHE_GUARD:
+        if _STATUS_GENERATIONS.get(root, 0) != generation:
+            return
         if key not in _STATUS_CACHE and len(_STATUS_CACHE) >= STATUS_CACHE_LIMIT:
             _STATUS_CACHE.pop(next(iter(_STATUS_CACHE)), None)
-        _STATUS_CACHE[key] = (time.monotonic(), str(ctx.repo_root), fingerprint, copy.deepcopy(payload))
+        _STATUS_CACHE[key] = (time.monotonic(), root, fingerprint, copy.deepcopy(payload))
 
 
 def _invalidate_status_cache(repo_root: Path) -> None:
     root = str(repo_root)
     with _STATUS_CACHE_GUARD:
+        _STATUS_GENERATIONS[root] = _STATUS_GENERATIONS.get(root, 0) + 1
         for key in [k for k, entry in _STATUS_CACHE.items() if entry[1] == root]:
             del _STATUS_CACHE[key]
 
 
-def git_status(workspace: str | Path) -> dict:
+def git_status(workspace: str | Path, *, use_cache: bool = False) -> dict:
+    """Current Git status for a workspace.
+
+    `use_cache` is opt-in and belongs to the polled read endpoints. Every caller
+    that *decides* from the payload — which diff to show, whether a path is
+    untracked and must be deleted rather than restored, whether a push needs an
+    upstream — reads fresh, because a working-tree edit leaves `.git` untouched
+    and would otherwise be invisible for the length of the TTL. Both paths still
+    publish their result for the poll to reuse.
+    """
     resolved = Path(workspace).expanduser().resolve()
-    cached = _cached_status(resolved)
-    if cached is not None:
-        return cached
+    if use_cache:
+        cached = _cached_status(resolved)
+        if cached is not None:
+            return cached
 
     ctx = resolve_git_context(resolved)
     if ctx is None:
         return {"is_git": False}
 
+    generation = _status_generation(ctx.repo_root)
     result = _run_git(
         ctx,
         [
@@ -849,7 +878,7 @@ def git_status(workspace: str | Path) -> dict:
     }
     # Fingerprint after the reads: git status may refresh a racy index while it
     # runs, and keying on the pre-read stat would miss on every follow-up call.
-    _store_status(ctx, _status_fingerprint(ctx.repo_root), payload)
+    _store_status(ctx, generation, _status_fingerprint(ctx.repo_root), payload)
     return payload
 
 
