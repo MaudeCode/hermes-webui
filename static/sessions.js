@@ -5152,6 +5152,10 @@ function _buildSessionArchiveToggle(session){
   btn.onclick=(e)=>{
     e.stopPropagation();
     e.preventDefault();
+    // stopPropagation keeps the document-level closer from running, and
+    // renderSessionListFromCache() defers its repaint while a menu is open —
+    // so an open ⋯ menu on any row would leave the archived row on screen.
+    closeSessionActionMenu();
     void _archiveSession(session,!session.archived);
   };
   return btn;

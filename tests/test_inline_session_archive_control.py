@@ -48,7 +48,9 @@ def _build_toggles(sessions):
             "  session_restore_desc:'Bring it back'};",
             "function t(k){return STRINGS[k];}",
             "const archiveCalls=[];",
-            "async function _archiveSession(session,archived){archiveCalls.push([session.session_id,archived]);return true;}",
+            "const callOrder=[];",
+            "function closeSessionActionMenu(){callOrder.push('close');}",
+            "async function _archiveSession(session,archived){callOrder.push('archive');archiveCalls.push([session.session_id,archived]);return true;}",
             _function_block(SESSIONS_JS, "_sessionArchiveDescription"),
             _function_block(SESSIONS_JS, "_buildSessionArchiveToggle"),
             "const out=JSON.parse(process.argv[1]).map(session=>{",
@@ -61,7 +63,7 @@ def _build_toggles(sessions):
             "    ariaLabel:btn.attrs['aria-label'],icon:btn.innerHTML,",
             "    stopped:ev.stopped,prevented:ev.prevented};",
             "});",
-            "process.stdout.write(JSON.stringify({buttons:out,archiveCalls}));",
+            "process.stdout.write(JSON.stringify({buttons:out,archiveCalls,callOrder}));",
         ]
     )
     result = subprocess.run(
@@ -98,6 +100,13 @@ def test_inline_control_keeps_the_worktree_retention_wording():
     out = _build_toggles([{"session_id": "s-wt", "archived": False, "worktree_path": "/tmp/wt"}])
 
     assert out["buttons"][0]["title"] == "Archive conversation — Hide it, keep the worktree"
+
+
+def test_inline_control_closes_an_open_menu_before_archiving():
+    """stopPropagation blocks the document closer, and a live menu defers the repaint."""
+    out = _build_toggles([{"session_id": "s-open", "archived": False}])
+
+    assert out["callOrder"] == ["close", "archive"]
 
 
 def test_inline_control_never_lets_the_click_reach_the_row():
