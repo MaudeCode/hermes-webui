@@ -1552,12 +1552,15 @@
      timestamp + action button (which appears on hover). Now that .session-time
      lives in the flex flow of .session-title-row, the timestamp sits at the
      row's right edge naturally, so no reservation is needed at rest. The
-     action button (.session-actions, position:absolute, 26x26 at right:6px)
-     and attention indicator (26x26 at right:6px) still need 40px reserved
-     when they're visible — covered by the hover / streaming / unread /
-     menu-open / focus-within rule below. */
+     attention indicator (26x26 at right:6px) still needs 40px reserved when
+     it is visible, and the action cluster (.session-actions, position:absolute
+     at right:6px — inline archive + the ⋯ trigger, 2 x 26px) needs 64px —
+     covered by the hover / streaming / unread / menu-open / focus-within
+     rules below. */
   .session-item{padding:8px 8px;margin-bottom:2px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--muted);transition:background .15s,color .15s,transform .5s cubic-bezier(.22,.61,.36,1),box-shadow .15s ease;display:flex;align-items:flex-start;gap:8px;min-width:0;position:relative;touch-action:pan-y;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;transform:translate3d(var(--session-swipe-offset,0),var(--session-reflow-offset,0),0);}
-  .session-item.streaming,.session-item.unread,.session-item.needs-attention,.session-item:focus-within,.session-item.menu-open{padding-right:40px;}
+  .session-item.streaming,.session-item.unread,.session-item.needs-attention{padding-right:40px;}
+  /* Two 26px controls (archive + ⋯) at right:6px need 58px; reserve 64px. */
+  .session-item:focus-within,.session-item.menu-open{padding-right:64px;}
   .session-item.needs-attention{box-shadow:inset 3px 0 0 var(--warning);background:color-mix(in srgb,var(--warning) 8%,transparent);}
   .session-item.attention-approval{box-shadow:inset 3px 0 0 var(--error);background:color-mix(in srgb,var(--error) 9%,transparent);}
   .session-item.attention-clarify{box-shadow:inset 3px 0 0 var(--warning);background:color-mix(in srgb,var(--warning) 8%,transparent);}
@@ -1603,7 +1606,7 @@
      Touch/iPad (hover:none) must NOT expand padding-right on :hover —
      the expansion causes a layout-reflow mid-tap that moves session-actions
      under the finger, triggering stopPropagation and swallowing navigation. */
-  @media (hover:hover){:root:not(.dark) .session-item:hover{background:var(--hover-bg);color:var(--text);}.session-item:hover{padding-right:40px;}}
+  @media (hover:hover){:root:not(.dark) .session-item:hover{background:var(--hover-bg);color:var(--text);}.session-item:hover{padding-right:64px;}}
   .session-item.active{background:var(--accent-bg);color:var(--accent);}
   .session-item.active.swiping-right{background:color-mix(in srgb,var(--warning) 20%,var(--accent-bg));}
   .session-item.active.swiping-left{background:color-mix(in srgb,var(--error) 18%,var(--accent-bg));}
@@ -1679,10 +1682,10 @@
   .session-actions{position:absolute;right:6px;top:50%;transform:translateY(-50%);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .15s ease;}
   .session-item:hover .session-actions,.session-item:focus-within .session-actions,.session-item.menu-open .session-actions{opacity:1;pointer-events:auto;}
   .session-item.streaming:not(:hover):not(:focus-within):not(.menu-open) .session-actions,.session-item.unread:not(:hover):not(:focus-within):not(.menu-open) .session-actions{opacity:0;pointer-events:none;}
-  .session-actions-trigger{width:26px;height:26px;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer;padding:0;line-height:1;display:inline-flex;align-items:center;justify-content:center;transition:background .12s,color .12s,border-color .12s;}
-  .session-actions-trigger:hover{background:var(--hover-bg);color:var(--text);}
+  .session-actions-trigger,.session-archive-toggle{width:26px;height:26px;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer;padding:0;line-height:1;display:inline-flex;align-items:center;justify-content:center;transition:background .12s,color .12s,border-color .12s;}
+  .session-actions-trigger:hover,.session-archive-toggle:hover{background:var(--hover-bg);color:var(--text);}
   .session-actions-trigger.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--text);}
-  .session-actions-trigger svg{display:block;}
+  .session-actions-trigger svg,.session-archive-toggle svg{display:block;}
   .session-action-menu{display:block;position:fixed;left:0;top:0;right:auto;bottom:auto;min-width:220px;max-width:min(280px,calc(100vw - 16px));background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -4px 24px rgba(0,0,0,.4);z-index:999;overflow:hidden;max-height:calc(100vh - 16px);overflow-y:auto;transform-origin:top right;will-change:opacity,transform;}
   .session-action-menu.open-animated{animation:session-menu-in .45s cubic-bezier(.2,.8,.2,1);}
   .session-action-menu.open{display:block;}
@@ -3261,8 +3264,8 @@
     .sidebar-nav .nav-tab svg,
     .icon-btn svg,
     .send-btn svg{display:block;flex:0 0 auto;}
-    .session-item{min-height:44px;padding:10px 40px 10px 12px;}
-    .session-item.streaming,.session-item.unread{padding-right:40px;}
+    .session-item{min-height:44px;padding:10px 64px 10px 12px;}
+    .session-item.streaming,.session-item.unread{padding-right:64px;}
     .session-actions{opacity:1;pointer-events:auto;}
     /* Empty state */
     .empty-hero-title{font-size:21px;}
@@ -5849,7 +5852,7 @@ main.main > #mainPlugin{display:none;}
 .session-child-session-fork.streaming .session-child-session-main{color:var(--accent);}
 .session-child-session-fork .session-actions{position:static;transform:none;opacity:1;pointer-events:auto;flex:0 0 auto;}
 .session-child-session-fork .session-child-session-state{position:static;transform:none;flex:0 0 auto;width:14px;height:14px;margin-right:2px;color:var(--accent);}
-.session-child-session-fork .session-actions-trigger{width:22px;height:22px;}
+.session-child-session-fork .session-actions-trigger,.session-child-session-fork .session-archive-toggle{width:22px;height:22px;}
 .session-child-session-fork .session-swipe-affordance{top:1px;bottom:1px;}
 .session-child-session-fork .session-child-session-main,.session-child-session-fork .session-actions{z-index:1;}
 .session-child-session-fork.swiping-right{background:color-mix(in srgb,var(--warning) 16%,var(--surface));box-shadow:0 0 0 1px color-mix(in srgb,var(--warning) 48%,transparent);}

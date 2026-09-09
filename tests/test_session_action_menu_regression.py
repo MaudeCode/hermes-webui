@@ -34,7 +34,7 @@ def test_session_list_refresh_does_not_close_open_conversation_actions():
 
 def test_archive_action_repaints_sidebar_before_full_refresh():
     """Archive should hide the row from cached sidebar state before /api/sessions returns."""
-    menu_body = _function_block(SESSIONS_JS, "_openSessionActionMenu")
+    toggle_body = _function_block(SESSIONS_JS, "_buildSessionArchiveToggle")
     helper_body = _function_block(SESSIONS_JS, "_archiveSession")
 
     api_call = "const response=await api('/api/session/archive'"
@@ -42,7 +42,7 @@ def test_archive_action_repaints_sidebar_before_full_refresh():
     cached_render = "renderSessionListFromCache();"
     full_refresh = "void renderSessionList();"
 
-    assert "await _archiveSession(session,!session.archived);" in menu_body
+    assert "void _archiveSession(session,!session.archived);" in toggle_body
     assert optimistic in helper_body
     assert helper_body.index(api_call) < helper_body.index(optimistic) < helper_body.index(cached_render) < helper_body.index(full_refresh)
 

@@ -87,19 +87,20 @@ def test_timestamp_hidden_when_attention_state_is_present():
     assert ".session-time.is-hidden{display:none;}" in STYLE_CSS
     # padding-right was 86px when the timestamp was position:absolute. Now that
     # the timestamp lives in the flex flow of .session-title-row, the rest
-    # state needs no right reservation; hover/streaming/unread/menu-open/
-    # focus-within all expand to 40px to make room for the absolute action
-    # button + attention indicator.
+    # state needs no right reservation; streaming/unread expand to 40px for the
+    # attention indicator, and hover/menu-open/focus-within expand to 64px for
+    # the two-button action cluster (inline archive + the three-dot trigger).
     assert ".session-item{padding:8px 8px;" in STYLE_CSS
     # PR #1110: :hover removed from the COMBINED padding-right rule (touch layout-shift fix).
     # Instead, hover padding is restored via @media (hover:hover) which only applies to
     # devices with a real hover capability (mouse). Touch/iPad devices satisfy hover:none
     # and skip that block, preventing the layout-reflow mid-tap bug.
-    assert ".session-item.streaming,.session-item.unread,.session-item.needs-attention,.session-item:focus-within,.session-item.menu-open{padding-right:40px;}" in STYLE_CSS
+    assert ".session-item.streaming,.session-item.unread,.session-item.needs-attention{padding-right:40px;}" in STYLE_CSS
+    assert ".session-item:focus-within,.session-item.menu-open{padding-right:64px;}" in STYLE_CSS
     # Desktop hover padding restored via media query (mouse devices only)
     assert "@media (hover:hover)" in STYLE_CSS
-    assert ".session-item:hover{padding-right:40px;}" in STYLE_CSS
-    assert ".session-item{min-height:44px;padding:10px 40px 10px 12px;}" in STYLE_CSS
+    assert ".session-item:hover{padding-right:64px;}" in STYLE_CSS
+    assert ".session-item{min-height:44px;padding:10px 64px 10px 12px;}" in STYLE_CSS
     # Timestamp now uses margin-left:auto inside the flex row instead of
     # absolute positioning. This stops the title's flex:1 bound from running
     # underneath the timestamp and lets the project dot sit beside it.
