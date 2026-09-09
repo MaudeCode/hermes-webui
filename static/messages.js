@@ -2508,6 +2508,19 @@ function _dispatchExtensionTurnLifecycle(type,sessionId,streamId,details={}){
   }
 }
 
+// Every attached stream that has a throttled in-flight write pending registers
+// its flusher here so a pagehide (tab close, navigation, BFCache freeze) writes
+// the snapshot instead of dropping up to 2s of tool/token progress. Entries
+// remove themselves when the timer fires or the stream flushes, so the set is
+// empty whenever nothing is pending.
+const _INFLIGHT_PERSIST_FLUSHERS=new Set();
+function _flushPendingInflightPersists(){
+  for(const flush of Array.from(_INFLIGHT_PERSIST_FLUSHERS)){
+    try{flush();}catch(_){ }
+  }
+}
+if(typeof window!=='undefined'&&typeof window.addEventListener==='function') window.addEventListener('pagehide',_flushPendingInflightPersists);
+
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
   if(typeof _isSessionCurrentPane==='function'&&!_isSessionCurrentPane(activeSid)) return;
@@ -2746,6 +2759,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _clearOwnerInflightState(){
     if(_isActiveSession() && S.activeStreamId!==streamId) return;
+    // Drop the pending write here too, so no caller can leave a timer armed
+    // that would rewrite the entry after this deletion.
+    _cancelPendingPersist();
     delete INFLIGHT[activeSid];
     clearInflightState(activeSid);
     _clearActivePaneInflightIfOwner();
@@ -2840,17 +2856,43 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // serialize the entire growing DOM via outerHTML. Keep the cleanup hook for
   // terminal call sites; there is no periodic timer to cancel anymore.
   function _cancelThrottledSnapshotTimer(){}
-  // Throttled variant for token-by-token updates. persistInflightState()
-  // calls saveInflightState() which does JSON.parse + JSON.stringify + write
-  // on the entire inflight map every call. On a fast model at 60 tok/s with
-  // a 10KB messages array this is ~36MB of JSON churn per second — a major
-  // GC pressure source that causes the renderer to crash under load.
-  // State transitions (tool events, done, error) still call persistInflightState()
-  // directly so no more than 2s of progress is lost on a crash.
+  // Throttled variant for token-by-token and tool-event updates.
+  // persistInflightState() calls saveInflightState() which does JSON.parse +
+  // JSON.stringify + write on the entire inflight map every call. On a fast
+  // model at 60 tok/s with a 10KB messages array this is ~36MB of JSON churn
+  // per second — a major GC pressure source that causes the renderer to crash
+  // under load. A 40-tool turn had the same problem before tool events were
+  // routed through here (HWEB-44). Terminal transitions (done, apperror,
+  // cancel, error) call _flushPersist() so at most 2s of progress is lost on a
+  // crash, and pagehide flushes every stream still holding a pending write.
   let _persistTimer=null;
   function _throttledPersist(){
     if(_persistTimer) return;
-    _persistTimer=setTimeout(()=>{_persistTimer=null;persistInflightState();},2000);
+    _INFLIGHT_PERSIST_FLUSHERS.add(_flushPersist);
+    _persistTimer=setTimeout(()=>{
+      _persistTimer=null;
+      _INFLIGHT_PERSIST_FLUSHERS.delete(_flushPersist);
+      persistInflightState();
+    },2000);
+  }
+  // Drop a pending throttled write without performing it. Terminal paths use
+  // this because _clearOwnerInflightState() removes the entry moments later:
+  // compacting and writing up to 1.5 MB and then deleting it is exactly the
+  // main-thread cost this throttle exists to avoid. It also keeps the original
+  // guarantee that no write lands after the stream is finalized.
+  function _cancelPendingPersist(){
+    if(!_persistTimer) return;
+    clearTimeout(_persistTimer);
+    _persistTimer=null;
+    _INFLIGHT_PERSIST_FLUSHERS.delete(_flushPersist);
+  }
+  // Write a pending throttled snapshot now. Only pagehide needs this: the tab
+  // is going away mid-turn, so the alternative is losing up to 2s of tool and
+  // token progress that nothing else will rewrite.
+  function _flushPersist(){
+    if(!_persistTimer) return;
+    _cancelPendingPersist();
+    persistInflightState();
   }
   function _closeSource(source){
     closeLiveStream(activeSid, streamId, source);
@@ -2885,7 +2927,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _finalizeStreamEndFallback(source){
     _clearStreamEndRecovery();
     _flushPendingReasoningRender();
-    if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
+    _cancelPendingPersist();
     _cancelThrottledSnapshotTimer();
     _terminalStateReached=true;
     _streamFinalized=true;
@@ -6315,7 +6357,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
 
     S.toolCalls=inflight.toolCalls;
-    persistInflightState();
+    // HWEB-44: bounded cadence. A 40-tool turn used to run 40 synchronous
+    // multi-megabyte parse/copy/stringify/write cycles on the main thread.
+    _throttledPersist();
     return tc;
   }
 
@@ -6840,7 +6884,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // S.messages with stale server data (issue #3195).
       _streamFinalized=true;
       _terminalStateReached=true;
-      if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
+      _cancelPendingPersist();
       _cancelThrottledSnapshotTimer();
       const _doneData=JSON.parse(e.data);
       const _doneEvent=e;
@@ -7318,7 +7362,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _flushPendingReasoningRender();
       _clearStreamEndRecovery();
       _terminalStateReached=true;
-      if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
+      _cancelPendingPersist();
       _cancelThrottledSnapshotTimer();
       _clearAnchorProseIncrementalNode();
       _streamFinalized=true;
@@ -7644,7 +7688,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _flushPendingReasoningRender();
       _clearStreamEndRecovery();
       _terminalStateReached=true;
-      if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
+      _cancelPendingPersist();
       _cancelThrottledSnapshotTimer();
       _clearAnchorProseIncrementalNode();
       _streamFinalized=true;
@@ -7820,7 +7864,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!session) return returnStatus?'missing':false;
       if(session.active_stream_id||session.pending_user_message) return returnStatus?'active':false;
       _flushPendingReasoningRender();
-      if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
+      _cancelPendingPersist();
       _cancelThrottledSnapshotTimer();
       _clearAnchorProseIncrementalNode();
       _streamFinalized=true;
@@ -7917,7 +7961,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _flushPendingReasoningRender();
     // Opus review Q1: mirror done/apperror/cancel finalization so any pending rAF
     // cannot fire after renderMessages() has settled the DOM with the error message.
-    if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
+    _cancelPendingPersist();
     _cancelThrottledSnapshotTimer();
     _clearAnchorProseIncrementalNode();
     _streamFinalized=true;

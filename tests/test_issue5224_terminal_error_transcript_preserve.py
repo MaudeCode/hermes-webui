@@ -151,6 +151,7 @@ function buildRuntime() {
   globalThis._oldestIdx = 0;
   globalThis._streamFinalized = !!scenario.streamFinalized;
   globalThis._persistTimer = null;
+  globalThis._cancelPendingPersist = () => calls.push('cancelPendingPersist');
   globalThis.api = async () => scenario.apiPayload || { session: null };
   globalThis.msgContent = undefined;
   globalThis._isPreservedCompressionTaskListMarkerOnlyText = () => false;
