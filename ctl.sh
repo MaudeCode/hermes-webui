@@ -774,6 +774,11 @@ start_cmd() {
     cd "${REPO_ROOT}"
     trap '' HUP
     export HERMES_WEBUI_PRESERVE_ENV=1
+    # Hand the server the sink its stdout/stderr actually lands in. --foreground
+    # execs in place, so bootstrap never creates its own bootstrap-<port>.log and
+    # the running server would otherwise have no way to find — or size-bound —
+    # this file. See rotate_webui_log in api/logging_hygiene.py.
+    export HERMES_WEBUI_LOG_FILE="${LOG_FILE}"
     exec nohup "${python_exe}" "${REPO_ROOT}/bootstrap.py" --no-browser --foreground --host "${CTL_HOST}" "${CTL_PORT}" ${CTL_BOOTSTRAP_ARGS[@]+"${CTL_BOOTSTRAP_ARGS[@]}"}
   ) >> "${LOG_FILE}" 2>&1 &
   pid=$!

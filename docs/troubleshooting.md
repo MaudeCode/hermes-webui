@@ -192,18 +192,25 @@ another, and half a turn read on its own looks pending:
 - no nonterminal turn is left;
 - no malformed line is present (a crash-torn event is exactly what the startup
   recovery audit flags for manual review, and the journal is the only record);
+- every event carries a `turn_id`, an `event` name and a numeric `created_at` —
+  a JSON-decodable line missing those is valid syntax but unusable evidence;
 - the live `{session_id}.json` sidecar exists and parses (a session whose
   sidecar is gone or corrupt is awaiting repair).
 
 Any uncertainty keeps the shards. Deleting the session releases them.
 
-Shards from earlier processes are deleted. The *running* process's own shard is
-truncated in place instead, under the same advisory lock `append_turn_journal_event`
-takes, with an mtime recheck that aborts if an append landed in between.
-Unlinking it would race an appender that had already opened the old inode and
-would silently drop its event; truncating cannot lose a write, because an
-`O_APPEND` writer blocked on the lock simply resumes at offset 0. This is what
-lets a server that stays up past the retention window reclaim its own storage.
+Every expired shard is emptied in place, under the same advisory lock
+`append_turn_journal_event` takes, with an mtime recheck that aborts if an
+append landed between the scan and the release. Truncating rather than
+unlinking is what makes this safe against a writer in *any* process: the
+appender reopens the path on every call, so unlinking races one that already
+holds the old inode and its event would vanish, whereas an `O_APPEND` writer
+blocked on the lock simply resumes at offset 0.
+
+The emptied file is then unlinked only when its owning pid is provably gone —
+the shards a restart loop leaves behind, which is the accumulation vector. A
+live pid, a pid-less legacy name, or a platform without a safe liveness probe
+keeps the now-empty inode until the session is deleted.
 
 - `HERMES_WEBUI_TURN_JOURNAL_RETENTION_DAYS`, default `14`; set `0` to reclaim
   every settled shard on the next pass.
@@ -212,10 +219,18 @@ lets a server that stays up past the retention window reclaim its own storage.
 
 ## The `bootstrap-<port>.log` file keeps growing
 
-`bootstrap.py` starts the server with stdout and stderr redirected into
-`{state_dir}/bootstrap-<port>.log` at the file-descriptor level, so no
-in-process log handler owns that sink. Once the file passes 32 MiB the server
-copies it to `bootstrap-<port>.log.1` and truncates the original in place.
+The server's stdout and stderr are redirected at the file-descriptor level, so
+no in-process log handler owns that sink. Which file it is depends on the
+launcher:
+
+- `./ctl.sh start` — the documented daemon path — runs `bootstrap.py
+  --foreground`, which execs in place, and redirects into `${HERMES_HOME}/webui.log`
+  (or `$HERMES_WEBUI_LOG_FILE`). `ctl.sh` exports that resolved path so the
+  running server can find it.
+- `bootstrap.py`'s detached path writes `{state_dir}/bootstrap-<port>.log`.
+
+Once the file passes 32 MiB the server copies it to `<log>.1` and truncates the
+original in place.
 
 Truncation, not rename: every writer holds an inherited `O_APPEND` descriptor on
 the open file, and renaming would leave all of them writing into the rotated

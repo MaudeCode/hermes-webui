@@ -229,6 +229,13 @@ class TestSpawnSupervisorBackoff:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+def _settled(turn_id: str) -> list[dict]:
+    return [
+        {"event": "submitted", "turn_id": turn_id, "created_at": 1},
+        {"event": "completed", "turn_id": turn_id, "created_at": 2},
+    ]
+
+
 def _write_shard(
     journal_dir: Path,
     name: str,
@@ -237,7 +244,9 @@ def _write_shard(
 ) -> Path:
     journal_dir.mkdir(parents=True, exist_ok=True)
     path = journal_dir / name
-    rows = events if events is not None else [{"event": "submitted"}]
+    # Default to one settled turn: well-formed evidence that the session is done,
+    # which is what most of these cases want the retention gate to act on.
+    rows = events if events is not None else _settled("t0")
     path.write_text(
         "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
     )
@@ -245,6 +254,10 @@ def _write_shard(
         stamp = time.time() - age_days * 24 * 60 * 60
         os.utime(path, (stamp, stamp))
     return path
+
+
+# Above pid_max on every supported platform, so `_pid_is_running` is certain.
+_DEAD_PID = 4194304
 
 
 def _write_sidecar(root: Path, session_id: str, body: str | None = None) -> Path:
@@ -256,20 +269,13 @@ def _write_sidecar(root: Path, session_id: str, body: str | None = None) -> Path
     return path
 
 
-def _settled(turn_id: str) -> list[dict]:
-    return [
-        {"event": "submitted", "turn_id": turn_id, "created_at": 1},
-        {"event": "completed", "turn_id": turn_id, "created_at": 2},
-    ]
-
-
 class TestTurnJournalRetention:
     def test_expired_shards_are_pruned_and_live_shards_are_not(self, tmp_path):
         journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
-        expired = _write_shard(journal_dir, "old-session~4242.jsonl", age_days=30)
+        expired = _write_shard(journal_dir, f"old-session~{_DEAD_PID}.jsonl", age_days=30)
         legacy_expired = _write_shard(journal_dir, "legacy-session.jsonl", age_days=30)
-        live = _write_shard(journal_dir, "new-session~4242.jsonl", age_days=0)
-        just_inside = _write_shard(journal_dir, "recent~4242.jsonl", age_days=13)
+        live = _write_shard(journal_dir, f"new-session~{_DEAD_PID}.jsonl", age_days=0)
+        just_inside = _write_shard(journal_dir, f"recent~{_DEAD_PID}.jsonl", age_days=13)
         for sid in ("old-session", "legacy-session", "new-session", "recent"):
             _write_sidecar(tmp_path, sid)
 
@@ -278,7 +284,9 @@ class TestTurnJournalRetention:
         assert result["pruned"] == 2
         assert result["bytes_reclaimed"] > 0
         assert not expired.exists()
-        assert not legacy_expired.exists()
+        # No pid in the legacy name means no owner to prove dead: emptied, kept.
+        assert legacy_expired.exists()
+        assert legacy_expired.stat().st_size == 0
         assert live.exists()
         assert just_inside.exists()
 
@@ -347,24 +355,83 @@ class TestTurnJournalRetention:
         )
         size_before = mine.stat().st_size
 
-        released = turn_journal._release_expired_shard(
-            mine, expected_mtime=1.0, own_suffix=f"~{os.getpid()}.jsonl"
-        )
+        released = turn_journal._release_expired_shard(mine, expected_mtime=1.0)
 
         assert released is False
         assert mine.stat().st_size == size_before
+
+    def test_a_live_foreign_pid_shard_is_emptied_but_not_unlinked(self, tmp_path):
+        """Another live process may still append — never unlink out from under it."""
+        journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
+        alive = _write_shard(
+            journal_dir,
+            f"shared~{os.getppid()}.jsonl",
+            age_days=90,
+            events=_settled("t1"),
+        )
+        _write_sidecar(tmp_path, "shared")
+
+        result = turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
+
+        assert result["pruned"] == 1
+        assert alive.exists()
+        assert alive.stat().st_size == 0
+
+    def test_an_event_without_a_turn_id_keeps_the_session(self, tmp_path):
+        """Valid JSON, unusable evidence: it derives to nothing and looks settled."""
+        journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
+        shard = _write_shard(
+            journal_dir,
+            f"no-turn-id~{_DEAD_PID}.jsonl",
+            age_days=90,
+            events=[{"event": "submitted", "created_at": 1}],
+        )
+        _write_sidecar(tmp_path, "no-turn-id")
+
+        result = turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
+
+        assert result["pruned"] == 0
+        assert shard.exists()
+
+    def test_a_non_numeric_created_at_keeps_the_session_without_raising(self, tmp_path):
+        """`derive_turn_journal_states` would raise and take the whole pass down."""
+        journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
+        shard = _write_shard(
+            journal_dir,
+            f"bad-clock~{_DEAD_PID}.jsonl",
+            age_days=90,
+            events=[
+                {"event": "submitted", "turn_id": "t1", "created_at": "yesterday"},
+                {"event": "completed", "turn_id": "t1", "created_at": "today"},
+            ],
+        )
+        settled = _write_shard(
+            journal_dir,
+            f"fine~{_DEAD_PID}.jsonl",
+            age_days=90,
+            events=_settled("t2"),
+        )
+        _write_sidecar(tmp_path, "bad-clock")
+        _write_sidecar(tmp_path, "fine")
+
+        result = turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
+
+        assert shard.exists()
+        # The healthy session in the same pass is still reclaimed.
+        assert not settled.exists()
+        assert result["pruned"] == 1
 
     def test_a_session_with_a_pending_turn_is_kept(self, tmp_path):
         """A nonterminal turn is still auditable/repairable — never drop it."""
         journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
         pending = _write_shard(
             journal_dir,
-            "pending~4242.jsonl",
+            f"pending~{_DEAD_PID}.jsonl",
             age_days=90,
             events=[{"event": "submitted", "turn_id": "t1", "created_at": 1}],
         )
         settled = _write_shard(
-            journal_dir, "settled~4242.jsonl", age_days=90, events=_settled("t2")
+            journal_dir, f"settled~{_DEAD_PID}.jsonl", age_days=90, events=_settled("t2")
         )
         _write_sidecar(tmp_path, "pending")
         _write_sidecar(tmp_path, "settled")
@@ -379,7 +446,7 @@ class TestTurnJournalRetention:
         """A crash-torn event is the evidence recovery flags — never destroy it."""
         journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
         journal_dir.mkdir(parents=True, exist_ok=True)
-        torn = journal_dir / "torn~4242.jsonl"
+        torn = journal_dir / f"torn~{_DEAD_PID}.jsonl"
         torn.write_text(
             "".join(json.dumps(row) + "\n" for row in _settled("t1"))
             + '{"event":"submi',
@@ -398,7 +465,7 @@ class TestTurnJournalRetention:
         """No `{sid}.json` means the session awaits repair; the journal is it."""
         journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
         orphan = _write_shard(
-            journal_dir, "orphan~4242.jsonl", age_days=90, events=_settled("t1")
+            journal_dir, f"orphan~{_DEAD_PID}.jsonl", age_days=90, events=_settled("t1")
         )
 
         result = turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
@@ -409,7 +476,7 @@ class TestTurnJournalRetention:
     def test_an_unparseable_sidecar_keeps_the_session(self, tmp_path):
         journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
         shard = _write_shard(
-            journal_dir, "corrupt~4242.jsonl", age_days=90, events=_settled("t1")
+            journal_dir, f"corrupt~{_DEAD_PID}.jsonl", age_days=90, events=_settled("t1")
         )
         _write_sidecar(tmp_path, "corrupt", body="{not json")
 
@@ -457,7 +524,7 @@ class TestTurnJournalRetention:
     def test_dry_run_counts_without_deleting(self, tmp_path):
         journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
         expired = _write_shard(
-            journal_dir, "old~4242.jsonl", age_days=30, events=_settled("t1")
+            journal_dir, f"old~{_DEAD_PID}.jsonl", age_days=30, events=_settled("t1")
         )
         _write_sidecar(tmp_path, "old")
 
@@ -479,7 +546,7 @@ class TestTurnJournalRetention:
         monkeypatch.setenv(turn_journal._TURN_JOURNAL_RETENTION_DAYS_ENV, "1")
         journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
         two_days = _write_shard(
-            journal_dir, "two-days~4242.jsonl", age_days=2, events=_settled("t1")
+            journal_dir, f"two-days~{_DEAD_PID}.jsonl", age_days=2, events=_settled("t1")
         )
         _write_sidecar(tmp_path, "two-days")
 
@@ -511,6 +578,22 @@ class TestWebuiLogRotation:
             held.write(b"after\n")
             held.flush()
         assert log.read_bytes() == b"after\n"
+
+    def test_ctl_log_file_env_selects_the_sink(self, tmp_path, monkeypatch):
+        """`ctl.sh start` execs bootstrap --foreground, which never makes a
+        bootstrap-<port>.log — it exports its own sink instead."""
+        ctl_log = tmp_path / "webui.log"
+        ctl_log.write_bytes(b"x")
+        monkeypatch.setenv(logging_hygiene._WEBUI_LOG_FILE_ENV, str(ctl_log))
+
+        assert logging_hygiene.webui_log_path() == ctl_log
+
+    def test_bootstrap_sink_is_the_fallback(self, monkeypatch):
+        from api.config import PORT
+
+        monkeypatch.delenv(logging_hygiene._WEBUI_LOG_FILE_ENV, raising=False)
+
+        assert logging_hygiene.webui_log_path().name == f"bootstrap-{PORT}.log"
 
     def test_log_under_the_cap_is_left_alone(self, tmp_path):
         log = tmp_path / "bootstrap-8787.log"

@@ -44,13 +44,25 @@ def install_webui_dependency_log_floors() -> None:
 # in-process owns that sink and no ``RotatingFileHandler`` can bound it. On a
 # server that runs for weeks the log grows without limit (HWEB-45).
 _WEBUI_LOG_MAX_BYTES_ENV = "HERMES_WEBUI_LOG_MAX_BYTES"
+_WEBUI_LOG_FILE_ENV = "HERMES_WEBUI_LOG_FILE"
 _WEBUI_LOG_DEFAULT_MAX_BYTES = 32 * 1024 * 1024
 
 
 def webui_log_path() -> Path:
-    """The bootstrap log this server's stdout/stderr is redirected into."""
+    """The file this server's stdout/stderr is redirected into, or ``None``.
+
+    Two launchers, two sinks. ``bootstrap.py``'s detached path writes
+    ``{STATE_DIR}/bootstrap-{PORT}.log``; ``ctl.sh start`` — the documented
+    daemon path — runs ``bootstrap.py --foreground``, which never creates that
+    file, and redirects into ``${HERMES_HOME}/webui.log`` instead. ``ctl.sh``
+    exports its resolved path as ``HERMES_WEBUI_LOG_FILE``, so prefer that and
+    fall back to the bootstrap sink.
+    """
     from api.config import PORT, STATE_DIR
 
+    configured = os.environ.get(_WEBUI_LOG_FILE_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser()
     return Path(STATE_DIR) / f"bootstrap-{PORT}.log"
 
 

@@ -343,6 +343,29 @@ def _session_sidecar_is_intact(session_id: str, root: Path) -> bool:
     return isinstance(payload, dict)
 
 
+def _event_is_well_formed(event: object) -> bool:
+    """True when an event carries the fields the settled check depends on.
+
+    A line can be valid JSON and still be unusable evidence — a ``submitted``
+    with no ``turn_id`` derives into nothing and would read as settled, and a
+    non-numeric ``created_at`` makes ``derive_turn_journal_states`` raise and
+    take the whole retention pass down with it. ``append_turn_journal_event``
+    fills all three in, so anything missing them was not written by this code
+    path and is uncertainty, not evidence of a settled session.
+    """
+    if not isinstance(event, dict):
+        return False
+    if not str(event.get("turn_id") or "").strip():
+        return False
+    if not str(event.get("event") or "").strip():
+        return False
+    try:
+        float(event.get("created_at") or 0)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def _session_is_prunable(session_id: str, root: Path) -> bool:
     """True only on positive evidence that nothing still needs this journal.
 
@@ -352,6 +375,8 @@ def _session_is_prunable(session_id: str, root: Path) -> bool:
     * an id ``read_turn_journal`` rejects, or a shard it cannot read;
     * a malformed line — a crash-torn event is exactly the evidence recovery
       flags for manual review, and deleting it destroys the only record;
+    * a JSON-decodable event missing ``turn_id``, ``event`` or a numeric
+      ``created_at``, which the malformed list never sees;
     * a nonterminal turn, which the startup audit still reports as pending;
     * a missing or unparseable live sidecar, i.e. a session awaiting repair.
     """
@@ -361,41 +386,76 @@ def _session_is_prunable(session_id: str, root: Path) -> bool:
         return False
     if journal.get("malformed"):
         return False
-    states, _ = derive_turn_journal_states(journal.get("events") or [])
+    events = journal.get("events") or []
+    if not all(_event_is_well_formed(event) for event in events):
+        return False
+    states, _ = derive_turn_journal_states(events)
     if any(not is_terminal_turn_event(event) for event in states.values()):
         return False
     return _session_sidecar_is_intact(session_id, root)
 
 
-def _release_expired_shard(path: Path, expected_mtime: float, own_suffix: str) -> bool:
+def _pid_is_running(pid: int) -> bool:
+    """Host-local liveness for the pid in a shard name; unknown counts as alive."""
+    if pid <= 0 or os.name != "posix":
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+    return True
+
+
+def _shard_owner_pid(path: Path) -> int:
+    """The pid encoded in ``{sid}~{pid}.jsonl``, or 0 for the legacy form."""
+    stem = path.stem
+    tilde = stem.find("~")
+    if tilde <= 0:
+        return 0
+    try:
+        return int(stem[tilde + 1:])
+    except ValueError:
+        return 0
+
+
+def _release_expired_shard(path: Path, expected_mtime: float) -> bool:
     """Reclaim one expired shard's bytes. Returns ``True`` when it did.
 
-    A shard this process owns is truncated, not unlinked.
-    :func:`append_turn_journal_event` reopens the path on every call, so
-    unlinking races an appender that has already opened the old inode: its event
-    would land in an unlinked file and vanish. Truncating under the same
-    advisory lock the appender takes cannot lose a write — an ``O_APPEND``
-    writer that was blocked on the lock simply resumes at offset 0 — and the
-    mtime recheck under that lock drops the whole attempt if an append landed
-    between the scan and here. The bytes are reclaimed either way; only the
-    now-empty inode stays, and ``delete_turn_journal`` releases that with the
-    session.
+    Every shard — this process's or another's — is emptied under the same
+    advisory lock :func:`append_turn_journal_event` takes, with an ``fstat``
+    recheck that aborts the whole attempt if an append landed between the
+    directory scan and here. Truncation is what makes this safe: the appender
+    reopens the path on every call, so unlinking races a writer that has already
+    opened the inode and its event would land in an unlinked file and vanish,
+    whereas an ``O_APPEND`` writer blocked on the lock simply resumes at
+    offset 0 and loses nothing.
 
-    Shards carrying another pid have no appender in this process, so they are
-    unlinked outright.
+    The empty file is then unlinked only when its owning pid is provably gone —
+    a shard from a previous run of this server, which is the accumulation vector
+    a restart loop creates. A live pid, an unparseable name, or a platform
+    without a safe liveness probe keeps the (now empty) inode;
+    ``delete_turn_journal`` releases it with the session.
+
+    Residual, stated rather than papered over: pid liveness is host-local, so a
+    second WebUI process on *another* host sharing this state directory over a
+    network filesystem could still be appending to a shard whose pid looks dead
+    here. Advisory locks are unreliable on those filesystems regardless, and the
+    shard must also have been silent for the whole retention window.
     """
-    if not path.name.endswith(own_suffix):
-        try:
-            path.unlink()
-            return True
-        except OSError:
-            return False
     try:
         with open(path, "r+b") as fh:
             with _journal_file_lock(fh):
                 if os.fstat(fh.fileno()).st_mtime != expected_mtime:
                     return False
                 fh.truncate(0)
+                owner = _shard_owner_pid(path)
+                if owner and not _pid_is_running(owner):
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
     except OSError:
         return False
     return True
@@ -421,10 +481,10 @@ def prune_stale_turn_journals(
       one pid can be completed under another and half a turn read alone looks
       pending.
 
-    Expired shards from dead processes are deleted; the running process's own
-    shard is truncated in place under the appender's lock, so a long-running
-    server reclaims its own storage without racing a write. See
-    :func:`_release_expired_shard`.
+    Every expired shard is emptied under the appender's own advisory lock, and
+    the empty file is unlinked only when its owning pid is provably gone — so a
+    long-running server reclaims its storage without racing a writer in this or
+    any other process. See :func:`_release_expired_shard`.
 
     Returns ``{"examined", "pruned", "bytes_reclaimed"}`` counted in shards.
     ``dry_run`` counts without touching anything.
@@ -441,7 +501,6 @@ def prune_stale_turn_journals(
     if not journal_dir.is_dir():
         return result
 
-    own_suffix = f"~{os.getpid()}.jsonl"
     by_session: dict[str, list[tuple[Path, os.stat_result]]] = {}
     for path in sorted(journal_dir.glob("*.jsonl")):
         try:
@@ -464,9 +523,7 @@ def prune_stale_turn_journals(
         for path, stat in shards:
             if not stat.st_size:
                 continue
-            if not dry_run and not _release_expired_shard(
-                path, stat.st_mtime, own_suffix
-            ):
+            if not dry_run and not _release_expired_shard(path, stat.st_mtime):
                 continue
             result["pruned"] += 1
             result["bytes_reclaimed"] += int(stat.st_size)

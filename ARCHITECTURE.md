@@ -870,8 +870,8 @@ background thread and in this order:
 
 The SessionChannel reaper's 60s tick is also the server's only always-on timer,
 so it owns process hygiene (`_run_process_hygiene`): every tick it evicts idle
-account-usage probe workers, rotates the `bootstrap-<port>.log` sink past its
-size cap, and reaps any detached external-app spawn that outlived its inline
+account-usage probe workers, rotates whichever stdout/stderr sink its
+launcher gave it past its size cap, and reaps any detached external-app spawn that outlived its inline
 wait; every six hours it additionally runs run- and turn-journal retention. Each
 step is independently guarded — a failing one never stops the reaper from
 collecting channels. Putting this work on a timer rather than a request path is
