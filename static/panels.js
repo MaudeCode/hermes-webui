@@ -57,9 +57,17 @@ const MAIN_VIEW_SIDEBAR_PANEL_FALLBACKS = { plugin: 'settings' };
 const PANEL_DATA_TTL_MS = 15000;
 const _panelDataLoadedAt = new Map();
 
+// The key is the complete identity the loaded data depends on. Profile, because
+// crons, skills, memory and todos are profile-scoped; session, because loadMemory()
+// requests /api/memory?session_id=, Todos reads session-owned todo state and
+// Workspaces renders an active badge from the current session. Keyed for every
+// panel rather than an allowlist of the session-scoped ones: an allowlist rots as
+// panels gain session-dependent content, and the cost of over-keying is one extra
+// load, which is the behaviour before this gate existed.
 function _panelDataFreshnessKey(panel){
   const profile = (typeof S !== 'undefined' && S && S.activeProfile) || 'default';
-  return `${panel} ${profile}`;
+  const session = (typeof S !== 'undefined' && S && S.session && S.session.session_id) || '';
+  return `${panel} ${profile} ${session}`;
 }
 
 function _panelDataIsFresh(panel, force){
@@ -77,9 +85,14 @@ function _apiFailureCount(){
 // counts every failed request; if the count moved while the loaders ran, treat the
 // load as unhydrated and leave the panel uncached, so the next entry retries
 // instead of showing an error state for the rest of the window.
-function _markPanelDataLoaded(panel, failuresBefore){
-  if (arguments.length > 1 && _apiFailureCount() !== failuresBefore) return;
-  _panelDataLoadedAt.set(_panelDataFreshnessKey(panel), Date.now());
+// `keyBefore` is the identity captured at dispatch. A load that started under one
+// profile/session and completed after a switch carries the previous identity's data,
+// so stamping the now-current key would mark the wrong scope fresh and suppress its
+// correction for the rest of the window.
+function _markPanelDataLoaded(panel, failuresBefore, keyBefore){
+  if (_apiFailureCount() !== failuresBefore) return;
+  if (_panelDataFreshnessKey(panel) !== keyBefore) return;
+  _panelDataLoadedAt.set(keyBefore, Date.now());
 }
 
 // HWEB-33: true while a main-view panel owns the screen. Such a panel replaces
@@ -503,6 +516,7 @@ async function switchPanel(name, opts = {}) {
   // something and are re-entering the panel to show it.
   const panelDataFresh = _panelDataIsFresh(nextPanel, opts.force);
   const failuresBefore = _apiFailureCount();
+  const freshnessKeyBefore = _panelDataFreshnessKey(nextPanel);
   if (!panelDataFresh) {
     if (nextPanel === 'tasks') await loadCrons();
     if (nextPanel === 'kanban') await loadKanban();
@@ -513,7 +527,7 @@ async function switchPanel(name, opts = {}) {
     if (nextPanel === 'todos') loadTodos();
     if (nextPanel === 'insights') await loadInsights();
     if (nextPanel === 'logs') await loadLogs();
-    if (nextPanel !== 'settings') _markPanelDataLoaded(nextPanel, failuresBefore);
+    if (nextPanel !== 'settings') _markPanelDataLoaded(nextPanel, failuresBefore, freshnessKeyBefore);
   }
   _syncLogsAutoRefresh();
   if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
@@ -526,7 +540,7 @@ async function switchPanel(name, opts = {}) {
     // failed settings load does not suppress the next entry's retry.
     if (!panelDataFresh) {
       void Promise.resolve(loadSettingsPanel())
-        .then(() => _markPanelDataLoaded('settings', failuresBefore))
+        .then(() => _markPanelDataLoaded('settings', failuresBefore, freshnessKeyBefore))
         .catch(() => {});
     }
   }

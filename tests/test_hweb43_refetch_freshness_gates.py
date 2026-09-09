@@ -248,7 +248,7 @@ def _panel_harness(body: str) -> str:
       querySelector: () => noopEl,
     }};
     global.$ = () => noopEl;
-    global.S = {{activeProfile:'default'}};
+    global.S = {{activeProfile:'default', session:{{session_id:'sess-a'}}}};
     global._currentPanel = 'chat';
     global._currentSettingsSection = 'general';
     global._beforePanelSwitch = () => true;
@@ -379,6 +379,47 @@ def test_settings_section_still_syncs_on_every_entry_while_its_fetch_is_gated():
     assert result["settings"] == 1, result
 
 
+def test_panel_freshness_is_keyed_by_session_not_just_profile():
+    """Codex P2: loadMemory() fetches /api/memory?session_id=, so the key must carry it."""
+    script = _panel_harness("""
+    (async () => {
+      await switchPanel('memory');
+      await switchPanel('chat');
+      await switchPanel('memory');
+      const sameSession = loads.memory;
+      S.session = {session_id: 'sess-b'};
+      await switchPanel('chat');
+      await switchPanel('memory');
+      console.log(JSON.stringify({sameSession, afterSessionSwitch: loads.memory}));
+    })();
+    """)
+    assert _run_node(script) == {"sameSession": 1, "afterSessionSwitch": 2}
+
+
+def test_a_load_that_finishes_after_a_switch_does_not_stamp_the_new_identity():
+    """Codex P2: the stamp is bound to the identity that started the load."""
+    script = _panel_harness("""
+    (async () => {
+      let release;
+      global.loadCrons = async () => {
+        bump('tasks');
+        await new Promise(resolve => { release = resolve; });
+      };
+      const slow = switchPanel('tasks');
+      // The user switches profile while that load is still on the wire.
+      S.activeProfile = 'other';
+      release();
+      await slow;
+      global.loadCrons = async () => bump('tasks');
+      // Profile B's tasks panel must NOT be marked fresh by profile A's response.
+      await switchPanel('chat');
+      await switchPanel('tasks');
+      console.log(JSON.stringify({loads: loads.tasks}));
+    })();
+    """)
+    assert _run_node(script) == {"loads": 2}
+
+
 # ── 3 + 4. api() dedupe and idempotent-only network retry ────────────────────
 
 _API_PRELUDE = f"""
@@ -450,6 +491,50 @@ def test_concurrent_gets_with_a_caller_signal_are_not_shared():
     }})();
     """
     assert _run_node(script) == {"calls": 2}
+
+
+def test_gets_with_different_caller_policies_are_not_collapsed():
+    """Codex P2: /api/model/auxiliary is requested with retries:0 and with the defaults."""
+    script = f"""
+    {_API_PRELUDE}
+    let calls = 0;
+    let release;
+    const gate = new Promise(resolve => {{ release = resolve; }});
+    global.fetch = () => {{
+      calls += 1;
+      return gate.then(() => ({{
+        ok:true, headers:{{get:()=>'application/json'}},
+        json:()=>Promise.resolve({{}}), text:()=>Promise.resolve(''),
+      }}));
+    }};
+    (async () => {{
+      const mixed = Promise.all([
+        api('/api/model/auxiliary', {{retries:0, timeoutToast:false}}),
+        api('/api/model/auxiliary'),
+      ]);
+      release();
+      await mixed;
+      const afterMixed = calls;
+      let release2;
+      const gate2 = new Promise(resolve => {{ release2 = resolve; }});
+      global.fetch = () => {{
+        calls += 1;
+        return gate2.then(() => ({{
+          ok:true, headers:{{get:()=>'application/json'}},
+          json:()=>Promise.resolve({{}}), text:()=>Promise.resolve(''),
+        }}));
+      }};
+      // Identical policies still share one request.
+      const same = Promise.all([
+        api('/api/model/auxiliary', {{retries:0, timeoutToast:false}}),
+        api('/api/model/auxiliary', {{retries:0, timeoutToast:false}}),
+      ]);
+      release2();
+      await same;
+      console.log(JSON.stringify({{afterMixed, afterSame: calls}}));
+    }})();
+    """
+    assert _run_node(script) == {"afterMixed": 2, "afterSame": 3}
 
 
 def test_a_get_issued_after_a_write_does_not_join_one_issued_before_it():

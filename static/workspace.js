@@ -18,12 +18,27 @@ async function api(path,opts={}){
   const _inflight=(typeof globalThis!=='undefined')
     ?(globalThis.__apiInflightRequests||(globalThis.__apiInflightRequests=new Map()))
     :null;
-  // The key carries the mutation clock stamped below, so a request issued AFTER a
-  // write completed never joins one issued before it. Without that, a GET started
-  // under the previous profile cookie could serve the profile-switch render that
-  // followed it — the response depends on more than the URL.
-  const dedupeKey=(_inflight&&isIdempotent&&opts.dedupe!==false&&!opts.signal)
-    ?(method+' '+url.href+' @'+((typeof globalThis!=='undefined'&&globalThis.__apiLastMutationAt)||0))
+  // The key is the COMPLETE request identity, not just the URL:
+  //  - the mutation clock stamped below, so a request issued after a write never
+  //    joins one issued before it (a GET started under the previous profile cookie
+  //    must not serve the profile-switch render that followed it);
+  //  - a fingerprint of the caller's options, because they carry per-caller policy.
+  //    /api/model/auxiliary is requested with {retries:0,timeoutToast:false} by the
+  //    title regenerator and with the defaults by the settings loader; collapsing
+  //    those would silently hand the follower the first caller's retry policy.
+  // A non-serializable opts object yields no key at all, so it falls through to its
+  // own request rather than being merged on a guess.
+  let optsFingerprint=null;
+  try{
+    const policy={};
+    for(const key of Object.keys(opts).sort()){
+      if(key==='signal'||key==='dedupe') continue;
+      policy[key]=opts[key];
+    }
+    optsFingerprint=JSON.stringify(policy);
+  }catch(_){ optsFingerprint=null; }
+  const dedupeKey=(_inflight&&isIdempotent&&opts.dedupe!==false&&!opts.signal&&optsFingerprint!==null)
+    ?(method+' '+url.href+' @'+((typeof globalThis!=='undefined'&&globalThis.__apiLastMutationAt)||0)+' '+optsFingerprint)
     :null;
   if(dedupeKey){
     const existing=_inflight.get(dedupeKey);

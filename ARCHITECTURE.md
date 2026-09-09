@@ -621,8 +621,11 @@ Chat/session durability invariants:
     the last completed write all bypass it. `api()` stamps that write clock on the
     completion of every non-idempotent request, so no mutating call site has to
     remember to invalidate. Panel data loaded by `switchPanel()` has an equivalent
-    15-second window keyed by panel and active profile, so toggling between two
-    panels no longer reloads each one on every entry.
+    15-second window keyed by panel, active profile and active session — several
+    panels render session-scoped data — so toggling between two panels no longer
+    reloads each one on every entry. A panel is stamped fresh only if no request
+    failed while its loaders ran (they catch their own errors) and the profile and
+    session that started the load are still current when it completes.
     When the optional Talaria Relay publisher is configured, `ACTIVE_RUNS` remains the
     sole run-liveness owner. An owner registers one server-wide Ed25519 publisher key;
     authenticated users then enroll opaque profile scopes without receiving publisher
@@ -1171,10 +1174,14 @@ timeouts, 401 redirects and the startup-503 budget described in section 7b):
 
 Two request-discipline rules live in that one wrapper rather than at call sites:
 
-- **Concurrent GET/HEAD requests for the same resolved URL share one in-flight
+- **Concurrent GET/HEAD requests with the same identity share one in-flight
   promise**, so two callers produce one network request and cannot resolve out of
-  order. Skipped when the caller supplies its own `AbortSignal` (aborting a shared
-  promise would cancel an unrelated caller); opt out with `dedupe:false`.
+  order. Identity is method + resolved URL + the write clock below + a fingerprint of
+  the caller's options — options carry per-caller policy (`/api/model/auxiliary` is
+  requested with `retries:0` by one caller and with the defaults by another), and the
+  write clock keeps a request issued after a write from joining one issued before it.
+  Skipped when the caller supplies its own `AbortSignal` (aborting a shared promise
+  would cancel an unrelated caller); opt out with `dedupe:false`.
 - **A network `TypeError` is only retried for idempotent methods.** A POST that
   died on the wire may already have been applied server-side. Startup-readiness
   503s and caller-supplied `retryStatuses` are still retried for any method.
