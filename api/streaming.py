@@ -481,6 +481,46 @@ def _file_signature(path: Path) -> tuple[int, int] | None:
         return None
 
 
+# Trees never worth descending when looking for SKILL.md. A skill that vendors a
+# dependency tree (node_modules, a .venv, a checked-out .git) otherwise turns the
+# per-turn snapshot below into a walk over thousands of irrelevant files, twice a
+# turn (HWEB-40). Prefer the upstream set so this stays aligned with what the
+# agent itself indexes; the literal fallback keeps the pruning in place when the
+# hermes CLI package isn't importable (WebUI-only installs, tests).
+_SKILL_WALK_PRUNE_FALLBACK = frozenset(
+    {".git", ".venv", "venv", "node_modules", "site-packages", "__pycache__"}
+)
+
+
+def _skill_walk_prune_dirs() -> frozenset:
+    try:
+        from agent.skill_utils import EXCLUDED_SKILL_DIRS
+    except Exception:
+        return _SKILL_WALK_PRUNE_FALLBACK
+    return frozenset(EXCLUDED_SKILL_DIRS) | _SKILL_WALK_PRUNE_FALLBACK
+
+
+def _walk_skill_dirs(skills_dir: Path):
+    """Yield (directory, filenames) under skills_dir, skipping vendored trees.
+
+    The single pruned walk behind every user-skill scan, so a new caller can't
+    reintroduce an unpruned ``rglob``. Missing directories yield nothing, which
+    matches what ``rglob`` on an absent path did.
+    """
+    excluded = _skill_walk_prune_dirs()
+    # followlinks=False: a symlink loop inside a vendored tree must not hang a turn.
+    for root, dirnames, filenames in os.walk(skills_dir, followlinks=False):
+        dirnames[:] = [d for d in dirnames if d not in excluded]
+        yield Path(root), filenames
+
+
+def _iter_skill_md_pruned(skills_dir: Path):
+    """Yield every SKILL.md under skills_dir without descending vendored trees."""
+    for root, filenames in _walk_skill_dirs(skills_dir):
+        if "SKILL.md" in filenames:
+            yield root / "SKILL.md"
+
+
 def _persistent_state_snapshot(profile_home: str | None) -> dict:
     """Capture lightweight memory/skill file signatures for save toasts."""
     if not profile_home:
@@ -494,7 +534,7 @@ def _persistent_state_snapshot(profile_home: str | None) -> dict:
     skills = {}
     skills_dir = root / "skills"
     try:
-        for skill_md in skills_dir.rglob("SKILL.md"):
+        for skill_md in _iter_skill_md_pruned(skills_dir):
             try:
                 rel = str(skill_md.relative_to(skills_dir)).replace("\\", "/")
             except ValueError:
