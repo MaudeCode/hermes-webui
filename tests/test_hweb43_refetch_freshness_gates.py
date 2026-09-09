@@ -1,0 +1,421 @@
+"""HWEB-43: freshness gates on session-list and panel refetching, plus api() dedupe.
+
+Every test here drives the real extracted function under node so it asserts
+observable behaviour (how many fetches/loads actually happened), not source text.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from tests.js_source_extract import extract_function
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+WORKSPACE_JS = (ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
+NODE = shutil.which("node")
+
+pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
+
+
+def _js(source: str, name: str) -> str:
+    """Extract `name` whether it is declared async or not."""
+    if f"async function {name}(" in source:
+        return extract_function(source, name, prefix="async function")
+    return extract_function(source, name)
+
+
+def _const(source: str, name: str) -> str:
+    for line in source.splitlines():
+        if line.startswith(f"const {name} = ") or line.startswith(f"const {name}="):
+            return line
+    raise AssertionError(f"const {name} not found")
+
+
+def _run_node(script: str, timeout: float = 10.0):
+    completed = subprocess.run(
+        [NODE, "-e", script],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    return json.loads(completed.stdout.strip())
+
+
+# ── 1 + 5. Session list TTL ──────────────────────────────────────────────────
+
+_SIDEBAR_PRELUDE = f"""
+global._showAllProfiles = false;
+global._allProjects = [];
+global.S = {{activeProfile:'default'}};
+global._sessionProjectsLastFetchedAt = 0;
+global._sessionProjectsLastFetchScope = '';
+global.SESSION_PROJECT_REFRESH_INTERVAL_MS = 30000;
+global._sessionListLastFetchedAt = 0;
+global._sessionListLastFetchKey = '';
+global._sessionListLastPayload = null;
+{_const(SESSIONS_JS, 'SESSION_LIST_REFRESH_TTL_MS')}
+global.SESSION_LIST_REFRESH_TTL_MS = SESSION_LIST_REFRESH_TTL_MS;
+let sessionFetches = 0;
+let sessionTitle = 'first turn';
+global.api = (url) => {{
+  if (url.startsWith('/api/projects')) return Promise.resolve({{projects: []}});
+  if (url.startsWith('/api/sessions')) {{
+    sessionFetches += 1;
+    return Promise.resolve({{sessions: [{{session_id:'s1', title: sessionTitle}}]}});
+  }}
+  return Promise.reject(new Error('unexpected endpoint ' + url));
+}};
+{_js(SESSIONS_JS, '_loadSidebarSessionListPayload')}
+"""
+
+
+def test_burst_of_turn_transitions_issues_one_session_fetch_per_ttl_window():
+    """Stream start/apperror/done/terminal all render the sidebar; one fetch is enough."""
+    script = f"""
+    {_SIDEBAR_PRELUDE}
+    (async () => {{
+      const qs = '?sidebar_source=all';
+      // Five back-to-back lifecycle renders, exactly as one turn transition emits them.
+      for (let i = 0; i < 5; i++) await _loadSidebarSessionListPayload(qs, {{}});
+      const gated = sessionFetches;
+      // A caller that knows the data changed bypasses the window.
+      await _loadSidebarSessionListPayload(qs, {{}}, {{force:true}});
+      const afterForce = sessionFetches;
+      // Once the window lapses, an ordinary render refetches again.
+      _sessionListLastFetchedAt -= (SESSION_LIST_REFRESH_TTL_MS + 1);
+      await _loadSidebarSessionListPayload(qs, {{}});
+      console.log(JSON.stringify({{gated, afterForce, afterExpiry: sessionFetches}}));
+    }})();
+    """
+    result = _run_node(script)
+    assert result["gated"] == 1, result
+    assert result["afterForce"] == 2, result
+    assert result["afterExpiry"] == 3, result
+
+
+def test_session_list_window_is_scoped_to_the_request_identity():
+    """A different sidebar scope must never be served the previous scope's rows."""
+    script = f"""
+    {_SIDEBAR_PRELUDE}
+    (async () => {{
+      await _loadSidebarSessionListPayload('?sidebar_source=all', {{}});
+      const afterFirst = sessionFetches;
+      await _loadSidebarSessionListPayload('?sidebar_source=cli', {{}});
+      const afterScopeChange = sessionFetches;
+      global.S = {{activeProfile:'other'}};
+      await _loadSidebarSessionListPayload('?sidebar_source=cli', {{}});
+      console.log(JSON.stringify({{
+        afterFirst, afterScopeChange, afterProfileChange: sessionFetches,
+      }}));
+    }})();
+    """
+    result = _run_node(script)
+    assert result == {"afterFirst": 1, "afterScopeChange": 2, "afterProfileChange": 3}
+
+
+def test_new_message_reaches_the_sidebar_without_waiting_for_the_ttl():
+    """AC5: the forced path (SSE session event, pull-to-refresh) shows new data now."""
+    script = f"""
+    {_SIDEBAR_PRELUDE}
+    (async () => {{
+      const qs = '?sidebar_source=all';
+      const before = await _loadSidebarSessionListPayload(qs, {{}});
+      sessionTitle = 'a new message arrived';
+      const gated = await _loadSidebarSessionListPayload(qs, {{}});
+      const forced = await _loadSidebarSessionListPayload(qs, {{}}, {{force:true}});
+      console.log(JSON.stringify({{
+        before: before.sessData.sessions[0].title,
+        gated: gated.sessData.sessions[0].title,
+        forced: forced.sessData.sessions[0].title,
+        fetches: sessionFetches,
+      }}));
+    }})();
+    """
+    result = _run_node(script)
+    assert result["before"] == "first turn"
+    assert result["gated"] == "first turn", "the window is what makes the force path meaningful"
+    assert result["forced"] == "a new message arrived", result
+    assert result["fetches"] == 2, result
+
+
+def test_session_list_window_fails_closed_after_a_write():
+    """api() stamps mutations; a snapshot older than the last write is not fresh."""
+    script = f"""
+    {_SIDEBAR_PRELUDE}
+    (async () => {{
+      const qs = '?sidebar_source=all';
+      await _loadSidebarSessionListPayload(qs, {{}});
+      const afterFirst = sessionFetches;
+      await _loadSidebarSessionListPayload(qs, {{}});
+      const stillGated = sessionFetches;
+      // A POST just completed (renamed/archived/sent) — the snapshot predates it.
+      globalThis.__apiLastMutationAt = Date.now() + 1;
+      await _loadSidebarSessionListPayload(qs, {{}});
+      console.log(JSON.stringify({{afterFirst, stillGated, afterWrite: sessionFetches}}));
+    }})();
+    """
+    result = _run_node(script)
+    assert result == {"afterFirst": 1, "stillGated": 1, "afterWrite": 2}
+
+
+# ── 2. Panel switch freshness gate ───────────────────────────────────────────
+
+def _panel_harness(body: str) -> str:
+    return f"""
+    const loads = {{}};
+    const bump = (name) => {{ loads[name] = (loads[name] || 0) + 1; }};
+    const noopEl = {{
+      classList:{{add(){{}}, remove(){{}}, toggle(){{}}}},
+      dataset:{{}},
+      contains(){{ return false; }},
+    }};
+    global.document = {{
+      querySelectorAll: () => [],
+      querySelector: () => noopEl,
+    }};
+    global.$ = () => noopEl;
+    global.S = {{activeProfile:'default'}};
+    global._currentPanel = 'chat';
+    global._currentSettingsSection = 'general';
+    global._beforePanelSwitch = () => true;
+    global._beginSettingsPanelSession = () => {{}};
+    global._kanbanStopPolling = () => {{}};
+    global._syncSidebarSseForPanel = () => {{}};
+    global._syncSidebarAria = () => {{}};
+    global._syncLogsAutoRefresh = () => {{}};
+    global._syncSystemHealthMonitorVisibility = () => {{}};
+    global._resyncChatSidebarAfterPanelSwitch = () => {{}};
+    global.syncTopbar = () => {{}};
+    global.syncAppTitlebar = () => {{}};
+    global.switchSettingsSection = () => bump('settingsSection');
+    global.loadSettingsPanel = () => bump('settings');
+    global.loadCrons = async () => bump('tasks');
+    global.loadKanban = async () => bump('kanban');
+    global.loadSkills = async () => bump('skills');
+    global.loadMemory = async () => bump('memory');
+    global.loadWorkspacesPanel = async () => bump('workspaces');
+    global.loadProfilesPanel = async () => bump('profiles');
+    global.loadTodos = () => bump('todos');
+    global.loadInsights = async () => bump('insights');
+    global.loadLogs = async () => bump('logs');
+    {_const(PANELS_JS, 'MAIN_VIEW_PANELS')}
+    {_const(PANELS_JS, 'PANEL_DATA_TTL_MS')}
+    const _panelDataLoadedAt = new Map();
+    {_js(PANELS_JS, '_panelDataFreshnessKey')}
+    {_js(PANELS_JS, '_panelDataIsFresh')}
+    {_js(PANELS_JS, '_markPanelDataLoaded')}
+    {_js(PANELS_JS, 'switchPanel')}
+    {body}
+    """
+
+
+def test_toggling_between_two_panels_twice_loads_each_once():
+    script = _panel_harness("""
+    (async () => {
+      await switchPanel('tasks');
+      await switchPanel('skills');
+      await switchPanel('tasks');
+      await switchPanel('skills');
+      console.log(JSON.stringify(loads));
+    })();
+    """)
+    result = _run_node(script)
+    assert result == {"tasks": 1, "skills": 1}, result
+
+
+def test_panel_reloads_after_its_window_lapses_and_on_force():
+    script = _panel_harness("""
+    (async () => {
+      await switchPanel('tasks');
+      await switchPanel('chat');
+      await switchPanel('tasks', {force:true});
+      const afterForce = loads.tasks;
+      await switchPanel('chat');
+      for (const key of _panelDataLoadedAt.keys()) {
+        _panelDataLoadedAt.set(key, _panelDataLoadedAt.get(key) - (PANEL_DATA_TTL_MS + 1));
+      }
+      await switchPanel('tasks');
+      console.log(JSON.stringify({afterForce, afterExpiry: loads.tasks}));
+    })();
+    """)
+    result = _run_node(script)
+    assert result == {"afterForce": 2, "afterExpiry": 3}
+
+
+def test_settings_section_still_syncs_on_every_entry_while_its_fetch_is_gated():
+    """Re-entering settings must re-apply the visible section even when data is fresh."""
+    script = _panel_harness("""
+    (async () => {
+      await switchPanel('settings');
+      await switchPanel('chat');
+      await switchPanel('settings');
+      console.log(JSON.stringify(loads));
+    })();
+    """)
+    result = _run_node(script)
+    assert result["settingsSection"] == 2, result
+    assert result["settings"] == 1, result
+
+
+# ── 3 + 4. api() dedupe and idempotent-only network retry ────────────────────
+
+_API_PRELUDE = f"""
+global.document = {{baseURI:'http://example.test/'}};
+global.location = {{href:'http://example.test/', pathname:'/', search:''}};
+global.window = {{location: global.location}};
+global.showToast = () => {{}};
+{_js(WORKSPACE_JS, 'api')}
+"""
+
+
+def test_simultaneous_gets_for_the_same_url_issue_one_request():
+    script = f"""
+    {_API_PRELUDE}
+    const calls = [];
+    let release;
+    const gate = new Promise(resolve => {{ release = resolve; }});
+    global.fetch = (url) => {{
+      calls.push(url);
+      return gate.then(() => ({{
+        ok:true,
+        headers:{{get:()=>'application/json'}},
+        json:()=>Promise.resolve({{n: calls.length}}),
+        text:()=>Promise.resolve(''),
+      }}));
+    }};
+    (async () => {{
+      const both = Promise.all([api('/api/sessions?x=1'), api('/api/sessions?x=1')]);
+      const other = api('/api/projects');
+      release();
+      const [a, b] = await both;
+      await other;
+      // Sequential calls must NOT reuse a settled entry.
+      await api('/api/sessions?x=1');
+      console.log(JSON.stringify({{calls, sameValue: a === b}}));
+    }})();
+    """
+    result = _run_node(script)
+    assert result["calls"] == [
+        "http://example.test/api/sessions?x=1",
+        "http://example.test/api/projects",
+        "http://example.test/api/sessions?x=1",
+    ], result
+    assert result["sameValue"] is True, "concurrent callers must share the one response"
+
+
+def test_concurrent_gets_with_a_caller_signal_are_not_shared():
+    """Sharing a promise across AbortSignals would let one caller cancel another."""
+    script = f"""
+    {_API_PRELUDE}
+    let calls = 0;
+    let release;
+    const gate = new Promise(resolve => {{ release = resolve; }});
+    global.fetch = () => {{
+      calls += 1;
+      return gate.then(() => ({{
+        ok:true, headers:{{get:()=>'application/json'}},
+        json:()=>Promise.resolve({{}}), text:()=>Promise.resolve(''),
+      }}));
+    }};
+    (async () => {{
+      const both = Promise.all([
+        api('/api/sessions', {{signal: new AbortController().signal}}),
+        api('/api/sessions', {{signal: new AbortController().signal}}),
+      ]);
+      release();
+      await both;
+      console.log(JSON.stringify({{calls}}));
+    }})();
+    """
+    assert _run_node(script) == {"calls": 2}
+
+
+def test_a_get_issued_after_a_write_does_not_join_one_issued_before_it():
+    """A GET's response depends on more than its URL (cookies, server state)."""
+    script = f"""
+    {_API_PRELUDE}
+    const calls = [];
+    let releaseGet;
+    const gate = new Promise(resolve => {{ releaseGet = resolve; }});
+    global.fetch = (url, opts) => {{
+      const method = (opts && opts.method) || 'GET';
+      calls.push(method + ' ' + url);
+      if (method !== 'GET') return Promise.resolve({{
+        ok:true, headers:{{get:()=>'application/json'}},
+        json:()=>Promise.resolve({{}}), text:()=>Promise.resolve(''),
+      }});
+      return gate.then(() => ({{
+        ok:true, headers:{{get:()=>'application/json'}},
+        json:()=>Promise.resolve({{}}), text:()=>Promise.resolve(''),
+      }}));
+    }};
+    (async () => {{
+      const first = api('/api/sessions');
+      await api('/api/profile/switch', {{method:'POST', body:'{{}}'}});
+      const second = api('/api/sessions');
+      releaseGet();
+      await Promise.all([first, second]);
+      console.log(JSON.stringify({{calls}}));
+    }})();
+    """
+    result = _run_node(script)
+    assert result["calls"] == [
+        "GET http://example.test/api/sessions",
+        "POST http://example.test/api/profile/switch",
+        "GET http://example.test/api/sessions",
+    ], result
+
+
+def test_post_is_not_retried_on_a_network_typeerror():
+    script = f"""
+    {_API_PRELUDE}
+    const attempts = {{}};
+    global.fetch = (url, opts) => {{
+      const method = (opts && opts.method) || 'GET';
+      attempts[method] = (attempts[method] || 0) + 1;
+      return Promise.reject(new TypeError('Failed to fetch'));
+    }};
+    (async () => {{
+      const errors = [];
+      try {{ await api('/api/chat/start', {{method:'POST', body:'{{}}', retryDelayMs:0}}); }}
+      catch (e) {{ errors.push('post:' + e.name); }}
+      try {{ await api('/api/sessions', {{retryDelayMs:0}}); }}
+      catch (e) {{ errors.push('get:' + e.name); }}
+      console.log(JSON.stringify({{attempts, errors}}));
+    }})();
+    """
+    result = _run_node(script)
+    assert result["attempts"]["POST"] == 1, "a POST may already have been applied server-side"
+    assert result["attempts"]["GET"] == 3, "idempotent GETs keep the network-error retry"
+    assert result["errors"] == ["post:TypeError", "get:TypeError"], result
+
+
+def test_mutating_requests_stamp_the_shared_mutation_clock():
+    script = f"""
+    {_API_PRELUDE}
+    global.fetch = () => Promise.resolve({{
+      ok:true, headers:{{get:()=>'application/json'}},
+      json:()=>Promise.resolve({{}}), text:()=>Promise.resolve(''),
+    }});
+    (async () => {{
+      await api('/api/sessions');
+      const afterGet = globalThis.__apiLastMutationAt || 0;
+      await api('/api/session/rename', {{method:'POST', body:'{{}}'}});
+      const afterPost = globalThis.__apiLastMutationAt || 0;
+      console.log(JSON.stringify({{afterGet, stamped: afterPost > 0}}));
+    }})();
+    """
+    result = _run_node(script)
+    assert result["afterGet"] == 0, "a read must not look like a write"
+    assert result["stamped"] is True

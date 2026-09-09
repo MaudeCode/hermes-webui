@@ -48,7 +48,9 @@ def test_sessions_and_projects_load_independently_so_projects_failure_cannot_bla
     helper = src[helper_start:helper_end]
 
     assert "Promise.all" not in block
-    assert "_loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts)" in block
+    assert "_loadSidebarSessionListPayload(" in block
+    # HWEB-43 added a third argument carrying the freshness-window bypass.
+    assert "{force:Boolean(opts&&opts.force)}," in block
     assert "const projectPromise = projectsAreFresh" in helper
     assert "Promise.resolve({projects:_allProjects||[]})" in helper
     assert "SESSION_PROJECT_REFRESH_INTERVAL_MS" in helper
@@ -94,7 +96,9 @@ def test_sessions_api_always_retries_transient_upstream_statuses_and_boot_keeps_
     assert "sessionRequestOpts.retryTimeouts=true;" in refresh
     assert refresh.index("sessionRequestOpts.retryTimeouts=true;") > boot_gate
 
-    assert "const sessData = await api('/api/sessions' + sessionListQS,sessionRequestOpts);" in helper
+    # HWEB-43 moved the fetch into the else branch of the freshness gate; the retry
+    # opts must still be the ones passed to it.
+    assert "sessData = await api('/api/sessions' + sessionListQS,sessionRequestOpts);" in helper
     assert "api('/api/sessions' + sessionListQS,{timeoutToast:false})" not in helper
     assert "retryTimeouts" in workspace_src
     assert "retryStatuses" in workspace_src

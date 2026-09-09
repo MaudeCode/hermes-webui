@@ -442,6 +442,22 @@ const _SESSION_LIST_BOOT_TIMEOUT_MS = 90000;
 const SESSION_PROJECT_REFRESH_INTERVAL_MS = 30000;
 let _sessionProjectsLastFetchedAt = 0;
 let _sessionProjectsLastFetchScope = '';
+// HWEB-43: renderSessionList() has ~100 unconditional call sites; the stream
+// lifecycle alone fires it on start, apperror, done, terminal and hidden-tab
+// attach, so one turn transition refetches the whole list several times over.
+// Same TTL mechanism as the projects cache above, but deliberately far shorter:
+// the row's streaming indicator is driven by the SERVER's `is_streaming`, so a
+// long window would leave a finished turn looking live. This value only has to
+// outlast the burst of renders a single lifecycle transition emits (all within a
+// few ms of each other); the 30s streaming poll and every SSE/mutation-driven
+// refresh pass `force` and bypass it entirely.
+// ponytail: fixed window, keyed on the request's own query string. If the
+// sidebar ever needs per-field freshness, invalidate on the specific event
+// instead of shortening this further.
+const SESSION_LIST_REFRESH_TTL_MS = 2000;
+let _sessionListLastFetchedAt = 0;
+let _sessionListLastFetchKey = '';
+let _sessionListLastPayload = null;
 const SESSION_LIST_INTERACTION_IDLE_MS = 700;
 const SESSION_SWIPE_DURATION_MS = 500;
 const SESSION_SWIPE_REFLOW_LEAD_MS = 220;
@@ -5797,6 +5813,9 @@ function _mergeRenderSessionListOptions(prev, next){
   if((prev&&prev.deferWhileInteracting===false)||(next&&next.deferWhileInteracting===false)){
     merged.deferWhileInteracting=false;
   }
+  // Same rule for the freshness window (HWEB-43): a coalesced batch containing one
+  // forced request must still refetch, or the caller that knew data changed loses.
+  if((prev&&prev.force===true)||(next&&next.force===true)) merged.force=true;
   return merged;
 }
 
@@ -5908,7 +5927,11 @@ async function _runRenderSessionListRefresh(opts, _gen){
       sessionRequestOpts.timeoutMs=_SESSION_LIST_BOOT_TIMEOUT_MS;
       sessionRequestOpts.retryTimeouts=true;
     }
-    const {sessData, projData}=await _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts);
+    const {sessData, projData}=await _loadSidebarSessionListPayload(
+      sessionListQS,
+      sessionRequestOpts,
+      {force:Boolean(opts&&opts.force)},
+    );
     // Discard stale response — a newer renderSessionList() call superseded us.
     if (_gen !== _renderSessionListGen) return;
     // #4671: while a profile switch is mid-flight, drop ANY payload — even one whose
@@ -5963,7 +5986,8 @@ async function _runRenderSessionListRefresh(opts, _gen){
   }
 }
 
-async function _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts){
+async function _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts, loadOpts){
+  const force=!!(loadOpts&&loadOpts.force);
   const projectScope=`${(typeof S!=='undefined'&&S&&S.activeProfile)||'default'}:${_showAllProfiles?'all':'active'}`;
   const now=Date.now();
   const projectsAreFresh=typeof _sessionProjectsLastFetchedAt==='number'
@@ -5988,7 +6012,32 @@ async function _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts)
         }
       })();
 
-  const sessData = await api('/api/sessions' + sessionListQS,sessionRequestOpts);
+  // HWEB-43: same freshness guard as the projects fetch above. The cache key is
+  // the full request identity — the query string carries source/hidden/archived
+  // scope, projectScope carries the profile and all-profiles flag — so a scope
+  // change can never be served a previous scope's rows. Replaying the cached
+  // payload (rather than skipping the render) keeps every downstream apply path
+  // unchanged: local overlays like optimistic streaming are recomputed from
+  // current state on each apply, only the server snapshot is reused.
+  const sessionListKey=`${projectScope}|${sessionListQS}`;
+  // api() stamps the completion of every non-idempotent request; a snapshot taken
+  // before the last write is not fresh no matter how recent it is.
+  const lastMutationAt=(typeof globalThis!=='undefined'&&Number(globalThis.__apiLastMutationAt))||0;
+  const sessionsAreFresh=!force
+    && _sessionListLastPayload!==null
+    && _sessionListLastFetchKey===sessionListKey
+    && _sessionListLastFetchedAt>0
+    && _sessionListLastFetchedAt>lastMutationAt
+    && now-_sessionListLastFetchedAt<(typeof SESSION_LIST_REFRESH_TTL_MS==='number'?SESSION_LIST_REFRESH_TTL_MS:2000);
+  let sessData;
+  if(sessionsAreFresh){
+    sessData=_sessionListLastPayload;
+  }else{
+    sessData = await api('/api/sessions' + sessionListQS,sessionRequestOpts);
+    _sessionListLastPayload=sessData;
+    _sessionListLastFetchKey=sessionListKey;
+    _sessionListLastFetchedAt=Date.now();
+  }
   const projData = await projectPromise;
 
   return {sessData,projData};
@@ -6350,7 +6399,10 @@ async function refreshSessionList(reason='manual', opts={}){
   }
   _sessionListRefreshInFlight = true;
   try{
-    await renderSessionList({deferWhileInteracting:!force});
+    // HWEB-43: a forced refresh already means "the caller knows something changed"
+    // (SSE session event, pull-to-refresh, hidden-tab catch-up), so it must also
+    // bypass the session-list freshness window, not just the interaction defer.
+    await renderSessionList({deferWhileInteracting:!force, force});
     if(refreshActive) await refreshActiveSessionIfExternallyUpdated(reason||'session-list');
   }finally{
     _sessionListRefreshInFlight = false;

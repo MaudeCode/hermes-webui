@@ -612,6 +612,17 @@ Chat/session durability invariants:
     Sidebar project metadata is cached for at most 30 seconds per profile scope and is
     invalidated immediately by local CRUD, project session events, and focus/visibility
     recovery; ordinary session polling does not reread projects on every refresh.
+    The sidebar session list has its own, much shorter freshness window (2 seconds,
+    keyed on the full request identity: profile, all-profiles flag and query string).
+    It exists only to collapse the burst of `renderSessionList()` calls a single
+    stream-lifecycle transition emits; the 30-second streaming poll, every
+    `refreshSessionList(..., {force:true})` caller (SSE session events,
+    focus/visibility resume, pull-to-refresh), and any read whose snapshot predates
+    the last completed write all bypass it. `api()` stamps that write clock on the
+    completion of every non-idempotent request, so no mutating call site has to
+    remember to invalidate. Panel data loaded by `switchPanel()` has an equivalent
+    15-second window keyed by panel and active profile, so toggling between two
+    panels no longer reloads each one on every entry.
     When the optional Talaria Relay publisher is configured, `ACTIVE_RUNS` remains the
     sole run-liveness owner. An owner registers one server-wide Ed25519 publisher key;
     authenticated users then enroll opaque profile scopes without receiving publisher
@@ -1148,7 +1159,8 @@ POST:
       body: JSON.stringify({field: value})
     });
 
-The api() helper:
+The api() helper, in outline (the real one in `static/workspace.js` also owns
+timeouts, 401 redirects and the startup-503 budget described in section 7b):
 
     async function api(path, opts={}) {
       const r = await fetch(path, {headers:{'Content-Type':'application/json'},...opts});
@@ -1156,6 +1168,16 @@ The api() helper:
       if (!r.ok) throw new Error(d.error || r.statusText);
       return d;
     }
+
+Two request-discipline rules live in that one wrapper rather than at call sites:
+
+- **Concurrent GET/HEAD requests for the same resolved URL share one in-flight
+  promise**, so two callers produce one network request and cannot resolve out of
+  order. Skipped when the caller supplies its own `AbortSignal` (aborting a shared
+  promise would cancel an unrelated caller); opt out with `dedupe:false`.
+- **A network `TypeError` is only retried for idempotent methods.** A POST that
+  died on the wire may already have been applied server-side. Startup-readiness
+  503s and caller-supplied `retryStatuses` are still retried for any method.
 
 ---
 

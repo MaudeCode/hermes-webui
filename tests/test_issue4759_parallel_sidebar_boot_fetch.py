@@ -94,6 +94,10 @@ def test_cold_boot_starts_projects_fetch_before_sessions_resolve():
 
     global._showAllProfiles = false;
     global._allProjects = [];
+    global._sessionListLastFetchedAt = 0;
+    global._sessionListLastFetchKey = '';
+    global._sessionListLastPayload = null;
+    global.SESSION_LIST_REFRESH_TTL_MS = 2000;
     global._sessionListHasLoadedOnce = false;
     global.api = (url) => {{
   if (url.startsWith('/api/projects')) {{
@@ -154,6 +158,10 @@ def test_project_failure_falls_back_without_blocking_session_payload():
     const calls = [];
     global._showAllProfiles = true;
     global._allProjects = [];
+    global._sessionListLastFetchedAt = 0;
+    global._sessionListLastFetchKey = '';
+    global._sessionListLastPayload = null;
+    global.SESSION_LIST_REFRESH_TTL_MS = 2000;
     global._sessionListHasLoadedOnce = false;
     global.api = (url) => {{
   if (url.startsWith('/api/projects')) {{
@@ -202,6 +210,10 @@ def test_existing_session_request_options_are_preserved():
     refresh_fn = _extract_function(SESSIONS_JS, "_runRenderSessionListRefresh")
     script = f"""
 global._SESSION_LIST_BOOT_TIMEOUT_MS = 90000;
+global._sessionListLastFetchedAt = 0;
+global._sessionListLastFetchKey = '';
+global._sessionListLastPayload = null;
+global.SESSION_LIST_REFRESH_TTL_MS = 2000;
 global._sessionListHasLoadedOnce = false;
 global._renderSessionListGen = 1;
 global._profileSwitchListEmbargo = false;
@@ -273,6 +285,10 @@ global.SESSION_PROJECT_REFRESH_INTERVAL_MS = 30000;
 global._sessionProjectsLastFetchedAt = Date.now();
 global._sessionProjectsLastFetchScope = 'default:active';
 global._allProjects = [{{name:'cached-demo'}}];
+global._sessionListLastFetchedAt = 0;
+global._sessionListLastFetchKey = '';
+global._sessionListLastPayload = null;
+global.SESSION_LIST_REFRESH_TTL_MS = 2000;
 global._sessionListHasLoadedOnce = true;
 global.api = (url, opts) => {{
   if (url.startsWith('/api/projects')) {{
@@ -341,6 +357,10 @@ global._allProjects = [{{name:'cached'}}];
 global.SESSION_PROJECT_REFRESH_INTERVAL_MS = 30000;
 global._sessionProjectsLastFetchedAt = now;
 global._sessionProjectsLastFetchScope = 'default:active';
+global._sessionListLastFetchedAt = 0;
+global._sessionListLastFetchKey = '';
+global._sessionListLastPayload = null;
+global.SESSION_LIST_REFRESH_TTL_MS = 2000;
 const calls = [];
 global.api = (url) => {{
   calls.push(url);

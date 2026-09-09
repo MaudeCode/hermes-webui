@@ -47,6 +47,31 @@ const APP_TITLEBAR_KEYS = {
 const MAIN_VIEW_PANELS = ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'];
 const MAIN_VIEW_SIDEBAR_PANEL_FALLBACKS = { plugin: 'settings' };
 
+// HWEB-43: switchPanel() reloads a panel's data on every entry, so toggling
+// between two panels N times costs N loads of each. Gate the loader dispatch on
+// a bounded freshness window, the same shape as the sidebar's project/session
+// caches. Only switchPanel() stamps this: a mutation inside a panel refreshes by
+// calling its loader directly, which leaves the stamp older than the data — an
+// unnecessary reload at worst, never a stale one. The key carries the active
+// profile because crons, skills, memory and todos are all profile-scoped.
+const PANEL_DATA_TTL_MS = 15000;
+const _panelDataLoadedAt = new Map();
+
+function _panelDataFreshnessKey(panel){
+  const profile = (typeof S !== 'undefined' && S && S.activeProfile) || 'default';
+  return `${panel} ${profile}`;
+}
+
+function _panelDataIsFresh(panel, force){
+  if (force) return false;
+  const at = _panelDataLoadedAt.get(_panelDataFreshnessKey(panel));
+  return typeof at === 'number' && at > 0 && (Date.now() - at) < PANEL_DATA_TTL_MS;
+}
+
+function _markPanelDataLoaded(panel){
+  _panelDataLoadedAt.set(_panelDataFreshnessKey(panel), Date.now());
+}
+
 // HWEB-33: true while a main-view panel owns the screen. Such a panel replaces
 // BOTH the sidebar session list and the chat transcript, so the sidebar event
 // stream has no visible consumer and _sidebarSseBackgrounded() closes it —
@@ -463,21 +488,29 @@ async function switchPanel(name, opts = {}) {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
   }
-  // Lazy-load panel data
-  if (nextPanel === 'tasks') await loadCrons();
-  if (nextPanel === 'kanban') await loadKanban();
-  if (nextPanel === 'skills') await loadSkills();
-  if (nextPanel === 'memory') await loadMemory();
-  if (nextPanel === 'workspaces') await loadWorkspacesPanel();
-  if (nextPanel === 'profiles') await loadProfilesPanel();
-  if (nextPanel === 'todos') loadTodos();
-  if (nextPanel === 'insights') await loadInsights();
-  if (nextPanel === 'logs') await loadLogs();
+  // Lazy-load panel data, unless this panel's data is still inside its freshness
+  // window (HWEB-43). `opts.force` bypasses the gate for callers that just changed
+  // something and are re-entering the panel to show it.
+  const panelDataFresh = _panelDataIsFresh(nextPanel, opts.force);
+  if (!panelDataFresh) {
+    if (nextPanel === 'tasks') await loadCrons();
+    if (nextPanel === 'kanban') await loadKanban();
+    if (nextPanel === 'skills') await loadSkills();
+    if (nextPanel === 'memory') await loadMemory();
+    if (nextPanel === 'workspaces') await loadWorkspacesPanel();
+    if (nextPanel === 'profiles') await loadProfilesPanel();
+    if (nextPanel === 'todos') loadTodos();
+    if (nextPanel === 'insights') await loadInsights();
+    if (nextPanel === 'logs') await loadLogs();
+    _markPanelDataLoaded(nextPanel);
+  }
   _syncLogsAutoRefresh();
   if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
   if (nextPanel === 'settings') {
+    // switchSettingsSection() is view state, not a data load — the visible section
+    // must be re-applied on every entry — but the panel's own fetch is gated.
     switchSettingsSection(_currentSettingsSection);
-    loadSettingsPanel();
+    if (!panelDataFresh) loadSettingsPanel();
   }
   _resyncChatSidebarAfterPanelSwitch();
   if (nextPanel === 'chat' && typeof syncTopbar === 'function') syncTopbar();

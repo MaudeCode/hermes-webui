@@ -2,6 +2,42 @@ async function api(path,opts={}){
   // Strip leading slash so URL resolves relative to location.href (supports subpath mounts)
   const rel = path.startsWith('/') ? path.slice(1) : path;
   const url=new URL(rel,document.baseURI||location.href);
+  const method=String(opts.method||'GET').toUpperCase();
+  const isIdempotent=method==='GET'||method==='HEAD';
+  // HWEB-43: coalesce concurrent identical idempotent requests. Two callers asking
+  // for the same URL at the same time previously issued two fetches AND could
+  // resolve out of order, so every call site had to re-implement its own
+  // generation counter to reject the stale winner. Sharing one in-flight promise
+  // fixes both in one place. Keyed on method+resolved URL (the complete request
+  // identity for a body-less GET). Skipped when the caller passes its own
+  // AbortSignal — aborting a shared promise would cancel an unrelated caller —
+  // and opt-out-able via `dedupe:false`, which is how the recursive re-entry
+  // below runs the real request. Stored on globalThis rather than at module scope
+  // so api() stays self-contained for tests/test_api_timeout.py, which extracts
+  // this function's source and evals it standalone under node.
+  const _inflight=(typeof globalThis!=='undefined')
+    ?(globalThis.__apiInflightRequests||(globalThis.__apiInflightRequests=new Map()))
+    :null;
+  // The key carries the mutation clock stamped below, so a request issued AFTER a
+  // write completed never joins one issued before it. Without that, a GET started
+  // under the previous profile cookie could serve the profile-switch render that
+  // followed it — the response depends on more than the URL.
+  const dedupeKey=(_inflight&&isIdempotent&&opts.dedupe!==false&&!opts.signal)
+    ?(method+' '+url.href+' @'+((typeof globalThis!=='undefined'&&globalThis.__apiLastMutationAt)||0))
+    :null;
+  if(dedupeKey){
+    const existing=_inflight.get(dedupeKey);
+    if(existing) return existing;
+    const started=api(path,{...opts,dedupe:false});
+    _inflight.set(dedupeKey,started);
+    // then(clear,clear) rather than finally(): finally() returns a derived
+    // promise that nobody awaits, so a rejected request would surface as an
+    // unhandled rejection. Registered before any caller awaits `started`, so the
+    // entry is gone by the time a consumer could ask for the same URL again.
+    const clear=()=>{ if(_inflight.get(dedupeKey)===started) _inflight.delete(dedupeKey); };
+    started.then(clear,clear);
+    return started;
+  }
   const timeoutMs=Object.prototype.hasOwnProperty.call(opts,'timeoutMs')?opts.timeoutMs:30000;
   const timeoutToast=opts.timeoutToast!==false;
   const redirect401=opts.redirect401!==false;
@@ -35,6 +71,7 @@ async function api(path,opts={}){
       delete fetchOpts.retryTimeouts;
       delete fetchOpts.retryStatuses;
       delete fetchOpts.retryDelayMs;
+      delete fetchOpts.dedupe;
 
       const useTimeout=Number.isFinite(Number(timeoutMs))&&Number(timeoutMs)>0;
       if(useTimeout&&typeof AbortController!=='undefined'){
@@ -139,7 +176,12 @@ async function api(path,opts={}){
         attempt--;
         continue;
       }
-      if(attempt<2&&attempt<maxAttempts-1 && (e instanceof TypeError || isStartupRecovery503 || retryStatuses.includes(Number(e.status)))){
+      // HWEB-43: a network TypeError means the request may or may not have reached
+      // the server, so replaying it is only safe for idempotent methods. A POST
+      // that died on the wire after the handler ran would be applied twice.
+      // Startup-readiness 503s and caller-opted retryStatuses stay method-agnostic:
+      // the first is a pre-handler gate, the second is an explicit caller decision.
+      if(attempt<2&&attempt<maxAttempts-1 && ((isIdempotent && e instanceof TypeError) || isStartupRecovery503 || retryStatuses.includes(Number(e.status)))){
         if(retryDelayMs) await new Promise(resolve=>setTimeout(resolve,retryDelayMs*Math.pow(2,attempt)));
         continue;
       }
@@ -147,6 +189,14 @@ async function api(path,opts={}){
     }finally{
       if(timeoutId) clearTimeout(timeoutId);
       if(upstreamSignal&&upstreamAbort) upstreamSignal.removeEventListener('abort',upstreamAbort);
+      // HWEB-43: record when server state may last have changed, so bounded read
+      // caches (the sidebar session list) fail closed after a write instead of
+      // serving a snapshot that predates it. Stamped on every non-idempotent
+      // ATTEMPT's completion, success or not: a timed-out or 500'd POST may still
+      // have been applied server-side, and "unknown" must not read as "unchanged".
+      // One chokepoint here beats invalidating at every mutating call site — a
+      // missed site would silently serve stale rows.
+      if(!isIdempotent&&typeof globalThis!=='undefined') globalThis.__apiLastMutationAt=Date.now();
     }
   }
   throw lastErr;
