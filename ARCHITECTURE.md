@@ -845,7 +845,9 @@ background thread and in this order:
 2. `verify_hermes_imports()`, and `auto_install_agent_deps()` only if an agent
    import actually failed.
 3. Gateway watcher, `bg_task_complete` drain thread, SessionChannel reaper,
-   plugins, and the Talaria relay publisher.
+   plugins, and the Talaria relay publisher. The watcher's 5s tick reads an O(1)
+   change signal and projects only when it moves; see "Gateway watcher change
+   detection" in `docs/sse-streams.md` for the polling and failure contract.
 
 While the gate is closed, every `/api/` request waits on it for up to
 `STARTUP_WAIT_SECONDS` (10s) and then returns **503 with `Retry-After: 5`** and a

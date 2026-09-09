@@ -175,6 +175,11 @@ def _make_db(tmp_path: Path):
             content TEXT,
             timestamp REAL NOT NULL
         );
+        -- Both indexes the projection self-heals on first run. Creating them up
+        -- front keeps the projection a pure read, so it does not perturb the
+        -- file stamps the O(1) fingerprint reads (HWEB-41).
+        CREATE INDEX idx_messages_session ON messages(session_id, timestamp);
+        CREATE INDEX idx_messages_session_user ON messages(session_id) WHERE role = 'user';
         """
     )
     conn.commit()
@@ -218,23 +223,27 @@ def test_cheap_fingerprint_stable_and_sensitive(tmp_path):
     assert fp4 != fp3
 
 
-def test_cheap_fingerprint_ignores_excluded_sources(tmp_path):
-    """cron/webui churn must not invalidate the fingerprint (matches projection scope)."""
+def test_excluded_source_churn_publishes_no_sidebar_event(tmp_path):
+    """cron/webui churn must not push a sidebar event.
+
+    The O(1) fingerprint (HWEB-41) is file/rowid scoped, not source scoped, so
+    cron writes do invalidate it and cost one bounded re-projection. The
+    user-visible invariant is the one asserted here: the projection excludes
+    those sources, so no spurious ``sessions_changed`` reaches subscribers.
+    """
     gw = importlib.import_module("api.gateway_watcher")
     db, conn = _make_db(tmp_path)
     _add_session(conn, "tg1", "telegram", mc=2)
-    fp1 = gw._cheap_change_fingerprint(db)
 
-    # A cron session churns heavily — but cron is excluded from the sidebar, so
-    # the fingerprint (and thus the expensive projection) must NOT fire.
+    watcher = gw.GatewayWatcher(state_db_path=db)
+    subscriber = watcher.subscribe()
+    assert watcher._poll_once(now=1.0) is True
+    assert [row["session_id"] for row in subscriber.get_nowait()["sessions"]] == ["tg1"]
+
     _add_session(conn, "cron1", "cron", mc=50)
-    fp2 = gw._cheap_change_fingerprint(db)
-    assert fp2 == fp1, "cron-only churn must not trigger a re-projection"
-
-    # A webui session likewise excluded.
     _add_session(conn, "webui1", "webui", mc=20)
-    fp3 = gw._cheap_change_fingerprint(db)
-    assert fp3 == fp1
+    watcher._poll_once(now=2.0)
+    assert subscriber.empty(), "excluded-source churn must not notify the sidebar"
 
 
 def test_cheap_fingerprint_detects_source_change(tmp_path):
@@ -282,56 +291,16 @@ def test_cheap_fingerprint_detects_same_count_message_rewrite(tmp_path):
     )
 
 
-def test_cheap_fingerprint_message_aggregate_does_not_read_role_payload(
-    tmp_path, monkeypatch
-):
-    """The five-second fingerprint must stay on the covering session/timestamp
-    index. Reading ``role`` forces a table lookup for every message row and made
-    a 10 GB state.db fingerprint take tens of seconds even while WebUI was idle.
-    Role-only changes are deliberately handled by the bounded periodic full
-    projection, so this query can stay on the existing covering index.
+def test_role_only_sidebar_visibility_change_is_seen_on_the_next_tick(tmp_path):
+    """Role-only mutations used to need a 60s parity projection to surface.
+
+    ``MAX(rowid)`` cannot see an in-place UPDATE, but the DB/WAL commit stamps
+    folded into the fingerprint can — so the change lands on the next 5s tick
+    and the periodic forced projection is no longer needed (HWEB-41).
     """
     gw = importlib.import_module("api.gateway_watcher")
     db, conn = _make_db(tmp_path)
-    conn.execute(
-        "CREATE INDEX idx_messages_session ON messages(session_id, timestamp)"
-    )
-    conn.commit()
-    _add_session(conn, "s1", "telegram", mc=3)
-    statements = []
-    real_open = gw.open_state_db_readonly
-
-    def traced_open(path):
-        traced = real_open(path)
-        traced.set_trace_callback(statements.append)
-        return traced
-
-    monkeypatch.setattr(gw, "open_state_db_readonly", traced_open)
-
-    assert gw._cheap_change_fingerprint(db) is not None
-    aggregate = next(
-        statement
-        for statement in statements
-        if "LEFT JOIN messages" in statement
-    )
-    assert "m.role" not in aggregate.lower()
-    assert "COUNT(m.id)" in aggregate
-    assert "MAX(m.timestamp)" in aggregate
-    plan = conn.execute("EXPLAIN QUERY PLAN " + aggregate).fetchall()
-    assert any(
-        "COVERING INDEX idx_messages_session" in str(row[3]) for row in plan
-    ), plan
-
-
-def test_periodic_projection_recovers_role_only_sidebar_visibility_change(tmp_path):
-    """Role-only mutations must not remain invisible forever."""
-    gw = importlib.import_module("api.gateway_watcher")
-    db, conn = _make_db(tmp_path)
     _add_session(conn, "cli1", "cli", mc=1, title="Untitled")
-    conn.execute(
-        "CREATE INDEX idx_messages_session ON messages(session_id, timestamp)"
-    )
-    conn.commit()
 
     watcher = gw.GatewayWatcher(state_db_path=db)
     subscriber = watcher.subscribe()
@@ -342,16 +311,15 @@ def test_periodic_projection_recovers_role_only_sidebar_visibility_change(tmp_pa
 
     conn.execute("UPDATE messages SET role = 'assistant' WHERE session_id = 'cli1'")
     conn.commit()
-    assert gw._cheap_change_fingerprint(db) == initial_fingerprint
+    assert gw._cheap_change_fingerprint(db) != initial_fingerprint
 
-    before_deadline = 1.0 + watcher.PROJECTION_PARITY_INTERVAL - 1.0
-    assert watcher._poll_once(now=before_deadline) is False
-    assert subscriber.empty()
-
-    at_deadline = 1.0 + watcher.PROJECTION_PARITY_INTERVAL
-    assert watcher._poll_once(now=at_deadline) is True
+    assert watcher._poll_once(now=2.0) is True
     event = subscriber.get_nowait()
     assert event["sessions"] == []
+    assert subscriber.empty()
+
+    # ...and an unchanged DB still costs nothing.
+    assert watcher._poll_once(now=3.0) is False
     assert subscriber.empty()
 
 
@@ -426,23 +394,28 @@ def test_projection_failure_preserves_populated_state_and_parity_retry(
     monkeypatch.setattr(
         gw, "read_importable_agent_session_rows", fail_once_then_project
     )
-    at_deadline = 1.0 + watcher.PROJECTION_PARITY_INTERVAL
 
-    assert watcher._poll_once(now=at_deadline) is False
+    # A real change arrives, but the projection that would publish it fails.
+    _add_session(conn, "tg2", "telegram", mc=1)
+    assert watcher._poll_once(now=2.0) is False
     assert attempts == [True]
     assert subscriber.empty()
     assert watcher._last_sessions is initial_sessions
     assert watcher._last_hash == initial_hash
+    # The fingerprint must NOT advance on failure, otherwise the missed change
+    # would stay missed until the next unrelated write to state.db.
     assert watcher._last_cheap_fp == initial_fingerprint
     assert watcher._last_full_projection_at == 1.0
 
-    assert watcher._poll_once(now=at_deadline + 1.0) is True
+    # The very next tick retries, with no further DB change needed.
+    assert watcher._poll_once(now=3.0) is True
     assert attempts == [True, True]
-    assert subscriber.empty()
-    assert watcher._last_sessions is initial_sessions
-    assert watcher._last_hash == initial_hash
-    assert watcher._last_cheap_fp == initial_fingerprint
-    assert watcher._last_full_projection_at == at_deadline + 1.0
+    assert [row["session_id"] for row in subscriber.get_nowait()["sessions"]] == [
+        "tg1",
+        "tg2",
+    ]
+    assert watcher._last_cheap_fp != initial_fingerprint
+    assert watcher._last_full_projection_at == 3.0
 
 
 def test_cheap_fingerprint_detects_lineage_only_change(tmp_path):
@@ -510,14 +483,28 @@ def test_cheap_fingerprint_handles_missing_optional_columns(tmp_path):
     assert fp is not None and isinstance(fp, str)
 
 
-def test_cheap_fingerprint_returns_none_without_source_column(tmp_path):
-    """A pre-source-tracking schema must return None (forces safe full read)."""
+def test_cheap_fingerprint_survives_a_pre_source_schema(tmp_path):
+    """A pre-source-tracking schema (no ``source`` column, no ``messages`` table)
+    must still yield a usable change signal.
+
+    The old fingerprint returned None here, which forced the expensive projection
+    on every single tick forever. The projection is the layer that knows how to
+    bail on an unsupported schema (it logs and returns []), so the fingerprint
+    only has to stay a sound change signal (HWEB-41).
+    """
     gw = importlib.import_module("api.gateway_watcher")
     db = tmp_path / "ancient.db"
     conn = sqlite3.connect(str(db))
     conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, started_at REAL)")
     conn.commit()
-    assert gw._cheap_change_fingerprint(db) is None
+
+    fp1 = gw._cheap_change_fingerprint(db)
+    assert isinstance(fp1, str)
+    assert gw._cheap_change_fingerprint(db) == fp1
+
+    conn.execute("INSERT INTO sessions (id, started_at) VALUES ('s1', 1.0)")
+    conn.commit()
+    assert gw._cheap_change_fingerprint(db) != fp1
 
 
 def test_poll_loop_skips_projection_when_unchanged(tmp_path, monkeypatch):
@@ -528,7 +515,7 @@ def test_poll_loop_skips_projection_when_unchanged(tmp_path, monkeypatch):
 
     projected = []
 
-    def fake_projection(_path):
+    def fake_projection(_path, **_kwargs):
         projected.append(True)
         return [{"session_id": "tg1"}]
 
@@ -538,9 +525,7 @@ def test_poll_loop_skips_projection_when_unchanged(tmp_path, monkeypatch):
     assert w._poll_once(now=1.0) is True
     assert projected == [True]
 
-    # Mutate only an excluded WebUI row: irrelevant churn must not trigger another
-    # expensive projection before the parity deadline.
-    _add_session(conn, "webui2", "webui", mc=99, title="WebUI run 2")
+    # Nothing committed to state.db: no projection, however large the store is.
     assert w._poll_once(now=2.0) is False
     assert projected == [True]
 

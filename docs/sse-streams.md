@@ -53,6 +53,48 @@ GET /api/sessions/events?gateway=1
 Clients that prefer two connections can keep using
 `/api/sessions/gateway/stream`; it is unchanged.
 
+## Gateway watcher change detection
+
+The gateway watcher (`api/gateway_watcher.py`) is what turns writes to the
+agent's `state.db` into `sessions_changed` events on the streams above. It polls
+on a `POLL_INTERVAL` of 5s per profile, and the cost of a tick is fixed — it does
+not grow with the number of sessions or messages in the store.
+
+Each tick reads an O(1) invalidation signal (`_cheap_change_fingerprint`):
+
+- `MAX(rowid)` on `sessions` and on `messages` — two index lookups, no scan and
+  no join. These advance on every INSERT.
+- the size and mtime of `state.db` and `state.db-wal`, plus SQLite's file-change
+  counter (main-file header bytes 24:28). These move on every commit, so the
+  in-place UPDATEs (a title rename, an `archived` flag, a `role` retag) and the
+  mid-table DELETEs that `MAX(rowid)` cannot see are caught too.
+
+The expensive projection (`read_importable_agent_session_rows`) runs only when
+that signal moved, or when it could not be read at all — an unreadable signal
+fails closed and projects rather than risking a missed change. An idle server
+therefore does no projection work at all.
+
+Two consequences worth knowing before changing this:
+
+- **The signal is not scoped to sidebar-visible sources.** cron/webui write churn
+  invalidates it too and costs one bounded projection. `_snapshot_hash` is still
+  the notification gate, so those extra projections never publish an event.
+- **`PROJECTION_PARITY_INTERVAL` (300s) is a backstop, not the detection path.**
+  In WAL mode a checkpoint can restart the WAL at a size the file already had,
+  and the main-file change counter only advances at checkpoint, so a pure UPDATE
+  in that window is visible through mtime alone — which can collide on a
+  coarse-granularity filesystem. The parity projection bounds that residue. It is
+  reached only when the O(1) signal reports idle, so it never affects tick cost.
+
+A failing watcher is no longer silent. The poll loop, the change check, and the
+projection all route their exceptions through `GatewayWatcher._warn_failure`,
+which logs at **warning** with the reason, the resolved `state.db` path, and the
+traceback, rate limited to one per `ERROR_LOG_INTERVAL` (60s) with the rest at
+debug. A stalled sidebar caused by a schema change or a permission error is
+diagnosable from the log alone; previously it left nothing above debug. This
+matters because the projection converts every exception into `None` rather than
+propagating it, so the failure is only observable where it is caught.
+
 ## Gateway probe scope (important for non-browser clients)
 
 `GET /api/sessions/gateway/stream?probe=1` returns a JSON capability payload
