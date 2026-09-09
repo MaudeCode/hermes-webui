@@ -180,22 +180,33 @@ left idle with a large journal directory never reclaimed anything.
 ## Turn-journal storage keeps growing
 
 The turn journal writes one shard per session per server process
-(`_turn_journal/{session_id}~{pid}.jsonl`). The same six-hourly retention pass
-as the run journal deletes a session's shards, but only when all three hold:
+(`_turn_journal/{session_id}~{pid}.jsonl`), so every restart adds a shard for
+each session it touches. The same six-hourly retention pass as the run journal
+reclaims a session's shards once no shard of that session has been written to
+for 14 days **and** the session is provably settled.
 
-- none of them is owned by the running server process — those belong to a
-  session this server can still append to, whatever their age;
-- none of them has been written to in the last 14 days;
-- the session's *merged* journal has no nonterminal turn left.
+Settled means all of the following, checked against the session's *merged*
+journal — merged because a turn submitted under one pid can be completed under
+another, and half a turn read on its own looks pending:
 
-The merged check matters because a turn submitted under one pid can be completed
-under another, and half a turn read on its own looks pending. A session that
-still holds a pending turn keeps its shards so the startup audit can keep
-reporting it, exactly like a nonterminal run journal; deleting the session
-releases them.
+- no nonterminal turn is left;
+- no malformed line is present (a crash-torn event is exactly what the startup
+  recovery audit flags for manual review, and the journal is the only record);
+- the live `{session_id}.json` sidecar exists and parses (a session whose
+  sidecar is gone or corrupt is awaiting repair).
 
-- `HERMES_WEBUI_TURN_JOURNAL_RETENTION_DAYS`, default `14`; set `0` to prune
-  every settled shard not owned by the running process on the next pass.
+Any uncertainty keeps the shards. Deleting the session releases them.
+
+Shards from earlier processes are deleted. The *running* process's own shard is
+truncated in place instead, under the same advisory lock `append_turn_journal_event`
+takes, with an mtime recheck that aborts if an append landed in between.
+Unlinking it would race an appender that had already opened the old inode and
+would silently drop its event; truncating cannot lose a write, because an
+`O_APPEND` writer blocked on the lock simply resumes at offset 0. This is what
+lets a server that stays up past the retention window reclaim its own storage.
+
+- `HERMES_WEBUI_TURN_JOURNAL_RETENTION_DAYS`, default `14`; set `0` to reclaim
+  every settled shard on the next pass.
 
 ---
 

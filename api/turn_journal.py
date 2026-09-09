@@ -325,18 +325,80 @@ def _retention_seconds_from_env() -> float:
     return max(0.0, days) * 24 * 60 * 60
 
 
-def _session_has_pending_turn(session_id: str, root: Path) -> bool:
-    """True when the session's merged journal still holds a nonterminal turn.
+def _session_sidecar_is_intact(session_id: str, root: Path) -> bool:
+    """True when the session's live sidecar exists and parses as a mapping.
 
-    Fails closed: an unreadable or unparseable id counts as pending, so a shard
-    is only ever deleted on positive evidence that nothing is waiting on it.
+    ``docs/rfcs/turn-journal.md`` gates pruning on sidecar/index recovery having
+    no findings. Running the full audit from here would invert the dependency —
+    ``api.session_recovery`` imports this module — and rescan the whole state
+    directory on every pass. So check the one condition that makes the journal
+    the sole surviving evidence for a session: a ``{sid}.json`` that is absent
+    or unreadable means the session is awaiting repair, and its journal is what
+    the repair would be built from.
+    """
+    try:
+        payload = json.loads((root / f"{session_id}.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    return isinstance(payload, dict)
+
+
+def _session_is_prunable(session_id: str, root: Path) -> bool:
+    """True only on positive evidence that nothing still needs this journal.
+
+    Fails closed on every uncertainty, because each one is a case the recovery
+    audit exists to catch:
+
+    * an id ``read_turn_journal`` rejects, or a shard it cannot read;
+    * a malformed line — a crash-torn event is exactly the evidence recovery
+      flags for manual review, and deleting it destroys the only record;
+    * a nonterminal turn, which the startup audit still reports as pending;
+    * a missing or unparseable live sidecar, i.e. a session awaiting repair.
     """
     try:
         journal = read_turn_journal(session_id, session_dir=root)
     except (ValueError, OSError):
-        return True
+        return False
+    if journal.get("malformed"):
+        return False
     states, _ = derive_turn_journal_states(journal.get("events") or [])
-    return any(not is_terminal_turn_event(event) for event in states.values())
+    if any(not is_terminal_turn_event(event) for event in states.values()):
+        return False
+    return _session_sidecar_is_intact(session_id, root)
+
+
+def _release_expired_shard(path: Path, expected_mtime: float, own_suffix: str) -> bool:
+    """Reclaim one expired shard's bytes. Returns ``True`` when it did.
+
+    A shard this process owns is truncated, not unlinked.
+    :func:`append_turn_journal_event` reopens the path on every call, so
+    unlinking races an appender that has already opened the old inode: its event
+    would land in an unlinked file and vanish. Truncating under the same
+    advisory lock the appender takes cannot lose a write — an ``O_APPEND``
+    writer that was blocked on the lock simply resumes at offset 0 — and the
+    mtime recheck under that lock drops the whole attempt if an append landed
+    between the scan and here. The bytes are reclaimed either way; only the
+    now-empty inode stays, and ``delete_turn_journal`` releases that with the
+    session.
+
+    Shards carrying another pid have no appender in this process, so they are
+    unlinked outright.
+    """
+    if not path.name.endswith(own_suffix):
+        try:
+            path.unlink()
+            return True
+        except OSError:
+            return False
+    try:
+        with open(path, "r+b") as fh:
+            with _journal_file_lock(fh):
+                if os.fstat(fh.fileno()).st_mtime != expected_mtime:
+                    return False
+                fh.truncate(0)
+    except OSError:
+        return False
+    return True
 
 
 def prune_stale_turn_journals(
@@ -346,25 +408,26 @@ def prune_stale_turn_journals(
     retention_seconds: float | None = None,
     dry_run: bool = False,
 ) -> dict:
-    """Delete settled turn-journal shards nothing has appended to in the window.
+    """Reclaim settled turn-journal shards nothing has appended to in the window.
 
     The run journal's retention keys off a terminal run event; the turn journal
     has no such per-file marker, because a shard stays open for as long as its
-    session might submit another turn. So a shard is expired only when all three
-    hold:
+    session might submit another turn. So a session's shards are expired only
+    when both hold:
 
-    * it is not owned by the running process — those belong to a session this
-      server can still append to, whatever their age;
     * no shard of that session has been written to inside the retention window;
-    * the session's *merged* journal has no nonterminal turn left. Judging the
-      merged state rather than one shard matters because a turn submitted under
-      one pid can be completed under another, and half a turn read alone looks
-      pending. A session that keeps a pending turn keeps its shards, exactly
-      like the run journal; ``delete_turn_journal`` releases them when the
-      session is deleted.
+    * :func:`_session_is_prunable` finds positive evidence the session is
+      settled — judged on the *merged* journal, because a turn submitted under
+      one pid can be completed under another and half a turn read alone looks
+      pending.
+
+    Expired shards from dead processes are deleted; the running process's own
+    shard is truncated in place under the appender's lock, so a long-running
+    server reclaims its own storage without racing a write. See
+    :func:`_release_expired_shard`.
 
     Returns ``{"examined", "pruned", "bytes_reclaimed"}`` counted in shards.
-    ``dry_run`` counts without deleting.
+    ``dry_run`` counts without touching anything.
     """
     root = Path(session_dir) if session_dir is not None else _default_session_dir()
     journal_dir = root / TURN_JOURNAL_DIR_NAME
@@ -394,20 +457,17 @@ def prune_stale_turn_journals(
         by_session.setdefault(session_id, []).append((path, stat))
 
     for session_id, shards in by_session.items():
-        if any(path.name.endswith(own_suffix) for path, _ in shards):
-            continue
         if any(stat.st_mtime >= cutoff for _, stat in shards):
             continue
-        if _session_has_pending_turn(session_id, root):
+        if not _session_is_prunable(session_id, root):
             continue
         for path, stat in shards:
-            if not dry_run:
-                try:
-                    path.unlink()
-                except FileNotFoundError:
-                    continue
-                except OSError:
-                    continue
+            if not stat.st_size:
+                continue
+            if not dry_run and not _release_expired_shard(
+                path, stat.st_mtime, own_suffix
+            ):
+                continue
             result["pruned"] += 1
             result["bytes_reclaimed"] += int(stat.st_size)
     return result
