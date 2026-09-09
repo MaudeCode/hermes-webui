@@ -7397,6 +7397,51 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`,provider_details:details,provider_details_label:detailsLabel,_compressionRecovery:recovery||undefined});
             _attachProjectedAnchorSceneToLastAssistant(S.messages);
           }
+          // HWEB-11: a terminal failure also raises a runtime notice so it shares
+          // the connection/agent notification stack instead of living only in the
+          // transcript. Cancels, interrupts and the recovery control message are
+          // not failures, so they raise nothing. The record is keyed by
+          // (session, stream) so a retry of the same turn coalesces and setBusy()
+          // can clear it when the next turn starts. It runs after the session-adoption
+          // branch above so publish and render resolve the same active session.
+          if(!isCancelled&&!isInterrupted&&!isRecoveryControlMessage&&typeof publishChatRuntimeNotice==='function'){
+            // The backend emits more provider-side types than the terminal-label
+            // list above names — api/gateway_chat.py adds gateway_http_error,
+            // gateway_empty_response and gateway_error, and api/models.py adds
+            // credential_pool_empty. Matching the gateway_/provider_ families by
+            // prefix keeps a newly added sibling classified as a provider failure
+            // instead of silently falling through to thread_error, which outranks
+            // offline and would put a provider outage above a lost connection.
+            const _errType=String(d.type||'');
+            const _isProviderFailure=isRateLimit||isQuotaExhausted||isAuthMismatch||isGatewayAuthError
+              ||isModelNotFound||isNoResponse||_errType==='credential_pool_empty'
+              ||/^(gateway|provider)_/.test(_errType);
+            publishChatRuntimeNotice({
+              kind:_isProviderFailure?'provider_failure':'thread_error',
+              // Compression rotation has already assigned S.session=d.session above,
+              // so S.session and continuationSid now agree. continuationSid stays the
+              // authoritative owner because it is resolved from the event payload, and
+              // publishing here means the record's owner and the render's active-session
+              // filter read the same value — deciding above the mutation and rendering
+              // below it is what suppressed the row.
+              sessionId:continuationSid||(S.session&&S.session.session_id)||activeSid||'',
+              runId:streamId||'',
+              tone:'error',
+              // The gateway names its own failures ("Gateway request failed",
+              // "Gateway returned no response") next to the type, and the local
+              // ladder does not cover those, so they would fall through to a bare
+              // "Error" — worst on a compact secondary row, where the detail line
+              // is hidden and the title is all the user gets. But the ladder DOES
+              // resolve a translated title for the types it names (gateway_auth_error
+              // has t('gateway_auth_label') in every locale), and d.label is English
+              // only, so preferring it unconditionally would untranslate those.
+              // The gateway label is a fallback for the uncovered types, not an
+              // override of a resolved translation.
+              title:String(label==='Error'&&d.label?d.label:label),
+              detail:String(d.message||''),
+              dismissible:true,
+            });
+          }
           if(!isRecoveryControlMessage){
             _anchorRetryTarget=[...S.messages].reverse().find(m=>m&&m.role==='assistant')||null;
             _anchorRetryIndex=_anchorRetryTarget?S.messages.indexOf(_anchorRetryTarget):-1;

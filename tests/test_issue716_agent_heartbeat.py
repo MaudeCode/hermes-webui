@@ -199,13 +199,18 @@ def test_agent_health_route_is_registered_with_tri_state_payload_shape():
 
 
 def test_agent_health_banner_markup_and_styles_exist():
-    assert 'id="agentHealthBanner"' in INDEX_HTML
+    # HWEB-11 folded the standalone #agentHealthBanner into the shared
+    # #chatRuntimeNotice stack. The alert role now lives on the sr-only announcer
+    # and the restart/dismiss actions are published with the notice record.
+    assert 'id="chatRuntimeNotice"' in INDEX_HTML
+    assert 'id="agentHealthBanner"' not in INDEX_HTML
     assert 'role="alert"' in INDEX_HTML
     assert 'aria-live="assertive"' in INDEX_HTML
-    assert 'onclick="dismissAgentHealthAlert()"' in INDEX_HTML
-    assert ".agent-health-banner" in STYLE_CSS
-    assert ".agent-health-banner.visible" in STYLE_CSS
-    assert ".agent-health-dismiss" in STYLE_CSS
+    assert "kind:'agent_unavailable'," in UI_JS
+    assert "onClick:()=>dismissAgentHealthAlert()}" in UI_JS
+    assert "id:'btnRestartGateway'," in UI_JS
+    assert ".chat-runtime-notice{" in STYLE_CSS
+    assert ".chat-runtime-notice-error .chat-runtime-notice-action" in STYLE_CSS
 
 
 def test_agent_health_frontend_polls_only_visible_and_distinguishes_states():

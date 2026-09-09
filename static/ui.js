@@ -50,6 +50,199 @@ function _setComposerHero(on){
   const chat=$('mainChat');
   if(chat) chat.classList.toggle('composer-hero',!!on);
 }
+// ── HWEB-11: consolidated chat connection/runtime notice stack ───────────────
+// Reconnect, offline, agent-health, provider-failure and thread-error each used
+// to own a separate banner host, so two live conditions produced two bars
+// competing for chat height and two independent aria-live regions. They now all
+// publish normalized records into one prioritized stack rendered into
+// #chatRuntimeNotice. The underlying health/polling/recovery mechanisms are
+// unchanged — only the presentation is consolidated.
+//
+// A record is
+//   {kind, sessionId, runId, tone, title, detail, actions, dismissible,
+//    onDismiss, ttlMs}
+// and coalesces on (kind, sessionId, runId): a poller re-publishing the same
+// condition updates that record in place instead of stacking a duplicate, which
+// is what keeps the 2.5s offline probe and the 30s agent-health poll from
+// multiplying the UI.
+//
+// Priority is fixed and total. The first entry renders expanded; the rest render
+// as compact rows in the same bounded (max-height + scroll) stack, so the
+// highest-priority current problem is always presented first with its action.
+const CHAT_NOTICE_PRIORITY=['thread_error','offline','agent_unavailable','provider_failure','reconnect'];
+const CHAT_NOTICE_MAX_VISIBLE=4;
+// Kinds that describe one condition with mutually exclusive states, so only the
+// newest may be shown. `reconnect` carries three: the boot "you may have missed a
+// response" prompt, "connection restored", and "restarting". They are unscoped,
+// so the cross-session eviction below does not separate them — without this an
+// update started under a live reconnect prompt stacks a second row, and the stale
+// prompt outranks the restart status it superseded.
+const CHAT_NOTICE_SINGLE_SLOT=new Set(['reconnect']);
+const _chatNotices=new Map();
+// Explicit dismissals, keyed exactly like the record. Kept separately so a
+// poller that re-publishes the same condition cannot resurrect a notice the user
+// dismissed; clearChatRuntimeNotice() forgets the dismissal because the
+// condition itself resolved and a later recurrence is genuinely new.
+const _chatNoticeDismissed=new Set();
+const _chatNoticeTimers=new Map();
+let _chatNoticeRenderedSignature=null;
+let _chatNoticeAnnouncedStamp='';
+function _chatNoticeKey(kind,sessionId,runId){return `${kind}|${sessionId||''}|${runId||''}`;}
+function _clearChatNoticeTimer(key){
+  const timer=_chatNoticeTimers.get(key);
+  if(timer){clearTimeout(timer);_chatNoticeTimers.delete(key);}
+}
+function publishChatRuntimeNotice(notice){
+  if(!notice||!notice.kind) return null;
+  const kind=String(notice.kind);
+  if(CHAT_NOTICE_PRIORITY.indexOf(kind)<0) return null;
+  const key=_chatNoticeKey(kind,notice.sessionId,notice.runId);
+  if(_chatNoticeDismissed.has(key)) return key;
+  // Supersede rather than stack. One chat owns a kind at a time, so publishing
+  // for a new session drops the same kind held by another session and a deleted
+  // or abandoned conversation cannot retain a record forever; same-session
+  // records with different run ids are left alone, because those are distinct
+  // turns of the chat you are looking at. A single-slot kind goes further: every
+  // other record of that kind is a superseded state of the same condition.
+  const singleSlot=CHAT_NOTICE_SINGLE_SLOT.has(kind);
+  if(singleSlot||notice.sessionId){
+    _chatNotices.forEach((rec,existing)=>{
+      if(rec.kind!==kind||existing===key) return;
+      if(singleSlot||(rec.sessionId&&rec.sessionId!==notice.sessionId)){
+        _chatNotices.delete(existing);_clearChatNoticeTimer(existing);
+      }
+    });
+  }
+  _chatNotices.set(key,{
+    key,kind,
+    sessionId:notice.sessionId||null,
+    runId:notice.runId||null,
+    tone:notice.tone==='info'?'info':'error',
+    title:String(notice.title||''),
+    detail:String(notice.detail||''),
+    actions:(Array.isArray(notice.actions)?notice.actions:[]).filter(a=>a&&a.label),
+    dismissible:!!notice.dismissible,
+    onDismiss:typeof notice.onDismiss==='function'?notice.onDismiss:null,
+  });
+  _clearChatNoticeTimer(key);
+  const ttl=Number(notice.ttlMs);
+  if(Number.isFinite(ttl)&&ttl>0){
+    _chatNoticeTimers.set(key,setTimeout(()=>{
+      _chatNotices.delete(key);_chatNoticeTimers.delete(key);renderChatRuntimeNotices();
+    },ttl));
+  }
+  renderChatRuntimeNotices();
+  return key;
+}
+function dismissChatRuntimeNotice(key){
+  const rec=_chatNotices.get(key);
+  _chatNoticeDismissed.add(key);
+  _chatNotices.delete(key);
+  _clearChatNoticeTimer(key);
+  if(rec&&rec.onDismiss){try{rec.onDismiss();}catch(_){}}
+  renderChatRuntimeNotices();
+}
+// clearChatRuntimeNotice(kind[, sessionId[, runId]]) — the condition resolved.
+// Narrower calls match more precisely; a bare kind clears every notice of that
+// kind, including its dismissal memory.
+function clearChatRuntimeNotice(kind,sessionId,runId){
+  const matchSession=arguments.length>1;
+  const matchRun=arguments.length>2;
+  const matches=key=>{
+    const parts=key.split('|');
+    if(parts[0]!==kind) return false;
+    if(matchSession&&parts[1]!==(sessionId||'')) return false;
+    if(matchRun&&parts[2]!==(runId||'')) return false;
+    return true;
+  };
+  const drop=[];
+  _chatNotices.forEach((_,key)=>{if(matches(key))drop.push(key);});
+  _chatNoticeDismissed.forEach(key=>{if(matches(key))drop.push(key);});
+  drop.forEach(key=>{_chatNotices.delete(key);_chatNoticeDismissed.delete(key);_clearChatNoticeTimer(key);});
+  renderChatRuntimeNotices();
+}
+function _activeChatRuntimeNotices(){
+  const currentSid=(typeof S==='object'&&S&&S.session&&S.session.session_id)||null;
+  return [..._chatNotices.values()]
+    // A session-scoped notice belongs to its own chat: viewing another session —
+    // or no session at all, after a delete or a new-chat reset — must not show
+    // the failure of the chat you left. Absent an active session there is no
+    // owner to match, so it stays hidden rather than defaulting to visible.
+    .filter(rec=>!rec.sessionId||(!!currentSid&&rec.sessionId===currentSid))
+    .sort((a,b)=>CHAT_NOTICE_PRIORITY.indexOf(a.kind)-CHAT_NOTICE_PRIORITY.indexOf(b.kind));
+}
+function _buildChatRuntimeNoticeRow(rec,secondary){
+  const row=document.createElement('div');
+  row.className='chat-runtime-notice-item chat-runtime-notice-'+rec.tone+(secondary?' chat-runtime-notice-secondary':'');
+  row.dataset.noticeKind=rec.kind;
+  const copy=document.createElement('div');
+  copy.className='chat-runtime-notice-copy';
+  const title=document.createElement('strong');
+  title.textContent=rec.title;
+  copy.appendChild(title);
+  // Only the highest-priority notice renders expanded; the rest keep their title
+  // and their action but drop the detail line so the stack stays bounded.
+  if(rec.detail&&!secondary){
+    const detail=document.createElement('span');
+    detail.textContent=rec.detail;
+    copy.appendChild(detail);
+  }
+  row.appendChild(copy);
+  const actions=rec.actions.slice();
+  if(rec.dismissible) actions.push({label:t('dismiss'),onClick:()=>dismissChatRuntimeNotice(rec.key)});
+  if(actions.length){
+    const box=document.createElement('div');
+    box.className='chat-runtime-notice-actions';
+    actions.forEach(action=>{
+      const btn=document.createElement('button');
+      btn.type='button';
+      btn.className='chat-runtime-notice-action';
+      if(action.id) btn.id=action.id;
+      btn.textContent=action.label;
+      if(action.ariaLabel) btn.setAttribute('aria-label',action.ariaLabel);
+      if(action.disabled) btn.disabled=true;
+      if(typeof action.onClick==='function') btn.addEventListener('click',action.onClick);
+      box.appendChild(btn);
+    });
+    row.appendChild(box);
+  }
+  return row;
+}
+// Announce the transition, not the poll. The stack itself is not a live region:
+// the two sr-only hosts are, and they are only written when the top notice's
+// identity or text actually changes, so a 2.5s probe republishing the same
+// offline record stays silent. role=alert carries newly active blocking
+// failures; role=status carries recovery/transient updates.
+function _announceChatRuntimeNotice(rec){
+  const stamp=rec?`${rec.key}|${rec.title}|${rec.detail}`:'';
+  if(stamp===_chatNoticeAnnouncedStamp) return;
+  _chatNoticeAnnouncedStamp=stamp;
+  const alertEl=$('chatRuntimeNoticeAlert');
+  const statusEl=$('chatRuntimeNoticeStatus');
+  const text=rec?[rec.title,rec.detail].filter(Boolean).join('. '):'';
+  const blocking=!!rec&&rec.tone==='error';
+  if(alertEl) alertEl.textContent=blocking?text:'';
+  if(statusEl) statusEl.textContent=blocking?'':text;
+}
+function renderChatRuntimeNotices(){
+  const host=$('chatRuntimeNotice');
+  if(!host) return;
+  const active=_activeChatRuntimeNotices().slice(0,CHAT_NOTICE_MAX_VISIBLE);
+  // Skip identical re-renders so a poll cannot drop an in-flight button state or
+  // steal focus from a button the user is about to press.
+  const signature=JSON.stringify(active.map(rec=>[rec.key,rec.tone,rec.title,rec.detail,rec.dismissible,rec.actions.map(a=>[a.label,!!a.disabled])]));
+  if(signature===_chatNoticeRenderedSignature) return;
+  _chatNoticeRenderedSignature=signature;
+  host.textContent='';
+  if(!active.length){
+    host.hidden=true;
+    _announceChatRuntimeNotice(null);
+    return;
+  }
+  active.forEach((rec,idx)=>host.appendChild(_buildChatRuntimeNoticeRow(rec,idx>0)));
+  host.hidden=false;
+  _announceChatRuntimeNotice(active[0]);
+}
 const OFFLINE_RECHECK_MS=2500;
 const OFFLINE_HEALTH_TIMEOUT_MS=10000;
 const OFFLINE_FETCH_FAILURES_BEFORE_BANNER=2;
@@ -66,21 +259,23 @@ function _browserReportsOnline(){return !('onLine' in navigator)||navigator.onLi
 function _offlineHealthUrl(){const url=new URL('health',document.baseURI||location.href);url.searchParams.set('offline_probe',String(Date.now()));return url.href;}
 function _setOfflineChecking(checking){
   _offlineChecking=!!checking;
-  const btn=$('offlineCheckNow');
-  if(btn){btn.disabled=_offlineChecking;btn.textContent=_offlineChecking?t('offline_checking'):t('offline_check_now');}
+  // The Check-now button is rendered from the notice record, so the probe state
+  // is republished rather than poked into the DOM.
+  if(_offlineVisible)_renderOfflineNotice();
 }
-function _renderOfflineBanner(){
-  const banner=$('offlineBanner');
-  if(!banner)return;
-  const detail=$('offlineDetails');
-  if(detail)detail.textContent=t(_offlineReason==='browser'?'offline_browser_detail':'offline_network_detail');
-  const title=$('offlineTitle');
-  if(title)title.textContent=t('offline_title');
-  const auto=$('offlineAutorefresh');
-  if(auto)auto.textContent=t('offline_autorefresh');
-  _setOfflineChecking(_offlineChecking);
-  banner.hidden=false;
-  banner.classList.add('visible');
+function _renderOfflineNotice(){
+  publishChatRuntimeNotice({
+    kind:'offline',
+    tone:'error',
+    title:t('offline_title'),
+    detail:`${t(_offlineReason==='browser'?'offline_browser_detail':'offline_network_detail')} ${t('offline_autorefresh')}`,
+    actions:[{
+      id:'offlineCheckNow',
+      label:_offlineChecking?t('offline_checking'):t('offline_check_now'),
+      disabled:_offlineChecking,
+      onClick:()=>{checkOfflineRecoveryNow();},
+    }],
+  });
 }
 // Shared "poll only while the tab is visible" driver. Every long-lived poller
 // wants the same three things: skip the tick while `document.hidden` so a
@@ -118,7 +313,11 @@ function _stopOfflineProbeTimer(){
 function showOfflineBanner(reason){
   _offlineVisible=true;
   _offlineReason=reason||(_browserReportsOnline()?'network':'browser');
-  _renderOfflineBanner();
+  // A recovery row is a 5s transient. Dropping offline again inside that window
+  // would otherwise show "Connection lost" and "Connection restored" together —
+  // the recovery it announced has been superseded, not merely aged out.
+  clearChatRuntimeNotice('reconnect','','recovered');
+  _renderOfflineNotice();
   _startOfflineProbeTimer();
 }
 function isOfflineBannerVisible(){return _offlineVisible;}
@@ -126,8 +325,7 @@ function _hideOfflineBanner(){
   _offlineVisible=false;
   _stopOfflineProbeTimer();
   _setOfflineChecking(false);
-  const banner=$('offlineBanner');
-  if(banner){banner.classList.remove('visible');banner.hidden=true;}
+  clearChatRuntimeNotice('offline');
 }
 async function _probeOfflineRecovery(){
   if(_offlineHealthProbePromise)return _offlineHealthProbePromise;
@@ -200,9 +398,18 @@ async function checkOfflineRecoveryNow(){
 // banner, restart the sidebar SSE (bfcache/background kills the connection),
 // and re-fetch the active session so any messages that landed while we were
 // away appear. A full reload is the fallback only if the soft path throws.
+const OFFLINE_RECOVERED_NOTICE_MS=5000;
 async function _recoverFromOfflineSoftly(){
   try{
     _hideOfflineBanner();
+    publishChatRuntimeNotice({
+      kind:'reconnect',
+      runId:'recovered',
+      tone:'info',
+      title:t('runtime_notice_restored_title'),
+      detail:t('runtime_notice_restored_detail'),
+      ttlMs:OFFLINE_RECOVERED_NOTICE_MS,
+    });
     if(typeof reconnectSidebarSSE==='function') reconnectSidebarSSE();
     if(S.session && typeof refreshSession==='function'){
       await refreshSession();
@@ -5298,7 +5505,7 @@ let _composerFitResizeListenerBound=false;
 // stays laid out and signals its open state with a class (.queue-card slides in
 // on `.visible`; .attach-tray is only populated on `.has-files`).
 const _COMPOSER_EXPAND_SURFACES=[
-  ['#reconnectBanner',''],['#offlineBanner',''],['#agentHealthBanner',''],
+  ['#chatRuntimeNotice',''],
   ['#approvalCard',''],['#clarifyCard',''],
   ['#queueCard','visible'],['#attachTray','has-files'],
   ['#micStatus',''],['#voiceModeBar',''],
@@ -8846,6 +9053,12 @@ async function handleComposerPrimaryAction(){
 function setBusy(v){
   S.busy=v;
   updateSendBtn();
+  if(v){
+    // A new turn supersedes the previous turn's terminal failure for this chat.
+    const sid=(S.session&&S.session.session_id)||'';
+    clearChatRuntimeNotice('provider_failure',sid);
+    clearChatRuntimeNotice('thread_error',sid);
+  }
   if(!v){
     if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
     setStatus('');
@@ -10381,11 +10594,19 @@ function clearInflight() {
   localStorage.removeItem(INFLIGHT_KEY);
 }
 function showReconnectBanner(msg) {
-  $('reconnectMsg').textContent = msg || 'A response may have been in progress when you last left.';
-  $('reconnectBanner').classList.add('visible');
+  publishChatRuntimeNotice({
+    kind:'reconnect',
+    tone:'info',
+    title:t('runtime_notice_reload_title'),
+    detail:msg||'A response may have been in progress when you last left.',
+    actions:[
+      {label:'Dismiss',onClick:()=>dismissReconnect()},
+      {id:'btnReconnectReload',label:'Reload',onClick:()=>refreshSession()},
+    ],
+  });
 }
 function dismissReconnect() {
-  $('reconnectBanner').classList.remove('visible');
+  clearChatRuntimeNotice('reconnect','','');
   clearInflight();
 }
 
@@ -10489,6 +10710,11 @@ const AGENT_HEALTH_DISMISSED_KEY='agent-health-dismissed';
 let _agentHealthTimer=null;
 let _agentHealthLastState='unknown';
 let _lastGatewayRestartTime=0;
+// Last /api/health/agent payload behind the notice, so the restart button can
+// republish the same record with its in-flight label instead of mutating a node
+// the next render would replace.
+let _agentHealthPayload=null;
+let _gatewayRestartInFlight=false;
 function _agentHealthDismissed(){
   try{return localStorage.getItem(AGENT_HEALTH_DISMISSED_KEY)==='1';}
   catch(_){return false;}
@@ -10500,38 +10726,37 @@ function _setAgentHealthDismissed(value){
   }catch(_){ }
 }
 function _hideAgentHealthAlert(){
-  const banner=$('agentHealthBanner');
-  if(banner){banner.classList.remove('visible');banner.hidden=true;}
+  clearChatRuntimeNotice('agent_unavailable');
 }
 function _showAgentHealthAlert(payload){
   if(_agentHealthDismissed()) return;
-  const banner=$('agentHealthBanner');
-  const title=$('agentHealthTitle');
-  const details=$('agentHealthDetails');
-  if(!banner) return;
-  if(title) title.textContent='Hermes agent is not responding';
-  const state=payload&&payload.details&&payload.details.gateway_state?` State: ${payload.details.gateway_state}.`:'';
-  if(details) details.textContent=`Gateway heartbeat failed.${state} Messages may not be delivered until it comes back.`;
-  banner.hidden=false;
-  banner.classList.add('visible');
+  if(payload!==undefined) _agentHealthPayload=payload;
+  const state=_agentHealthPayload&&_agentHealthPayload.details&&_agentHealthPayload.details.gateway_state?` State: ${_agentHealthPayload.details.gateway_state}.`:'';
+  publishChatRuntimeNotice({
+    kind:'agent_unavailable',
+    tone:'error',
+    title:'Hermes agent is not responding',
+    detail:`Gateway heartbeat failed.${state} Messages may not be delivered until it comes back.`,
+    actions:[
+      {id:'btnRestartGateway',label:_gatewayRestartInFlight?'Restarting...':'Restart Service',disabled:_gatewayRestartInFlight,onClick:()=>{restartGatewayService();}},
+      {id:'agentHealthDismiss',label:'Dismiss',ariaLabel:'Dismiss Hermes agent heartbeat alert',disabled:_gatewayRestartInFlight,onClick:()=>dismissAgentHealthAlert()},
+    ],
+  });
 }
 function dismissAgentHealthAlert(){
   _setAgentHealthDismissed(true);
   _hideAgentHealthAlert();
 }
 async function restartGatewayService(){
-  const btn = $('btnRestartGateway');
-  const dismissBtn = $('agentHealthDismiss');
-  if(!btn) return;
-  btn.disabled = true;
-  if(dismissBtn) dismissBtn.disabled = true;
-  const originalText = btn.textContent;
-  btn.textContent = 'Restarting...';
+  if(_gatewayRestartInFlight) return;
+  _gatewayRestartInFlight = true;
+  _showAgentHealthAlert();
+  let restarted = false;
   try {
     const res = await api('/api/health/restart', {method: 'POST'});
     if(res && res.ok){
       showToast('Gateway service restarted successfully');
-      _hideAgentHealthAlert();
+      restarted = true;
       _lastGatewayRestartTime = Date.now();
       setTimeout(pollAgentHealth, 15000);
     } else {
@@ -10540,16 +10765,24 @@ async function restartGatewayService(){
   } catch(e) {
     showToast('Failed to restart gateway service: ' + e.message);
   } finally {
-    btn.disabled = false;
-    if(dismissBtn) dismissBtn.disabled = false;
-    btn.textContent = originalText;
+    _gatewayRestartInFlight = false;
+    // Restore the idle buttons only while the outage is still the live state. A
+    // successful restart resolves it; so does a heartbeat that resolved healthy
+    // while the request was in flight — republishing then would resurrect a
+    // stale outage and ask the user to restart an already-recovered gateway.
+    if(restarted||_agentHealthLastState!=='down') _hideAgentHealthAlert();
+    else _showAgentHealthAlert();
   }
 }
 async function pollAgentHealth(){
   if(document.visibilityState !== 'visible') return;
+  // Don't race an in-flight restart: a poll landing mid-request would clear the
+  // alert out from under its own buttons, and its result is stale by definition.
+  if(_gatewayRestartInFlight) return;
   if(Date.now() - _lastGatewayRestartTime < 15000) return;
   try{
     const payload=await api('/api/health/agent',{timeoutToast:false});
+    _agentHealthPayload=payload;
     if(payload.alive === true){
       _agentHealthLastState='alive';
       _setAgentHealthDismissed(false);
@@ -11326,10 +11559,21 @@ async function _waitForServerThenReload(opts){
     return normalizedIdentity.serverStartedAt===null&&normalizedIdentity.uptimeSeconds===null ? null : normalizedIdentity;
   })();
   window._restartingForUpdate=true;
-  const msgEl=$('reconnectMsg');
-  const banner=$('reconnectBanner');
-  if(msgEl) msgEl.textContent='⏳ Restarting… please wait';
-  if(banner) banner.classList.add('visible');
+  // The restart message reuses the reconnect slot under its own run id, so a
+  // previously dismissed reconnect prompt cannot suppress it. Guarded because
+  // tests extract this function on its own, the same way the sidebar-SSE and
+  // refreshSession calls elsewhere in this file are guarded.
+  // Takes a key, not a string: t() is resolved behind the same guard so the
+  // extracted-function harnesses only need the globals they already stub.
+  // `actions` is what makes the timeout state actionable — its copy tells the
+  // user to click Reload, so the row has to carry that button the way the
+  // reconnect banner it replaced always did. refreshSession() hard-reloads while
+  // window._restartingForUpdate is set, which is exactly the recovery wanted.
+  const _publishRestartNotice=(titleKey,detail,actions)=>{
+    if(typeof publishChatRuntimeNotice!=='function') return;
+    publishChatRuntimeNotice({kind:'reconnect',runId:'restart',tone:'info',title:t(titleKey),detail,actions});
+  };
+  _publishRestartNotice('runtime_notice_restarting_title','\u23f3 Restarting… please wait');
   const deadline=Date.now()+maxMs;
   // Track restart-outage evidence. An outage (failed or non-OK /health probes)
   // followed by a healthy response is a reliable new-instance signal even when
@@ -11427,7 +11671,7 @@ async function _waitForServerThenReload(opts){
     }catch(_){ _consecutiveOutages++; /* socket closed during restart — retry */ }
     await new Promise(r=>setTimeout(r, interval));
   }
-  if(msgEl) msgEl.textContent='⚠️ Server is taking longer than expected — click Reload when ready';
+  _publishRestartNotice('runtime_notice_restart_slow_title','\u26a0\ufe0f Server is taking longer than expected — click Reload when ready',[{id:'btnRestartTimeoutReload',label:'Reload',onClick:()=>refreshSession()}]);
 }
 
 function _pendingCurrentTailUserMessage(messages){
@@ -11623,6 +11867,9 @@ function _topbarMessageMetaText(){
   return t('n_messages',loadedCount);
 }
 function syncTopbar(){
+  // The notice stack hides notices owned by another session, so a session switch
+  // has to re-evaluate it.
+  if(typeof renderChatRuntimeNotices==='function') renderChatRuntimeNotices();
   if(!S.session){
     document.title=assistantDisplayName();
     if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
