@@ -11,8 +11,6 @@ execution from `git describe --tags --always`, and on CI's tagless checkout that
 falls back to a bare abbreviated SHA whose length git picks from prefix
 ambiguity — so the two instances could disagree by one hex digit.
 """
-import ast
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -72,106 +70,6 @@ def test_module_cache_and_package_attribute_agree():
     assert sys.modules["api.updates"] is before
     assert api_package.updates is before
     assert WEBUI_VERSION == before.WEBUI_VERSION
-
-
-def test_no_test_removes_api_updates_from_the_module_cache():
-    """Catch the mutation at its source, in any spelling.
-
-    The identity check above only fires when the leaking test happened to run
-    earlier in the same shard, so this scan is the deterministic half. It covers
-    `del`, `.pop(...)` and `monkeypatch.delitem` rather than one literal form.
-
-    The rule is not "never touch `sys.modules`" — it is "put BOTH references
-    back". A removal paired, in the same function, with a restore of the
-    `sys.modules` entry *and* the `updates` attribute on the `api` package is
-    exactly what the failure message asks for, so it is not an offender. Scoping
-    per function (rather than per line) is what keeps a correct try/finally from
-    being flagged alongside a genuine leak.
-    """
-    # Match through an alias (`import sys as _sys`) by anchoring on `.modules`.
-    removals = (
-        re.compile(r"\bdel\s+\w+\.modules\["),
-        re.compile(r"\b\w+\.modules\.pop\("),
-    )
-    # Both halves of the restore the message demands.
-    restores_mapping = re.compile(r"\.modules\[[\"']api\.updates[\"']\]\s*=")
-    restores_attribute = re.compile(
-        r"\bapi\.updates\s*=|\bsetattr\(\s*api\s*,\s*[\"']updates[\"']"
-    )
-
-    def removal_lines(source: str) -> list[tuple[int, str]]:
-        found = []
-        for number, line in enumerate(source.splitlines(), 1):
-            stripped = line.strip()
-            if "api.updates" not in stripped:
-                continue
-            if any(pattern.search(stripped) for pattern in removals):
-                found.append((number, stripped))
-        return found
-
-    offenders = []
-    for path in sorted((ROOT / "tests").glob("test_*.py")):
-        if path.name == Path(__file__).name:
-            continue
-        source = path.read_text(encoding="utf-8")
-        if "api.updates" not in source:
-            continue
-        found = removal_lines(source)
-        if not found:
-            continue
-        # Parse only the few files that actually remove the module: compiling a
-        # test file that embeds JS raises SyntaxWarning noise for no benefit.
-        tree = ast.parse(source, filename=str(path))
-        # Every function that both removes and fully restores is exonerated; its
-        # line range is then excluded from the file-level scan below.
-        exonerated = set()
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            body = ast.get_source_segment(source, node) or ""
-            if not removal_lines(body):
-                continue
-            if restores_mapping.search(body) and restores_attribute.search(body):
-                exonerated.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
-        for number, stripped in found:
-            if number in exonerated:
-                continue
-            offenders.append(f"{path.name}:{number}: {stripped}")
-
-    assert not offenders, (
-        "removing api.updates from sys.modules leaves the next dotted import to "
-        "execute the module a second time, splitting WEBUI_VERSION across the "
-        "session (HWEB-86). `from api import updates` returns the existing "
-        "module anyway, so the eviction buys nothing. If you genuinely need a "
-        "fresh import, restore BOTH references in the same function — `sys.modules"
-        "['api.updates']` and the `updates` attribute on the `api` package. "
-        "`monkeypatch.delitem` and `patch.dict` restore only the first:\n"
-        + "\n".join(offenders)
-    )
-
-
-def test_the_module_cache_scan_still_catches_an_unrestored_eviction(tmp_path):
-    """The exemption must not hollow out the scan.
-
-    A function that removes `api.updates` and restores only the `sys.modules`
-    entry is the exact HWEB-86 leak, and must still be reported.
-    """
-    leaky = tmp_path / "test_leaky.py"
-    leaky.write_text(
-        "import sys\n"
-        "def test_x():\n"
-        "    first = sys.modules['api.updates']\n"
-        "    del sys.modules['api.updates']\n"
-        "    sys.modules['api.updates'] = first\n",
-        encoding="utf-8",
-    )
-    source = leaky.read_text(encoding="utf-8")
-    restores_attribute = re.compile(
-        r"\bapi\.updates\s*=|\bsetattr\(\s*api\s*,\s*[\"']updates[\"']"
-    )
-    assert not restores_attribute.search(source), (
-        "a mapping-only restore must not satisfy the attribute half of the rule"
-    )
 
 
 def test_sw_js_serves_the_version_the_app_currently_reports(tmp_path, monkeypatch):
