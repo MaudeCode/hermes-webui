@@ -68,7 +68,17 @@ function _panelDataIsFresh(panel, force){
   return typeof at === 'number' && at > 0 && (Date.now() - at) < PANEL_DATA_TTL_MS;
 }
 
-function _markPanelDataLoaded(panel){
+function _apiFailureCount(){
+  return (typeof globalThis !== 'undefined' && globalThis.__apiFailureCount) || 0;
+}
+
+// The panel loaders catch their own request failures and resolve normally, so a
+// failed load is indistinguishable from a successful one at this level. api()
+// counts every failed request; if the count moved while the loaders ran, treat the
+// load as unhydrated and leave the panel uncached, so the next entry retries
+// instead of showing an error state for the rest of the window.
+function _markPanelDataLoaded(panel, failuresBefore){
+  if (arguments.length > 1 && _apiFailureCount() !== failuresBefore) return;
   _panelDataLoadedAt.set(_panelDataFreshnessKey(panel), Date.now());
 }
 
@@ -492,6 +502,7 @@ async function switchPanel(name, opts = {}) {
   // window (HWEB-43). `opts.force` bypasses the gate for callers that just changed
   // something and are re-entering the panel to show it.
   const panelDataFresh = _panelDataIsFresh(nextPanel, opts.force);
+  const failuresBefore = _apiFailureCount();
   if (!panelDataFresh) {
     if (nextPanel === 'tasks') await loadCrons();
     if (nextPanel === 'kanban') await loadKanban();
@@ -502,7 +513,7 @@ async function switchPanel(name, opts = {}) {
     if (nextPanel === 'todos') loadTodos();
     if (nextPanel === 'insights') await loadInsights();
     if (nextPanel === 'logs') await loadLogs();
-    _markPanelDataLoaded(nextPanel);
+    if (nextPanel !== 'settings') _markPanelDataLoaded(nextPanel, failuresBefore);
   }
   _syncLogsAutoRefresh();
   if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
@@ -510,7 +521,14 @@ async function switchPanel(name, opts = {}) {
     // switchSettingsSection() is view state, not a data load — the visible section
     // must be re-applied on every entry — but the panel's own fetch is gated.
     switchSettingsSection(_currentSettingsSection);
-    if (!panelDataFresh) loadSettingsPanel();
+    // loadSettingsPanel() stays unawaited so the sidebar/titlebar sync below is not
+    // held behind its fetch; the freshness stamp rides its completion instead, so a
+    // failed settings load does not suppress the next entry's retry.
+    if (!panelDataFresh) {
+      void Promise.resolve(loadSettingsPanel())
+        .then(() => _markPanelDataLoaded('settings', failuresBefore))
+        .catch(() => {});
+    }
   }
   _resyncChatSidebarAfterPanelSwitch();
   if (nextPanel === 'chat' && typeof syncTopbar === 'function') syncTopbar();

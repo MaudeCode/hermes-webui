@@ -6033,10 +6033,20 @@ async function _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts,
   if(sessionsAreFresh){
     sessData=_sessionListLastPayload;
   }else{
+    // The entry is stamped with the request's START time, not its completion. A
+    // response already in flight when a write landed is pre-mutation data even
+    // though it arrives after; completion-time stamping would clear the
+    // fail-closed check above and let the next render repaint pre-mutation rows.
+    // For the same reason a response only replaces the entry when it started at
+    // least as late as the stored one — an out-of-order older response must not
+    // overwrite a newer snapshot.
+    const requestedAt=now;
     sessData = await api('/api/sessions' + sessionListQS,sessionRequestOpts);
-    _sessionListLastPayload=sessData;
-    _sessionListLastFetchKey=sessionListKey;
-    _sessionListLastFetchedAt=Date.now();
+    if(_sessionListLastFetchKey!==sessionListKey||requestedAt>=_sessionListLastFetchedAt){
+      _sessionListLastPayload=sessData;
+      _sessionListLastFetchKey=sessionListKey;
+      _sessionListLastFetchedAt=requestedAt;
+    }
   }
   const projData = await projectPromise;
 

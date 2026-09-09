@@ -140,6 +140,13 @@ async function api(path,opts={}){
       ]):await requestPromise;
     }catch(e){
       lastErr=e;
+      // HWEB-43: count failed requests, so a caller that cannot see its own loader's
+      // swallowed errors (switchPanel's freshness gate) can fail closed and skip
+      // caching. A counter rather than Date.now() because two failures inside one
+      // millisecond must still read as two. A retried-then-successful attempt also
+      // counts; the cost of that false positive is one extra load, which is the
+      // behaviour before the gate existed.
+      if(typeof globalThis!=='undefined') globalThis.__apiFailureCount=(globalThis.__apiFailureCount||0)+1;
       const isTimeout=didTimeout||(e&&(e.timeout===true||e.name==='TimeoutError'));
       if(isTimeout){
         if(retryTimeouts&&attempt<2&&attempt<maxAttempts-1){

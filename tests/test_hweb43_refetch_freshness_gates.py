@@ -68,11 +68,14 @@ global._sessionListLastPayload = null;
 global.SESSION_LIST_REFRESH_TTL_MS = SESSION_LIST_REFRESH_TTL_MS;
 let sessionFetches = 0;
 let sessionTitle = 'first turn';
+let holdSessions = null;
 global.api = (url) => {{
   if (url.startsWith('/api/projects')) return Promise.resolve({{projects: []}});
   if (url.startsWith('/api/sessions')) {{
     sessionFetches += 1;
-    return Promise.resolve({{sessions: [{{session_id:'s1', title: sessionTitle}}]}});
+    const payload = {{sessions: [{{session_id:'s1', title: sessionTitle}}]}};
+    if (holdSessions) return holdSessions.then(() => payload);
+    return Promise.resolve(payload);
   }}
   return Promise.reject(new Error('unexpected endpoint ' + url));
 }};
@@ -169,6 +172,66 @@ def test_session_list_window_fails_closed_after_a_write():
     assert result == {"afterFirst": 1, "stillGated": 1, "afterWrite": 2}
 
 
+def test_a_response_already_in_flight_when_a_write_landed_is_not_cached_as_fresh():
+    """Codex P2: the entry is stamped with the request's start, not its completion.
+
+    A render queued behind an in-flight fetch previously saw that fetch's
+    completion timestamp as newer than the write that landed mid-flight, so it
+    replayed pre-mutation rows instead of issuing the replacement fetch.
+    """
+    script = f"""
+    {_SIDEBAR_PRELUDE}
+    let clock = 100000;
+    Date.now = () => clock;
+    (async () => {{
+      const qs = '?sidebar_source=all';
+      let release;
+      holdSessions = new Promise(resolve => {{ release = resolve; }});
+      const inFlight = _loadSidebarSessionListPayload(qs, {{}});   // started at 100000
+      clock += 10;
+      globalThis.__apiLastMutationAt = clock;   // archive/rename POST lands mid-flight
+      clock += 10;
+      release();                                // response arrives at 100020
+      await inFlight;
+      holdSessions = null;
+      const afterFirst = sessionFetches;
+      // The queued render must refetch: that payload was requested before the write.
+      await _loadSidebarSessionListPayload(qs, {{}});
+      console.log(JSON.stringify({{afterFirst, afterQueued: sessionFetches}}));
+    }})();
+    """
+    result = _run_node(script)
+    assert result == {"afterFirst": 1, "afterQueued": 2}
+
+
+def test_an_out_of_order_older_response_does_not_overwrite_a_newer_snapshot():
+    script = f"""
+    {_SIDEBAR_PRELUDE}
+    // A controlled clock so "started earlier" is unambiguous rather than a
+    // same-millisecond tie.
+    let clock = 100000;
+    Date.now = () => clock;
+    (async () => {{
+      const qs = '?sidebar_source=all';
+      let release;
+      holdSessions = new Promise(resolve => {{ release = resolve; }});
+      sessionTitle = 'older';
+      const slow = _loadSidebarSessionListPayload(qs, {{}});
+      await Promise.resolve();
+      holdSessions = null;
+      clock += 50;
+      sessionTitle = 'newer';
+      // A later request that started after `slow` but resolves before it.
+      globalThis.__apiLastMutationAt = clock;
+      await _loadSidebarSessionListPayload(qs, {{}});
+      release();
+      await slow;
+      console.log(JSON.stringify({{cached: _sessionListLastPayload.sessions[0].title}}));
+    }})();
+    """
+    assert _run_node(script) == {"cached": "newer"}
+
+
 # ── 2. Panel switch freshness gate ───────────────────────────────────────────
 
 def _panel_harness(body: str) -> str:
@@ -199,7 +262,7 @@ def _panel_harness(body: str) -> str:
     global.syncTopbar = () => {{}};
     global.syncAppTitlebar = () => {{}};
     global.switchSettingsSection = () => bump('settingsSection');
-    global.loadSettingsPanel = () => bump('settings');
+    global.loadSettingsPanel = async () => {{ bump('settings'); if (global.failSettings) globalThis.__apiFailureCount = (globalThis.__apiFailureCount || 0) + 1; }};
     global.loadCrons = async () => bump('tasks');
     global.loadKanban = async () => bump('kanban');
     global.loadSkills = async () => bump('skills');
@@ -214,6 +277,7 @@ def _panel_harness(body: str) -> str:
     const _panelDataLoadedAt = new Map();
     {_js(PANELS_JS, '_panelDataFreshnessKey')}
     {_js(PANELS_JS, '_panelDataIsFresh')}
+    {_js(PANELS_JS, '_apiFailureCount')}
     {_js(PANELS_JS, '_markPanelDataLoaded')}
     {_js(PANELS_JS, 'switchPanel')}
     {body}
@@ -251,6 +315,53 @@ def test_panel_reloads_after_its_window_lapses_and_on_force():
     """)
     result = _run_node(script)
     assert result == {"afterForce": 2, "afterExpiry": 3}
+
+
+def test_a_failed_panel_load_is_not_cached_as_fresh():
+    """Codex P2: the loaders swallow their own errors, so freshness must fail closed."""
+    script = _panel_harness("""
+    (async () => {
+      global.loadCrons = async () => { bump('tasks'); globalThis.__apiFailureCount = (globalThis.__apiFailureCount || 0) + 1; };
+      await switchPanel('tasks');
+      await switchPanel('chat');
+      await switchPanel('tasks');
+      const afterFailures = loads.tasks;
+      // Once a load succeeds, the window applies again.
+      global.loadCrons = async () => bump('tasks');
+      await switchPanel('chat');
+      await switchPanel('tasks');
+      const afterSuccess = loads.tasks;
+      await switchPanel('chat');
+      await switchPanel('tasks');
+      console.log(JSON.stringify({afterFailures, afterSuccess, afterGated: loads.tasks}));
+    })();
+    """)
+    result = _run_node(script)
+    assert result == {"afterFailures": 2, "afterSuccess": 3, "afterGated": 3}
+
+
+def test_a_failed_settings_load_is_not_cached_as_fresh():
+    script = _panel_harness("""
+    (async () => {
+      global.failSettings = true;
+      await switchPanel('settings');
+      await switchPanel('chat');
+      await new Promise(r => setTimeout(r, 0));
+      await switchPanel('settings');
+      const afterFailure = loads.settings;
+      global.failSettings = false;
+      await switchPanel('chat');
+      await new Promise(r => setTimeout(r, 0));
+      await switchPanel('settings');
+      const afterSuccess = loads.settings;
+      await switchPanel('chat');
+      await new Promise(r => setTimeout(r, 0));
+      await switchPanel('settings');
+      console.log(JSON.stringify({afterFailure, afterSuccess, afterGated: loads.settings}));
+    })();
+    """)
+    result = _run_node(script)
+    assert result == {"afterFailure": 2, "afterSuccess": 3, "afterGated": 3}
 
 
 def test_settings_section_still_syncs_on_every_entry_while_its_fetch_is_gated():
