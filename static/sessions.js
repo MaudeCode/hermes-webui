@@ -5109,12 +5109,23 @@ async function _archiveSession(session, archived=true, beforeListRender=null){
 
 // style.css hides the whole .session-actions cluster under
 // (hover:none) and (pointer:coarse), so the inline archive control below is
-// unreachable on touch-primary devices and the long-press action menu has to
-// keep carrying archive/restore there. Fails to `true` on uncertainty: a
+// unreachable on touch-primary devices. Fails to `true` on uncertainty: a
 // redundant menu entry costs a row, a missing one costs the only non-gesture
 // way to archive.
 function _sessionInlineActionsHidden(){
   try{ return !window.matchMedia || window.matchMedia('(hover:none) and (pointer:coarse)').matches; }
+  catch(_){ return true; }
+}
+
+// The action menu keeps carrying archive/restore for any caller that has no
+// inline control to fall back on. Two such callers exist: a sidebar row on a
+// coarse-pointer device (the cluster is display:none), and the mobile titlebar
+// long-press in panels.js, which anchors on the conversation title and is wired
+// on every touch-capable device — including a hybrid laptop whose primary
+// pointer is `fine`, where the media query alone would wrongly drop the entry.
+function _sessionArchiveNeedsMenuEntry(anchorEl){
+  if(_sessionInlineActionsHidden()) return true;
+  try{ return !(anchorEl && anchorEl.closest && anchorEl.closest('.session-item,.session-child-session-fork')); }
   catch(_){ return true; }
 }
 
@@ -5247,9 +5258,9 @@ function _openSessionActionMenu(session, anchorEl){
   ));
   // Archive/restore normally lives inline beside the ⋯ trigger
   // (_buildSessionArchiveToggle), because it is a frequent session-list action.
-  // It stays in this menu only where that control is hidden — see
-  // _sessionInlineActionsHidden().
-  if(_sessionInlineActionsHidden()){
+  // It stays in this menu only for callers with no inline control to use — see
+  // _sessionArchiveNeedsMenuEntry().
+  if(_sessionArchiveNeedsMenuEntry(anchorEl)){
     menu.appendChild(_buildSessionAction(
       session.archived?t('session_restore'):t('session_archive'),
       session.archived?t('session_restore_desc'):_sessionArchiveDescription(session),

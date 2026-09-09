@@ -115,7 +115,7 @@ def test_archive_menu_entry_only_survives_where_the_inline_control_is_hidden():
     """Coarse-pointer devices hide .session-actions, so the menu keeps archive there."""
     menu_body = _function_block(SESSIONS_JS, "_openSessionActionMenu")
 
-    guard = menu_body.find("if(_sessionInlineActionsHidden()){")
+    guard = menu_body.find("if(_sessionArchiveNeedsMenuEntry(anchorEl)){")
     assert guard >= 0, "archive menu entry is not gated on the inline control being hidden"
     # The one remaining _archiveSession call in the menu is inside that guard.
     assert menu_body.count("_archiveSession(session,!session.archived)") == 1
@@ -147,6 +147,62 @@ def _inline_actions_hidden(media_matches):
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
+
+
+def _needs_menu_entry(cases):
+    """Run _sessionArchiveNeedsMenuEntry with a stubbed matchMedia and anchor."""
+    if NODE is None:
+        pytest.skip("node not on PATH")
+    driver = "\n".join(
+        [
+            "const cases=JSON.parse(process.argv[1]);",
+            _function_block(SESSIONS_JS, "_sessionInlineActionsHidden"),
+            _function_block(SESSIONS_JS, "_sessionArchiveNeedsMenuEntry"),
+            "const out=cases.map(c=>{",
+            "  globalThis.window={matchMedia:(q)=>({matches: q==='(hover:none) and (pointer:coarse)' && c.coarse})};",
+            "  const anchor = c.anchor===null ? null : {closest:(sel)=>{",
+            "    return sel.split(',').some(s=>c.anchor.includes(s.trim())) ? {} : null;",
+            "  }};",
+            "  return _sessionArchiveNeedsMenuEntry(anchor);",
+            "});",
+            "process.stdout.write(JSON.stringify(out));",
+        ]
+    )
+    result = subprocess.run(
+        [NODE, "-e", driver, json.dumps(cases)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_menu_keeps_archive_for_every_caller_without_an_inline_control():
+    """panels.js long-presses the titlebar on any touch device, fine pointer included."""
+    sidebar_row = [".session-item"]
+    fork_child = [".session-child-session-fork"]
+    titlebar = []  # #chatTitle is in no sidebar row
+
+    fine_sidebar, fine_fork, fine_titlebar, coarse_sidebar, no_anchor = _needs_menu_entry(
+        [
+            {"coarse": False, "anchor": sidebar_row},
+            {"coarse": False, "anchor": fork_child},
+            {"coarse": False, "anchor": titlebar},
+            {"coarse": True, "anchor": sidebar_row},
+            {"coarse": False, "anchor": None},
+        ]
+    )
+
+    # Sidebar rows on a fine pointer have the inline control right there.
+    assert fine_sidebar is False
+    assert fine_fork is False
+    # A hybrid laptop (fine pointer + touchscreen) still long-presses the titlebar.
+    assert fine_titlebar is True
+    # Coarse pointer hides the cluster, so even a sidebar row needs the entry.
+    assert coarse_sidebar is True
+    # Fail closed on an unrecognised caller.
+    assert no_anchor is True
 
 
 def test_inline_actions_are_reported_hidden_only_on_coarse_pointer_devices():
