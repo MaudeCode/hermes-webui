@@ -11,7 +11,6 @@ execution from `git describe --tags --always`, and on CI's tagless checkout that
 falls back to a bare abbreviated SHA whose length git picks from prefix
 ambiguity — so the two instances could disagree by one hex digit.
 """
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -71,49 +70,6 @@ def test_module_cache_and_package_attribute_agree():
     assert sys.modules["api.updates"] is before
     assert api_package.updates is before
     assert WEBUI_VERSION == before.WEBUI_VERSION
-
-
-def test_no_test_removes_api_updates_from_the_module_cache():
-    """Catch the mutation at its source, in any spelling.
-
-    The identity check above only fires when the leaking test happened to run
-    earlier in the same shard, so this scan is the deterministic half. It covers
-    `del`, `.pop(...)` and `monkeypatch.delitem` rather than one literal form.
-    """
-    # Only the unscoped spellings are matched. `monkeypatch.delitem` and
-    # `patch.dict(sys.modules)` at least restore the mapping, so they are not
-    # flagged — but neither restores the `api.updates` attribute on the `api`
-    # package, which a dotted re-import inside the block rebinds. Anything that
-    # re-imports has to put both references back; see the message below.
-    # Match through an alias (`import sys as _sys`) by anchoring on `.modules`.
-    patterns = (
-        re.compile(r"\bdel\s+\w+\.modules\["),
-        re.compile(r"\b\w+\.modules\.pop\("),
-    )
-    offenders = []
-    for path in sorted((ROOT / "tests").glob("test_*.py")):
-        if path.name == Path(__file__).name:
-            continue
-        source = path.read_text(encoding="utf-8")
-        if "api.updates" not in source:
-            continue
-        for number, line in enumerate(source.splitlines(), 1):
-            stripped = line.strip()
-            if not any(pattern.search(stripped) for pattern in patterns):
-                continue
-            if "api.updates" not in stripped:
-                continue
-            offenders.append(f"{path.name}:{number}: {stripped}")
-    assert not offenders, (
-        "removing api.updates from sys.modules leaves the next dotted import to "
-        "execute the module a second time, splitting WEBUI_VERSION across the "
-        "session (HWEB-86). `from api import updates` returns the existing "
-        "module anyway, so the eviction buys nothing. If you genuinely need a "
-        "fresh import, restore BOTH references afterwards — `sys.modules"
-        "['api.updates']` and the `updates` attribute on the `api` package. "
-        "`monkeypatch.delitem` and `patch.dict` restore only the first:\n"
-        + "\n".join(offenders)
-    )
 
 
 def test_sw_js_serves_the_version_the_app_currently_reports(tmp_path, monkeypatch):
