@@ -2413,6 +2413,7 @@ def _cleanup_account_usage_probe_workers(
     now: float | None = None,
     idle_seconds: float = _ACCOUNT_USAGE_WORKER_IDLE_SECONDS,
 ) -> None:
+    """Evict dead and idle probe workers. Called from the reaper tick."""
     cutoff = time.monotonic() if now is None else now
     stale: list[tuple[str, _AccountUsageProbeWorker]] = []
     with _account_usage_worker_pool_lock:
@@ -2430,9 +2431,10 @@ def _cleanup_account_usage_probe_workers(
             if not remaining_workers:
                 _account_usage_worker_pool.pop(key, None)
             else:
-                # Replenish to N so partial cleanup doesn't permanently shrink the pool
-                while len(remaining_workers) < _ACCOUNT_USAGE_WORKERS_PER_HOME:
-                    remaining_workers.append(_AccountUsageProbeWorker(Path(key)))
+                # No replenish here. `_get_account_usage_probe_worker` refills the
+                # pool to N on the next fetch, and a worker's subprocess is not
+                # launched until `_fetch_locked` runs outside this lock — so a
+                # shrunk pool costs nothing until it is used again.
                 _account_usage_worker_pool[key] = remaining_workers
     for _key, worker in stale:
         worker.close()
@@ -2553,7 +2555,11 @@ def _agent_fetch_account_usage_for_home(
     credential_id: str | None = None,
 ) -> Any:
     try:
-        _cleanup_account_usage_probe_workers()
+        # Idle-worker eviction runs on the SessionChannel reaper tick, not here:
+        # walking the whole pool and polling every worker under the global pool
+        # lock put that work on a request thread, and made eviction reachable
+        # only while traffic was flowing — exactly when idle workers are not the
+        # problem (HWEB-45).
         worker = _get_account_usage_probe_worker(home)
         if worker is not None:
             try:
