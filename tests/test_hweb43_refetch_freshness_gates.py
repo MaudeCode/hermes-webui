@@ -407,6 +407,64 @@ def test_a_fire_and_forget_failure_after_the_loader_resolves_invalidates_freshne
     }
 
 
+def test_kanban_is_never_gated_because_its_loader_restarts_polling():
+    """Codex P2: switchPanel() stops kanban polling on exit; loadKanban() restarts it."""
+    script = _panel_harness("""
+    (async () => {
+      let polling = false;
+      global._kanbanStopPolling = () => { polling = false; };
+      global.loadKanban = async () => { bump('kanban'); polling = true; };
+      await switchPanel('kanban');
+      await switchPanel('chat');
+      const stoppedOnExit = polling;
+      await switchPanel('kanban');
+      console.log(JSON.stringify({stoppedOnExit, loads: loads.kanban, pollingOnReturn: polling}));
+    })();
+    """)
+    assert _run_node(script) == {
+        "stoppedOnExit": False,
+        "loads": 2,
+        "pollingOnReturn": True,
+    }
+
+
+def test_panel_freshness_is_keyed_by_the_active_workspace():
+    """Codex P2: switchToWorkspace() mutates S.session.workspace without a new session."""
+    script = _panel_harness("""
+    (async () => {
+      S.session = {session_id: 'sess-a', workspace: '/ws/a'};
+      await switchPanel('workspaces');
+      await switchPanel('chat');
+      await switchPanel('workspaces');
+      const sameWorkspace = loads.workspaces;
+      // An in-place workspace switch on the SAME session.
+      S.session.workspace = '/ws/b';
+      await switchPanel('chat');
+      await switchPanel('workspaces');
+      console.log(JSON.stringify({sameWorkspace, afterWorkspaceSwitch: loads.workspaces}));
+    })();
+    """)
+    assert _run_node(script) == {"sameWorkspace": 1, "afterWorkspaceSwitch": 2}
+
+
+def test_expired_freshness_entries_are_evicted_instead_of_accumulating():
+    """Codex P2: nothing else deletes from the map, so a long-lived tab grows it."""
+    script = _panel_harness("""
+    (async () => {
+      for (let i = 0; i < 25; i++) {
+        S.session = {session_id: 'sess-' + i, workspace: '/ws/' + i};
+        await switchPanel('memory');
+        await switchPanel('chat');
+        // Age every entry past the window, as a long-lived tab would.
+        for (const entry of _panelDataLoadedAt.values()) entry.at -= (PANEL_DATA_TTL_MS + 1);
+      }
+      console.log(JSON.stringify({entries: _panelDataLoadedAt.size}));
+    })();
+    """)
+    result = _run_node(script)
+    assert result["entries"] <= 2, result
+
+
 def test_settings_section_still_syncs_on_every_entry_while_its_fetch_is_gated():
     """Re-entering settings must re-apply the visible section even when data is fresh."""
     script = _panel_harness("""

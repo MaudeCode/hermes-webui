@@ -57,17 +57,21 @@ const MAIN_VIEW_SIDEBAR_PANEL_FALLBACKS = { plugin: 'settings' };
 const PANEL_DATA_TTL_MS = 15000;
 const _panelDataLoadedAt = new Map();
 
-// The key is the complete identity the loaded data depends on. Profile, because
-// crons, skills, memory and todos are profile-scoped; session, because loadMemory()
-// requests /api/memory?session_id=, Todos reads session-owned todo state and
-// Workspaces renders an active badge from the current session. Keyed for every
-// panel rather than an allowlist of the session-scoped ones: an allowlist rots as
-// panels gain session-dependent content, and the cost of over-keying is one extra
-// load, which is the behaviour before this gate existed.
+// The key is the union of the client state the panel loaders read, so a change to
+// any of it invalidates every panel rather than an allowlist of the ones known to
+// care today — an allowlist rots as panels gain dependencies, and over-keying only
+// costs an extra load. Profile: crons, skills, memory and todos are profile-scoped.
+// Session: loadMemory() requests /api/memory?session_id= and Todos reads
+// session-owned todo state. Workspace: renderWorkspacesPanel() derives its active
+// badge from S.session.workspace, which switchToWorkspace() mutates in place
+// without changing the session id. A panel that starts reading some other piece of
+// S must be added here.
 function _panelDataFreshnessKey(panel){
   const profile = (typeof S !== 'undefined' && S && S.activeProfile) || 'default';
-  const session = (typeof S !== 'undefined' && S && S.session && S.session.session_id) || '';
-  return `${panel} ${profile} ${session}`;
+  const session = (typeof S !== 'undefined' && S && S.session) || null;
+  const sid = (session && session.session_id) || '';
+  const workspace = (session && session.workspace) || '';
+  return `${panel} ${profile} ${sid} ${workspace}`;
 }
 
 // Freshness is checked against the failure counter at READ time, against the count
@@ -101,6 +105,14 @@ function _apiFailureCount(){
 // correction for the rest of the window.
 function _markPanelDataLoaded(panel, keyBefore, failuresBefore){
   if (_panelDataFreshnessKey(panel) !== keyBefore) return;
+  // Drop entries that can no longer be fresh. A long-lived tab visits panels under
+  // many session/workspace identities, and nothing else deletes from this map, so
+  // without the sweep it grows for the life of the page. It runs on a panel switch
+  // over at most one entry per identity seen in the last window, so it stays cheap.
+  const cutoff = Date.now() - PANEL_DATA_TTL_MS;
+  for (const [key, entry] of _panelDataLoadedAt) {
+    if (!entry || !(entry.at > cutoff)) _panelDataLoadedAt.delete(key);
+  }
   _panelDataLoadedAt.set(keyBefore, {at: Date.now(), failures: failuresBefore});
 }
 
@@ -523,7 +535,11 @@ async function switchPanel(name, opts = {}) {
   // Lazy-load panel data, unless this panel's data is still inside its freshness
   // window (HWEB-43). `opts.force` bypasses the gate for callers that just changed
   // something and are re-entering the panel to show it.
-  const panelDataFresh = _panelDataIsFresh(nextPanel, opts.force);
+  // Kanban is excluded: switchPanel() stops its polling on the way out (above) and
+  // loadKanban() is what restarts it, so gating the loader would reopen a board with
+  // neither SSE nor fallback polling. It is the only loader that owns a lifecycle
+  // rather than just data; the rest are safe to skip.
+  const panelDataFresh = nextPanel !== 'kanban' && _panelDataIsFresh(nextPanel, opts.force);
   const freshnessKeyBefore = _panelDataFreshnessKey(nextPanel);
   const failuresBefore = _apiFailureCount();
   if (!panelDataFresh) {

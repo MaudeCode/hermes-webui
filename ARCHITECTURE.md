@@ -621,11 +621,13 @@ Chat/session durability invariants:
     the last completed write all bypass it. `api()` stamps that write clock on the
     completion of every non-idempotent request, so no mutating call site has to
     remember to invalidate. Panel data loaded by `switchPanel()` has an equivalent
-    15-second window keyed by panel, active profile and active session — several
-    panels render session-scoped data — so toggling between two panels no longer
-    reloads each one on every entry. A panel is stamped fresh only if no request
-    failed while its loaders ran (they catch their own errors) and the profile and
-    session that started the load are still current when it completes.
+    15-second window keyed by panel plus the client state its loaders read — active
+    profile, session and session workspace — so toggling between two panels no longer
+    reloads each one on every entry. An entry is only usable while the profile,
+    session and workspace that produced it are still current and no `api()` request
+    has failed since it was dispatched, and expired entries are swept on each stamp.
+    Kanban is deliberately outside the gate: it is the only panel whose loader owns a
+    lifecycle (`_kanbanStartPolling()`) that `switchPanel()` stops on the way out.
     When the optional Talaria Relay publisher is configured, `ACTIVE_RUNS` remains the
     sole run-liveness owner. An owner registers one server-wide Ed25519 publisher key;
     authenticated users then enroll opaque profile scopes without receiving publisher
