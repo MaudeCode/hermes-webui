@@ -350,6 +350,37 @@ class TestTurnJournalRetention:
         assert first["pruned"] == 1
         assert second["pruned"] == 0
 
+    def test_an_emptied_shard_is_unlinked_once_its_owner_exits(self, tmp_path):
+        """Otherwise every restart leaks one permanent zero-byte file per session."""
+        journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
+        journal_dir.mkdir(parents=True, exist_ok=True)
+        # A shard a previous run truncated and could not unlink while it lived.
+        emptied = journal_dir / f"restarted~{_DEAD_PID}.jsonl"
+        emptied.touch()
+        stamp = time.time() - 90 * 24 * 60 * 60
+        os.utime(emptied, (stamp, stamp))
+        _write_sidecar(tmp_path, "restarted")
+
+        result = turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
+
+        assert not emptied.exists()
+        assert result["pruned"] == 1
+        assert result["bytes_reclaimed"] == 0
+
+    def test_an_emptied_shard_of_a_live_owner_is_left_alone(self, tmp_path):
+        journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
+        journal_dir.mkdir(parents=True, exist_ok=True)
+        emptied = journal_dir / f"mine~{os.getpid()}.jsonl"
+        emptied.touch()
+        stamp = time.time() - 90 * 24 * 60 * 60
+        os.utime(emptied, (stamp, stamp))
+        _write_sidecar(tmp_path, "mine")
+
+        result = turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
+
+        assert emptied.exists()
+        assert result["pruned"] == 0
+
     def test_release_declines_when_the_shard_changed_under_the_lock(self, tmp_path):
         """An append between the scan and the truncate aborts the whole attempt."""
         journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
@@ -390,6 +421,47 @@ class TestTurnJournalRetention:
             events=[{"event": "submitted", "created_at": 1}],
         )
         _write_sidecar(tmp_path, "no-turn-id")
+
+        result = turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
+
+        assert result["pruned"] == 0
+        assert shard.exists()
+
+    @pytest.mark.parametrize(
+        "created_at", [None, "1700000000", float("nan"), float("inf"), True]
+    )
+    def test_a_non_finite_or_absent_timestamp_keeps_the_session(
+        self, tmp_path, created_at
+    ):
+        """`float(x or 0)` accepted all of these; a settled-looking session then
+        lost its evidence, which is what this gate exists to prevent."""
+        journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
+        events = [
+            {"event": "submitted", "turn_id": "t1", "created_at": created_at},
+            {"event": "completed", "turn_id": "t1", "created_at": 2},
+        ]
+        shard = _write_shard(
+            journal_dir, f"odd~{_DEAD_PID}.jsonl", age_days=90, events=events
+        )
+        _write_sidecar(tmp_path, "odd")
+
+        result = turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
+
+        assert result["pruned"] == 0
+        assert shard.exists()
+
+    def test_a_missing_created_at_key_keeps_the_session(self, tmp_path):
+        journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
+        shard = _write_shard(
+            journal_dir,
+            f"nokey~{_DEAD_PID}.jsonl",
+            age_days=90,
+            events=[
+                {"event": "submitted", "turn_id": "t1"},
+                {"event": "completed", "turn_id": "t1", "created_at": 2},
+            ],
+        )
+        _write_sidecar(tmp_path, "nokey")
 
         result = turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
 

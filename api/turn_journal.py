@@ -7,6 +7,7 @@ reason about submitted turns without depending on in-memory stream state.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import threading
@@ -371,6 +372,8 @@ def _event_is_well_formed(event: object) -> bool:
     take the whole retention pass down with it. ``append_turn_journal_event``
     fills all three in, so anything missing them was not written by this code
     path and is uncertainty, not evidence of a settled session.
+    Deliberately stricter than :func:`_safe_created_at`, which stays lenient
+    because ordering may degrade on junk. Here junk must fail closed.
     """
     if not isinstance(event, dict):
         return False
@@ -378,11 +381,14 @@ def _event_is_well_formed(event: object) -> bool:
         return False
     if not str(event.get("event") or "").strip():
         return False
-    try:
-        float(event.get("created_at") or 0)
-    except (TypeError, ValueError):
+    created_at = event.get("created_at")
+    # A real number, not "whatever coerces": `float(x or 0)` accepted a missing
+    # or null timestamp as epoch, which let a corrupted `submitted` sort behind
+    # a valid `completed` and read as settled. bool is an int subclass, so
+    # exclude it explicitly.
+    if isinstance(created_at, bool) or not isinstance(created_at, (int, float)):
         return False
-    return True
+    return math.isfinite(created_at)
 
 
 def _session_sidecar_is_intact(session_id: str, root: Path) -> bool:
@@ -409,8 +415,8 @@ def _session_is_prunable(session_id: str, root: Path) -> bool:
     * an id ``read_turn_journal`` rejects, or a shard it cannot read;
     * a malformed line — a crash-torn event is exactly the evidence recovery
       flags for manual review, and deleting it destroys the only record;
-    * a JSON-decodable event missing ``turn_id``, ``event`` or a numeric
-      ``created_at``, which the malformed list never sees;
+    * a JSON-decodable event missing ``turn_id``, ``event`` or a present,
+      finite, numeric ``created_at``, none of which the malformed list sees;
     * a nonterminal turn, which the startup audit still reports as pending;
     * a missing or unparseable live sidecar. The recovery audit walks only the
       sidecars it can parse, so it never reports these — the journal is the
@@ -474,13 +480,15 @@ def _release_expired_shard(path: Path, expected_mtime: float) -> bool:
     whereas an ``O_APPEND`` writer blocked on the lock simply resumes at
     offset 0 and loses nothing.
 
-    The empty file is then unlinked only when its owning pid is provably gone —
-    a shard from a previous run of this server, which is the accumulation vector
-    a restart loop creates. A live pid, an unparseable name, or a platform
-    without a safe liveness probe keeps the (now empty) inode;
-    ``delete_turn_journal`` releases it with the session.
+    The emptied file is then unlinked once its owning pid is provably gone — the
+    shards a restart loop leaves behind, which is the accumulation vector. A
+    shard kept because its owner was still alive is revisited on a later pass
+    and released then, so an empty inode outlives its process until the next
+    expiry rather than forever. An unparseable name or a platform without a safe
+    liveness probe keeps it; ``delete_turn_journal`` releases it with the
+    session either way.
 
-Without ``fcntl`` — Windows — :func:`_journal_file_lock` is a documented
+    Without ``fcntl`` — Windows — :func:`_journal_file_lock` is a documented
     no-op, so nothing stops a first append from landing between the ``fstat``
     and the ``truncate`` and being erased. There is no second mechanism to fall
     back on, because synchronizing here alone would not help: the appender does
@@ -495,14 +503,21 @@ Without ``fcntl`` — Windows — :func:`_journal_file_lock` is a documented
     """
     if _fcntl is None:
         return False
+    owner = _shard_owner_pid(path)
+    owner_is_gone = bool(owner) and not _pid_is_running(owner)
     try:
         with open(path, "r+b") as fh:
             with _journal_file_lock(fh):
-                if os.fstat(fh.fileno()).st_mtime != expected_mtime:
+                current = os.fstat(fh.fileno())
+                if current.st_mtime != expected_mtime:
                     return False
-                fh.truncate(0)
-                owner = _shard_owner_pid(path)
-                if owner and not _pid_is_running(owner):
+                if not current.st_size and not owner_is_gone:
+                    # Already emptied and its owner may still append: nothing to
+                    # reclaim, and nothing safe to remove.
+                    return False
+                if current.st_size:
+                    fh.truncate(0)
+                if owner_is_gone:
                     try:
                         path.unlink()
                     except OSError:
@@ -586,9 +601,17 @@ def prune_stale_turn_journals(
         if not _session_is_prunable(session_id, root):
             continue
         for path, stat in shards:
-            if not stat.st_size:
+            # No size guard here. An already-emptied shard still has an inode to
+            # release once its owner exits, and skipping it left one permanent
+            # zero-byte file per session per restart — the growth this pass
+            # exists to stop. `_release_expired_shard` decides what is left to do.
+            if dry_run:
+                if not stat.st_size:
+                    continue
+                result["pruned"] += 1
+                result["bytes_reclaimed"] += int(stat.st_size)
                 continue
-            if not dry_run and not _release_expired_shard(path, stat.st_mtime):
+            if not _release_expired_shard(path, stat.st_mtime):
                 continue
             result["pruned"] += 1
             result["bytes_reclaimed"] += int(stat.st_size)

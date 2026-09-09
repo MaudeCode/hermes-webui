@@ -192,8 +192,9 @@ another, and half a turn read on its own looks pending:
 - no nonterminal turn is left;
 - no malformed line is present (a crash-torn event is exactly what the startup
   recovery audit flags for manual review, and the journal is the only record);
-- every event carries a `turn_id`, an `event` name and a numeric `created_at` —
-  a JSON-decodable line missing those is valid syntax but unusable evidence;
+- every event carries a `turn_id`, an `event` name and a `created_at` that is
+  present, numeric and finite — a JSON-decodable line missing those is valid
+  syntax but unusable evidence;
 - the live `{session_id}.json` sidecar exists and parses (a session whose
   sidecar is gone or corrupt is awaiting repair, and the audit below only walks
   the sidecars it *can* read, so it never reports this case);
@@ -218,10 +219,12 @@ appender reopens the path on every call, so unlinking races one that already
 holds the old inode and its event would vanish, whereas an `O_APPEND` writer
 blocked on the lock simply resumes at offset 0.
 
-The emptied file is then unlinked only when its owning pid is provably gone —
-the shards a restart loop leaves behind, which is the accumulation vector. A
-live pid, a pid-less legacy name, or a platform without a safe liveness probe
-keeps the now-empty inode until the session is deleted.
+The emptied file is then unlinked once its owning pid is provably gone — the
+shards a restart loop leaves behind, which is the accumulation vector. A shard
+kept because its owner was still alive is revisited after the next retention
+window and released then, so an empty inode outlives its process temporarily
+rather than forever. A pid-less legacy name or a platform without a safe
+liveness probe keeps it until the session is deleted.
 
 - `HERMES_WEBUI_TURN_JOURNAL_RETENTION_DAYS`, default `14`; set `0` to reclaim
   every settled shard on the next pass.
