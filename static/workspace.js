@@ -19,9 +19,11 @@ async function api(path,opts={}){
     ?(globalThis.__apiInflightRequests||(globalThis.__apiInflightRequests=new Map()))
     :null;
   // The key is the COMPLETE request identity, not just the URL:
-  //  - the mutation clock stamped below, so a request issued after a write never
+  //  - the write generation stamped below, so a request issued after a write never
   //    joins one issued before it (a GET started under the previous profile cookie
-  //    must not serve the profile-switch render that followed it);
+  //    must not serve the profile-switch render that followed it). A counter rather
+  //    than Date.now(): two writes completing inside one millisecond must still read
+  //    as two, and browsers deliberately coarsen timer precision;
   //  - a fingerprint of the caller's options, because they carry per-caller policy.
   //    /api/model/auxiliary is requested with {retries:0,timeoutToast:false} by the
   //    title regenerator and with the defaults by the settings loader; collapsing
@@ -38,7 +40,7 @@ async function api(path,opts={}){
     optsFingerprint=JSON.stringify(policy);
   }catch(_){ optsFingerprint=null; }
   const dedupeKey=(_inflight&&isIdempotent&&opts.dedupe!==false&&!opts.signal&&optsFingerprint!==null)
-    ?(method+' '+url.href+' @'+((typeof globalThis!=='undefined'&&globalThis.__apiLastMutationAt)||0)+' '+optsFingerprint)
+    ?(method+' '+url.href+' @'+((typeof globalThis!=='undefined'&&globalThis.__apiMutationSeq)||0)+' '+optsFingerprint)
     :null;
   if(dedupeKey){
     const existing=_inflight.get(dedupeKey);
@@ -211,14 +213,15 @@ async function api(path,opts={}){
     }finally{
       if(timeoutId) clearTimeout(timeoutId);
       if(upstreamSignal&&upstreamAbort) upstreamSignal.removeEventListener('abort',upstreamAbort);
-      // HWEB-43: record when server state may last have changed, so bounded read
-      // caches (the sidebar session list) fail closed after a write instead of
-      // serving a snapshot that predates it. Stamped on every non-idempotent
-      // ATTEMPT's completion, success or not: a timed-out or 500'd POST may still
-      // have been applied server-side, and "unknown" must not read as "unchanged".
-      // One chokepoint here beats invalidating at every mutating call site — a
-      // missed site would silently serve stale rows.
-      if(!isIdempotent&&typeof globalThis!=='undefined') globalThis.__apiLastMutationAt=Date.now();
+      // HWEB-43: count writes, so bounded read caches (the sidebar session list)
+      // fail closed after one instead of serving a snapshot that predates it. A
+      // generation counter rather than a timestamp: reads compare it for equality,
+      // so two writes inside one millisecond can never look like none. Counted on
+      // every non-idempotent ATTEMPT's completion, success or not: a timed-out or
+      // 500'd POST may still have been applied server-side, and "unknown" must not
+      // read as "unchanged". One chokepoint here beats invalidating at every
+      // mutating call site — a missed site would silently serve stale rows.
+      if(!isIdempotent&&typeof globalThis!=='undefined') globalThis.__apiMutationSeq=(globalThis.__apiMutationSeq||0)+1;
     }
   }
   throw lastErr;
@@ -604,12 +607,13 @@ function noteWorkspaceMutationsFromToolCalls(toolCalls){
   if(!Array.isArray(toolCalls)) return;
   for(const tc of toolCalls) noteWorkspaceMutationsFromToolCall(tc);
   // HWEB-43: this is the moment the client learns the agent may have changed the
-  // workspace server-side, without any client write to stamp the clock. Advance it
-  // so the loadDir('.') that follows cannot be merged into an /api/list request that
-  // was already in flight before the tools ran, and would answer with the pre-tool
-  // tree. Stamped for any non-empty tool list rather than only recorded mutations:
-  // the cost of a false positive is one extra fetch, and this must fail closed.
-  if(toolCalls.length&&typeof globalThis!=='undefined') globalThis.__apiLastMutationAt=Date.now();
+  // workspace server-side, without any client write to count. Advance the same
+  // write generation api() maintains, so the loadDir('.') that follows cannot be
+  // merged into an /api/list request that was already in flight before the tools
+  // ran and would answer with the pre-tool tree. Counted for any non-empty tool
+  // list rather than only recorded mutations: the cost of a false positive is one
+  // extra fetch, and this must fail closed.
+  if(toolCalls.length&&typeof globalThis!=='undefined') globalThis.__apiMutationSeq=(globalThis.__apiMutationSeq||0)+1;
 }
 
 function _isOpenPreviewPathMutated(){

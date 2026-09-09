@@ -618,9 +618,12 @@ Chat/session durability invariants:
     stream-lifecycle transition emits; the 30-second streaming poll, every
     `refreshSessionList(..., {force:true})` caller (SSE session events,
     focus/visibility resume, pull-to-refresh), and any read whose snapshot predates
-    the last completed write all bypass it. `api()` stamps that write clock on the
+    the last completed write all bypass it. `api()` advances a write generation on the
     completion of every non-idempotent request, so no mutating call site has to
-    remember to invalidate. Panel data loaded by `switchPanel()` has an equivalent
+    remember to invalidate; reads compare that generation for equality, so it is a
+    counter rather than a clock and two writes inside one millisecond can never read
+    as none. `noteWorkspaceMutationsFromToolCalls()` advances the same generation,
+    because an agent tool changes the workspace without any client write. Panel data loaded by `switchPanel()` has an equivalent
     15-second window keyed by panel plus the client state its loaders read — active
     profile, session and session workspace — so toggling between two panels no longer
     reloads each one on every entry. An entry is only usable while the profile,
@@ -1178,10 +1181,11 @@ Two request-discipline rules live in that one wrapper rather than at call sites:
 
 - **Concurrent GET/HEAD requests with the same identity share one in-flight
   promise**, so two callers produce one network request and cannot resolve out of
-  order. Identity is method + resolved URL + the write clock below + a fingerprint of
+  order. Identity is method + resolved URL + the write generation below + a fingerprint of
   the caller's options — options carry per-caller policy (`/api/model/auxiliary` is
   requested with `retries:0` by one caller and with the defaults by another), and the
-  write clock keeps a request issued after a write from joining one issued before it.
+  write generation keeps a request issued after a write from joining one issued
+  before it.
   Skipped when the caller supplies its own `AbortSignal` (aborting a shared promise
   would cancel an unrelated caller); opt out with `dedupe:false`.
 - **A network `TypeError` is only retried for idempotent methods.** A POST that

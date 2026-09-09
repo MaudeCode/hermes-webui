@@ -458,6 +458,7 @@ const SESSION_LIST_REFRESH_TTL_MS = 2000;
 let _sessionListLastFetchedAt = 0;
 let _sessionListLastFetchKey = '';
 let _sessionListLastPayload = null;
+let _sessionListLastMutationSeq = 0;
 const SESSION_LIST_INTERACTION_IDLE_MS = 700;
 const SESSION_SWIPE_DURATION_MS = 500;
 const SESSION_SWIPE_REFLOW_LEAD_MS = 220;
@@ -6025,32 +6026,36 @@ async function _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts,
   // unchanged: local overlays like optimistic streaming are recomputed from
   // current state on each apply, only the server snapshot is reused.
   const sessionListKey=`${projectScope}|${sessionListQS}`;
-  // api() stamps the completion of every non-idempotent request; a snapshot taken
-  // before the last write is not fresh no matter how recent it is.
-  const lastMutationAt=(typeof globalThis!=='undefined'&&Number(globalThis.__apiLastMutationAt))||0;
+  // api() counts every non-idempotent request's completion. The entry records the
+  // generation seen when its request STARTED, and freshness requires the live
+  // generation to still equal it — an equality check rather than a timestamp
+  // comparison, so it cannot be defeated by two writes landing inside one
+  // millisecond, and a payload requested before a write is stale however recent.
+  const mutationSeq=(typeof globalThis!=='undefined'&&Number(globalThis.__apiMutationSeq))||0;
   const sessionsAreFresh=!force
     && _sessionListLastPayload!==null
     && _sessionListLastFetchKey===sessionListKey
     && _sessionListLastFetchedAt>0
-    && _sessionListLastFetchedAt>lastMutationAt
+    && _sessionListLastMutationSeq===mutationSeq
     && now-_sessionListLastFetchedAt<(typeof SESSION_LIST_REFRESH_TTL_MS==='number'?SESSION_LIST_REFRESH_TTL_MS:2000);
   let sessData;
   if(sessionsAreFresh){
     sessData=_sessionListLastPayload;
   }else{
-    // The entry is stamped with the request's START time, not its completion. A
-    // response already in flight when a write landed is pre-mutation data even
-    // though it arrives after; completion-time stamping would clear the
-    // fail-closed check above and let the next render repaint pre-mutation rows.
-    // For the same reason a response only replaces the entry when it started at
-    // least as late as the stored one — an out-of-order older response must not
-    // overwrite a newer snapshot.
+    // The entry records the request's START, not its completion — both the time and
+    // the write generation. A response already in flight when a write landed is
+    // pre-mutation data even though it arrives after; recording completion state
+    // would clear the fail-closed check above and let the next render repaint
+    // pre-mutation rows. For the same reason a response only replaces the entry
+    // when it started at least as late as the stored one — an out-of-order older
+    // response must not overwrite a newer snapshot.
     const requestedAt=now;
     sessData = await api('/api/sessions' + sessionListQS,sessionRequestOpts);
     if(_sessionListLastFetchKey!==sessionListKey||requestedAt>=_sessionListLastFetchedAt){
       _sessionListLastPayload=sessData;
       _sessionListLastFetchKey=sessionListKey;
       _sessionListLastFetchedAt=requestedAt;
+      _sessionListLastMutationSeq=mutationSeq;
     }
   }
   const projData = await projectPromise;

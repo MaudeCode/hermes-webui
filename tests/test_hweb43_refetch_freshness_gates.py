@@ -64,6 +64,7 @@ global.SESSION_PROJECT_REFRESH_INTERVAL_MS = 30000;
 global._sessionListLastFetchedAt = 0;
 global._sessionListLastFetchKey = '';
 global._sessionListLastPayload = null;
+global._sessionListLastMutationSeq = 0;
 global._sessionListLoadError = null;
 {_const(SESSIONS_JS, 'SESSION_LIST_REFRESH_TTL_MS')}
 global.SESSION_LIST_REFRESH_TTL_MS = SESSION_LIST_REFRESH_TTL_MS;
@@ -164,7 +165,7 @@ def test_session_list_window_fails_closed_after_a_write():
       await _loadSidebarSessionListPayload(qs, {{}});
       const stillGated = sessionFetches;
       // A POST just completed (renamed/archived/sent) — the snapshot predates it.
-      globalThis.__apiLastMutationAt = Date.now() + 1;
+      globalThis.__apiMutationSeq = (globalThis.__apiMutationSeq || 0) + 1;
       await _loadSidebarSessionListPayload(qs, {{}});
       console.log(JSON.stringify({{afterFirst, stillGated, afterWrite: sessionFetches}}));
     }})();
@@ -190,7 +191,7 @@ def test_a_response_already_in_flight_when_a_write_landed_is_not_cached_as_fresh
       holdSessions = new Promise(resolve => {{ release = resolve; }});
       const inFlight = _loadSidebarSessionListPayload(qs, {{}});   // started at 100000
       clock += 10;
-      globalThis.__apiLastMutationAt = clock;   // archive/rename POST lands mid-flight
+      globalThis.__apiMutationSeq = (globalThis.__apiMutationSeq || 0) + 1;   // archive/rename POST lands mid-flight
       clock += 10;
       release();                                // response arrives at 100020
       await inFlight;
@@ -223,7 +224,7 @@ def test_an_out_of_order_older_response_does_not_overwrite_a_newer_snapshot():
       clock += 50;
       sessionTitle = 'newer';
       // A later request that started after `slow` but resolves before it.
-      globalThis.__apiLastMutationAt = clock;
+      globalThis.__apiMutationSeq = (globalThis.__apiMutationSeq || 0) + 1;
       await _loadSidebarSessionListPayload(qs, {{}});
       release();
       await slow;
@@ -765,6 +766,40 @@ def test_a_reload_after_agent_tool_calls_does_not_join_a_pre_tool_request():
     assert _run_node(script) == {"calls": 2}
 
 
+def test_two_writes_inside_one_millisecond_still_change_the_request_identity():
+    """Codex P2: browsers coarsen timer precision, so the write clock is a counter."""
+    script = f"""
+    {_API_PRELUDE}
+    Date.now = () => 100000;   // every write completes in the same tick
+    const calls = [];
+    let release;
+    const gate = new Promise(resolve => {{ release = resolve; }});
+    global.fetch = (url, opts) => {{
+      const method = (opts && opts.method) || 'GET';
+      calls.push(method);
+      if (method !== 'GET') return Promise.resolve({{
+        ok:true, headers:{{get:()=>'application/json'}},
+        json:()=>Promise.resolve({{}}), text:()=>Promise.resolve(''),
+      }});
+      return gate.then(() => ({{
+        ok:true, headers:{{get:()=>'application/json'}},
+        json:()=>Promise.resolve({{}}), text:()=>Promise.resolve(''),
+      }}));
+    }};
+    (async () => {{
+      const first = api('/api/sessions');
+      await api('/api/session/rename', {{method:'POST', body:'{{}}'}});
+      const second = api('/api/sessions');
+      await api('/api/session/archive', {{method:'POST', body:'{{}}'}});
+      const third = api('/api/sessions');
+      release();
+      await Promise.all([first, second, third]);
+      console.log(JSON.stringify({{gets: calls.filter(m => m === 'GET').length}}));
+    }})();
+    """
+    assert _run_node(script) == {"gets": 3}
+
+
 def test_post_is_not_retried_on_a_network_typeerror():
     script = f"""
     {_API_PRELUDE}
@@ -798,9 +833,9 @@ def test_mutating_requests_stamp_the_shared_mutation_clock():
     }});
     (async () => {{
       await api('/api/sessions');
-      const afterGet = globalThis.__apiLastMutationAt || 0;
+      const afterGet = globalThis.__apiMutationSeq || 0;
       await api('/api/session/rename', {{method:'POST', body:'{{}}'}});
-      const afterPost = globalThis.__apiLastMutationAt || 0;
+      const afterPost = globalThis.__apiMutationSeq || 0;
       console.log(JSON.stringify({{afterGet, stamped: afterPost > 0}}));
     }})();
     """
