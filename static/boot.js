@@ -2469,12 +2469,17 @@ document.addEventListener('keydown',async e=>{
     if(composer){e.preventDefault();composer.focus();}
     return;
   }
-  // Enter on approval card = Allow once (when a button inside the card is focused or
-  // card is visible and focus is not on an input/textarea/select)
+  // Enter is the Allow-once accelerator for a visible approval card — but only
+  // while focus is NOT on one of the card's own controls. Enter on a focused
+  // button must activate THAT button: otherwise Deny, More options, collapse and
+  // dismiss all silently approve the command instead (codex P1). Allow once is
+  // unaffected either way — its native click runs the same respondApproval('once').
   if(e.key==='Enter'&&!e.metaKey&&!e.ctrlKey&&!e.shiftKey){
     const card=$('approvalCard');
-    const tag=(document.activeElement||{}).tagName||'';
-    if(card&&card.classList.contains('visible')&&tag!=='TEXTAREA'&&tag!=='INPUT'&&tag!=='SELECT'){
+    const active=document.activeElement;
+    const tag=(active||{}).tagName||'';
+    const onCardControl=!!(card&&active&&card.contains(active)&&(tag==='BUTTON'||tag==='A'));
+    if(card&&card.classList.contains('visible')&&!onCardControl&&tag!=='TEXTAREA'&&tag!=='INPUT'&&tag!=='SELECT'){
       e.preventDefault();
       if(typeof respondApproval==='function') respondApproval('once');
       return;
@@ -2507,6 +2512,15 @@ document.addEventListener('keydown',async e=>{
     return;
   }
   if(e.key==='Escape'){
+    // Close the approval overflow menu first — it is the innermost open surface,
+    // and Escape there must not also clear the session search or blur the composer.
+    // Only while it is actually on screen: switchPanel() hides #mainChat with
+    // display:none and leaves the menu's own hidden flag alone, so an off-screen
+    // menu would otherwise swallow the Escape that should close Settings (codex P2).
+    // offsetParent===null is the repo's laid-out test (see ui.js closeToolsetsDropdown).
+    const _moreMenu=$('approvalMoreMenu');
+    if(_moreMenu&&!_moreMenu.hidden&&_moreMenu.offsetParent!==null
+       &&typeof closeApprovalMoreMenu==='function'&&closeApprovalMoreMenu()) return;
     // Close onboarding overlay if open (skip/dismiss the wizard)
     const onboardingOverlay=$('onboardingOverlay');
     if(onboardingOverlay&&onboardingOverlay.style.display!=='none'){

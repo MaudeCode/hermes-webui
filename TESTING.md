@@ -614,7 +614,9 @@ EXPECT:
     "Dangerous command - approval required"
   - The card shows the command text
   - The card shows the pattern description (e.g. "recursive delete [recursive_delete]")
-  - Four buttons: Allow once, Allow this session, Always allow, Deny
+  - Two buttons answer this request: Allow once (primary) and Deny
+  - A "More options" button opens the policy menu: Allow session, Always allow,
+    Skip all. Escape or a click outside closes it again.
 FAIL: No card appears, agent executes without asking, page crashes.
 
 ### T7.2: Deny Approval Blocks the Command
