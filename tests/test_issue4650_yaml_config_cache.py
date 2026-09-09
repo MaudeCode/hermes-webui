@@ -133,3 +133,52 @@ def test_save_evicts_cache_so_next_read_is_fresh(tmp_path, clean_cache):
     assert fresh["agent"]["reasoning_effort"] == "low", (
         "read after save must return the freshly-written config, not a stale cache hit"
     )
+
+
+def test_same_size_replace_with_restored_mtime_is_reparsed(tmp_path, monkeypatch, clean_cache):
+    """HWEB-81: an atomic replace that keeps the byte length and puts the
+    original mtime back (rsync -a, cp -p, config management that restores
+    metadata) leaves (mtime_ns, size) identical. Keying on that alone served
+    the previous parse forever — including the webui_oidc policy that decides
+    owner authority. The key also covers st_ino/st_ctime_ns, which a replace
+    always changes."""
+    import os
+
+    cfg = tmp_path / "config.yaml"
+    _write(cfg, "webui_oidc:\n  owner_values: [group-aaa]\n")
+
+    calls = {"n": 0}
+    import yaml as _yaml
+    real_load = _yaml.safe_load
+
+    def counting_load(text):
+        calls["n"] += 1
+        return real_load(text)
+
+    monkeypatch.setattr(_yaml, "safe_load", counting_load)
+
+    first = config._load_yaml_config_file(cfg)
+    assert first["webui_oidc"]["owner_values"] == ["group-aaa"]
+    original = cfg.stat()
+
+    replacement = tmp_path / "config.yaml.new"
+    _write(replacement, "webui_oidc:\n  owner_values: [group-bbb]\n")
+    assert replacement.stat().st_size == original.st_size, "test setup: sizes must match"
+    os.replace(replacement, cfg)
+    os.utime(cfg, ns=(original.st_atime_ns, original.st_mtime_ns))
+
+    after = cfg.stat()
+    assert (after.st_mtime_ns, after.st_size) == (original.st_mtime_ns, original.st_size), (
+        "test setup: the replace must be invisible to a (mtime_ns, size) key"
+    )
+
+    reloaded = config._load_yaml_config_file(cfg)
+    assert reloaded["webui_oidc"]["owner_values"] == ["group-bbb"], (
+        "a same-size replace with a restored mtime served the stale parse"
+    )
+    assert calls["n"] == 2, "the replacement must trigger exactly one fresh parse"
+
+    # ...and the file is stable again: no reparse storm (#4650) after the bust.
+    config._load_yaml_config_file(cfg)
+    config._load_yaml_config_file(cfg)
+    assert calls["n"] == 2, "an unchanged file must not be reparsed"

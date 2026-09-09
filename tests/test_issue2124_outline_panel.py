@@ -96,7 +96,8 @@ def test_outline_opt_in_layout_and_render_state_contract():
     ):
         assert marker in OUTLINE_JS
 
-    assert "#outlineToggleBtn,#outlinePanelWrapper{display:none!important;}" in STYLE_CSS
+    # HWEB-12 added the gutter minimap to the same mobile hide rule.
+    assert "#outlineToggleBtn,#outlinePanelWrapper,#outlineMinimap{display:none!important;}" in STYLE_CSS
     assert "right:calc(var(--outline-workspace-offset, 0px) + 20px)" in STYLE_CSS
     assert "if (!S.messages || !S.messages.length)" not in OUTLINE_JS
 

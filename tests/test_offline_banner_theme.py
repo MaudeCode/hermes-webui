@@ -11,7 +11,9 @@ def _css_rule(selector: str) -> str:
 
 
 def test_offline_banner_uses_theme_surface_and_active_palette_accent_tokens():
-    rule = _css_rule(".offline-banner")
+    # HWEB-11: the offline notice renders inside the shared runtime-notice stack,
+    # so the theme contract now applies to that host.
+    rule = _css_rule(".chat-runtime-notice")
 
     assert "var(--bg-1" not in rule
     assert "var(--warning" not in rule
@@ -20,9 +22,9 @@ def test_offline_banner_uses_theme_surface_and_active_palette_accent_tokens():
 
 
 def test_offline_banner_title_and_action_follow_active_palette_accent():
-    title_rule = _css_rule(".offline-copy strong")
-    action_rule = _css_rule(".offline-action")
-    hover_rule = _css_rule(".offline-action:hover")
+    title_rule = _css_rule(".chat-runtime-notice-copy strong")
+    action_rule = _css_rule(".chat-runtime-notice-action")
+    hover_rule = _css_rule(".chat-runtime-notice-action:hover")
 
     assert "color:var(--accent-text)" in title_rule
     assert "color:var(--accent-text)" in action_rule

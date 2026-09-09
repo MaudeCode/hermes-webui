@@ -535,14 +535,16 @@ if(typeof window!=='undefined'){
   };
 }
 
+// HWEB-6: sort/filter chrome belongs to the explicit structured-data mode only
+// (a ```csv fence or a CSV preview, both rendered into .csv-table-wrap). An
+// ordinary markdown table in prose stays a static reading table.
 function enhanceMarkdownTables(root){
   if(!root||!root.querySelectorAll) return;
   const scope=root;
-  const tables=scope.querySelectorAll('.msg-body table:not([data-markdown-table-enhanced])');
+  const tables=scope.querySelectorAll('.msg-body .csv-table-wrap table:not([data-markdown-table-enhanced])');
   const sortLabel=typeof t==='function'?t('markdown_table_sort_column'):'Sort column';
   const filterLabel=typeof t==='function'?t('markdown_table_filter'):'Filter table';
   tables.forEach((table)=>{
-    if(table.closest('.csv-table-wrap')) return;
     const headRows=table.tHead?Array.from(table.tHead.rows):[];
     const body=table.tBodies&&table.tBodies.length?table.tBodies[0]:table;
     const bodyRows=Array.from(body.rows||[]).filter((row)=>row.parentElement===body);
@@ -551,7 +553,9 @@ function enhanceMarkdownTables(root){
     table.setAttribute('data-markdown-table-enhanced','1');
     bodyRows.forEach((row,idx)=>{ row.dataset.markdownTableOriginalIndex=String(idx); });
 
-    if(bodyRows.length>=4&&table.parentElement){
+    // The filter sits above the wrapper, not inside its bordered scroll box.
+    const filterAnchor=table.closest('.csv-table-wrap')||table;
+    if(bodyRows.length>=4&&filterAnchor.parentElement){
       const filter=document.createElement('input');
       filter.type='search';
       filter.className='markdown-table-filter';
@@ -565,7 +569,7 @@ function enhanceMarkdownTables(root){
           row.hidden=!!query&&!_markdownTableText(row.textContent).toLowerCase().includes(query);
         });
       });
-      table.parentElement.insertBefore(filter,table);
+      filterAnchor.parentElement.insertBefore(filter,filterAnchor);
     }
 
     Array.from(headerRow.cells||[]).forEach((cell,colIdx)=>{
@@ -3070,7 +3074,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
 
     const tr=$('toolRunningRow');if(tr)tr.remove();
-    $('emptyState').style.display='none';
+    if(typeof hideConversationEmptyState==='function') hideConversationEmptyState();
     assistantRow=document.createElement('div');
     assistantRow.className='assistant-segment';
     _currentLiveSegmentSeq+=1;
@@ -7392,6 +7396,51 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             const recovery=(d.compression_recovery&&typeof d.compression_recovery==='object')?d.compression_recovery:null;
             S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`,provider_details:details,provider_details_label:detailsLabel,_compressionRecovery:recovery||undefined});
             _attachProjectedAnchorSceneToLastAssistant(S.messages);
+          }
+          // HWEB-11: a terminal failure also raises a runtime notice so it shares
+          // the connection/agent notification stack instead of living only in the
+          // transcript. Cancels, interrupts and the recovery control message are
+          // not failures, so they raise nothing. The record is keyed by
+          // (session, stream) so a retry of the same turn coalesces and setBusy()
+          // can clear it when the next turn starts. It runs after the session-adoption
+          // branch above so publish and render resolve the same active session.
+          if(!isCancelled&&!isInterrupted&&!isRecoveryControlMessage&&typeof publishChatRuntimeNotice==='function'){
+            // The backend emits more provider-side types than the terminal-label
+            // list above names — api/gateway_chat.py adds gateway_http_error,
+            // gateway_empty_response and gateway_error, and api/models.py adds
+            // credential_pool_empty. Matching the gateway_/provider_ families by
+            // prefix keeps a newly added sibling classified as a provider failure
+            // instead of silently falling through to thread_error, which outranks
+            // offline and would put a provider outage above a lost connection.
+            const _errType=String(d.type||'');
+            const _isProviderFailure=isRateLimit||isQuotaExhausted||isAuthMismatch||isGatewayAuthError
+              ||isModelNotFound||isNoResponse||_errType==='credential_pool_empty'
+              ||/^(gateway|provider)_/.test(_errType);
+            publishChatRuntimeNotice({
+              kind:_isProviderFailure?'provider_failure':'thread_error',
+              // Compression rotation has already assigned S.session=d.session above,
+              // so S.session and continuationSid now agree. continuationSid stays the
+              // authoritative owner because it is resolved from the event payload, and
+              // publishing here means the record's owner and the render's active-session
+              // filter read the same value — deciding above the mutation and rendering
+              // below it is what suppressed the row.
+              sessionId:continuationSid||(S.session&&S.session.session_id)||activeSid||'',
+              runId:streamId||'',
+              tone:'error',
+              // The gateway names its own failures ("Gateway request failed",
+              // "Gateway returned no response") next to the type, and the local
+              // ladder does not cover those, so they would fall through to a bare
+              // "Error" — worst on a compact secondary row, where the detail line
+              // is hidden and the title is all the user gets. But the ladder DOES
+              // resolve a translated title for the types it names (gateway_auth_error
+              // has t('gateway_auth_label') in every locale), and d.label is English
+              // only, so preferring it unconditionally would untranslate those.
+              // The gateway label is a fallback for the uncovered types, not an
+              // override of a resolved translation.
+              title:String(label==='Error'&&d.label?d.label:label),
+              detail:String(d.message||''),
+              dismissible:true,
+            });
           }
           if(!isRecoveryControlMessage){
             _anchorRetryTarget=[...S.messages].reverse().find(m=>m&&m.role==='assistant')||null;

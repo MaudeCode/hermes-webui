@@ -14,13 +14,16 @@ I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 
 
 def test_offline_banner_markup_styles_and_copy_exist():
-    assert 'id="offlineBanner"' in INDEX_HTML
-    assert 'role="status"' in INDEX_HTML
-    assert 'aria-live="assertive"' in INDEX_HTML
-    assert 'onclick="checkOfflineRecoveryNow()"' in INDEX_HTML
-    assert ".offline-banner" in STYLE_CSS
-    assert ".offline-banner.visible" in STYLE_CSS
-    assert ".offline-action[disabled]" in STYLE_CSS
+    # HWEB-11 folded the standalone #offlineBanner into the shared
+    # #chatRuntimeNotice stack; the offline copy and its Check-now action are now
+    # published as a notice record rather than living in static markup.
+    assert 'id="chatRuntimeNotice"' in INDEX_HTML
+    assert 'id="offlineBanner"' not in INDEX_HTML
+    assert "kind:'offline'," in UI_JS
+    assert "id:'offlineCheckNow'," in UI_JS
+    assert "onClick:()=>{checkOfflineRecoveryNow();}," in UI_JS
+    assert ".chat-runtime-notice{" in STYLE_CSS
+    assert ".chat-runtime-notice-action[disabled]" in STYLE_CSS
     for key in (
         "offline_title",
         "offline_browser_detail",

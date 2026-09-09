@@ -41,7 +41,13 @@
     /* Make the in-page demos of approval/clarify cards visible without JS */
     .approval-card.doc-visible,
     .clarify-card.doc-visible{display:block;}
-    .reconnect-banner.doc-visible{display:flex;align-items:center;justify-content:space-between;gap:12px;background:rgba(201,168,76,.12);border:1px solid rgba(201,168,76,.3);color:var(--gold);padding:8px 14px;border-radius:8px;font-size:12px;}
+    .chat-runtime-notice.doc-visible{position:static;max-height:none;box-shadow:none;backdrop-filter:none;display:flex;flex-direction:column;background:rgba(201,168,76,.12);border:1px solid rgba(201,168,76,.3);color:var(--gold);border-radius:8px;font-size:12px;overflow:hidden;}
+    .chat-runtime-notice.doc-visible .chat-runtime-notice-item{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 14px;}
+    .chat-runtime-notice.doc-visible .chat-runtime-notice-item+.chat-runtime-notice-item{border-top:1px solid rgba(201,168,76,.22);}
+    .chat-runtime-notice.doc-visible .chat-runtime-notice-secondary{padding:6px 14px;opacity:.85;}
+    .chat-runtime-notice.doc-visible .chat-runtime-notice-copy{display:flex;flex-direction:column;gap:2px;}
+    .chat-runtime-notice.doc-visible .chat-runtime-notice-copy strong{font-size:12px;}
+    .chat-runtime-notice.doc-visible .chat-runtime-notice-action,
     .reconnect-banner.doc-visible .reconnect-btn{background:none;border:1px solid rgba(201,168,76,.35);color:var(--gold);padding:4px 10px;border-radius:6px;font-size:11px;cursor:pointer;}
     .bg-error-banner.doc-visible{border-radius:8px;}
     /* Two-up grid for short comparisons */
@@ -824,15 +830,40 @@ Run typecheck to confirm, then patch.</pre></div>
     </ul>
   </div>
 
-  <div class="doc-card"><span class="doc-label">Reconnect / mid-stream recovery banner</span>
-    <div class="reconnect-banner doc-visible">
-      <span>⚠ A response may have been in progress when you last left. Reload messages?</span>
-      <div style="display:flex;gap:8px;">
-        <button class="reconnect-btn">Dismiss</button>
-        <button class="reconnect-btn">↻ Reload</button>
+  <div class="doc-card"><span class="doc-label">Chat runtime notice stack (<code>#chatRuntimeNotice</code>)</span>
+    <p style="color:var(--muted);font-size:12px;line-height:1.8;margin:0 0 10px;">
+      One host for every chat connection/runtime condition — thread error, offline,
+      agent unavailable, provider failure, reconnect/recovered — in that priority
+      order. Records coalesce on <code>(kind, session_id, run_id)</code>, so a poller
+      re-reporting the same condition updates its row instead of stacking a duplicate.
+      Only the top row renders expanded; the rest keep their title and action in the
+      same bounded, scrollable stack. It overlays from the top of the viewport, so the
+      transcript never re-flows when a notice appears or clears. Announcements go
+      through two sr-only regions (<code>role="alert"</code> for a newly active blocking
+      failure, <code>role="status"</code> for recovery/transient updates) and are written
+      only when the top notice actually changes — a 2.5s offline probe stays silent.
+    </p>
+    <div class="chat-runtime-notice doc-visible">
+      <div class="chat-runtime-notice-item">
+        <div class="chat-runtime-notice-copy">
+          <strong>Connection lost</strong>
+          <span>Hermes is unreachable from this browser right now. I will refresh this page automatically when Hermes is reachable again.</span>
+        </div>
+        <div class="chat-runtime-notice-actions"><button class="chat-runtime-notice-action">Check now</button></div>
+      </div>
+      <div class="chat-runtime-notice-item chat-runtime-notice-secondary">
+        <div class="chat-runtime-notice-copy"><strong>A response may have been in progress when you last left</strong></div>
+        <div class="chat-runtime-notice-actions">
+          <button class="chat-runtime-notice-action">Dismiss</button>
+          <button class="chat-runtime-notice-action">↻ Reload</button>
+        </div>
       </div>
     </div>
-    <div class="bg-error-banner doc-visible" style="margin-top:8px;">
+    <p style="color:var(--muted);font-size:12px;line-height:1.8;margin:10px 0 6px;">
+      Background-run failures keep their own sidebar-scoped banner — they are not chat
+      runtime state:
+    </p>
+    <div class="bg-error-banner doc-visible">
       <span>⚠ Agent run exited with non-zero status (code 1). Check the logs.</span>
       <button class="reconnect-btn">Dismiss</button>
     </div>

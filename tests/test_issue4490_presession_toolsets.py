@@ -63,7 +63,15 @@ def test_toggle_toolsets_dropdown_opens_without_session_guard():
     toggle = _function_body(UI_JS, "function toggleToolsetsDropdown")
 
     assert "!S.session" not in toggle
-    assert "chip.offsetParent === null" in toggle
+    # HWEB-7 moved the toolsets chip out of the footer row and into the composer
+    # overflow panel, so the #1431 "don't open against a zero-rect anchor" guard
+    # moved with it into the shared resolver. The invariant is unchanged: the
+    # toggle still refuses to open when nothing is laid out to anchor to.
+    assert "_toolsetsDropdownAnchor()" in toggle
+    assert "if (!chip)" in toggle
+    anchor = _function_body(UI_JS, "function _toolsetsDropdownAnchor")
+    assert "_composerOverflowAnchor(" in anchor
+    assert "offsetParent !== null" in _function_body(UI_JS, "function _composerOverflowAnchor")
     assert "_populateToolsetsDropdown();" in toggle
 
 

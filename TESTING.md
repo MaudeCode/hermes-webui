@@ -207,23 +207,40 @@ STEPS:
 EXPECT:
   - Dark background
   - Sidebar begins directly with the icon tab row; there is no dedicated branding header
-  - Center area shows "What can I help with?" heading with suggestion buttons
+  - Center area shows the "What are we working on in <workspace>?" hero headline
+    with the composer floated up beneath it, not docked at the bottom edge
+  - There is no logo, subtitle, or suggestion-card panel
   - Session list in sidebar is empty or shows existing sessions
   - Sidebar footer shows a single "Hermes WebUI" control-center button
   - No session is highlighted active
   - Send button is present but there is no input focus by default
 FAIL: Page shows error, blank white screen, or auto-creates a new session without user action.
 
-### T1.2: Suggestion Buttons Work
+### T1.2: The Hero Composer Docks on the First Message
 SETUP: T1.1 complete, no active session.
 STEPS:
-  1. Click "What files are in this workspace?" suggestion button
+  1. Type "What files are in this workspace?" into the centered composer
+  2. Press Enter
 EXPECT:
   - A new session is created automatically (since none existed)
-  - The text "What files are in this workspace?" appears as the user message
-  - Thinking dots appear below the user message
+  - The SAME composer slides down to its normal docked position; the caret stays
+    in it and any remaining draft text is not lost
+  - The hero headline disappears
+  - The typed text appears as the user message, with thinking dots below it
   - After a few seconds, Hermes responds
-FAIL: Button does nothing, error appears, or page crashes.
+FAIL: A second input appears, the draft or focus is lost, the composer jumps
+instead of transitioning, or the headline stays behind.
+
+### T1.3: Hero Names the Active Workspace
+SETUP: A workspace is selected in the composer's workspace chip.
+STEPS:
+  1. Open a new conversation
+  2. Switch the workspace via the composer chip
+EXPECT:
+  - The headline reads "What are we working on in <name>?" using the same
+    friendly name shown on the chip, and follows the switch
+  - With no workspace selected it reads "What are we working on?"
+FAIL: Headline shows a raw path, a stale workspace, or never updates.
 
 ---
 
@@ -235,7 +252,7 @@ STEPS:
   1. Click the "+ New conversation" button in the sidebar
 EXPECT:
   - A new session named "Untitled" appears highlighted in the session list
-  - The center area shows the empty state ("What can I help with?")
+  - The center area shows the hero: headline plus the floated composer
   - The + button is the ONLY way to create a session (no auto-create on load)
 FAIL: Multiple sessions created, error thrown, or empty state not shown.
 
@@ -308,7 +325,7 @@ STEPS:
   1. Delete that session via the trash icon
 EXPECT:
   - Session list is empty
-  - Center area shows "What can I help with?" empty state
+  - Center area shows the hero: headline plus the floated composer
   - No session is auto-created
 FAIL: New session created, error thrown, or UI breaks.
 
@@ -1397,12 +1414,14 @@ EXPECT:
   - Feels clickable and primary (not the same style as the secondary sm-btn buttons)
 FAIL: Button looks same as other secondary buttons.
 
-### T25.8: Suggestion Buttons Slide on Hover
+### T25.8: Hero Composer Carries No Footer Chrome
+SETUP: Light mode, and again with the Graphite or GitHub skin.
 EXPECT:
-  - On the empty state, hovering a suggestion button shifts it slightly right (2px)
-  - Border turns blue on hover
-  - Subtle background tint on hover
-FAIL: No hover movement, generic hover state.
+  - On an empty conversation the floated composer shows only its own rounded
+    box; no full-width tinted band or horizontal rule crosses the chat area
+  - After the first message the docked composer regains its footer background
+    and top border
+FAIL: A sidebar-colored band or rule paints across the middle of the conversation.
 
 ### T25.9: Toast Notification is Premium
 EXPECT:
@@ -1757,7 +1776,7 @@ STEPS:
   3. Confirm the modal
 EXPECT:
   - All messages disappear from the chat area
-  - Empty state ("What can I help with?") reappears
+  - The hero reappears: headline plus the composer floated back up
   - Session title in sidebar resets to "Untitled"
   - Toast: "Conversation cleared"
   - Session still in the sidebar (not deleted)

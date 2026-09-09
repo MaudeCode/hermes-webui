@@ -72,14 +72,16 @@ def test_explicit_reload_config_forces_disk_refresh(tmp_path, monkeypatch):
 
     calls = {"n": 0}
     calls_lock = threading.Lock()
-    real_load = config._load_yaml_config_file_raw
+    # _load_yaml_config_file_identified is the parse core reload_config() routes
+    # through; _load_yaml_config_file_raw is now a thin wrapper over it (HWEB-81).
+    real_load = config._load_yaml_config_file_identified
 
-    def _counted_load(path):
+    def _counted_load(path, **kwargs):
         with calls_lock:
             calls["n"] += 1
-        return real_load(path)
+        return real_load(path, **kwargs)
 
-    monkeypatch.setattr(config, "_load_yaml_config_file_raw", _counted_load)
+    monkeypatch.setattr(config, "_load_yaml_config_file_identified", _counted_load)
     config_path.write_text("marker: hot\n", encoding="utf-8")
 
     config.reload_config()

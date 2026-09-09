@@ -13,7 +13,7 @@ def test_table_cell_paragraph_margins_are_reset():
 
 def test_table_cell_paragraph_reset_follows_global_message_paragraph_rule():
     """The table-specific reset must override the generic message paragraph spacing rule."""
-    generic_rule = ".msg-body p{margin-bottom:10px;}"
+    generic_rule = ".msg-body p,.msg-body ul,.msg-body ol,.msg-body blockquote,"
     table_reset = ".msg-body td p,.msg-body th p{margin:0;}"
 
     assert generic_rule in STYLE_CSS

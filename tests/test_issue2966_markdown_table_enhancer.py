@@ -37,7 +37,8 @@ def test_markdown_table_enhancement_is_idempotent_and_message_scoped():
     messages = _read_static("messages.js")
     helper = messages[messages.index("function enhanceMarkdownTables(root)"):messages.index("function _markdownTableText")]
 
-    assert ".msg-body table:not([data-markdown-table-enhanced])" in helper
+    # HWEB-6: the enhancer only reaches tables in explicit structured-data mode.
+    assert ".msg-body .csv-table-wrap table:not([data-markdown-table-enhanced])" in helper
     assert "data-markdown-table-enhanced" in helper
     assert "table.setAttribute('data-markdown-table-enhanced','1')" in helper
     assert ".csv-table-wrap" in helper
@@ -65,7 +66,7 @@ def test_markdown_table_filter_is_gated_to_multi_row_tables_and_preserves_rows()
     messages = _read_static("messages.js")
     helper = messages[messages.index("function enhanceMarkdownTables(root)"):messages.index("function _markdownTableText")]
 
-    assert "if(bodyRows.length>=4&&table.parentElement)" in helper
+    assert "if(bodyRows.length>=4&&filterAnchor.parentElement)" in helper
     assert "filter.type='search'" in helper
     assert "filter.placeholder=filterLabel" in helper
     assert "filter.setAttribute('aria-label',filterLabel)" in helper

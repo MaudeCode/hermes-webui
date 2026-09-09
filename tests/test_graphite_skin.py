@@ -1,5 +1,6 @@
 """Graphite skin registration and neutral workbench palette."""
 
+import re
 from pathlib import Path
 
 REPO = Path(__file__).parent.parent
@@ -67,6 +68,10 @@ def test_graphite_skin_uses_native_ui_and_mono_font_stacks():
     assert "-webkit-font-smoothing:antialiased" in CSS
     assert ':root[data-skin="graphite"] textarea#msg' in CSS
     assert ':root[data-skin="graphite"] textarea#msg{font-family:var(--font-ui)!important;font-size:14px;' in CSS
-    assert ':root[data-skin="graphite"] .msg-body{font-family:var(--font-conversation);font-size:13px;font-weight:430;' in CSS
-    assert ':root[data-skin="graphite"][data-font-size="large"] .msg-body{font-size:15px;' in CSS
+    # HWEB-5: prose size/spacing comes from --message-body-* tokens, so the skin
+    # must not carry its own px scale or per-font-size overrides.
+    assert ':root[data-skin="graphite"] .msg-body{font-family:var(--font-conversation);font-weight:430;letter-spacing:0;}' in CSS
+    assert not re.search(
+        r':root\[data-skin="graphite"\]\[data-font-size="[^"]+"\] \.msg-body', CSS
+    )
     assert ':root[data-skin="graphite"] .tool-card-name' in CSS

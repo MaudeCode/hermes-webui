@@ -30,6 +30,218 @@ function showConversationEmptyState(){
   try{ delete document.documentElement.dataset.sessionBoot; }catch(_){}
   const empty=$('emptyState');
   if(empty) empty.style.display='';
+  _setComposerHero(true);
+  // Re-resolve the workspace-aware headline for the conversation we just landed on.
+  if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
+}
+// The one place the empty state is taken down. Every caller that starts painting
+// a transcript row goes through here so the hero layout is released with it
+// (HWEB-1) — a direct style.display='none' would leave the composer centered.
+// Call sites guard with `typeof` (the existing _applyUserRowIntrinsicHeight
+// pattern): several regression tests extract one render function out of this
+// file and run it under node against hand-stubbed collaborators, so a bare
+// reference to a helper outside the extracted body is a ReferenceError there.
+function hideConversationEmptyState(){
+  const empty=$('emptyState');
+  if(empty) empty.style.display='none';
+  _setComposerHero(false);
+}
+function _setComposerHero(on){
+  const chat=$('mainChat');
+  if(chat) chat.classList.toggle('composer-hero',!!on);
+}
+// ── HWEB-11: consolidated chat connection/runtime notice stack ───────────────
+// Reconnect, offline, agent-health, provider-failure and thread-error each used
+// to own a separate banner host, so two live conditions produced two bars
+// competing for chat height and two independent aria-live regions. They now all
+// publish normalized records into one prioritized stack rendered into
+// #chatRuntimeNotice. The underlying health/polling/recovery mechanisms are
+// unchanged — only the presentation is consolidated.
+//
+// A record is
+//   {kind, sessionId, runId, tone, title, detail, actions, dismissible,
+//    onDismiss, ttlMs}
+// and coalesces on (kind, sessionId, runId): a poller re-publishing the same
+// condition updates that record in place instead of stacking a duplicate, which
+// is what keeps the 2.5s offline probe and the 30s agent-health poll from
+// multiplying the UI.
+//
+// Priority is fixed and total. The first entry renders expanded; the rest render
+// as compact rows in the same bounded (max-height + scroll) stack, so the
+// highest-priority current problem is always presented first with its action.
+const CHAT_NOTICE_PRIORITY=['thread_error','offline','agent_unavailable','provider_failure','reconnect'];
+const CHAT_NOTICE_MAX_VISIBLE=4;
+// Kinds that describe one condition with mutually exclusive states, so only the
+// newest may be shown. `reconnect` carries three: the boot "you may have missed a
+// response" prompt, "connection restored", and "restarting". They are unscoped,
+// so the cross-session eviction below does not separate them — without this an
+// update started under a live reconnect prompt stacks a second row, and the stale
+// prompt outranks the restart status it superseded.
+const CHAT_NOTICE_SINGLE_SLOT=new Set(['reconnect']);
+const _chatNotices=new Map();
+// Explicit dismissals, keyed exactly like the record. Kept separately so a
+// poller that re-publishes the same condition cannot resurrect a notice the user
+// dismissed; clearChatRuntimeNotice() forgets the dismissal because the
+// condition itself resolved and a later recurrence is genuinely new.
+const _chatNoticeDismissed=new Set();
+const _chatNoticeTimers=new Map();
+let _chatNoticeRenderedSignature=null;
+let _chatNoticeAnnouncedStamp='';
+function _chatNoticeKey(kind,sessionId,runId){return `${kind}|${sessionId||''}|${runId||''}`;}
+function _clearChatNoticeTimer(key){
+  const timer=_chatNoticeTimers.get(key);
+  if(timer){clearTimeout(timer);_chatNoticeTimers.delete(key);}
+}
+function publishChatRuntimeNotice(notice){
+  if(!notice||!notice.kind) return null;
+  const kind=String(notice.kind);
+  if(CHAT_NOTICE_PRIORITY.indexOf(kind)<0) return null;
+  const key=_chatNoticeKey(kind,notice.sessionId,notice.runId);
+  if(_chatNoticeDismissed.has(key)) return key;
+  // Supersede rather than stack. One chat owns a kind at a time, so publishing
+  // for a new session drops the same kind held by another session and a deleted
+  // or abandoned conversation cannot retain a record forever; same-session
+  // records with different run ids are left alone, because those are distinct
+  // turns of the chat you are looking at. A single-slot kind goes further: every
+  // other record of that kind is a superseded state of the same condition.
+  const singleSlot=CHAT_NOTICE_SINGLE_SLOT.has(kind);
+  if(singleSlot||notice.sessionId){
+    _chatNotices.forEach((rec,existing)=>{
+      if(rec.kind!==kind||existing===key) return;
+      if(singleSlot||(rec.sessionId&&rec.sessionId!==notice.sessionId)){
+        _chatNotices.delete(existing);_clearChatNoticeTimer(existing);
+      }
+    });
+  }
+  _chatNotices.set(key,{
+    key,kind,
+    sessionId:notice.sessionId||null,
+    runId:notice.runId||null,
+    tone:notice.tone==='info'?'info':'error',
+    title:String(notice.title||''),
+    detail:String(notice.detail||''),
+    actions:(Array.isArray(notice.actions)?notice.actions:[]).filter(a=>a&&a.label),
+    dismissible:!!notice.dismissible,
+    onDismiss:typeof notice.onDismiss==='function'?notice.onDismiss:null,
+  });
+  _clearChatNoticeTimer(key);
+  const ttl=Number(notice.ttlMs);
+  if(Number.isFinite(ttl)&&ttl>0){
+    _chatNoticeTimers.set(key,setTimeout(()=>{
+      _chatNotices.delete(key);_chatNoticeTimers.delete(key);renderChatRuntimeNotices();
+    },ttl));
+  }
+  renderChatRuntimeNotices();
+  return key;
+}
+function dismissChatRuntimeNotice(key){
+  const rec=_chatNotices.get(key);
+  _chatNoticeDismissed.add(key);
+  _chatNotices.delete(key);
+  _clearChatNoticeTimer(key);
+  if(rec&&rec.onDismiss){try{rec.onDismiss();}catch(_){}}
+  renderChatRuntimeNotices();
+}
+// clearChatRuntimeNotice(kind[, sessionId[, runId]]) — the condition resolved.
+// Narrower calls match more precisely; a bare kind clears every notice of that
+// kind, including its dismissal memory.
+function clearChatRuntimeNotice(kind,sessionId,runId){
+  const matchSession=arguments.length>1;
+  const matchRun=arguments.length>2;
+  const matches=key=>{
+    const parts=key.split('|');
+    if(parts[0]!==kind) return false;
+    if(matchSession&&parts[1]!==(sessionId||'')) return false;
+    if(matchRun&&parts[2]!==(runId||'')) return false;
+    return true;
+  };
+  const drop=[];
+  _chatNotices.forEach((_,key)=>{if(matches(key))drop.push(key);});
+  _chatNoticeDismissed.forEach(key=>{if(matches(key))drop.push(key);});
+  drop.forEach(key=>{_chatNotices.delete(key);_chatNoticeDismissed.delete(key);_clearChatNoticeTimer(key);});
+  renderChatRuntimeNotices();
+}
+function _activeChatRuntimeNotices(){
+  const currentSid=(typeof S==='object'&&S&&S.session&&S.session.session_id)||null;
+  return [..._chatNotices.values()]
+    // A session-scoped notice belongs to its own chat: viewing another session —
+    // or no session at all, after a delete or a new-chat reset — must not show
+    // the failure of the chat you left. Absent an active session there is no
+    // owner to match, so it stays hidden rather than defaulting to visible.
+    .filter(rec=>!rec.sessionId||(!!currentSid&&rec.sessionId===currentSid))
+    .sort((a,b)=>CHAT_NOTICE_PRIORITY.indexOf(a.kind)-CHAT_NOTICE_PRIORITY.indexOf(b.kind));
+}
+function _buildChatRuntimeNoticeRow(rec,secondary){
+  const row=document.createElement('div');
+  row.className='chat-runtime-notice-item chat-runtime-notice-'+rec.tone+(secondary?' chat-runtime-notice-secondary':'');
+  row.dataset.noticeKind=rec.kind;
+  const copy=document.createElement('div');
+  copy.className='chat-runtime-notice-copy';
+  const title=document.createElement('strong');
+  title.textContent=rec.title;
+  copy.appendChild(title);
+  // Only the highest-priority notice renders expanded; the rest keep their title
+  // and their action but drop the detail line so the stack stays bounded.
+  if(rec.detail&&!secondary){
+    const detail=document.createElement('span');
+    detail.textContent=rec.detail;
+    copy.appendChild(detail);
+  }
+  row.appendChild(copy);
+  const actions=rec.actions.slice();
+  if(rec.dismissible) actions.push({label:t('dismiss'),onClick:()=>dismissChatRuntimeNotice(rec.key)});
+  if(actions.length){
+    const box=document.createElement('div');
+    box.className='chat-runtime-notice-actions';
+    actions.forEach(action=>{
+      const btn=document.createElement('button');
+      btn.type='button';
+      btn.className='chat-runtime-notice-action';
+      if(action.id) btn.id=action.id;
+      btn.textContent=action.label;
+      if(action.ariaLabel) btn.setAttribute('aria-label',action.ariaLabel);
+      if(action.disabled) btn.disabled=true;
+      if(typeof action.onClick==='function') btn.addEventListener('click',action.onClick);
+      box.appendChild(btn);
+    });
+    row.appendChild(box);
+  }
+  return row;
+}
+// Announce the transition, not the poll. The stack itself is not a live region:
+// the two sr-only hosts are, and they are only written when the top notice's
+// identity or text actually changes, so a 2.5s probe republishing the same
+// offline record stays silent. role=alert carries newly active blocking
+// failures; role=status carries recovery/transient updates.
+function _announceChatRuntimeNotice(rec){
+  const stamp=rec?`${rec.key}|${rec.title}|${rec.detail}`:'';
+  if(stamp===_chatNoticeAnnouncedStamp) return;
+  _chatNoticeAnnouncedStamp=stamp;
+  const alertEl=$('chatRuntimeNoticeAlert');
+  const statusEl=$('chatRuntimeNoticeStatus');
+  const text=rec?[rec.title,rec.detail].filter(Boolean).join('. '):'';
+  const blocking=!!rec&&rec.tone==='error';
+  if(alertEl) alertEl.textContent=blocking?text:'';
+  if(statusEl) statusEl.textContent=blocking?'':text;
+}
+function renderChatRuntimeNotices(){
+  const host=$('chatRuntimeNotice');
+  if(!host) return;
+  const active=_activeChatRuntimeNotices().slice(0,CHAT_NOTICE_MAX_VISIBLE);
+  // Skip identical re-renders so a poll cannot drop an in-flight button state or
+  // steal focus from a button the user is about to press.
+  const signature=JSON.stringify(active.map(rec=>[rec.key,rec.tone,rec.title,rec.detail,rec.dismissible,rec.actions.map(a=>[a.label,!!a.disabled])]));
+  if(signature===_chatNoticeRenderedSignature) return;
+  _chatNoticeRenderedSignature=signature;
+  host.textContent='';
+  if(!active.length){
+    host.hidden=true;
+    _announceChatRuntimeNotice(null);
+    return;
+  }
+  active.forEach((rec,idx)=>host.appendChild(_buildChatRuntimeNoticeRow(rec,idx>0)));
+  host.hidden=false;
+  _announceChatRuntimeNotice(active[0]);
 }
 const OFFLINE_RECHECK_MS=2500;
 const OFFLINE_HEALTH_TIMEOUT_MS=10000;
@@ -47,21 +259,23 @@ function _browserReportsOnline(){return !('onLine' in navigator)||navigator.onLi
 function _offlineHealthUrl(){const url=new URL('health',document.baseURI||location.href);url.searchParams.set('offline_probe',String(Date.now()));return url.href;}
 function _setOfflineChecking(checking){
   _offlineChecking=!!checking;
-  const btn=$('offlineCheckNow');
-  if(btn){btn.disabled=_offlineChecking;btn.textContent=_offlineChecking?t('offline_checking'):t('offline_check_now');}
+  // The Check-now button is rendered from the notice record, so the probe state
+  // is republished rather than poked into the DOM.
+  if(_offlineVisible)_renderOfflineNotice();
 }
-function _renderOfflineBanner(){
-  const banner=$('offlineBanner');
-  if(!banner)return;
-  const detail=$('offlineDetails');
-  if(detail)detail.textContent=t(_offlineReason==='browser'?'offline_browser_detail':'offline_network_detail');
-  const title=$('offlineTitle');
-  if(title)title.textContent=t('offline_title');
-  const auto=$('offlineAutorefresh');
-  if(auto)auto.textContent=t('offline_autorefresh');
-  _setOfflineChecking(_offlineChecking);
-  banner.hidden=false;
-  banner.classList.add('visible');
+function _renderOfflineNotice(){
+  publishChatRuntimeNotice({
+    kind:'offline',
+    tone:'error',
+    title:t('offline_title'),
+    detail:`${t(_offlineReason==='browser'?'offline_browser_detail':'offline_network_detail')} ${t('offline_autorefresh')}`,
+    actions:[{
+      id:'offlineCheckNow',
+      label:_offlineChecking?t('offline_checking'):t('offline_check_now'),
+      disabled:_offlineChecking,
+      onClick:()=>{checkOfflineRecoveryNow();},
+    }],
+  });
 }
 // Shared "poll only while the tab is visible" driver. Every long-lived poller
 // wants the same three things: skip the tick while `document.hidden` so a
@@ -99,7 +313,11 @@ function _stopOfflineProbeTimer(){
 function showOfflineBanner(reason){
   _offlineVisible=true;
   _offlineReason=reason||(_browserReportsOnline()?'network':'browser');
-  _renderOfflineBanner();
+  // A recovery row is a 5s transient. Dropping offline again inside that window
+  // would otherwise show "Connection lost" and "Connection restored" together —
+  // the recovery it announced has been superseded, not merely aged out.
+  clearChatRuntimeNotice('reconnect','','recovered');
+  _renderOfflineNotice();
   _startOfflineProbeTimer();
 }
 function isOfflineBannerVisible(){return _offlineVisible;}
@@ -107,8 +325,7 @@ function _hideOfflineBanner(){
   _offlineVisible=false;
   _stopOfflineProbeTimer();
   _setOfflineChecking(false);
-  const banner=$('offlineBanner');
-  if(banner){banner.classList.remove('visible');banner.hidden=true;}
+  clearChatRuntimeNotice('offline');
 }
 async function _probeOfflineRecovery(){
   if(_offlineHealthProbePromise)return _offlineHealthProbePromise;
@@ -181,9 +398,18 @@ async function checkOfflineRecoveryNow(){
 // banner, restart the sidebar SSE (bfcache/background kills the connection),
 // and re-fetch the active session so any messages that landed while we were
 // away appear. A full reload is the fallback only if the soft path throws.
+const OFFLINE_RECOVERED_NOTICE_MS=5000;
 async function _recoverFromOfflineSoftly(){
   try{
     _hideOfflineBanner();
+    publishChatRuntimeNotice({
+      kind:'reconnect',
+      runId:'recovered',
+      tone:'info',
+      title:t('runtime_notice_restored_title'),
+      detail:t('runtime_notice_restored_detail'),
+      ttlMs:OFFLINE_RECOVERED_NOTICE_MS,
+    });
     if(typeof reconnectSidebarSSE==='function') reconnectSidebarSSE();
     if(S.session && typeof refreshSession==='function'){
       await refreshSession();
@@ -4258,8 +4484,7 @@ function _positionModelDropdown(){
   const mobileAction=$('composerMobileModelAction');
   const footer=document.querySelector('.composer-footer');
   if(!dd||!footer) return;
-  const panel=$('composerMobileConfigPanel');
-  const anchor=(panel&&panel.classList.contains('open')&&mobileAction)?mobileAction:(chip&&chip.offsetParent?chip:mobileAction);
+  const anchor=_composerOverflowAnchor('composerMobileModelAction',chip)||mobileAction;
   if(!anchor) return;
   const isPhone=typeof window.matchMedia==='function'&&window.matchMedia('(max-width:640px)').matches;
   if(isPhone){
@@ -5280,7 +5505,7 @@ let _composerFitResizeListenerBound=false;
 // stays laid out and signals its open state with a class (.queue-card slides in
 // on `.visible`; .attach-tray is only populated on `.has-files`).
 const _COMPOSER_EXPAND_SURFACES=[
-  ['#reconnectBanner',''],['#offlineBanner',''],['#agentHealthBanner',''],
+  ['#chatRuntimeNotice',''],
   ['#approvalCard',''],['#clarifyCard',''],
   ['#queueCard','visible'],['#attachTray','has-files'],
   ['#micStatus',''],['#voiceModeBar',''],
@@ -5683,11 +5908,9 @@ function toggleReasoningDropdown(){
 function _positionReasoningDropdown(){
   const dd=$('composerReasoningDropdown');
   const chip=$('composerReasoningChip');
-  const mobileAction=$('composerMobileReasoningAction');
   const footer=document.querySelector('.composer-footer');
   if(!dd||!chip||!footer) return;
-  const panel=$('composerMobileConfigPanel');
-  const anchor=(panel&&panel.classList.contains('open')&&mobileAction)?mobileAction:chip;
+  const anchor=_composerOverflowAnchor('composerMobileReasoningAction',chip)||chip;
   const chipRect=anchor.getBoundingClientRect();
   const footerRect=footer.getBoundingClientRect();
   let left=chipRect.left-footerRect.left;
@@ -5768,6 +5991,11 @@ function _applyToolsetsChip(toolsets) {
     chip.classList.remove('has-custom');
     chip.title = t('session_toolsets') + ': ' + t('session_toolsets_profile_defaults');
   }
+  // The overflow row is the primary surface for this control (HWEB-7).
+  const actionLabel = $('composerMobileToolsetsLabel');
+  const action = $('composerMobileToolsetsAction');
+  if (actionLabel) actionLabel.textContent = label.textContent;
+  if (action) { action.title = chip.title; action.classList.toggle('has-custom', hasCustom); }
 }
 
 function _syncToolsetsChip() {
@@ -5917,12 +6145,31 @@ function _populateToolsetsDropdown() {
   _renderToolsetsPresetSections({ state, input });
 }
 
+// HWEB-7: a control can have a footer chip, an overflow row, or both showing,
+// and which one is laid out changes with the fit stage. An open panel is not
+// enough to pick the row — the model, reasoning and context rows are
+// display:none at the widths where the footer keeps its own chip, so anchoring
+// on `.open` alone reads a zero rect and drops the popup at the footer's left
+// edge. Prefer the row only when it actually has a box, then the chip, then
+// nothing (callers close rather than anchor to a zero rect, per #1431).
+function _composerOverflowAnchor(rowId, chip) {
+  const panel = $('composerMobileConfigPanel');
+  const row = $(rowId);
+  if (panel && panel.classList.contains('open') && row && row.offsetParent !== null) return row;
+  return (chip && chip.offsetParent !== null) ? chip : null;
+}
+window._composerOverflowAnchor = _composerOverflowAnchor;
+
+function _toolsetsDropdownAnchor() {
+  return _composerOverflowAnchor('composerMobileToolsetsAction', $('composerToolsetsChip'));
+}
+
 function _positionToolsetsDropdown() {
   const dd = $('composerToolsetsDropdown');
-  const chip = $('composerToolsetsChip');
+  const chip = _toolsetsDropdownAnchor();
   const footer = document.querySelector('.composer-footer');
   if (!dd || !chip || !footer) return;
-  // Defense: if the chip has been hidden by responsive CSS (e.g. resize across
+  // Defense: if the anchor has been hidden by responsive CSS (e.g. resize across
   // 1100px container threshold while dropdown was open), don't try to anchor
   // to a zero-rect element — close the dropdown instead. (#1431)
   if (chip.offsetParent === null) { closeToolsetsDropdown(); return; }
@@ -5936,11 +6183,12 @@ function _positionToolsetsDropdown() {
 
 function toggleToolsetsDropdown() {
   const dd = $('composerToolsetsDropdown');
-  const chip = $('composerToolsetsChip');
-  if (!dd || !chip) return;
-  // Don't open when the chip itself is hidden by responsive CSS (#1431).
-  // offsetParent === null catches display:none on the element or any ancestor.
-  if (chip.offsetParent === null) return;
+  const chip = _toolsetsDropdownAnchor();
+  if (!dd) return;
+  // Don't open when no anchor is visible — neither the overflow row nor the
+  // wide-container chip. offsetParent === null catches display:none on the
+  // element or any ancestor. (#1431)
+  if (!chip) { if (dd.classList.contains('open')) closeToolsetsDropdown(); return; }
   const open = dd.classList.contains('open');
   if (open) { closeToolsetsDropdown(); return; }
   if (typeof closeProfileDropdown === 'function') closeProfileDropdown();
@@ -5960,6 +6208,8 @@ function toggleToolsetsDropdown() {
   dd.classList.add('open');
   _positionToolsetsDropdown();
   chip.classList.add('active');
+  const action = $('composerMobileToolsetsAction');
+  if (action) { action.classList.add('active'); action.setAttribute('aria-expanded', 'true'); }
   // Focus the input after a tick so the layout has settled
   setTimeout(() => { const inp = $('toolsetsInput'); if (inp) inp.focus(); }, 50);
 }
@@ -5967,8 +6217,10 @@ function toggleToolsetsDropdown() {
 function closeToolsetsDropdown() {
   const dd = $('composerToolsetsDropdown');
   const chip = $('composerToolsetsChip');
+  const action = $('composerMobileToolsetsAction');
   if (dd) dd.classList.remove('open');
   if (chip) chip.classList.remove('active');
+  if (action) { action.classList.remove('active'); action.setAttribute('aria-expanded', 'false'); }
 }
 
 function _applySessionToolsets(toolsets) {
@@ -6010,6 +6262,9 @@ function _applySessionToolsets(toolsets) {
 document.addEventListener('click', function(e) {
   if (
     !e.target.closest('#composerToolsetsChip') &&
+    // The overflow row is the trigger at every width since HWEB-7; without this
+    // exemption the click that opens the dropdown bubbles here and closes it.
+    !e.target.closest('#composerMobileToolsetsAction') &&
     !e.target.closest('#composerToolsetsDropdown')
   ) closeToolsetsDropdown();
   // Active profile defaults button
@@ -6064,8 +6319,11 @@ document.addEventListener('change', function(e) {
 window.addEventListener('resize', () => {
   const dd = $('composerToolsetsDropdown');
   if (!dd || !dd.classList.contains('open')) return;
-  const chip = $('composerToolsetsChip');
-  if (!chip || chip.offsetParent === null) { closeToolsetsDropdown(); return; }
+  // Resolve through the shared anchor: the footer chip is hidden at every width
+  // since HWEB-7, so checking it alone would close a picker opened from the
+  // overflow row on any resize — including the visual-viewport change an
+  // on-screen keyboard causes when the picker's own input takes focus.
+  if (!_toolsetsDropdownAnchor()) { closeToolsetsDropdown(); return; }
   _positionToolsetsDropdown();
 });
 
@@ -6083,6 +6341,21 @@ function closeMobileComposerConfig(){
   if(typeof closeWsDropdown==='function') closeWsDropdown();
 }
 
+// The panel is only readable while open, so pulling the labels of the controls
+// it now owns across at open time keeps one sync point instead of hooking every
+// place those labels change. (HWEB-7)
+function _syncComposerOverflowLabels(){
+  const pairs=[['profileChipLabel','composerMobileProfileLabel'],['composerToolsetsLabel','composerMobileToolsetsLabel']];
+  for(const pair of pairs){
+    const src=$(pair[0]);
+    const dst=$(pair[1]);
+    // An empty source means the chip has not been populated yet; keep the row's
+    // own text rather than blanking it.
+    if(src&&dst&&src.textContent) dst.textContent=src.textContent;
+  }
+}
+window._syncComposerOverflowLabels=_syncComposerOverflowLabels;
+
 function openMobileComposerConfig(){
   const panel=$('composerMobileConfigPanel');
   if(!panel) return;
@@ -6091,6 +6364,7 @@ function openMobileComposerConfig(){
   closeModelDropdown();
   closeReasoningDropdown();
   if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
+  if(typeof _syncComposerOverflowLabels==='function') _syncComposerOverflowLabels();
   panel.classList.add('open');
   _syncMobileComposerConfigButton(true);
 }
@@ -6129,7 +6403,11 @@ document.addEventListener('click',function(e){
     e.target.closest('#composerMobileConfigPanel') ||
     e.target.closest('#composerWsDropdown') ||
     e.target.closest('#composerModelDropdown') ||
-    e.target.closest('#composerReasoningDropdown')
+    e.target.closest('#composerReasoningDropdown') ||
+    // Opened from a panel row, so they must not close the panel under them.
+    e.target.closest('#composerToolsetsDropdown') ||
+    e.target.closest('#profileDropdown') ||
+    e.target.closest('#savedPromptsPopup')
   ) return;
   closeMobileComposerConfig();
 });
@@ -6143,15 +6421,29 @@ document.addEventListener('keydown',function(e){
   if(typeof closeWsDropdown==='function') closeWsDropdown();
   closeModelDropdown();
   closeReasoningDropdown();
+  if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
+  if(typeof closeProfileDropdown==='function') closeProfileDropdown();
+  // Saved prompts opens from a panel row but is positioned against the footer,
+  // so closing the panel alone would leave it on screen with its trigger gone.
+  const savedPopup=$('savedPromptsPopup');
+  if(savedPopup&&savedPopup.style.display!=='none'){
+    savedPopup.style.display='none';
+    const savedBtn=$('btnSavedPrompts');
+    if(savedBtn) savedBtn.setAttribute('aria-expanded','false');
+  }
+  const btn=$('composerMobileConfigBtn');
+  if(btn&&typeof btn.focus==='function'){try{btn.focus({preventScroll:true});}catch(_){btn.focus();}}
 });
 
+// The panel used to be phone-only, so crossing 640px simply closed it and its
+// dropdowns. It is open at every width now (HWEB-7), so a resize has to move
+// the footer-anchored dropdowns instead. The model, profile and toolsets
+// dropdowns already have their own resize handlers.
 window.addEventListener('resize',function(){
-  if(window.matchMedia && !window.matchMedia('(max-width: 640px)').matches){
-    closeMobileComposerConfig();
-    closeModelDropdown();
-    closeReasoningDropdown();
-    if(typeof closeWsDropdown==='function') closeWsDropdown();
-  }
+  const reasoning=$('composerReasoningDropdown');
+  if(reasoning&&reasoning.classList.contains('open')&&typeof _positionReasoningDropdown==='function') _positionReasoningDropdown();
+  const ws=$('composerWsDropdown');
+  if(ws&&ws.classList.contains('open')&&typeof _positionComposerWsDropdown==='function') _positionComposerWsDropdown();
 });
 
 // ── Scroll pinning ──────────────────────────────────────────────────────────
@@ -7116,7 +7408,7 @@ function _clearActivityElapsedTimer(){
   _activityElapsedTimerGroup=null;
 }
 
-const _MOBILE_CONFIG_BASE_LABEL='Workspace, model, quota, reasoning, and context settings';
+const _MOBILE_CONFIG_BASE_LABEL='Composer settings and secondary controls';
 
 function _setCtxCompressButton(btn,text){
   if(!btn)return;
@@ -8761,6 +9053,12 @@ async function handleComposerPrimaryAction(){
 function setBusy(v){
   S.busy=v;
   updateSendBtn();
+  if(v){
+    // A new turn supersedes the previous turn's terminal failure for this chat.
+    const sid=(S.session&&S.session.session_id)||'';
+    clearChatRuntimeNotice('provider_failure',sid);
+    clearChatRuntimeNotice('thread_error',sid);
+  }
   if(!v){
     if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
     setStatus('');
@@ -10296,11 +10594,19 @@ function clearInflight() {
   localStorage.removeItem(INFLIGHT_KEY);
 }
 function showReconnectBanner(msg) {
-  $('reconnectMsg').textContent = msg || 'A response may have been in progress when you last left.';
-  $('reconnectBanner').classList.add('visible');
+  publishChatRuntimeNotice({
+    kind:'reconnect',
+    tone:'info',
+    title:t('runtime_notice_reload_title'),
+    detail:msg||'A response may have been in progress when you last left.',
+    actions:[
+      {label:'Dismiss',onClick:()=>dismissReconnect()},
+      {id:'btnReconnectReload',label:'Reload',onClick:()=>refreshSession()},
+    ],
+  });
 }
 function dismissReconnect() {
-  $('reconnectBanner').classList.remove('visible');
+  clearChatRuntimeNotice('reconnect','','');
   clearInflight();
 }
 
@@ -10404,6 +10710,11 @@ const AGENT_HEALTH_DISMISSED_KEY='agent-health-dismissed';
 let _agentHealthTimer=null;
 let _agentHealthLastState='unknown';
 let _lastGatewayRestartTime=0;
+// Last /api/health/agent payload behind the notice, so the restart button can
+// republish the same record with its in-flight label instead of mutating a node
+// the next render would replace.
+let _agentHealthPayload=null;
+let _gatewayRestartInFlight=false;
 function _agentHealthDismissed(){
   try{return localStorage.getItem(AGENT_HEALTH_DISMISSED_KEY)==='1';}
   catch(_){return false;}
@@ -10415,38 +10726,37 @@ function _setAgentHealthDismissed(value){
   }catch(_){ }
 }
 function _hideAgentHealthAlert(){
-  const banner=$('agentHealthBanner');
-  if(banner){banner.classList.remove('visible');banner.hidden=true;}
+  clearChatRuntimeNotice('agent_unavailable');
 }
 function _showAgentHealthAlert(payload){
   if(_agentHealthDismissed()) return;
-  const banner=$('agentHealthBanner');
-  const title=$('agentHealthTitle');
-  const details=$('agentHealthDetails');
-  if(!banner) return;
-  if(title) title.textContent='Hermes agent is not responding';
-  const state=payload&&payload.details&&payload.details.gateway_state?` State: ${payload.details.gateway_state}.`:'';
-  if(details) details.textContent=`Gateway heartbeat failed.${state} Messages may not be delivered until it comes back.`;
-  banner.hidden=false;
-  banner.classList.add('visible');
+  if(payload!==undefined) _agentHealthPayload=payload;
+  const state=_agentHealthPayload&&_agentHealthPayload.details&&_agentHealthPayload.details.gateway_state?` State: ${_agentHealthPayload.details.gateway_state}.`:'';
+  publishChatRuntimeNotice({
+    kind:'agent_unavailable',
+    tone:'error',
+    title:'Hermes agent is not responding',
+    detail:`Gateway heartbeat failed.${state} Messages may not be delivered until it comes back.`,
+    actions:[
+      {id:'btnRestartGateway',label:_gatewayRestartInFlight?'Restarting...':'Restart Service',disabled:_gatewayRestartInFlight,onClick:()=>{restartGatewayService();}},
+      {id:'agentHealthDismiss',label:'Dismiss',ariaLabel:'Dismiss Hermes agent heartbeat alert',disabled:_gatewayRestartInFlight,onClick:()=>dismissAgentHealthAlert()},
+    ],
+  });
 }
 function dismissAgentHealthAlert(){
   _setAgentHealthDismissed(true);
   _hideAgentHealthAlert();
 }
 async function restartGatewayService(){
-  const btn = $('btnRestartGateway');
-  const dismissBtn = $('agentHealthDismiss');
-  if(!btn) return;
-  btn.disabled = true;
-  if(dismissBtn) dismissBtn.disabled = true;
-  const originalText = btn.textContent;
-  btn.textContent = 'Restarting...';
+  if(_gatewayRestartInFlight) return;
+  _gatewayRestartInFlight = true;
+  _showAgentHealthAlert();
+  let restarted = false;
   try {
     const res = await api('/api/health/restart', {method: 'POST'});
     if(res && res.ok){
       showToast('Gateway service restarted successfully');
-      _hideAgentHealthAlert();
+      restarted = true;
       _lastGatewayRestartTime = Date.now();
       setTimeout(pollAgentHealth, 15000);
     } else {
@@ -10455,16 +10765,24 @@ async function restartGatewayService(){
   } catch(e) {
     showToast('Failed to restart gateway service: ' + e.message);
   } finally {
-    btn.disabled = false;
-    if(dismissBtn) dismissBtn.disabled = false;
-    btn.textContent = originalText;
+    _gatewayRestartInFlight = false;
+    // Restore the idle buttons only while the outage is still the live state. A
+    // successful restart resolves it; so does a heartbeat that resolved healthy
+    // while the request was in flight — republishing then would resurrect a
+    // stale outage and ask the user to restart an already-recovered gateway.
+    if(restarted||_agentHealthLastState!=='down') _hideAgentHealthAlert();
+    else _showAgentHealthAlert();
   }
 }
 async function pollAgentHealth(){
   if(document.visibilityState !== 'visible') return;
+  // Don't race an in-flight restart: a poll landing mid-request would clear the
+  // alert out from under its own buttons, and its result is stale by definition.
+  if(_gatewayRestartInFlight) return;
   if(Date.now() - _lastGatewayRestartTime < 15000) return;
   try{
     const payload=await api('/api/health/agent',{timeoutToast:false});
+    _agentHealthPayload=payload;
     if(payload.alive === true){
       _agentHealthLastState='alive';
       _setAgentHealthDismissed(false);
@@ -11241,10 +11559,21 @@ async function _waitForServerThenReload(opts){
     return normalizedIdentity.serverStartedAt===null&&normalizedIdentity.uptimeSeconds===null ? null : normalizedIdentity;
   })();
   window._restartingForUpdate=true;
-  const msgEl=$('reconnectMsg');
-  const banner=$('reconnectBanner');
-  if(msgEl) msgEl.textContent='⏳ Restarting… please wait';
-  if(banner) banner.classList.add('visible');
+  // The restart message reuses the reconnect slot under its own run id, so a
+  // previously dismissed reconnect prompt cannot suppress it. Guarded because
+  // tests extract this function on its own, the same way the sidebar-SSE and
+  // refreshSession calls elsewhere in this file are guarded.
+  // Takes a key, not a string: t() is resolved behind the same guard so the
+  // extracted-function harnesses only need the globals they already stub.
+  // `actions` is what makes the timeout state actionable — its copy tells the
+  // user to click Reload, so the row has to carry that button the way the
+  // reconnect banner it replaced always did. refreshSession() hard-reloads while
+  // window._restartingForUpdate is set, which is exactly the recovery wanted.
+  const _publishRestartNotice=(titleKey,detail,actions)=>{
+    if(typeof publishChatRuntimeNotice!=='function') return;
+    publishChatRuntimeNotice({kind:'reconnect',runId:'restart',tone:'info',title:t(titleKey),detail,actions});
+  };
+  _publishRestartNotice('runtime_notice_restarting_title','\u23f3 Restarting… please wait');
   const deadline=Date.now()+maxMs;
   // Track restart-outage evidence. An outage (failed or non-OK /health probes)
   // followed by a healthy response is a reliable new-instance signal even when
@@ -11342,7 +11671,7 @@ async function _waitForServerThenReload(opts){
     }catch(_){ _consecutiveOutages++; /* socket closed during restart — retry */ }
     await new Promise(r=>setTimeout(r, interval));
   }
-  if(msgEl) msgEl.textContent='⚠️ Server is taking longer than expected — click Reload when ready';
+  _publishRestartNotice('runtime_notice_restart_slow_title','\u26a0\ufe0f Server is taking longer than expected — click Reload when ready',[{id:'btnRestartTimeoutReload',label:'Reload',onClick:()=>refreshSession()}]);
 }
 
 function _pendingCurrentTailUserMessage(messages){
@@ -11538,6 +11867,9 @@ function _topbarMessageMetaText(){
   return t('n_messages',loadedCount);
 }
 function syncTopbar(){
+  // The notice stack hides notices owned by another session, so a session switch
+  // has to re-evaluate it.
+  if(typeof renderChatRuntimeNotices==='function') renderChatRuntimeNotices();
   if(!S.session){
     document.title=assistantDisplayName();
     if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
@@ -11555,6 +11887,7 @@ function syncTopbar(){
     // Update profile chip even when no session is active (e.g. right after profile switch)
     const _profileLabel=$('profileChipLabel');
     if(_profileLabel) _profileLabel.textContent=S.activeProfile||'default';
+    if(typeof _syncComposerOverflowLabels==='function') _syncComposerOverflowLabels();
     const _titleLabel=$('titlebarProfileLabel');
     if(_titleLabel) _titleLabel.textContent=S.activeProfile||'default';
     return;
@@ -11682,6 +12015,7 @@ function syncTopbar(){
   // unaffected by this line.
   const profileLabel=$('profileChipLabel');
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
+  if(typeof _syncComposerOverflowLabels==='function') _syncComposerOverflowLabels();
   const titleLabel=$('titlebarProfileLabel');
   if(titleLabel) titleLabel.textContent=S.activeProfile||'default';
 }
@@ -11773,8 +12107,57 @@ function isTpsDisplayEnabled(){
 function _assistantRoleHtml(tsTitle='', tpsText=''){
   const _bn=assistantDisplayName();
   const tps=(isTpsDisplayEnabled()&&tpsText)?`<span class="msg-tps-inline" title="Tokens per second">${esc(tpsText)}</span>`:'';
-  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant">${esc(_bn.charAt(0).toUpperCase())}</div><span class="msg-role-name">${esc(_bn)}</span>${tps}</div>`;
+  // HWEB-4: no avatar, and the name is exposed to assistive tech only — left
+  // alignment already identifies the speaker. The row survives as the container
+  // for the live TPS chip and for the transparent-stream collapse name tag
+  // (which CSS re-reveals; there the tag is a control, not identity chrome).
+  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><span class="msg-role-name">${esc(_bn)}</span>${tps}</div>`;
 }
+// ── HWEB-4: message-action overflow dismissal ────────────────────────────
+// The overflow is a native <details>, so open/close, Enter/Space and focus are
+// the platform's job. Only light dismissal has to be added: one open menu at a
+// time, close on outside click or on activating an item, and Escape returns
+// focus to the summary that opened it.
+function _closeMessageActionMenus(except){
+  document.querySelectorAll('details.msg-more[open]').forEach(d=>{ if(d!==except) d.open=false; });
+}
+document.addEventListener('click',e=>{
+  if(!document.querySelector('details.msg-more[open]')) return;
+  const target=e.target;
+  const summary=(target&&target.closest)?target.closest('details.msg-more > summary'):null;
+  // A click on a summary keeps that menu (the browser toggles it after this
+  // handler); a click on an item or outside closes everything.
+  _closeMessageActionMenus(summary?summary.parentElement:null);
+});
+document.addEventListener('keydown',e=>{
+  if(e.key!=='Escape') return;
+  const open=document.querySelector('details.msg-more[open]');
+  if(!open) return;
+  const summary=open.querySelector('summary');
+  _closeMessageActionMenus(null);
+  if(summary&&summary.focus) summary.focus();
+});
+// The menu opens upward so it never fights the composer, but `.messages` is a
+// scroller: overflow past its start edge is clipped AND unreachable (scrollTop
+// cannot go below 0), while end-side overflow can always be scrolled to. So on
+// a short transcript, where the first assistant footer can sit closer to the top
+// than the menu is tall, drop it below the trigger instead.
+function _placeMessageActionMenu(details){
+  if(!details) return;
+  if(!details.open){details.removeAttribute('data-drop');return;}
+  const menu=details.querySelector('.msg-more-menu');
+  const scroller=details.closest?details.closest('.messages'):null;
+  if(!menu||!scroller||!details.getBoundingClientRect) return;
+  const needed=(menu.offsetHeight||0)+6;
+  const roomAbove=details.getBoundingClientRect().top-scroller.getBoundingClientRect().top;
+  details.setAttribute('data-drop', roomAbove<needed?'down':'up');
+}
+// `toggle` does not bubble, so listen in the capture phase.
+document.addEventListener('toggle',e=>{
+  const el=e.target;
+  if(!el||!el.classList||!el.classList.contains('msg-more')) return;
+  _placeMessageActionMenu(el);
+}, true);
 function _setAssistantTurnTps(turn, tpsText=''){
   if(!turn) return;
   const role=turn.querySelector('.msg-role.assistant');
@@ -14825,7 +15208,7 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   if(!S.session||!S.activeStreamId) return false;
   if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
   if(streamId&&S.activeStreamId!==streamId) return false;
-  $('emptyState').style.display='none';
+  if(typeof hideConversationEmptyState==='function') hideConversationEmptyState();
   let turn=$('liveAssistantTurn');
   if(!turn){
     turn=_createAssistantTurn();
@@ -14922,7 +15305,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   if(!S.session||!S.activeStreamId) return false;
   if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
   if(streamId&&S.activeStreamId!==streamId) return false;
-  $('emptyState').style.display='none';
+  if(typeof hideConversationEmptyState==='function') hideConversationEmptyState();
   let turn=$('liveAssistantTurn');
   if(!turn){
     turn=_createAssistantTurn();
@@ -18022,7 +18405,9 @@ function renderMessages(options){
   // During session switch, S.messages is intentionally cleared while the full
   // message fetch is still in flight. Other async updates can still call
   // renderMessages() in this window. Keep the existing loading placeholder.
-  if(_loadingSessionId===sid&&msgCount===0&&inner) return;
+  // Any load in flight owns the pane, not only one whose sid matches: a switch
+  // clears S.messages before reassigning S.session (HWEB-1).
+  if(_loadingSessionId&&msgCount===0&&inner) return;
   if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
   let cachedRenderSignature=null;
   const hasTransientTranscriptUi=!!(
@@ -18032,7 +18417,7 @@ function renderMessages(options){
 
   const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);
   const visWithIdx=_getVisibleMessagesWithIdx();
-  if(visWithIdx.length||preservedCompressionTaskMessages.length) $('emptyState').style.display='none';
+  if(visWithIdx.length||preservedCompressionTaskMessages.length){ if(typeof hideConversationEmptyState==='function') hideConversationEmptyState(); }
   else showConversationEmptyState();
   const virtualWindow=virtualFallback
     ? {virtualized:false,start:0,end:visWithIdx.length,topPad:0,bottomPad:0,total:visWithIdx.length,tailStart:visWithIdx.length}
@@ -18491,8 +18876,11 @@ function renderMessages(options){
     const statusHtml = (!isUser&&m._statusCard) ? _statusCardHtml(m._statusCard) : '';
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
-    const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
-    const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
+    // HWEB-4: the assistant's secondary actions live inside the overflow menu,
+    // so they carry a visible label there (.msg-action-label is display:none on
+    // the inline icon buttons that stay in the footer).
+    const undoBtn  = isLastAssistant ? `<button class="msg-action-btn msg-more-item" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}<span class="msg-action-label">${esc(t('undo_exchange'))}</span></button>` : '';
+    const retryBtn = isLastAssistant ? `<button class="msg-action-btn msg-more-item" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}<span class="msg-action-label">${esc(t('regenerate'))}</span></button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
     const readOnlySession=typeof _isReadOnlySession==='function'
       ? _isReadOnlySession(S.session)
@@ -18500,8 +18888,8 @@ function renderMessages(options){
     const branchableReadOnlySession=typeof _isBranchableReadOnlySession==='function'
       ? _isBranchableReadOnlySession(S.session)
       : false;
-    const forkBtn  = (readOnlySession&&!branchableReadOnlySession) ? '' : `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1})">${li('git-branch',13)}</button>`;
-    const ttsBtn   = !isUser ? `<button class="msg-action-btn msg-tts-btn" title="${t('tts_listen')||'Listen'}" onclick="speakMessage(this)">${li('volume-2',13)}</button>` : '';
+    const forkBtn  = (readOnlySession&&!branchableReadOnlySession) ? '' : `<button class="msg-action-btn${isUser?'':' msg-more-item'}" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1})">${li('git-branch',13)}<span class="msg-action-label">${esc(t('fork_from_here'))}</span></button>`;
+    const ttsBtn   = !isUser ? `<button class="msg-action-btn msg-tts-btn msg-more-item" title="${t('tts_listen')||'Listen'}" onclick="speakMessage(this)">${li('volume-2',13)}<span class="msg-action-label">${esc(t('tts_listen')||'Listen')}</span></button>` : '';
     const tsVal=m._ts||m.timestamp;
     // _formatInServerTz handles fractional-hour offsets (India +0530 etc.)
     // correctly via offset arithmetic; bare toLocaleString is the browser-tz fallback.
@@ -18518,7 +18906,17 @@ function renderMessages(options){
     const questionJumpBtn = (_qJumpTarget!==undefined&&_qJumpTarget!==null)
       ? _questionJumpButtonHtml(_qJumpTarget, assistantRawIdxByQuestionRawIdx.get(_qJumpTarget)??rawIdx)
       : '';
-    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
+    // HWEB-4: assistant rows keep Copy directly available and fold the
+    // secondary actions (listen / fork / retry / undo) into one native
+    // <details> overflow, so the answer is not preceded or trailed by a full
+    // toolbar. User rows keep their existing inline controls.
+    const moreItems = isUser ? '' : `${ttsBtn}${forkBtn}${retryBtn}${undoBtn}`;
+    const moreLabel = t('more_actions');
+    const moreBtn = moreItems
+      ? `<details class="msg-more"><summary class="msg-action-btn msg-more-btn" title="${moreLabel}" aria-label="${moreLabel}">${li('more-horizontal',13)}</summary><div class="msg-more-menu">${moreItems}</div></details>`
+      : '';
+    const actionsHtml = isUser ? `${editBtn}${forkBtn}${copyBtn}` : `${copyBtn}${moreBtn}`;
+    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${actionsHtml}</span>${questionJumpBtn}</div>`;
 
     if(_isContextCompactionMessage(m)){
       continue;
@@ -18665,10 +19063,13 @@ function renderMessages(options){
         if(blocks) blocks.innerHTML='';
         for(const attr of _recycleResetAttrs) recycled.removeAttribute(attr);
         const role=recycled.querySelector('.msg-role.assistant');
-        if(role) role.outerHTML=_assistantRoleHtml(tsTitle, isTpsDisplayEnabled()?_formatTurnTps(m._turnTps):'');
+        // HWEB-4: settled TPS renders in the final-response metadata footer
+        // below, not as a chip above the answer. Only the live turn still gets
+        // a header chip, stamped by _setLiveAssistantTps while it streams.
+        if(role) role.outerHTML=_assistantRoleHtml(tsTitle, '');
         currentAssistantTurn=recycled;
       }else{
-        currentAssistantTurn=_createAssistantTurn(tsTitle, isTpsDisplayEnabled()?_formatTurnTps(m._turnTps):'');
+        currentAssistantTurn=_createAssistantTurn(tsTitle, '');
       }
       currentAssistantTurn.dataset.role='assistant';
       if(S.session) currentAssistantTurn.dataset.sessionId=S.session.session_id;
@@ -19371,12 +19772,15 @@ function renderMessages(options){
       const compactWorklogForMessage=isCompactWorklogMode()&&(toolCallAssistantIdxs.has(mi)||assistantThinking.has(mi));
       const durationText=compactWorklogForMessage?'':_formatTurnDuration(msg._turnDuration);
       const usedModelText=_usedModelTurnChipLabel(msg);
-      if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText&&!usedModelText) continue;
+      // HWEB-4: TPS moved off the (removed) assistant header into this settled
+      // metadata row, beside duration/model/usage.
+      const tpsText=isTpsDisplayEnabled()?_formatTurnTps(msg._turnTps):'';
+      if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText&&!usedModelText&&!tpsText) continue;
       const seg=assistantSegments.get(mi);
       const row=seg?seg.closest('.assistant-turn'):null;
       const footerRows=row?row.querySelectorAll('.msg-foot'):[];
       const targetFoot=footerRows.length?footerRows[footerRows.length-1]:null;
-      if(!targetFoot||targetFoot.querySelector('.msg-usage-inline,.msg-duration-inline,.msg-gateway-inline,.gateway-failover-inline,.msg-model-warning-inline,.msg-used-model-inline')) continue;
+      if(!targetFoot||targetFoot.querySelector('.msg-usage-inline,.msg-duration-inline,.msg-gateway-inline,.gateway-failover-inline,.msg-model-warning-inline,.msg-used-model-inline,.msg-tps-inline')) continue;
       const fragments=[];
       if(modelWarningText){
         const warning=document.createElement('span');
@@ -19401,6 +19805,13 @@ function renderMessages(options){
         duration.className='msg-duration-inline';
         duration.textContent=`Done in ${durationText}`;
         fragments.push(duration);
+      }
+      if(tpsText){
+        const tps=document.createElement('span');
+        tps.className='msg-tps-inline';
+        tps.title='Tokens per second';
+        tps.textContent=tpsText;
+        fragments.push(tps);
       }
       // The transparent turn footer owns the model label (.lf-model) whenever
       // the turn has transparent event rows — skip the generic chip there so
@@ -20728,7 +21139,7 @@ function ensureLiveWorklogShell(){
     _dedupeLiveProcessedWorklogAnchors($('liveAssistantTurn'));
     return $('liveAssistantTurn');
   }
-  $('emptyState').style.display='none';
+  if(typeof hideConversationEmptyState==='function') hideConversationEmptyState();
   const compactWorklog=typeof isCompactWorklogMode==='function'&&isCompactWorklogMode();
   if(!compactWorklog&&!isSimplifiedToolCalling()){
     appendThinking();
@@ -21246,7 +21657,12 @@ function loadCsvInline(container){
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         const preview=buildCsvTablePreview(path, text, downloadUrl);
+        // The table lands after renderMessages() already ran the enhancer, so a
+        // message-level CSV preview would otherwise miss the sorting/filtering
+        // that structured-data mode is supposed to carry (HWEB-6).
+        const host=el.parentElement;
         el.outerHTML=preview.html||_csvPreviewErrorHtml(path, preview.errorKey||'csv_error', snap);
+        if(host&&typeof enhanceMarkdownTables==='function') enhanceMarkdownTables(host);
       })
       .catch(()=>{
         el.outerHTML=_csvPreviewErrorHtml(path, 'csv_error', snap);
@@ -21739,8 +22155,7 @@ function appendThinking(text='', options){
     _renderLiveAnchorActivitySceneForStream(S.activeStreamId, S.session.session_id);
     return;
   }
-  const empty=$('emptyState');
-  if(empty) empty.style.display='none';
+  if(typeof hideConversationEmptyState==='function') hideConversationEmptyState();
   if(!isSimplifiedToolCalling()){
     let row=$('thinkingRow');
     if(!row){

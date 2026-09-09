@@ -7,7 +7,7 @@ from urllib.parse import quote
 
 import api.config as api_config
 import api.routes as routes
-from api.updates import WEBUI_VERSION
+import api.updates
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -81,8 +81,14 @@ def test_service_worker_and_favicon_follow_selected_static_root(tmp_path, monkey
     monkeypatch.setattr(api_config, "get_static_root", lambda: static_root)
 
     sw_handler = _get("/sw.js")
+    # Read the version the way the route does — an attribute lookup at call
+    # time, not a name bound when this module was imported. A test that evicts
+    # `api.updates` from sys.modules leaves a second module object behind, and a
+    # stale binding would then be compared against the live one; on a tagless
+    # checkout the two `git describe --always` calls can even differ in
+    # abbreviation length, which is exactly how this test failed in CI.
     expected = sw_path.read_text(encoding="utf-8").replace(
-        "__WEBUI_VERSION__", quote(WEBUI_VERSION, safe="")
+        "__WEBUI_VERSION__", quote(api.updates.WEBUI_VERSION, safe="")
     ).encode("utf-8")
     assert sw_handler.status == 200
     assert sw_handler.header("Service-Worker-Allowed") == "/"

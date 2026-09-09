@@ -800,19 +800,24 @@ def test_renderMessages_preserves_loading_placeholder_for_session_switch(cleanup
     ui_src = (REPO_ROOT / "static/ui.js").read_text()
     fn_start = ui_src.find("function renderMessages")
     assert fn_start >= 0, "renderMessages() not found in ui.js"
-    fn_body = ui_src[fn_start:fn_start + 1400]
+    # Wide enough to still contain the render-window reset below the guard after
+    # HWEB-1 added the comment explaining why the guard is not keyed on sid.
+    fn_body = ui_src[fn_start:fn_start + 2000]
 
     compact = re.sub(r"\s+", "", fn_body)
-    assert (
-        "if(_loadingSessionId===sid&&msgCount===0&&inner)return;" in compact
-    ), (
-        "renderMessages() must return early when loadSession is active for"
-        " the current sid and S.messages is still empty."
+    # HWEB-1 widened the guard from `_loadingSessionId===sid` to any load in
+    # flight: a cross-session load clears S.messages before it reassigns
+    # S.session, so through that window sid is still the departing session and
+    # the equality form missed. The new form covers this test's case too.
+    guard = "if(_loadingSessionId&&msgCount===0&&inner)return;"
+    assert guard in compact, (
+        "renderMessages() must return early while any loadSession is in flight"
+        " and S.messages is still empty."
     )
 
     # Guard must live before render-window reset and message-filter pass.
     reset_pos = compact.find("if(sid!==_messageRenderWindowSid)_resetMessageRenderWindow(sid);")
-    guard_pos = compact.find("if(_loadingSessionId===sid&&msgCount===0&&inner)return;")
+    guard_pos = compact.find(guard)
     assert (
         0 <= guard_pos < reset_pos
     ), "Session-load empty-state guard must run before render-window/state resets."

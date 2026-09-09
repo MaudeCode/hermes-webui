@@ -48,6 +48,7 @@ function applyConversationOutlinePreference() {
     _panelOpen = false;
     if (wrapper) wrapper.hidden = true;
   }
+  _syncMinimap();
 }
 
 function _expandOutlineRenderWindow() {
@@ -69,31 +70,53 @@ function _ensureOutlineMessagesLoaded(sid) {
   return _ensureAllMessagesLoaded().then(function() {
     if (!S.session || S.session.session_id !== sid) return false;
     _expandOutlineRenderWindow();
+    // The load did a wholesale replace of S.messages; until the transcript is
+    // rebuilt every row id still encodes the OLD index, so any msg-user-<i>
+    // lookup would resolve to a different message.
+    if (typeof renderMessages === 'function') renderMessages({ preserveScroll: true });
     return true;
   }).catch(function() {
     return false;
   });
 }
 
-// Extracts the first 60 visible characters from a message content value.
-function _excerptText(content) {
+// Extracts the first `maxLen` visible characters from a message content value.
+function _excerptText(content, maxLen) {
   let text = '';
   if (Array.isArray(content)) {
     text = content
-      .filter(p => p && p.type === 'text')
-      .map(p => p.text || p.content || '')
+      .map(function(p) {
+        if (typeof p === 'string') return p;
+        if (!p || typeof p !== 'object') return '';
+        // The same three part types _assistantMessageHasVisibleContent() counts
+        // as visible output; anything else (tool_use, images) has no prose.
+        if (p.type !== 'text' && p.type !== 'input_text' && p.type !== 'output_text') return '';
+        return p.text || p.content || '';
+      })
+      .filter(Boolean)
       .join(' ');
   } else {
     text = String(content || '');
   }
   text = text.trim().replace(/\s+/g, ' ');
-  return text.length > 60 ? text.slice(0, 60) + '…' : text;
+  const limit = maxLen || 60;
+  return text.length > limit ? text.slice(0, limit) + '…' : text;
 }
 
 // Scrolls to a user message row identified by its rawIdx and flashes it.
 function _jumpToMessage(rawIdx) {
   const sid = _currentSid();
   if (!sid) return;
+
+  // For about a second after a session opens, the load-time bottom settle keeps
+  // re-claiming the scroller (ResizeObserver + timers + rAF). Without taking
+  // jump ownership the way ui.js's own question jump does, that settle wins the
+  // race and a jump made right after load silently snaps back to the tail.
+  if (typeof _cancelBottomSettle === 'function') _cancelBottomSettle();
+  const scroller = document.getElementById('messages');
+  if (scroller && typeof _beginMessageJumpScroll === 'function') {
+    _beginMessageJumpScroll(scroller);
+  }
 
   const rowId = 'msg-user-' + rawIdx;
   const row   = document.getElementById(rowId);
@@ -231,6 +254,414 @@ function toggleOutlinePanel() {
   }
 }
 
+// -- Turn minimap (HWEB-12) --------------------------------------------------
+// The same _buildEntries() user turns, drawn as compact marks in the unused
+// gutter left of the reading column. The labelled panel above stays the
+// keyboard/touch fallback; this is the always-visible index for wide desktops.
+
+const MINIMAP_MIN_MARKS   = 4;   // fewer turns than this and a map doesn't help
+const MINIMAP_MIN_GUTTER  = 52;  // px of unused gutter needed to host the rail
+const MINIMAP_PREVIEW_LEN = 140;
+
+let _minimapSid      = null;      // session the marks were built for
+let _minimapSig      = null;      // entry signature the marks were built from
+let _minimapEntries  = [];
+let _minimapObserver = null;      // one IntersectionObserver over user rows
+let _minimapObserved = new Map(); // rawIdx -> the row element being observed
+let _minimapVisible  = new Set(); // rawIdx currently intersecting the scroller
+let _minimapActive   = null;      // rawIdx carrying aria-current
+let _minimapFrame    = 0;
+let _minimapShellObserver = null;
+
+function _minimapEl() {
+  return document.getElementById('outlineMinimap');
+}
+
+function _minimapMarks() {
+  const el = _minimapEl();
+  return el ? Array.prototype.slice.call(el.querySelectorAll('.outline-mark')) : [];
+}
+
+// Width of the empty space between the pane's left edge and the reading column.
+// Measured rather than derived, so it already accounts for the .messages gutter,
+// the scrollbar, full-width chat (--msg-max: 100%, column fills the pane) and
+// browser zoom (which shrinks the pane in CSS pixels).
+function _minimapGutter(shell) {
+  const column = document.getElementById('msgInner');
+  if (!shell || !column) return 0;
+  return Math.max(0, column.getBoundingClientRect().left -
+                     shell.getBoundingClientRect().left);
+}
+
+// The terminal assistant text of the turn that starts at rawIdx, or ''.
+// Reads only loaded messages -- an unloaded turn simply has no reply preview.
+function _turnReplyExcerpt(rawIdx) {
+  const msgs = (S && S.messages) || [];
+  let reply = '';
+  for (let i = rawIdx + 1; i < msgs.length; i++) {
+    const m = msgs[i];
+    if (!m) continue;
+    if (m.role === 'user') break;                 // next turn starts here
+    if (m.role !== 'assistant') continue;
+    // A compacted turn carries its answer in the anchor scene, not in content.
+    const scene = typeof _assistantAnchorSceneFinalAnswerText === 'function'
+      ? _assistantAnchorSceneFinalAnswerText(m)
+      : '';
+    const text = _excerptText(scene || m.content, MINIMAP_PREVIEW_LEN);
+    if (text) reply = text;                       // keep the LAST one
+  }
+  return reply;
+}
+
+function _minimapAllowed() {
+  return _outlineAllowed();
+}
+
+function _teardownMinimap() {
+  if (_minimapObserver) _minimapObserver.disconnect();
+  _minimapObserved.clear();
+  _minimapVisible.clear();
+  _minimapActive = null;
+}
+
+function _ensureMinimapObserver() {
+  if (_minimapObserver) return _minimapObserver;
+  if (typeof IntersectionObserver === 'undefined') return null;
+  _minimapObserver = new IntersectionObserver(function(records) {
+    for (let i = 0; i < records.length; i++) {
+      const r = records[i];
+      const idx = Number(String(r.target.id).slice('msg-user-'.length));
+      if (!isFinite(idx)) continue;
+      if (r.isIntersecting) _minimapVisible.add(idx);
+      else _minimapVisible.delete(idx);
+    }
+    _syncMinimapActive();
+  }, { root: document.getElementById('messages'), threshold: 0 });
+  return _minimapObserver;
+}
+
+// Keeps the observer pointed at whichever user rows are currently rendered.
+// Virtualization drops and recreates rows without touching S.messages, so this
+// runs on every render, not only when the mark list changes.
+function _reobserveMinimapRows() {
+  const obs = _ensureMinimapObserver();
+  if (!obs) return;
+  const live = new Set();
+  for (let i = 0; i < _minimapEntries.length; i++) {
+    const rawIdx = _minimapEntries[i].rawIdx;
+    live.add(rawIdx);
+    const row  = document.getElementById('msg-user-' + rawIdx);
+    const prev = _minimapObserved.get(rawIdx) || null;
+    if (prev === row) continue;
+    if (prev) obs.unobserve(prev);
+    if (row) {
+      obs.observe(row);
+      _minimapObserved.set(rawIdx, row);
+    } else {
+      _minimapObserved.delete(rawIdx);
+      _minimapVisible.delete(rawIdx);
+    }
+  }
+  const stale = [];
+  _minimapObserved.forEach(function(row, rawIdx) {
+    if (!live.has(rawIdx)) stale.push([rawIdx, row]);
+  });
+  for (let i = 0; i < stale.length; i++) {
+    obs.unobserve(stale[i][1]);
+    _minimapObserved.delete(stale[i][0]);
+    _minimapVisible.delete(stale[i][0]);
+  }
+}
+
+// The last turn that starts at or above the viewport's top edge. Used only when
+// nothing intersects, so the O(turns) rect read never runs on a normal scroll.
+function _precedingRenderedTurn() {
+  const scroller = document.getElementById('messages');
+  if (!scroller) return null;
+  const top = scroller.getBoundingClientRect().top;
+  let best = null;
+  for (let i = 0; i < _minimapEntries.length; i++) {
+    const row = document.getElementById('msg-user-' + _minimapEntries[i].rawIdx);
+    if (!row) continue;
+    if (row.getBoundingClientRect().top > top) break;   // entries are in order
+    best = _minimapEntries[i].rawIdx;
+  }
+  return best;
+}
+
+// The nearest visible turn is the earliest user row still on screen. When a long
+// answer fills the viewport nothing intersects, so fall back to geometry: the
+// turn that answer belongs to. Deriving it rather than keeping the last active
+// mark is what makes a first paint, a session switch and a programmatic jump
+// (which skip the intermediate scroll states an observer would have reported)
+// all land on the turn the reader is actually inside.
+function _syncMinimapActive() {
+  let next = null;
+  _minimapVisible.forEach(function(idx) {
+    if (next === null || idx < next) next = idx;
+  });
+  if (next === null) next = _precedingRenderedTurn();
+  if (next === null) next = _minimapActive;   // scrolled above the first loaded turn
+  if (next === null || next === _minimapActive) return;
+  _minimapActive = next;
+  const el = _minimapEl();
+  const marks = _minimapMarks();
+  const focusInside = !!(el && el.contains(document.activeElement));
+  let hasStop = false;
+  for (let i = 0; i < marks.length; i++) {
+    const isActive = Number(marks[i].dataset.rawIdx) === next;
+    if (isActive) marks[i].setAttribute('aria-current', 'true');
+    else marks[i].removeAttribute('aria-current');
+    // Tab lands on the turn the reader is at, unless they are already in the rail.
+    if (!focusInside) marks[i].tabIndex = isActive ? 0 : -1;
+    if (marks[i].tabIndex === 0) hasStop = true;
+  }
+  if (!focusInside && !hasStop && marks.length) marks[0].tabIndex = 0;
+}
+
+function _setMinimapTabStop(target) {
+  const marks = _minimapMarks();
+  for (let i = 0; i < marks.length; i++) marks[i].tabIndex = marks[i] === target ? 0 : -1;
+}
+
+function _minimapPreviewEl() {
+  const el = _minimapEl();
+  return el ? el.querySelector('.outline-mark-preview') : null;
+}
+
+function _hideMinimapPreview() {
+  const preview = _minimapPreviewEl();
+  if (preview) preview.hidden = true;
+}
+
+function _showMinimapPreview(mark) {
+  const el = _minimapEl();
+  const preview = _minimapPreviewEl();
+  if (!el || !preview || !mark) return;
+  const rawIdx = Number(mark.dataset.rawIdx);
+  let entry = null;
+  for (let i = 0; i < _minimapEntries.length; i++) {
+    if (_minimapEntries[i].rawIdx === rawIdx) { entry = _minimapEntries[i]; break; }
+  }
+  if (!entry) return;
+  const reply = _turnReplyExcerpt(rawIdx);
+  preview.innerHTML =
+    '<div class="outline-preview-user">' + _escHtml(entry.excerpt) + '</div>' +
+    (reply ? '<div class="outline-preview-reply">' + _escHtml(reply) + '</div>' : '');
+  preview.hidden = false;
+  // Centre on the mark, then clamp inside the transcript pane so the first and
+  // last marks do not push the card over the header or the composer.
+  const shell = el.parentElement;
+  if (!shell) return;
+  const mapRect   = el.getBoundingClientRect();
+  const markRect  = mark.getBoundingClientRect();
+  const shellRect = shell.getBoundingClientRect();
+  const height    = preview.offsetHeight;
+  let top = markRect.top + markRect.height / 2 - height / 2;
+  top = Math.min(Math.max(top, shellRect.top + 8), shellRect.bottom - height - 8);
+  preview.style.top = Math.round(top - mapRect.top) + 'px';
+}
+
+function _renderMinimapMarks(entries) {
+  const el = _minimapEl();
+  if (!el) return;
+  const active = _minimapActive;
+  // A jump into unloaded history re-renders the transcript, which rebuilds the
+  // marks under a keyboard user's feet. Put focus back on the same TURN, keyed
+  // by the session-absolute index so a prepend or an append cannot move it.
+  const focusedMark = _minimapMarks().indexOf(document.activeElement) >= 0
+    ? document.activeElement
+    : null;
+  const focusedSessionIdx = _minimapMarkSessionIndex(focusedMark);
+  el.innerHTML = entries.map(function(e) {
+    const label = _escHtml(t('outline_minimap_mark', e.label, e.excerpt));
+    const current = e.rawIdx === active ? ' aria-current="true"' : '';
+    const session = _minimapSessionIndex(e.rawIdx);
+    const sessionAttr = session === null ? '' : ' data-session-idx="' + session + '"';
+    return '<button class="outline-mark" type="button" data-raw-idx="' + e.rawIdx +
+      '"' + sessionAttr + ' tabindex="-1" aria-label="' + label + '"' + current + '></button>';
+  }).join('') + '<div class="outline-mark-preview" hidden aria-hidden="true"></div>';
+  const marks = _minimapMarks();
+  if (!marks.length) return;
+  let stop = marks[0];
+  for (let i = 0; i < marks.length; i++) {
+    if (Number(marks[i].dataset.rawIdx) === active) { stop = marks[i]; break; }
+  }
+  if (focusedSessionIdx !== null) {
+    const raw = _minimapRawIdxForSessionIndex(focusedSessionIdx);
+    let refocus = null;
+    for (let i = 0; i < marks.length && raw !== null; i++) {
+      if (Number(marks[i].dataset.rawIdx) === raw) { refocus = marks[i]; break; }
+    }
+    refocus = refocus || marks[marks.length - 1];
+    refocus.tabIndex = 0;
+    refocus.focus();
+    return;
+  }
+  stop.tabIndex = 0;
+}
+
+// Rebuilds marks when the turn list changed, and always reconciles geometry,
+// visibility and row observation. Cheap enough to run after every render.
+function _syncMinimap() {
+  const el = _minimapEl();
+  if (!el) return;
+  const shell = el.parentElement;
+
+  if (!_minimapAllowed()) {
+    el.hidden = true;
+    _hideMinimapPreview();
+    _teardownMinimap();
+    _minimapSig = null;
+    _minimapEntries = [];
+    return;
+  }
+
+  const sid = _currentSid();
+  if (sid !== _minimapSid) {          // session switch: no mark identity carries over
+    _teardownMinimap();
+    _minimapSid = sid;
+    _minimapSig = null;
+  }
+
+  const entries = (sid && S && S.messages) ? _buildEntries() : [];
+  // The locale is part of the signature because the mark labels are built with
+  // t() rather than data-i18n-*, so applyLocaleToDOM() cannot retranslate them.
+  // The loaded window's base offset is part of it because each mark is stamped
+  // with a session-absolute index derived from that base; if the base moves, a
+  // stamp made under the old one no longer resolves to its own turn.
+  const sig = document.documentElement.lang + '|' + _minimapSessionIndex(0) + '|' +
+    entries.map(function(e) { return e.rawIdx + ':' + e.excerpt; }).join(' ');
+  _minimapEntries = entries;
+  if (sig !== _minimapSig) {
+    _minimapSig = sig;
+    _hideMinimapPreview();
+    _renderMinimapMarks(entries);
+  }
+
+  const fits = entries.length >= MINIMAP_MIN_MARKS &&
+               _minimapGutter(shell) >= MINIMAP_MIN_GUTTER;
+  if (el.hidden !== !fits) el.hidden = !fits;
+  if (!fits) {
+    _hideMinimapPreview();
+    _teardownMinimap();
+    return;
+  }
+  _reobserveMinimapRows();
+  if (_minimapActive === null) _syncMinimapActive();
+}
+
+function _scheduleMinimapSync() {
+  if (_minimapFrame) return;
+  const raf = window.requestAnimationFrame ||
+    function(fn) { return window.setTimeout(fn, 16); };
+  _minimapFrame = raf(function() {
+    _minimapFrame = 0;
+    _syncMinimap();
+  }) || 1;
+}
+
+// The session-absolute index of a loaded message, or null when ui.js's index
+// helpers are unavailable. This is the one identity that survives BOTH ends of
+// a reload: _loadOlderMessages prepends and shifts every rawIdx down, and any
+// other writer (a second tab, a messaging integration) can append while a load
+// is in flight, so neither a raw index nor a position in the turn list holds.
+function _minimapSessionIndex(rawIdx) {
+  if (typeof _messageSessionIndexForRawIdx !== 'function') return null;
+  const idx = _messageSessionIndexForRawIdx(rawIdx);
+  return (idx === null || !isFinite(idx)) ? null : idx;
+}
+
+// The index a mark was stamped with when it was rendered, or null.
+function _minimapMarkSessionIndex(mark) {
+  if (!mark || !mark.dataset || mark.dataset.sessionIdx === undefined) return null;
+  const idx = Number(mark.dataset.sessionIdx);
+  return isFinite(idx) ? idx : null;
+}
+
+function _minimapRawIdxForSessionIndex(sessionIdx) {
+  if (sessionIdx === null || typeof _messageRawIdxForSessionIndex !== 'function') return null;
+  const raw = _messageRawIdxForSessionIndex(sessionIdx);
+  return (raw === null || !isFinite(raw) || raw < 0) ? null : raw;
+}
+
+// A mark's rawIdx is an index into the CURRENTLY loaded messages. While the
+// session is still truncated (the initial fetch is a tail window that
+// _loadOlderMessages grows backwards) that index is tail-relative, and
+// _jumpToMessage's own recovery path replaces S.messages with the COMPLETE
+// transcript -- which renumbers every row. So when history is still unloaded,
+// run the existing explicit full-load first, then re-resolve the mark from its
+// session-absolute index.
+function _activateMinimapMark(mark) {
+  const rawIdx = Number(mark.dataset.rawIdx);
+  const sid = _currentSid();
+  const truncated = typeof _messagesTruncated !== 'undefined' && _messagesTruncated;
+  const sessionIdx = _minimapMarkSessionIndex(mark);
+  if (!truncated || sessionIdx === null) {
+    _jumpToMessage(rawIdx);
+    return;
+  }
+  _ensureOutlineMessagesLoaded(sid).then(function(loaded) {
+    if (_currentSid() !== sid) return;
+    if (!loaded) { _jumpToMessage(rawIdx); return; }
+    _syncMinimap();                      // marks now carry absolute indices
+    const resolved = _minimapRawIdxForSessionIndex(sessionIdx);
+    _jumpToMessage(resolved === null ? rawIdx : resolved);
+  });
+}
+
+function _onMinimapKeydown(ev) {
+  const marks = _minimapMarks();
+  const cur = marks.indexOf(document.activeElement);
+  if (cur < 0) return;
+  let next = -1;
+  if (ev.key === 'ArrowDown' || ev.key === 'ArrowRight') next = Math.min(marks.length - 1, cur + 1);
+  else if (ev.key === 'ArrowUp' || ev.key === 'ArrowLeft') next = Math.max(0, cur - 1);
+  else if (ev.key === 'Home') next = 0;
+  else if (ev.key === 'End') next = marks.length - 1;
+  else return;
+  ev.preventDefault();
+  _setMinimapTabStop(marks[next]);
+  marks[next].focus();
+}
+
+function _bindMinimap() {
+  const el = _minimapEl();
+  if (!el || el.dataset.bound === '1') return;
+  el.dataset.bound = '1';
+  const markOf = function(ev) {
+    const target = ev.target;
+    return target && target.closest ? target.closest('.outline-mark') : null;
+  };
+  el.addEventListener('click', function(ev) {
+    const mark = markOf(ev);
+    if (!mark) return;
+    _setMinimapTabStop(mark);
+    _activateMinimapMark(mark);
+  });
+  el.addEventListener('pointerover', function(ev) {
+    const mark = markOf(ev);
+    if (mark) _showMinimapPreview(mark);
+  });
+  el.addEventListener('pointerout', function(ev) {
+    if (!el.contains(ev.relatedTarget)) _hideMinimapPreview();
+  });
+  el.addEventListener('focusin', function(ev) {
+    const mark = markOf(ev);
+    if (!mark) return;
+    _setMinimapTabStop(mark);
+    _showMinimapPreview(mark);
+  });
+  el.addEventListener('focusout', function(ev) {
+    if (!el.contains(ev.relatedTarget)) _hideMinimapPreview();
+  });
+  el.addEventListener('keydown', _onMinimapKeydown);
+  if (typeof ResizeObserver !== 'undefined' && el.parentElement && !_minimapShellObserver) {
+    _minimapShellObserver = new ResizeObserver(_scheduleMinimapSync);
+    _minimapShellObserver.observe(el.parentElement);
+  }
+}
+
 // Jump target exposed on window so inline onclick handlers can reach it.
 window._outlineJump = _jumpToMessage;
 window.applyConversationOutlinePreference = applyConversationOutlinePreference;
@@ -259,6 +690,7 @@ window.applyConversationOutlinePreference = applyConversationOutlinePreference;
         _renderPanel();
       }
     }
+    _scheduleMinimapSync();
     return result;
   };
 })();
@@ -267,6 +699,7 @@ window.applyConversationOutlinePreference = applyConversationOutlinePreference;
 window.toggleOutlinePanel = toggleOutlinePanel;
 
 document.addEventListener('DOMContentLoaded', function() {
+  _bindMinimap();
   applyConversationOutlinePreference();
   const root = document.documentElement;
   const rightPanel = document.querySelector('.rightpanel');
@@ -278,7 +711,7 @@ document.addEventListener('DOMContentLoaded', function() {
     _outlineWorkspaceObserver = new MutationObserver(applyConversationOutlinePreference);
     _outlineWorkspaceObserver.observe(root, {
       attributes: true,
-      attributeFilter: ['data-workspace-panel']
+      attributeFilter: ['data-workspace-panel', 'data-chat-width']
     });
     // Also re-evaluate when the active main panel changes. switchPanel() is a
     // global function declaration (called via inline onclick), so it can't be

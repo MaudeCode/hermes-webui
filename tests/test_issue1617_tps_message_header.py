@@ -138,6 +138,8 @@ def test_tps_header_rendering_respects_display_setting():
     assert "isTpsDisplayEnabled()?_formatTurnTps(value):''" in UI_JS, (
         "live TPS updates must remove/suppress the chip when the setting is off"
     )
-    assert "isTpsDisplayEnabled()?_formatTurnTps(m._turnTps):''" in UI_JS, (
+    # HWEB-4 moved the settled chip out of the (now chrome-free) assistant header
+    # and into the final-response metadata footer; the display gate moved with it.
+    assert "const tpsText=isTpsDisplayEnabled()?_formatTurnTps(msg._turnTps):'';" in UI_JS, (
         "reloaded assistant messages must not render persisted TPS while disabled"
     )

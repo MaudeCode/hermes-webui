@@ -838,7 +838,7 @@ def test_describe_git_version_suppresses_unknown_dirty_probe_status(
 
     def fake_git(args, cwd, timeout=10):
         calls.append(args)
-        if args == ['describe', '--tags', '--always']:
+        if args == ['describe', '--tags', '--always', '--abbrev=8']:
             return 'v0.52.5', True
         if args == ['diff-index', '--quiet', 'HEAD', '--']:
             return probe_output, False
@@ -848,14 +848,14 @@ def test_describe_git_version_suppresses_unknown_dirty_probe_status(
 
     assert updates._describe_git_version(tmp_path) == 'v0.52.5'
     assert calls == [
-        ['describe', '--tags', '--always'],
+        ['describe', '--tags', '--always', '--abbrev=8'],
         ['diff-index', '--quiet', 'HEAD', '--'],
     ]
 
 
 def test_describe_git_version_marks_exact_dirty_probe_status(tmp_path, monkeypatch):
     def fake_git(args, cwd, timeout=10):
-        if args == ['describe', '--tags', '--always']:
+        if args == ['describe', '--tags', '--always', '--abbrev=8']:
             return 'v0.52.5', True
         if args == ['diff-index', '--quiet', 'HEAD', '--']:
             return 'git exited with status 1', False
