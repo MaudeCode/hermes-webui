@@ -5107,6 +5107,60 @@ async function _archiveSession(session, archived=true, beforeListRender=null){
   }catch(err){if(renderHold) await renderHold.catch(()=>{});_pendingSessionReflowPositions=null;showToast(t('session_archive_failed')+err.message);return false;}
 }
 
+// style.css hides the whole .session-actions cluster under
+// (hover:none) and (pointer:coarse), so the inline archive control below is
+// unreachable on touch-primary devices. Fails to `true` on uncertainty: a
+// redundant menu entry costs a row, a missing one costs the only non-gesture
+// way to archive.
+function _sessionInlineActionsHidden(){
+  try{ return !window.matchMedia || window.matchMedia('(hover:none) and (pointer:coarse)').matches; }
+  catch(_){ return true; }
+}
+
+// The action menu keeps carrying archive/restore for any caller that has no
+// inline control to fall back on. Two such callers exist: a sidebar row on a
+// coarse-pointer device (the cluster is display:none), and the mobile titlebar
+// long-press in panels.js, which anchors on the conversation title and is wired
+// on every touch-capable device — including a hybrid laptop whose primary
+// pointer is `fine`, where the media query alone would wrongly drop the entry.
+function _sessionArchiveNeedsMenuEntry(anchorEl){
+  if(_sessionInlineActionsHidden()) return true;
+  try{ return !(anchorEl && anchorEl.closest && anchorEl.closest('.session-item,.session-child-session-fork')); }
+  catch(_){ return true; }
+}
+
+// Inline archive/restore control that sits beside the ⋯ trigger inside
+// .session-actions. Routes through _archiveSession so worktree-retention
+// messaging, the active-session localStorage cleanup, the reduced-motion
+// reflow and the read-only guard all stay in one place. The pointer/click
+// stopPropagation mirrors the ⋯ trigger: the row itself opens the session,
+// so the button must not let the event reach it.
+function _buildSessionArchiveToggle(session){
+  const btn=document.createElement('button');
+  btn.type='button';
+  btn.className='session-archive-toggle';
+  const label=session.archived?t('session_restore'):t('session_archive');
+  // The tooltip keeps the worktree-retention wording the menu entry used to
+  // carry; the accessible name stays the bare action.
+  const desc=session.archived?t('session_restore_desc'):_sessionArchiveDescription(session);
+  btn.title=desc?(label+' — '+desc):label;
+  btn.setAttribute('aria-label',label);
+  btn.innerHTML=session.archived?ICONS.unarchive:ICONS.archive;
+  const stopPointer=(e)=>e.stopPropagation();
+  btn.onpointerdown=stopPointer;
+  btn.onpointerup=stopPointer;
+  btn.onclick=(e)=>{
+    e.stopPropagation();
+    e.preventDefault();
+    // stopPropagation keeps the document-level closer from running, and
+    // renderSessionListFromCache() defers its repaint while a menu is open —
+    // so an open ⋯ menu on any row would leave the archived row on screen.
+    closeSessionActionMenu();
+    void _archiveSession(session,!session.archived);
+  };
+  return btn;
+}
+
 function _openSessionActionMenu(session, anchorEl){
   const isReadOnly = _isReadOnlySession(session);
   if(_sessionActionMenu && _sessionActionSessionId===session.session_id && _sessionActionAnchor===anchorEl){
@@ -5206,15 +5260,21 @@ function _openSessionActionMenu(session, anchorEl){
       _showProjectPicker(session,refreshedAnchor||anchorEl);
     }
   ));
-  menu.appendChild(_buildSessionAction(
-    session.archived?t('session_restore'):t('session_archive'),
-    session.archived?t('session_restore_desc'):_sessionArchiveDescription(session),
-    session.archived?ICONS.unarchive:ICONS.archive,
-    async()=>{
-      closeSessionActionMenu();
-      await _archiveSession(session,!session.archived);
-    }
-  ));
+  // Archive/restore normally lives inline beside the ⋯ trigger
+  // (_buildSessionArchiveToggle), because it is a frequent session-list action.
+  // It stays in this menu only for callers with no inline control to use — see
+  // _sessionArchiveNeedsMenuEntry().
+  if(_sessionArchiveNeedsMenuEntry(anchorEl)){
+    menu.appendChild(_buildSessionAction(
+      session.archived?t('session_restore'):t('session_archive'),
+      session.archived?t('session_restore_desc'):_sessionArchiveDescription(session),
+      session.archived?ICONS.unarchive:ICONS.archive,
+      async()=>{
+        closeSessionActionMenu();
+        await _archiveSession(session,!session.archived);
+      }
+    ));
+  }
   if(isExternalSession && !session.archived){
     menu.appendChild(_buildSessionAction(
       t('session_hide_external'),
@@ -8952,6 +9012,7 @@ function renderSessionListFromCache(){
               e.preventDefault();
               _openSessionActionMenu(child, menuBtn);
             };
+            actions.appendChild(_buildSessionArchiveToggle(child));
             actions.appendChild(menuBtn);
             row.appendChild(actions);
             row.append(
@@ -9051,6 +9112,7 @@ function renderSessionListFromCache(){
         e.preventDefault();
         _openSessionActionMenu(s, menuBtn);
       };
+      actions.appendChild(_buildSessionArchiveToggle(s));
       actions.appendChild(menuBtn);
       el.appendChild(actions);
     }

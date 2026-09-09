@@ -247,30 +247,31 @@ class TestProjectDotPlacement:
         assert "padding:8px 8px" in rule, (
             f"Expected 'padding:8px 8px' for at-rest session items, got: {rule!r}"
         )
-        # Mobile also drops from 86px to 40px — the absolute timestamp is
-        # gone (now flex-flow), so only the always-visible action button's
-        # footprint (26px + 6px gap ≈ 32px, rounded to 40px) needs reservation.
-        assert ".session-item{min-height:44px;padding:10px 40px 10px 12px;}" in STYLE_CSS
+        # Mobile also drops from 86px — the absolute timestamp is gone (now
+        # flex-flow), so only the always-visible action cluster needs
+        # reservation: two 26px buttons at right:6px (58px, rounded to 64px).
+        assert ".session-item{min-height:44px;padding:10px 64px 10px 12px;}" in STYLE_CSS
 
     def test_session_item_expands_padding_on_hover_and_attention(self):
         """PR #1110: Touch layout-shift fix — :hover removed from the COMBINED
         padding-right selector. Touch devices (iPad, phone) see hover:none so
         they skip the @media (hover:hover) block below. Mouse devices see
         hover:hover and get the padding-right on hover.
-        streaming/unread/needs-attention/focus-within/menu-open expand to 40px for all devices."""
-        # Touch-safe combined rule (no :hover in this one)
+        streaming/unread/needs-attention expand to 40px (attention indicator) and
+        focus-within/menu-open to 64px (the two-button action cluster) on all devices."""
+        # Touch-safe combined rules (no :hover in either one)
         sel = (
             ".session-item.streaming,.session-item.unread,"
-            ".session-item.needs-attention,"
-            ".session-item:focus-within,"
-            ".session-item.menu-open"
+            ".session-item.needs-attention"
         )
         idx = STYLE_CSS.find(sel)
-        assert idx >= 0, (
-            "Combined streaming/unread/focus-within/menu-open padding rule not found"
-        )
+        assert idx >= 0, "Combined streaming/unread/needs-attention padding rule not found"
         rule = STYLE_CSS[idx: STYLE_CSS.find("}", idx)]
         assert "padding-right:40px" in rule
+        sel_actions = ".session-item:focus-within,.session-item.menu-open"
+        idx_actions = STYLE_CSS.find(sel_actions)
+        assert idx_actions >= 0, "focus-within/menu-open padding rule not found"
+        assert "padding-right:64px" in STYLE_CSS[idx_actions: STYLE_CSS.find("}", idx_actions)]
         # Desktop hover padding restored via @media (hover:hover) — mouse devices only
         assert "@media (hover:hover)" in STYLE_CSS
-        assert ".session-item:hover{padding-right:40px;}" in STYLE_CSS
+        assert ".session-item:hover{padding-right:64px;}" in STYLE_CSS

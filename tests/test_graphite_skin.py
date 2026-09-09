@@ -49,7 +49,10 @@ def test_graphite_skin_tunes_workbench_chrome():
     assert ':root[data-skin="graphite"] .session-item.active' in CSS
     assert ':root[data-skin="graphite"] .session-item.active{position:relative;padding:10px 12px 10px 18px;' in CSS
     assert ':root[data-skin="graphite"] .session-item.active.streaming' in CSS
-    assert ':root[data-skin="graphite"] .session-item.active.menu-open{padding-right:40px;}' in CSS
+    # Streaming/unread/needs-attention reserve the 26px attention indicator; the
+    # focus/menu-open states reserve the two-button action cluster (HWEB-16).
+    assert ':root[data-skin="graphite"] .session-item.active.needs-attention{padding-right:40px;}' in CSS
+    assert ':root[data-skin="graphite"] .session-item.active.menu-open{padding-right:64px;}' in CSS
     assert ':root[data-skin="graphite"] .session-item.active:hover .session-time:not(.is-hidden)' in CSS
     assert ':root[data-skin="graphite"] .session-item.active .session-lineage-count' in CSS
     assert ':root[data-skin="graphite"] #mainSettings .theme-pick-btn.active' in CSS
