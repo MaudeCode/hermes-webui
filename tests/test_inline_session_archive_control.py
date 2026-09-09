@@ -111,14 +111,52 @@ def test_inline_control_never_lets_the_click_reach_the_row():
     assert btn["tag"] == "BUTTON" or btn["tag"] == "button"
 
 
-def test_archive_is_no_longer_an_action_menu_entry():
+def test_archive_menu_entry_only_survives_where_the_inline_control_is_hidden():
+    """Coarse-pointer devices hide .session-actions, so the menu keeps archive there."""
     menu_body = _function_block(SESSIONS_JS, "_openSessionActionMenu")
 
-    assert "_archiveSession" not in menu_body
-    assert "t('session_archive')" not in menu_body
-    assert "t('session_restore')" not in menu_body
+    guard = menu_body.find("if(_sessionInlineActionsHidden()){")
+    assert guard >= 0, "archive menu entry is not gated on the inline control being hidden"
+    # The one remaining _archiveSession call in the menu is inside that guard.
+    assert menu_body.count("_archiveSession(session,!session.archived)") == 1
+    assert menu_body.index("_archiveSession(session,!session.archived)") > guard
     # The separate external-session hide entry is untouched.
     assert "t('session_hide_external')" in menu_body
+
+
+def _inline_actions_hidden(media_matches):
+    """Run _sessionInlineActionsHidden with a stubbed matchMedia."""
+    if NODE is None:
+        pytest.skip("node not on PATH")
+    driver = "\n".join(
+        [
+            "const cases=JSON.parse(process.argv[1]);",
+            _function_block(SESSIONS_JS, "_sessionInlineActionsHidden"),
+            "const out=cases.map(c=>{",
+            "  globalThis.window = c === null ? {} : {matchMedia:(q)=>({matches: q === '(hover:none) and (pointer:coarse)' && c})};",
+            "  return _sessionInlineActionsHidden();",
+            "});",
+            "process.stdout.write(JSON.stringify(out));",
+        ]
+    )
+    result = subprocess.run(
+        [NODE, "-e", driver, json.dumps(media_matches)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_inline_actions_are_reported_hidden_only_on_coarse_pointer_devices():
+    coarse, fine, no_match_media = _inline_actions_hidden([True, False, None])
+
+    assert coarse is True
+    assert fine is False
+    # Fail closed: an unknown environment keeps the menu entry rather than
+    # leaving swipe as the only way to archive.
+    assert no_match_media is True
 
 
 def test_both_editable_row_builders_mount_the_inline_control():
@@ -136,3 +174,24 @@ def test_row_reserves_room_for_two_controls_when_the_cluster_is_visible():
     assert ".session-item{min-height:44px;padding:10px 64px 10px 12px;}" in STYLE_CSS
     # The inline control shares the ⋯ trigger's chrome instead of redefining it.
     assert ".session-actions-trigger,.session-archive-toggle{width:26px;height:26px;" in STYLE_CSS
+
+
+def test_every_skin_active_row_reserves_the_same_cluster_width():
+    """Skin overrides are higher-specificity, so a stale 40px there wins on active rows."""
+    for skin in ("graphite", "codex", "terracotta", "github"):
+        cluster = (
+            f'  :root[data-skin="{skin}"] .session-item.active:focus-within,\n'
+            f'  :root[data-skin="{skin}"] .session-item.active.menu-open{{padding-right:64px;}}'
+        )
+        assert cluster in STYLE_CSS, f"{skin} focus/menu-open reservation not widened"
+        hover = (
+            f'@media (hover:hover){{:root[data-skin="{skin}"] '
+            f'.session-item.active:hover{{padding-right:64px;}}}}'
+        )
+        assert hover in STYLE_CSS, f"{skin} hover reservation not widened"
+        # The attention-indicator-only states legitimately stay at 40px.
+        attention = (
+            f'  :root[data-skin="{skin}"] .session-item.active.needs-attention'
+            f'{{padding-right:40px;}}'
+        )
+        assert attention in STYLE_CSS, f"{skin} attention reservation changed unexpectedly"

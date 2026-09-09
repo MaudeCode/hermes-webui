@@ -5107,6 +5107,17 @@ async function _archiveSession(session, archived=true, beforeListRender=null){
   }catch(err){if(renderHold) await renderHold.catch(()=>{});_pendingSessionReflowPositions=null;showToast(t('session_archive_failed')+err.message);return false;}
 }
 
+// style.css hides the whole .session-actions cluster under
+// (hover:none) and (pointer:coarse), so the inline archive control below is
+// unreachable on touch-primary devices and the long-press action menu has to
+// keep carrying archive/restore there. Fails to `true` on uncertainty: a
+// redundant menu entry costs a row, a missing one costs the only non-gesture
+// way to archive.
+function _sessionInlineActionsHidden(){
+  try{ return !window.matchMedia || window.matchMedia('(hover:none) and (pointer:coarse)').matches; }
+  catch(_){ return true; }
+}
+
 // Inline archive/restore control that sits beside the ⋯ trigger inside
 // .session-actions. Routes through _archiveSession so worktree-retention
 // messaging, the active-session localStorage cleanup, the reduced-motion
@@ -5234,8 +5245,21 @@ function _openSessionActionMenu(session, anchorEl){
       _showProjectPicker(session,refreshedAnchor||anchorEl);
     }
   ));
-  // Archive/restore is not in this menu: it lives inline beside the ⋯ trigger
+  // Archive/restore normally lives inline beside the ⋯ trigger
   // (_buildSessionArchiveToggle), because it is a frequent session-list action.
+  // It stays in this menu only where that control is hidden — see
+  // _sessionInlineActionsHidden().
+  if(_sessionInlineActionsHidden()){
+    menu.appendChild(_buildSessionAction(
+      session.archived?t('session_restore'):t('session_archive'),
+      session.archived?t('session_restore_desc'):_sessionArchiveDescription(session),
+      session.archived?ICONS.unarchive:ICONS.archive,
+      async()=>{
+        closeSessionActionMenu();
+        await _archiveSession(session,!session.archived);
+      }
+    ));
+  }
   if(isExternalSession && !session.archived){
     menu.appendChild(_buildSessionAction(
       t('session_hide_external'),
