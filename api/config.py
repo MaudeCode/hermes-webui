@@ -10365,23 +10365,56 @@ def _normalize_appearance(theme, skin) -> tuple[str, str]:
     return next_theme, next_skin
 
 
+# Memoized read cache for _read_raw_settings_file, keyed on (the SETTINGS_FILE
+# path, st_mtime_ns, st_size, st_ino, st_ctime_ns) — the same file identity
+# _load_yaml_config_file_identified uses next door, for the same reason. Every
+# load_settings() goes through here (31 call sites across routes/streaming, at
+# least one per GET /api/sessions), so without a cache a UI poll storm turns
+# into a read + json.loads storm on the same unchanged file (HWEB-40).
+#
+# save_settings() writes through _atomic_write_settings_text, i.e. rename onto a
+# fresh inode, so st_ino/st_ctime_ns invalidate the entry even for a same-size
+# write that restores mtime — a saved setting is visible on the next read with
+# no restart and no explicit invalidation hook to keep in sync.
+#
+# Callers get a deep copy: load_settings() copies only the top level of the
+# stored dict, so a nested dict/list value would otherwise stay shared with the
+# cache and a caller mutating it would corrupt every later read.
+_settings_file_cache: dict[str, tuple] = {}
+_settings_file_cache_lock = threading.Lock()
+
+
 def _read_raw_settings_file() -> dict:
     """Read settings.json without applying defaults."""
     try:
-        if not SETTINGS_FILE.exists():
-            return {}
+        st = SETTINGS_FILE.stat()
     except OSError:
-        # PermissionError or other OS-level error (e.g. UID mismatch in Docker)
-        # Treat as missing rather than failing startup.
-        logger.debug("Cannot stat settings file %s (inaccessible?)", SETTINGS_FILE)
+        # Missing file, PermissionError, or other OS-level error (e.g. UID
+        # mismatch in Docker). Treat as missing rather than failing startup.
+        logger.debug("Cannot stat settings file %s (missing or inaccessible?)", SETTINGS_FILE)
         return {}
 
+    cache_key = str(SETTINGS_FILE)
+    stat_key = (st.st_mtime_ns, st.st_size, st.st_ino, st.st_ctime_ns)
+    with _settings_file_cache_lock:
+        cached = _settings_file_cache.get(cache_key)
+        if cached is not None and cached[0] == stat_key:
+            return copy.deepcopy(cached[1])
+
+    # Cache miss / stale: read off disk outside the lock so a slow read doesn't
+    # serialize unrelated paths; a concurrent duplicate read is harmless.
     try:
         loaded = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
     except Exception:
+        # Do NOT cache the failure: a partially written file re-read on the next
+        # call is cheaper than pinning {} until the next stat change.
         logger.debug("Failed to load settings from %s", SETTINGS_FILE)
         return {}
-    return loaded if isinstance(loaded, dict) else {}
+
+    raw = loaded if isinstance(loaded, dict) else {}
+    with _settings_file_cache_lock:
+        _settings_file_cache[cache_key] = (stat_key, raw)
+    return copy.deepcopy(raw)
 
 
 def _extract_persisted_speech_keys(stored: dict) -> set[str]:

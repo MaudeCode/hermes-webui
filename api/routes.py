@@ -991,6 +991,7 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
 def _find_skill_in_dirs(name: str, skills_dirs: list[Path]) -> tuple[Path | None, Path | None]:
     """Resolve a WebUI skill name inside explicit skills directories."""
     from agent.skill_utils import iter_skill_index_files
+    from api.streaming import _walk_skill_dirs
     from tools.skills_tool import _EXCLUDED_SKILL_DIRS, _parse_frontmatter
 
     raw_name = str(name or "").strip().strip("/")
@@ -1029,11 +1030,16 @@ def _find_skill_in_dirs(name: str, skills_dirs: list[Path]) -> tuple[Path | None
             except Exception:
                 continue
 
-        for legacy_md in skills_dir.rglob("*.md"):
-            if legacy_md.name == "SKILL.md":
-                continue
-            if legacy_md.stem == raw_name and _skill_path_within(skills_dir, legacy_md):
-                return legacy_md.parent, legacy_md
+        # Pruned walk, not rglob: this legacy fallback runs precisely when the
+        # pruned SKILL.md pass above found nothing, so an unpruned rglob here
+        # made the miss path the most expensive one (HWEB-40).
+        for legacy_root, legacy_names in _walk_skill_dirs(skills_dir):
+            for legacy_name in legacy_names:
+                if legacy_name == "SKILL.md" or not legacy_name.endswith(".md"):
+                    continue
+                legacy_md = legacy_root / legacy_name
+                if legacy_md.stem == raw_name and _skill_path_within(skills_dir, legacy_md):
+                    return legacy_md.parent, legacy_md
     return None, None
 
 
@@ -30367,11 +30373,16 @@ def _handle_skill_delete(handler, body):
         return bad(handler, str(e))
     import shutil
 
+    from api.streaming import _iter_skill_md_pruned
+
     skill_name = str(body["name"]).strip().lower().replace(" ", "-")
     if not skill_name or "/" in skill_name or ".." in skill_name:
         return bad(handler, "Invalid skill name")
     skills_dir = _active_skills_dir()
-    matches = [p for p in skills_dir.rglob("SKILL.md") if p.parent.name == skill_name]
+    # Pruned walk, not rglob: a skill that vendors a dependency tree can carry a
+    # nested <name>/SKILL.md, and an unpruned match would rmtree that vendored
+    # directory instead of the skill the caller named (HWEB-40).
+    matches = [p for p in _iter_skill_md_pruned(skills_dir) if p.parent.name == skill_name]
     if not matches:
         return bad(handler, "Skill not found", 404)
     skill_dir = matches[0].parent
