@@ -7,6 +7,7 @@ pathspecs, and keeps all Git subprocess calls shell-free and bounded.
 
 from __future__ import annotations
 
+import copy
 import difflib
 import logging
 import os
@@ -14,6 +15,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import re
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -29,6 +31,11 @@ logger = logging.getLogger(__name__)
 GIT_TIMEOUT = 5
 GIT_REMOTE_TIMEOUT = 60
 STATUS_FILE_LIMIT = 500
+# git_status is polled by the workspace panel and re-read by every mutation
+# helper. Repeat calls on an unchanged repository reuse the previous payload;
+# the TTL bounds staleness for working-tree edits, which do not touch .git.
+STATUS_CACHE_TTL = 2.0
+STATUS_CACHE_LIMIT = 32
 DIFF_SIZE_LIMIT = 512 * 1024
 COMMIT_MESSAGE_DIFF_LIMIT = 64 * 1024
 WORKSPACE_GIT_DESTRUCTIVE_ENV = "HERMES_WEBUI_WORKSPACE_GIT_DESTRUCTIVE"
@@ -139,6 +146,8 @@ class GitContext:
 
 _LOCKS_GUARD = threading.Lock()
 _OP_LOCKS: dict[str, threading.Lock] = {}
+_STATUS_CACHE_GUARD = threading.Lock()
+_STATUS_CACHE: dict[str, tuple[float, str, tuple, dict]] = {}
 
 
 @contextmanager
@@ -154,6 +163,10 @@ def _git_mutation_lock(ctx: GitContext):
     try:
         yield
     finally:
+        # Every mutation helper runs under this lock, so releasing it is the one
+        # chokepoint where the cached status is guaranteed stale — including the
+        # untracked-file deletions in git_discard that leave .git untouched.
+        _invalidate_status_cache(ctx.repo_root)
         lock.release()
 
 
@@ -540,22 +553,20 @@ def _parse_numstat(text: str, ctx: GitContext) -> dict[str, tuple[int, int, bool
     return stats
 
 
-def _parse_path_list(text: str, ctx: GitContext) -> set[str]:
-    paths: set[str] = set()
-    for raw_path in text.split("\0"):
-        if not raw_path:
-            continue
-        workspace_path = _workspace_rel(ctx, raw_path)
-        if workspace_path is not None:
-            paths.add(workspace_path)
-    return paths
+def _collect_numstat(ctx: GitContext, cached: bool) -> dict[str, tuple[int, int, bool]] | None:
+    """Line counts per changed path, or None when git could not answer.
 
-
-def _collect_diff_paths(ctx: GitContext, cached: bool, *, ignore_cr_at_eol: bool = True) -> set[str] | None:
-    args = ["diff", "--name-only", "-z"]
-    args.append("--no-textconv")
-    if ignore_cr_at_eol:
-        args.append("--ignore-cr-at-eol")
+    The key set doubles as the `diff --name-only` path set the caller used to
+    ask for separately: both forms apply the same filters, and a mode-only
+    change is reported by --numstat as `0\t0\tpath`. None means "git failed",
+    which callers must not read as "nothing changed".
+    """
+    args = [
+        "diff",
+        "--numstat",
+        "--no-textconv",
+        "--ignore-cr-at-eol",
+    ]
     if cached:
         args.append("--cached")
     args.extend(["--", _workspace_pathspec(ctx)])
@@ -568,31 +579,6 @@ def _collect_diff_paths(ctx: GitContext, cached: bool, *, ignore_cr_at_eol: bool
     )
     if result.returncode != 0:
         return None
-    return _parse_path_list(result.stdout, ctx)
-
-
-def _collect_numstat(
-    ctx: GitContext,
-    cached: bool,
-    *,
-    ignore_cr_at_eol: bool = True,
-) -> dict[str, tuple[int, int, bool]]:
-    args = ["diff", "--numstat"]
-    args.append("--no-textconv")
-    if ignore_cr_at_eol:
-        args.append("--ignore-cr-at-eol")
-    if cached:
-        args.append("--cached")
-    args.extend(["--", _workspace_pathspec(ctx)])
-    result = _run_git(
-        ctx,
-        args,
-        check=False,
-        disable_filter_attributes=workspace_git_destructive_enabled(),
-        neutralize_filter_programs=True,
-    )
-    if result.returncode != 0:
-        return {}
     return _parse_numstat(result.stdout, ctx)
 
 
@@ -615,8 +601,75 @@ def _count_untracked_file(path: Path) -> tuple[int, int, bool]:
     return len(text.splitlines()) or (1 if text else 0), 0, False
 
 
+def _resolve_git_dir(repo_root: Path) -> Path:
+    """The directory holding `index` and `HEAD`, following a worktree pointer file."""
+    dot_git = repo_root / ".git"
+    try:
+        if dot_git.is_file():
+            text = dot_git.read_text(encoding="utf-8", errors="replace").strip()
+            if text.startswith("gitdir:"):
+                target = Path(text[len("gitdir:"):].strip())
+                return target if target.is_absolute() else (repo_root / target)
+    except OSError:
+        pass
+    return dot_git
+
+
+def _status_fingerprint(repo_root: Path) -> tuple:
+    git_dir = _resolve_git_dir(repo_root)
+    parts: list = [workspace_git_destructive_enabled()]
+    for name in ("index", "HEAD"):
+        try:
+            st = (git_dir / name).stat()
+            parts.append((st.st_mtime_ns, st.st_size, st.st_ino))
+        except OSError:
+            parts.append(None)
+    return tuple(parts)
+
+
+def _cached_status(workspace: Path) -> dict | None:
+    """The previous payload for this workspace, or None if it may be stale.
+
+    Looked up before the context is resolved so a hit costs no subprocess at
+    all, including the `rev-parse --show-toplevel` that resolution needs.
+    """
+    key = str(workspace)
+    with _STATUS_CACHE_GUARD:
+        entry = _STATUS_CACHE.get(key)
+        if entry is None:
+            return None
+        stored_at, repo_root, fingerprint, payload = entry
+        if (time.monotonic() - stored_at) >= STATUS_CACHE_TTL:
+            del _STATUS_CACHE[key]
+            return None
+        if _status_fingerprint(Path(repo_root)) != fingerprint:
+            del _STATUS_CACHE[key]
+            return None
+        return copy.deepcopy(payload)
+
+
+def _store_status(ctx: GitContext, fingerprint: tuple, payload: dict) -> None:
+    key = str(ctx.workspace)
+    with _STATUS_CACHE_GUARD:
+        if key not in _STATUS_CACHE and len(_STATUS_CACHE) >= STATUS_CACHE_LIMIT:
+            _STATUS_CACHE.pop(next(iter(_STATUS_CACHE)), None)
+        _STATUS_CACHE[key] = (time.monotonic(), str(ctx.repo_root), fingerprint, copy.deepcopy(payload))
+
+
+def _invalidate_status_cache(repo_root: Path) -> None:
+    root = str(repo_root)
+    with _STATUS_CACHE_GUARD:
+        for key in [k for k, entry in _STATUS_CACHE.items() if entry[1] == root]:
+            del _STATUS_CACHE[key]
+
+
 def git_status(workspace: str | Path) -> dict:
-    ctx = resolve_git_context(workspace)
+    resolved = Path(workspace).expanduser().resolve()
+    cached = _cached_status(resolved)
+    if cached is not None:
+        return cached
+
+    ctx = resolve_git_context(resolved)
     if ctx is None:
         return {"is_git": False}
 
@@ -627,7 +680,6 @@ def git_status(workspace: str | Path) -> dict:
             "--porcelain=v2",
             "-z",
             "--branch",
-            "--ignored=matching",
             "--untracked-files=all",
             "--",
             _workspace_pathspec(ctx),
@@ -638,10 +690,7 @@ def git_status(workspace: str | Path) -> dict:
     )
     staged_stats = _collect_numstat(ctx, cached=True)
     unstaged_stats = _collect_numstat(ctx, cached=False)
-    staged_raw_stats = _collect_numstat(ctx, cached=True, ignore_cr_at_eol=False)
-    unstaged_raw_stats = _collect_numstat(ctx, cached=False, ignore_cr_at_eol=False)
-    staged_diff_paths = _collect_diff_paths(ctx, cached=True)
-    unstaged_diff_paths = _collect_diff_paths(ctx, cached=False)
+    stat_sources = (staged_stats or {}, unstaged_stats or {})
 
     branch = ""
     upstream = ""
@@ -673,36 +722,33 @@ def git_status(workspace: str | Path) -> dict:
 
         old_path = None
         renamed = False
+        # porcelain=v2 changed/renamed records carry <mH> <mI> <mW> at 3..5;
+        # they tell a mode-only change apart from CRLF noise without a second diff.
+        mode_head = mode_index = mode_worktree = ""
         if rec.startswith("? "):
             xy = "??"
             repo_path = rec[2:]
             untracked = True
-            ignored = False
-        elif rec.startswith("! "):
-            xy = "!!"
-            repo_path = rec[2:]
-            untracked = False
-            ignored = True
         elif rec.startswith("1 "):
             parts = rec.split(" ", 8)
             if len(parts) < 9:
                 continue
             xy = parts[1]
+            mode_head, mode_index, mode_worktree = parts[3], parts[4], parts[5]
             repo_path = parts[8]
             untracked = False
-            ignored = False
         elif rec.startswith("2 "):
             parts = rec.split(" ", 9)
             if len(parts) < 10:
                 continue
             xy = parts[1]
+            mode_head, mode_index, mode_worktree = parts[3], parts[4], parts[5]
             repo_path = parts[9]
             if i < len(tokens):
                 old_path = tokens[i]
                 i += 1
             renamed = True
             untracked = False
-            ignored = False
         elif rec.startswith("u "):
             parts = rec.split(" ", 10)
             if len(parts) < 11:
@@ -710,7 +756,6 @@ def git_status(workspace: str | Path) -> dict:
             xy = parts[1]
             repo_path = parts[10]
             untracked = False
-            ignored = False
         else:
             continue
 
@@ -722,7 +767,7 @@ def git_status(workspace: str | Path) -> dict:
         y = xy[1] if len(xy) > 1 else "."
         conflict = xy in {"DD", "AU", "UD", "UA", "DU", "AA", "UU"} or rec.startswith("u ")
         additions, deletions, binary = 0, 0, False
-        for source in (staged_stats, unstaged_stats):
+        for source in stat_sources:
             if workspace_path in source:
                 a, d, b = source[workspace_path]
                 additions += a
@@ -733,54 +778,26 @@ def git_status(workspace: str | Path) -> dict:
 
         staged = (x not in {".", "?"}) and not untracked
         unstaged = (y not in {".", " "}) and not untracked
-        if staged and staged_diff_paths is not None and not renamed:
-            raw_staged = staged
-            staged = workspace_path in staged_diff_paths or (
-                old_workspace_path is not None and old_workspace_path in staged_diff_paths
+        # A path missing from the CR-insensitive numstat still shows in porcelain:
+        # its whole diff was carriage returns. A mode change would have been listed.
+        if staged and staged_stats is not None and not renamed:
+            staged = workspace_path in staged_stats or (
+                old_workspace_path is not None and old_workspace_path in staged_stats
             )
-            if raw_staged and not staged:
-                if workspace_path in staged_raw_stats or (
-                    old_workspace_path is not None and old_workspace_path in staged_raw_stats
-                ):
-                    filtered_noise["crlf_only"] += 1
-                else:
-                    filtered_noise["filemode_only"] += 1
-        if unstaged and unstaged_diff_paths is not None and not renamed:
-            raw_unstaged = unstaged
-            unstaged = workspace_path in unstaged_diff_paths or (
-                old_workspace_path is not None and old_workspace_path in unstaged_diff_paths
+            if not staged:
+                filtered_noise["crlf_only"] += 1
+        if unstaged and unstaged_stats is not None and not renamed:
+            unstaged = workspace_path in unstaged_stats or (
+                old_workspace_path is not None and old_workspace_path in unstaged_stats
             )
-            if raw_unstaged and not unstaged:
-                if workspace_path in unstaged_raw_stats or (
-                    old_workspace_path is not None and old_workspace_path in unstaged_raw_stats
-                ):
-                    filtered_noise["crlf_only"] += 1
-                else:
-                    filtered_noise["filemode_only"] += 1
-        if ignored:
-            files[workspace_path] = {
-                "path": workspace_path,
-                "old_path": None,
-                "workspace_path": workspace_path,
-                "status": "Ignored",
-                "staged": False,
-                "unstaged": False,
-                "untracked": False,
-                "ignored": True,
-                "conflict": False,
-                "additions": 0,
-                "deletions": 0,
-                "binary": False,
-            }
-            if len(files) >= STATUS_FILE_LIMIT:
-                truncated = True
-                break
-            continue
+            if not unstaged:
+                filtered_noise["crlf_only"] += 1
 
         if not (staged or unstaged or untracked or conflict or renamed):
             continue
         if not (untracked or conflict or renamed or binary) and additions == 0 and deletions == 0:
-            filtered_noise["crlf_only"] += 1
+            mode_only = (staged and mode_head != mode_index) or (unstaged and mode_index != mode_worktree)
+            filtered_noise["filemode_only" if mode_only else "crlf_only"] += 1
             continue
 
         files[workspace_path] = {
@@ -804,8 +821,6 @@ def git_status(workspace: str | Path) -> dict:
     file_list = sorted(files.values(), key=lambda f: (f["path"].lower()))
     totals = _empty_status()
     for item in file_list:
-        if item.get("ignored"):
-            continue
         if item["staged"]:
             totals["staged"] += 1
         if item["unstaged"]:
@@ -814,11 +829,11 @@ def git_status(workspace: str | Path) -> dict:
             totals["untracked"] += 1
         if item["conflict"]:
             totals["conflicts"] += 1
-    totals["changed"] = sum(1 for item in file_list if not item.get("ignored"))
+    totals["changed"] = len(file_list)
 
     if not branch:
         branch = (_run_git(ctx, ["rev-parse", "--short", "HEAD"], check=False).stdout or "").strip()
-    return {
+    payload = {
         "is_git": True,
         "branch": branch or "HEAD",
         "upstream": upstream,
@@ -832,6 +847,10 @@ def git_status(workspace: str | Path) -> dict:
             "active": any(filtered_noise.values()),
         },
     }
+    # Fingerprint after the reads: git status may refresh a racy index while it
+    # runs, and keying on the pre-read stat would miss on every follow-up call.
+    _store_status(ctx, _status_fingerprint(ctx.repo_root), payload)
+    return payload
 
 
 def _branch_ahead_behind(ctx: GitContext, branch: str, upstream: str) -> tuple[int, int]:

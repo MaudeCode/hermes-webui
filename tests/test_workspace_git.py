@@ -158,7 +158,13 @@ def test_git_status_handles_staged_unstaged_untracked_deleted_and_renamed(tmp_pa
     assert status["totals"]["changed"] >= 5
 
 
-def test_git_status_reports_ignored_files_without_counting_them_as_changes(tmp_path):
+def test_git_status_omits_ignored_files_entirely(tmp_path):
+    """Ignored files are deliberately not reported.
+
+    `--ignored=matching` made every status call walk the whole ignored tree
+    (node_modules included) and nothing rendered the result, so the polled path
+    no longer asks for it.
+    """
     from api.workspace_git import git_status
 
     repo = _init_repo(tmp_path / "repo")
@@ -176,11 +182,9 @@ def test_git_status_reports_ignored_files_without_counting_them_as_changes(tmp_p
     by_path = {item["path"]: item for item in status["files"]}
 
     assert by_path["tracked.txt"]["unstaged"] is True
-    assert by_path["debug.log"]["ignored"] is True
-    assert by_path["debug.log"]["status"] == "Ignored"
-    assert by_path["build/"]["ignored"] is True
-    assert by_path["build/"]["staged"] is False
-    assert by_path["build/"]["untracked"] is False
+    assert "debug.log" not in by_path
+    assert not [item for item in status["files"] if item["path"].startswith("build")]
+    assert all(item["ignored"] is False for item in status["files"])
     assert status["totals"]["changed"] == 1
     assert status["totals"]["untracked"] == 0
 
@@ -238,6 +242,9 @@ def test_git_status_ignores_filemode_only_noise(tmp_path):
     assert status["totals"]["changed"] == 0
     assert status["files"] == []
     assert status["noise_filtering"]["active"] is True
+    # Classified from the porcelain=v2 mode columns, not from a second diff pass.
+    assert status["noise_filtering"]["filemode_only"] == 1
+    assert status["noise_filtering"]["crlf_only"] == 0
 
 
 def test_git_status_scopes_nested_workspace_to_that_directory(tmp_path):
@@ -386,34 +393,6 @@ def test_git_discard_untracked_file_tolerates_concurrent_missing_file(tmp_path, 
     assert raced["seen"] is True
     assert not transient.exists()
     assert status["totals"]["changed"] == 0
-
-
-def test_git_status_reports_ignored_files_without_counting_them_as_changed(tmp_path):
-    from api.workspace_git import git_status
-
-    repo = _init_repo(tmp_path / "repo")
-    (repo / ".gitignore").write_text("*.log\nbuild/\n", encoding="utf-8")
-    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
-    _commit_all(repo)
-
-    (repo / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")
-    (repo / "debug.log").write_text("ignored log\n", encoding="utf-8")
-    build = repo / "build"
-    build.mkdir()
-    (build / "artifact.txt").write_text("ignored artifact\n", encoding="utf-8")
-
-    status = git_status(repo)
-    by_path = {item["path"]: item for item in status["files"]}
-
-    assert by_path["tracked.txt"]["unstaged"] is True
-    assert by_path["debug.log"]["ignored"] is True
-    assert by_path["debug.log"]["status"] == "Ignored"
-    assert by_path["debug.log"]["staged"] is False
-    assert by_path["debug.log"]["unstaged"] is False
-    assert by_path["debug.log"]["untracked"] is False
-    assert any(item["ignored"] and item["path"].startswith("build") for item in status["files"])
-    assert status["totals"]["changed"] == 1
-    assert status["totals"]["untracked"] == 0
 
 
 def test_git_diff_large_untracked_file_is_bounded(tmp_path):
@@ -2573,3 +2552,117 @@ def test_config_names_for_scope_passes_windows_hide_flags(monkeypatch, tmp_path)
     assert captured.get("creationflags") == windows_hide_flags(), (
         "_config_names_for_scope must pass creationflags=windows_hide_flags()"
     )
+
+
+def _count_git_calls(monkeypatch):
+    """Record every git subprocess api.workspace_git spawns."""
+    from api import workspace_git as wg
+
+    calls = []
+    real_run = subprocess.run
+
+    def counting_run(args, **kwargs):
+        calls.append([str(a) for a in args])
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(wg.subprocess, "run", counting_run)
+    return calls
+
+
+def _repository_reads(calls):
+    """git calls that read the repository, minus the fixed per-call hardening probes.
+
+    Every hardened invocation prefixes a pair of `git config --get-regexp` probes
+    that inspect filter configuration; those are a property of _run_git, not of
+    the status fan-out this ticket measures.
+    """
+    return [argv for argv in calls if argv[:2] != ["git", "config"]]
+
+
+def _status_repo(tmp_path):
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    (repo / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")
+    (repo / "fresh.txt").write_text("fresh\n", encoding="utf-8")
+    return repo
+
+
+def test_git_status_repeat_call_on_untouched_repo_spawns_no_git_subprocess(tmp_path, monkeypatch):
+    from api.workspace_git import git_status
+
+    repo = _status_repo(tmp_path)
+    git_status(repo)
+
+    calls = _count_git_calls(monkeypatch)
+    warm = git_status(repo)
+
+    assert calls == []
+    assert warm["totals"]["changed"] == 2
+
+
+def test_git_status_cold_call_reads_the_repo_at_most_three_times(tmp_path, monkeypatch):
+    from api.workspace_git import git_status
+
+    repo = _status_repo(tmp_path)
+
+    calls = _count_git_calls(monkeypatch)
+    status = git_status(repo)
+
+    reads = _repository_reads(calls)
+    payload_reads = [argv for argv in reads if "status" in argv or "diff" in argv]
+    assert len(payload_reads) <= 3, payload_reads
+    # One `rev-parse --show-toplevel` resolves the workspace on top of those.
+    assert len(reads) <= 4, reads
+    assert status["totals"]["changed"] == 2
+
+
+def test_git_status_cache_is_invalidated_by_commit_and_index_changes(tmp_path, monkeypatch):
+    from api.workspace_git import git_status
+
+    repo = _status_repo(tmp_path)
+    assert git_status(repo)["totals"]["staged"] == 0
+
+    _git(repo, "add", "fresh.txt")
+    after_index = git_status(repo)
+    assert after_index["totals"]["staged"] == 1
+    assert after_index["totals"]["untracked"] == 0
+
+    _git(repo, "commit", "-m", "add fresh")
+    after_commit = git_status(repo)
+    assert after_commit["totals"]["staged"] == 0
+
+    calls = _count_git_calls(monkeypatch)
+    _git(repo, "checkout", "-b", "sidebranch")
+    assert git_status(repo)["branch"] == "sidebranch"
+    assert _repository_reads(calls), "a HEAD change must force a fresh read"
+
+
+def test_git_status_cache_expires_so_worktree_edits_surface(tmp_path, monkeypatch):
+    """A plain file edit leaves .git untouched, so only the TTL bounds it."""
+    from api import workspace_git as wg
+
+    repo = _status_repo(tmp_path)
+    assert wg.git_status(repo)["totals"]["changed"] == 2
+
+    (repo / "second.txt").write_text("second\n", encoding="utf-8")
+
+    monkeypatch.setattr(wg, "STATUS_CACHE_TTL", 60.0)
+    assert wg.git_status(repo)["totals"]["changed"] == 2
+
+    monkeypatch.setattr(wg, "STATUS_CACHE_TTL", 0.0)
+    assert wg.git_status(repo)["totals"]["changed"] == 3
+
+
+def test_git_status_cache_is_invalidated_by_discarding_an_untracked_file(tmp_path):
+    """git_discard deletes untracked files outright, which .git mtimes cannot see."""
+    from api.workspace_git import git_discard, git_status
+
+    repo = _status_repo(tmp_path)
+    assert git_status(repo)["totals"]["untracked"] == 1
+
+    after = git_discard(repo, ["fresh.txt"], delete_untracked=True)
+
+    assert not (repo / "fresh.txt").exists()
+    assert after["totals"]["untracked"] == 0
+    assert git_status(repo)["totals"]["untracked"] == 0
