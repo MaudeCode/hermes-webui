@@ -603,6 +603,13 @@ function noteWorkspaceMutationsFromToolCall(tc){
 function noteWorkspaceMutationsFromToolCalls(toolCalls){
   if(!Array.isArray(toolCalls)) return;
   for(const tc of toolCalls) noteWorkspaceMutationsFromToolCall(tc);
+  // HWEB-43: this is the moment the client learns the agent may have changed the
+  // workspace server-side, without any client write to stamp the clock. Advance it
+  // so the loadDir('.') that follows cannot be merged into an /api/list request that
+  // was already in flight before the tools ran, and would answer with the pre-tool
+  // tree. Stamped for any non-empty tool list rather than only recorded mutations:
+  // the cost of a false positive is one extra fetch, and this must fail closed.
+  if(toolCalls.length&&typeof globalThis!=='undefined') globalThis.__apiLastMutationAt=Date.now();
 }
 
 function _isOpenPreviewPathMutated(){

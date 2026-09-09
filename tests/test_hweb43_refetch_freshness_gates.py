@@ -64,6 +64,7 @@ global.SESSION_PROJECT_REFRESH_INTERVAL_MS = 30000;
 global._sessionListLastFetchedAt = 0;
 global._sessionListLastFetchKey = '';
 global._sessionListLastPayload = null;
+global._sessionListLoadError = null;
 {_const(SESSIONS_JS, 'SESSION_LIST_REFRESH_TTL_MS')}
 global.SESSION_LIST_REFRESH_TTL_MS = SESSION_LIST_REFRESH_TTL_MS;
 let sessionFetches = 0;
@@ -230,6 +231,41 @@ def test_an_out_of_order_older_response_does_not_overwrite_a_newer_snapshot():
     }})();
     """
     assert _run_node(script) == {"cached": "newer"}
+
+
+def test_a_render_while_a_load_error_is_showing_always_reaches_the_server():
+    """Codex P2: the Retry button renders unforced; replaying the cache would clear
+    the error banner and report a recovery that never happened."""
+    refresh = _js(SESSIONS_JS, "_runRenderSessionListRefresh")
+    script = f"""
+    {_SIDEBAR_PRELUDE}
+    {refresh}
+    let applied = 0;
+    global._renderSessionListGen = 0;
+    global._profileSwitchListEmbargo = false;
+    global._cronPollGeneration = 0;
+    global._pendingSessionListPayload = null;
+    global._contentSearchResults = [];
+    global._sessionListHasLoadedOnce = true;
+    global.$ = () => ({{value: ''}});
+    global._sessionListQueryString = () => '?sidebar_source=all';
+    global._isSessionListUserInteracting = () => false;
+    global._applySessionListPayload = () => {{ applied += 1; _sessionListLoadError = null; }};
+    (async () => {{
+      await _runRenderSessionListRefresh({{}}, 0);
+      const afterFirst = sessionFetches;
+      // A forced refresh failed a moment ago and the error banner is on screen.
+      global._sessionListLoadError = {{message: 'Could not load conversations.'}};
+      await _runRenderSessionListRefresh({{deferWhileInteracting: false}}, 0);
+      console.log(JSON.stringify({{
+        afterFirst, afterRetry: sessionFetches, errorCleared: _sessionListLoadError === null,
+      }}));
+    }})();
+    """
+    result = _run_node(script)
+    assert result["afterFirst"] == 1, result
+    assert result["afterRetry"] == 2, "Retry must contact the server, not replay the cache"
+    assert result["errorCleared"] is True
 
 
 # ── 2. Panel switch freshness gate ───────────────────────────────────────────
@@ -696,6 +732,37 @@ def test_a_get_issued_after_a_write_does_not_join_one_issued_before_it():
         "POST http://example.test/api/profile/switch",
         "GET http://example.test/api/sessions",
     ], result
+
+
+def test_a_reload_after_agent_tool_calls_does_not_join_a_pre_tool_request():
+    """Codex P2: the agent mutates the workspace server-side, so no client write
+    stamps the clock; noteWorkspaceMutationsFromToolCalls() is where the client
+    learns of it."""
+    note_fn = _js(WORKSPACE_JS, "noteWorkspaceMutationsFromToolCalls")
+    script = f"""
+    {_API_PRELUDE}
+    {note_fn}
+    global.noteWorkspaceMutationsFromToolCall = () => {{}};
+    const calls = [];
+    let release;
+    const gate = new Promise(resolve => {{ release = resolve; }});
+    global.fetch = (url) => {{
+      calls.push(url);
+      return gate.then(() => ({{
+        ok:true, headers:{{get:()=>'application/json'}},
+        json:()=>Promise.resolve({{}}), text:()=>Promise.resolve(''),
+      }}));
+    }};
+    (async () => {{
+      const preTool = api('/api/list?path=.');       // still in flight
+      noteWorkspaceMutationsFromToolCalls([{{name:'write_file'}}]);
+      const postTool = api('/api/list?path=.');      // the completion reload
+      release();
+      await Promise.all([preTool, postTool]);
+      console.log(JSON.stringify({{calls: calls.length}}));
+    }})();
+    """
+    assert _run_node(script) == {"calls": 2}
 
 
 def test_post_is_not_retried_on_a_network_typeerror():

@@ -5927,10 +5927,15 @@ async function _runRenderSessionListRefresh(opts, _gen){
       sessionRequestOpts.timeoutMs=_SESSION_LIST_BOOT_TIMEOUT_MS;
       sessionRequestOpts.retryTimeouts=true;
     }
+    // While a load error is on screen, every render is a recovery attempt and must
+    // reach the server. Replaying the cached payload would clear _sessionListLoadError
+    // in _applySessionListPayload() and report a recovery that never happened — which
+    // is exactly what the visible Retry button, and any passive refresh behind it,
+    // would otherwise do inside the window.
     const {sessData, projData}=await _loadSidebarSessionListPayload(
       sessionListQS,
       sessionRequestOpts,
-      {force:Boolean(opts&&opts.force)},
+      {force:Boolean(opts&&opts.force)||Boolean(_sessionListLoadError)},
     );
     // Discard stale response — a newer renderSessionList() call superseded us.
     if (_gen !== _renderSessionListGen) return;

@@ -50,7 +50,7 @@ def test_sessions_and_projects_load_independently_so_projects_failure_cannot_bla
     assert "Promise.all" not in block
     assert "_loadSidebarSessionListPayload(" in block
     # HWEB-43 added a third argument carrying the freshness-window bypass.
-    assert "{force:Boolean(opts&&opts.force)}," in block
+    assert "{force:Boolean(opts&&opts.force)||Boolean(_sessionListLoadError)}," in block
     assert "const projectPromise = projectsAreFresh" in helper
     assert "Promise.resolve({projects:_allProjects||[]})" in helper
     assert "SESSION_PROJECT_REFRESH_INTERVAL_MS" in helper

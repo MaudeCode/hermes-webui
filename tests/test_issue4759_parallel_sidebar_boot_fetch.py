@@ -97,6 +97,7 @@ def test_cold_boot_starts_projects_fetch_before_sessions_resolve():
     global._sessionListLastFetchedAt = 0;
     global._sessionListLastFetchKey = '';
     global._sessionListLastPayload = null;
+    global._sessionListLoadError = null;
     global.SESSION_LIST_REFRESH_TTL_MS = 2000;
     global._sessionListHasLoadedOnce = false;
     global.api = (url) => {{
@@ -161,6 +162,7 @@ def test_project_failure_falls_back_without_blocking_session_payload():
     global._sessionListLastFetchedAt = 0;
     global._sessionListLastFetchKey = '';
     global._sessionListLastPayload = null;
+    global._sessionListLoadError = null;
     global.SESSION_LIST_REFRESH_TTL_MS = 2000;
     global._sessionListHasLoadedOnce = false;
     global.api = (url) => {{
@@ -213,6 +215,7 @@ global._SESSION_LIST_BOOT_TIMEOUT_MS = 90000;
 global._sessionListLastFetchedAt = 0;
 global._sessionListLastFetchKey = '';
 global._sessionListLastPayload = null;
+global._sessionListLoadError = null;
 global.SESSION_LIST_REFRESH_TTL_MS = 2000;
 global._sessionListHasLoadedOnce = false;
 global._renderSessionListGen = 1;
@@ -288,6 +291,7 @@ global._allProjects = [{{name:'cached-demo'}}];
 global._sessionListLastFetchedAt = 0;
 global._sessionListLastFetchKey = '';
 global._sessionListLastPayload = null;
+global._sessionListLoadError = null;
 global.SESSION_LIST_REFRESH_TTL_MS = 2000;
 global._sessionListHasLoadedOnce = true;
 global.api = (url, opts) => {{
@@ -360,6 +364,7 @@ global._sessionProjectsLastFetchScope = 'default:active';
 global._sessionListLastFetchedAt = 0;
 global._sessionListLastFetchKey = '';
 global._sessionListLastPayload = null;
+global._sessionListLoadError = null;
 global.SESSION_LIST_REFRESH_TTL_MS = 2000;
 const calls = [];
 global.api = (url) => {{
