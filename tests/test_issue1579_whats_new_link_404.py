@@ -49,6 +49,35 @@ def upd():
 
 # ── 1. Server-side: api.updates._check_repo uses merge-base, not HEAD ──
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _restore_api_updates_module():
+    """Undo the deliberate re-imports below so later tests see one live module.
+
+    These tests drop ``api.updates`` from ``sys.modules`` to force a fresh import
+    under a controlled CWD. Without restoring afterwards the freshly imported
+    module stays installed while the ``api`` package attribute still points at the
+    original, so ``patch('api.updates._run_git')`` and ``from api import updates``
+    target different objects — which silently broke the lock-conflict tests in
+    tests/test_updates.py whenever this file ran first.
+    """
+    import api
+
+    original_module = sys.modules.get('api.updates')
+    original_attr = getattr(api, 'updates', None)
+    try:
+        yield
+    finally:
+        if original_module is not None:
+            sys.modules['api.updates'] = original_module
+        else:
+            sys.modules.pop('api.updates', None)
+        if original_attr is not None:
+            api.updates = original_attr
+
+
 def _make_throwaway_repo(tmp_path, *, local_only_commits=0, upstream_advanced=0):
     """Create a tiny git repo with a fake 'origin' remote.
 

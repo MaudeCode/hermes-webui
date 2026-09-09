@@ -137,7 +137,7 @@ def test_detect_webui_version_recovers_via_windows_registry_fallback(tmp_path):
 
     def fake_run(cmd, **kwargs):
         assert cmd[0] == FAKE_GIT_EXE
-        if cmd[1:] == ['describe', '--tags', '--always']:
+        if cmd[1:] == ['describe', '--tags', '--always', '--abbrev=8']:
             return MagicMock(returncode=0, stdout='v0.51.999\n', stderr='')
         if cmd[1:] == ['diff-index', '--quiet', 'HEAD', '--']:
             return MagicMock(returncode=0, stdout='', stderr='')
