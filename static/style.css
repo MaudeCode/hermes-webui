@@ -3266,6 +3266,14 @@
     .send-btn svg{display:block;flex:0 0 auto;}
     .session-item{min-height:44px;padding:10px 64px 10px 12px;}
     .session-item.streaming,.session-item.unread{padding-right:64px;}
+    /* Every skin re-declares the active row's padding at higher specificity, and
+       the action cluster is permanently visible at this width — so reserve for
+       it here too, matched selector-for-selector so source order decides.
+       :root[data-skin] covers a new skin without another copy of this block. */
+    :root[data-skin] .session-item.active,
+    :root[data-skin] .session-item.active.streaming,
+    :root[data-skin] .session-item.active.unread,
+    :root[data-skin] .session-item.active.needs-attention{padding-right:64px;}
     .session-actions{opacity:1;pointer-events:auto;}
     /* Empty state */
     .empty-hero-title{font-size:21px;}

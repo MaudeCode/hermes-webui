@@ -195,3 +195,40 @@ def test_every_skin_active_row_reserves_the_same_cluster_width():
             f'{{padding-right:40px;}}'
         )
         assert attention in STYLE_CSS, f"{skin} attention reservation changed unexpectedly"
+
+
+def _measured_padding_right(skin, width, classes):
+    """Measure the real cascade: load style.css in Chromium and read the row."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        pytest.skip("playwright not installed")
+    html = f"""<!doctype html><html data-skin="{skin}" class="dark"><head>
+    <style>{STYLE_CSS}</style></head>
+    <body><div class="sidebar"><div class="session-list">
+    <div class="session-item {classes}" id="row"><div class="session-text">
+    <div class="session-title-row"><span class="session-title">A conversation title</span>
+    <span class="session-time">11h</span></div></div>
+    <div class="session-actions"><button class="session-archive-toggle"></button>
+    <button class="session-actions-trigger"></button></div></div>
+    </div></div></body></html>"""
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch()
+        except Exception:
+            pytest.skip("chromium not available")
+        page = browser.new_page(viewport={"width": width, "height": 600})
+        page.set_content(html)
+        page.wait_for_timeout(150)
+        value = page.evaluate(
+            "getComputedStyle(document.getElementById('row')).paddingRight"
+        )
+        browser.close()
+    return value
+
+
+@pytest.mark.parametrize("skin", ["graphite", "codex", "terracotta", "github"])
+@pytest.mark.parametrize("classes", ["active", "active streaming", "active unread"])
+def test_narrow_skinned_active_row_reserves_the_cluster_width(skin, classes):
+    """Skin rules outrank the ≤640px reservation, and the cluster is always visible there."""
+    assert _measured_padding_right(skin, 480, classes) == "64px"
