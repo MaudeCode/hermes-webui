@@ -190,6 +190,7 @@ def test_restore_settled_session_projects_through_production_path(browser):
               window._isSessionCurrentPane = sid => !!S.session && S.session.session_id === sid;
               window._streamFinalized = false;
               window._persistTimer = null;
+              window._flushPersist = () => {};
               window._cancelThrottledSnapshotTimer = () => {};
               window._clearAnchorProseIncrementalNode = () => {};
               window._cancelAnimationFramePendingStreamRender = () => {};
