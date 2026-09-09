@@ -307,7 +307,8 @@ def test_panel_reloads_after_its_window_lapses_and_on_force():
       const afterForce = loads.tasks;
       await switchPanel('chat');
       for (const key of _panelDataLoadedAt.keys()) {
-        _panelDataLoadedAt.set(key, _panelDataLoadedAt.get(key) - (PANEL_DATA_TTL_MS + 1));
+        const entry = _panelDataLoadedAt.get(key);
+        entry.at -= (PANEL_DATA_TTL_MS + 1);
       }
       await switchPanel('tasks');
       console.log(JSON.stringify({afterForce, afterExpiry: loads.tasks}));
@@ -362,6 +363,48 @@ def test_a_failed_settings_load_is_not_cached_as_fresh():
     """)
     result = _run_node(script)
     assert result == {"afterFailure": 2, "afterSuccess": 3, "afterGated": 3}
+
+
+def test_a_fire_and_forget_failure_after_the_loader_resolves_invalidates_freshness():
+    """Codex P2: loadCrons() launches loadCronGatewayNotice() without awaiting it.
+
+    A nested request that fails after the outer loader resolved would otherwise
+    change the failure count too late to stop the stamp, pinning the panel's
+    partial state for the whole window.
+    """
+    script = _panel_harness("""
+    (async () => {
+      global.loadCrons = async () => {
+        bump('tasks');
+        // The loader's own unawaited tail: a real request, so it lands a turn of
+        // the event loop later — after switchPanel() has already stamped.
+        setTimeout(() => {
+          globalThis.__apiFailureCount = (globalThis.__apiFailureCount || 0) + 1;
+        }, 0);
+      };
+      await switchPanel('tasks');
+      await switchPanel('chat');
+      await new Promise(r => setTimeout(r, 0));
+      await switchPanel('tasks');
+      const afterLateFailure = loads.tasks;
+      // With a clean tail the window applies again: one load, then a gated re-entry.
+      global.loadCrons = async () => bump('tasks');
+      await new Promise(r => setTimeout(r, 0));
+      await switchPanel('chat');
+      await switchPanel('tasks');
+      const afterCleanLoad = loads.tasks;
+      await switchPanel('chat');
+      await switchPanel('tasks');
+      console.log(JSON.stringify({
+        afterLateFailure, afterCleanLoad, afterGatedReentry: loads.tasks,
+      }));
+    })();
+    """)
+    assert _run_node(script) == {
+        "afterLateFailure": 2,
+        "afterCleanLoad": 3,
+        "afterGatedReentry": 3,
+    }
 
 
 def test_settings_section_still_syncs_on_every_entry_while_its_fetch_is_gated():

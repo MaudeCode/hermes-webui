@@ -70,10 +70,20 @@ function _panelDataFreshnessKey(panel){
   return `${panel} ${profile} ${session}`;
 }
 
+// Freshness is checked against the failure counter at READ time, against the count
+// observed before the load was dispatched. Checking only at stamp time would miss
+// the loaders' own fire-and-forget work (loadCrons() launches
+// loadCronGatewayNotice(), loadSettingsPanel() launches _loadAuxiliaryModels()),
+// whose requests can fail after the outer loader has already resolved. Any api()
+// failure from dispatch onwards therefore invalidates the entry. That also catches
+// unrelated background failures, which costs one extra load — the behaviour before
+// this gate existed — and is the direction that fails closed.
 function _panelDataIsFresh(panel, force){
   if (force) return false;
-  const at = _panelDataLoadedAt.get(_panelDataFreshnessKey(panel));
-  return typeof at === 'number' && at > 0 && (Date.now() - at) < PANEL_DATA_TTL_MS;
+  const entry = _panelDataLoadedAt.get(_panelDataFreshnessKey(panel));
+  if (!entry || !(entry.at > 0)) return false;
+  if (entry.failures !== _apiFailureCount()) return false;
+  return (Date.now() - entry.at) < PANEL_DATA_TTL_MS;
 }
 
 function _apiFailureCount(){
@@ -81,18 +91,17 @@ function _apiFailureCount(){
 }
 
 // The panel loaders catch their own request failures and resolve normally, so a
-// failed load is indistinguishable from a successful one at this level. api()
-// counts every failed request; if the count moved while the loaders ran, treat the
-// load as unhydrated and leave the panel uncached, so the next entry retries
-// instead of showing an error state for the rest of the window.
+// failed load is indistinguishable from a successful one at this level. The entry
+// records the api() failure count observed at DISPATCH, and _panelDataIsFresh()
+// rejects it once the live count differs. One comparison covers both a failure
+// during the load and one in the loader's fire-and-forget tail.
 // `keyBefore` is the identity captured at dispatch. A load that started under one
 // profile/session and completed after a switch carries the previous identity's data,
 // so stamping the now-current key would mark the wrong scope fresh and suppress its
 // correction for the rest of the window.
-function _markPanelDataLoaded(panel, failuresBefore, keyBefore){
-  if (_apiFailureCount() !== failuresBefore) return;
+function _markPanelDataLoaded(panel, keyBefore, failuresBefore){
   if (_panelDataFreshnessKey(panel) !== keyBefore) return;
-  _panelDataLoadedAt.set(keyBefore, Date.now());
+  _panelDataLoadedAt.set(keyBefore, {at: Date.now(), failures: failuresBefore});
 }
 
 // HWEB-33: true while a main-view panel owns the screen. Such a panel replaces
@@ -515,8 +524,8 @@ async function switchPanel(name, opts = {}) {
   // window (HWEB-43). `opts.force` bypasses the gate for callers that just changed
   // something and are re-entering the panel to show it.
   const panelDataFresh = _panelDataIsFresh(nextPanel, opts.force);
-  const failuresBefore = _apiFailureCount();
   const freshnessKeyBefore = _panelDataFreshnessKey(nextPanel);
+  const failuresBefore = _apiFailureCount();
   if (!panelDataFresh) {
     if (nextPanel === 'tasks') await loadCrons();
     if (nextPanel === 'kanban') await loadKanban();
@@ -527,7 +536,7 @@ async function switchPanel(name, opts = {}) {
     if (nextPanel === 'todos') loadTodos();
     if (nextPanel === 'insights') await loadInsights();
     if (nextPanel === 'logs') await loadLogs();
-    if (nextPanel !== 'settings') _markPanelDataLoaded(nextPanel, failuresBefore, freshnessKeyBefore);
+    if (nextPanel !== 'settings') _markPanelDataLoaded(nextPanel, freshnessKeyBefore, failuresBefore);
   }
   _syncLogsAutoRefresh();
   if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
@@ -540,7 +549,7 @@ async function switchPanel(name, opts = {}) {
     // failed settings load does not suppress the next entry's retry.
     if (!panelDataFresh) {
       void Promise.resolve(loadSettingsPanel())
-        .then(() => _markPanelDataLoaded('settings', failuresBefore, freshnessKeyBefore))
+        .then(() => _markPanelDataLoaded('settings', freshnessKeyBefore, failuresBefore))
         .catch(() => {});
     }
   }
