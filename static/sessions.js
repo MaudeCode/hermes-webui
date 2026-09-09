@@ -442,6 +442,23 @@ const _SESSION_LIST_BOOT_TIMEOUT_MS = 90000;
 const SESSION_PROJECT_REFRESH_INTERVAL_MS = 30000;
 let _sessionProjectsLastFetchedAt = 0;
 let _sessionProjectsLastFetchScope = '';
+// HWEB-43: renderSessionList() has ~100 unconditional call sites; the stream
+// lifecycle alone fires it on start, apperror, done, terminal and hidden-tab
+// attach, so one turn transition refetches the whole list several times over.
+// Same TTL mechanism as the projects cache above, but deliberately far shorter:
+// the row's streaming indicator is driven by the SERVER's `is_streaming`, so a
+// long window would leave a finished turn looking live. This value only has to
+// outlast the burst of renders a single lifecycle transition emits (all within a
+// few ms of each other); the 30s streaming poll and every SSE/mutation-driven
+// refresh pass `force` and bypass it entirely.
+// ponytail: fixed window, keyed on the request's own query string. If the
+// sidebar ever needs per-field freshness, invalidate on the specific event
+// instead of shortening this further.
+const SESSION_LIST_REFRESH_TTL_MS = 2000;
+let _sessionListLastFetchedAt = 0;
+let _sessionListLastFetchKey = '';
+let _sessionListLastPayload = null;
+let _sessionListLastMutationSeq = 0;
 const SESSION_LIST_INTERACTION_IDLE_MS = 700;
 const SESSION_SWIPE_DURATION_MS = 500;
 const SESSION_SWIPE_REFLOW_LEAD_MS = 220;
@@ -5857,6 +5874,9 @@ function _mergeRenderSessionListOptions(prev, next){
   if((prev&&prev.deferWhileInteracting===false)||(next&&next.deferWhileInteracting===false)){
     merged.deferWhileInteracting=false;
   }
+  // Same rule for the freshness window (HWEB-43): a coalesced batch containing one
+  // forced request must still refetch, or the caller that knew data changed loses.
+  if((prev&&prev.force===true)||(next&&next.force===true)) merged.force=true;
   return merged;
 }
 
@@ -5968,7 +5988,16 @@ async function _runRenderSessionListRefresh(opts, _gen){
       sessionRequestOpts.timeoutMs=_SESSION_LIST_BOOT_TIMEOUT_MS;
       sessionRequestOpts.retryTimeouts=true;
     }
-    const {sessData, projData}=await _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts);
+    // While a load error is on screen, every render is a recovery attempt and must
+    // reach the server. Replaying the cached payload would clear _sessionListLoadError
+    // in _applySessionListPayload() and report a recovery that never happened — which
+    // is exactly what the visible Retry button, and any passive refresh behind it,
+    // would otherwise do inside the window.
+    const {sessData, projData}=await _loadSidebarSessionListPayload(
+      sessionListQS,
+      sessionRequestOpts,
+      {force:Boolean(opts&&opts.force)||Boolean(_sessionListLoadError)},
+    );
     // Discard stale response — a newer renderSessionList() call superseded us.
     if (_gen !== _renderSessionListGen) return;
     // #4671: while a profile switch is mid-flight, drop ANY payload — even one whose
@@ -6023,7 +6052,8 @@ async function _runRenderSessionListRefresh(opts, _gen){
   }
 }
 
-async function _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts){
+async function _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts, loadOpts){
+  const force=!!(loadOpts&&loadOpts.force);
   const projectScope=`${(typeof S!=='undefined'&&S&&S.activeProfile)||'default'}:${_showAllProfiles?'all':'active'}`;
   const now=Date.now();
   const projectsAreFresh=typeof _sessionProjectsLastFetchedAt==='number'
@@ -6048,7 +6078,46 @@ async function _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts)
         }
       })();
 
-  const sessData = await api('/api/sessions' + sessionListQS,sessionRequestOpts);
+  // HWEB-43: same freshness guard as the projects fetch above. The cache key is
+  // the full request identity — the query string carries source/hidden/archived
+  // scope, projectScope carries the profile and all-profiles flag — so a scope
+  // change can never be served a previous scope's rows. Replaying the cached
+  // payload (rather than skipping the render) keeps every downstream apply path
+  // unchanged: local overlays like optimistic streaming are recomputed from
+  // current state on each apply, only the server snapshot is reused.
+  const sessionListKey=`${projectScope}|${sessionListQS}`;
+  // api() counts every non-idempotent request's completion. The entry records the
+  // generation seen when its request STARTED, and freshness requires the live
+  // generation to still equal it — an equality check rather than a timestamp
+  // comparison, so it cannot be defeated by two writes landing inside one
+  // millisecond, and a payload requested before a write is stale however recent.
+  const mutationSeq=(typeof globalThis!=='undefined'&&Number(globalThis.__apiMutationSeq))||0;
+  const sessionsAreFresh=!force
+    && _sessionListLastPayload!==null
+    && _sessionListLastFetchKey===sessionListKey
+    && _sessionListLastFetchedAt>0
+    && _sessionListLastMutationSeq===mutationSeq
+    && now-_sessionListLastFetchedAt<(typeof SESSION_LIST_REFRESH_TTL_MS==='number'?SESSION_LIST_REFRESH_TTL_MS:2000);
+  let sessData;
+  if(sessionsAreFresh){
+    sessData=_sessionListLastPayload;
+  }else{
+    // The entry records the request's START, not its completion — both the time and
+    // the write generation. A response already in flight when a write landed is
+    // pre-mutation data even though it arrives after; recording completion state
+    // would clear the fail-closed check above and let the next render repaint
+    // pre-mutation rows. For the same reason a response only replaces the entry
+    // when it started at least as late as the stored one — an out-of-order older
+    // response must not overwrite a newer snapshot.
+    const requestedAt=now;
+    sessData = await api('/api/sessions' + sessionListQS,sessionRequestOpts);
+    if(_sessionListLastFetchKey!==sessionListKey||requestedAt>=_sessionListLastFetchedAt){
+      _sessionListLastPayload=sessData;
+      _sessionListLastFetchKey=sessionListKey;
+      _sessionListLastFetchedAt=requestedAt;
+      _sessionListLastMutationSeq=mutationSeq;
+    }
+  }
   const projData = await projectPromise;
 
   return {sessData,projData};
@@ -6410,7 +6479,10 @@ async function refreshSessionList(reason='manual', opts={}){
   }
   _sessionListRefreshInFlight = true;
   try{
-    await renderSessionList({deferWhileInteracting:!force});
+    // HWEB-43: a forced refresh already means "the caller knows something changed"
+    // (SSE session event, pull-to-refresh, hidden-tab catch-up), so it must also
+    // bypass the session-list freshness window, not just the interaction defer.
+    await renderSessionList({deferWhileInteracting:!force, force});
     if(refreshActive) await refreshActiveSessionIfExternallyUpdated(reason||'session-list');
   }finally{
     _sessionListRefreshInFlight = false;

@@ -2,6 +2,59 @@ async function api(path,opts={}){
   // Strip leading slash so URL resolves relative to location.href (supports subpath mounts)
   const rel = path.startsWith('/') ? path.slice(1) : path;
   const url=new URL(rel,document.baseURI||location.href);
+  const method=String(opts.method||'GET').toUpperCase();
+  const isIdempotent=method==='GET'||method==='HEAD';
+  // HWEB-43: coalesce concurrent identical idempotent requests. Two callers asking
+  // for the same URL at the same time previously issued two fetches AND could
+  // resolve out of order, so every call site had to re-implement its own
+  // generation counter to reject the stale winner. Sharing one in-flight promise
+  // fixes both in one place. Keyed on method+resolved URL (the complete request
+  // identity for a body-less GET). Skipped when the caller passes its own
+  // AbortSignal — aborting a shared promise would cancel an unrelated caller —
+  // and opt-out-able via `dedupe:false`, which is how the recursive re-entry
+  // below runs the real request. Stored on globalThis rather than at module scope
+  // so api() stays self-contained for tests/test_api_timeout.py, which extracts
+  // this function's source and evals it standalone under node.
+  const _inflight=(typeof globalThis!=='undefined')
+    ?(globalThis.__apiInflightRequests||(globalThis.__apiInflightRequests=new Map()))
+    :null;
+  // The key is the COMPLETE request identity, not just the URL:
+  //  - the write generation stamped below, so a request issued after a write never
+  //    joins one issued before it (a GET started under the previous profile cookie
+  //    must not serve the profile-switch render that followed it). A counter rather
+  //    than Date.now(): two writes completing inside one millisecond must still read
+  //    as two, and browsers deliberately coarsen timer precision;
+  //  - a fingerprint of the caller's options, because they carry per-caller policy.
+  //    /api/model/auxiliary is requested with {retries:0,timeoutToast:false} by the
+  //    title regenerator and with the defaults by the settings loader; collapsing
+  //    those would silently hand the follower the first caller's retry policy.
+  // A non-serializable opts object yields no key at all, so it falls through to its
+  // own request rather than being merged on a guess.
+  let optsFingerprint=null;
+  try{
+    const policy={};
+    for(const key of Object.keys(opts).sort()){
+      if(key==='signal'||key==='dedupe') continue;
+      policy[key]=opts[key];
+    }
+    optsFingerprint=JSON.stringify(policy);
+  }catch(_){ optsFingerprint=null; }
+  const dedupeKey=(_inflight&&isIdempotent&&opts.dedupe!==false&&!opts.signal&&optsFingerprint!==null)
+    ?(method+' '+url.href+' @'+((typeof globalThis!=='undefined'&&globalThis.__apiMutationSeq)||0)+' '+optsFingerprint)
+    :null;
+  if(dedupeKey){
+    const existing=_inflight.get(dedupeKey);
+    if(existing) return existing;
+    const started=api(path,{...opts,dedupe:false});
+    _inflight.set(dedupeKey,started);
+    // then(clear,clear) rather than finally(): finally() returns a derived
+    // promise that nobody awaits, so a rejected request would surface as an
+    // unhandled rejection. Registered before any caller awaits `started`, so the
+    // entry is gone by the time a consumer could ask for the same URL again.
+    const clear=()=>{ if(_inflight.get(dedupeKey)===started) _inflight.delete(dedupeKey); };
+    started.then(clear,clear);
+    return started;
+  }
   const timeoutMs=Object.prototype.hasOwnProperty.call(opts,'timeoutMs')?opts.timeoutMs:30000;
   const timeoutToast=opts.timeoutToast!==false;
   const redirect401=opts.redirect401!==false;
@@ -35,6 +88,7 @@ async function api(path,opts={}){
       delete fetchOpts.retryTimeouts;
       delete fetchOpts.retryStatuses;
       delete fetchOpts.retryDelayMs;
+      delete fetchOpts.dedupe;
 
       const useTimeout=Number.isFinite(Number(timeoutMs))&&Number(timeoutMs)>0;
       if(useTimeout&&typeof AbortController!=='undefined'){
@@ -103,6 +157,13 @@ async function api(path,opts={}){
       ]):await requestPromise;
     }catch(e){
       lastErr=e;
+      // HWEB-43: count failed requests, so a caller that cannot see its own loader's
+      // swallowed errors (switchPanel's freshness gate) can fail closed and skip
+      // caching. A counter rather than Date.now() because two failures inside one
+      // millisecond must still read as two. A retried-then-successful attempt also
+      // counts; the cost of that false positive is one extra load, which is the
+      // behaviour before the gate existed.
+      if(typeof globalThis!=='undefined') globalThis.__apiFailureCount=(globalThis.__apiFailureCount||0)+1;
       const isTimeout=didTimeout||(e&&(e.timeout===true||e.name==='TimeoutError'));
       if(isTimeout){
         if(retryTimeouts&&attempt<2&&attempt<maxAttempts-1){
@@ -139,7 +200,12 @@ async function api(path,opts={}){
         attempt--;
         continue;
       }
-      if(attempt<2&&attempt<maxAttempts-1 && (e instanceof TypeError || isStartupRecovery503 || retryStatuses.includes(Number(e.status)))){
+      // HWEB-43: a network TypeError means the request may or may not have reached
+      // the server, so replaying it is only safe for idempotent methods. A POST
+      // that died on the wire after the handler ran would be applied twice.
+      // Startup-readiness 503s and caller-opted retryStatuses stay method-agnostic:
+      // the first is a pre-handler gate, the second is an explicit caller decision.
+      if(attempt<2&&attempt<maxAttempts-1 && ((isIdempotent && e instanceof TypeError) || isStartupRecovery503 || retryStatuses.includes(Number(e.status)))){
         if(retryDelayMs) await new Promise(resolve=>setTimeout(resolve,retryDelayMs*Math.pow(2,attempt)));
         continue;
       }
@@ -147,6 +213,15 @@ async function api(path,opts={}){
     }finally{
       if(timeoutId) clearTimeout(timeoutId);
       if(upstreamSignal&&upstreamAbort) upstreamSignal.removeEventListener('abort',upstreamAbort);
+      // HWEB-43: count writes, so bounded read caches (the sidebar session list)
+      // fail closed after one instead of serving a snapshot that predates it. A
+      // generation counter rather than a timestamp: reads compare it for equality,
+      // so two writes inside one millisecond can never look like none. Counted on
+      // every non-idempotent ATTEMPT's completion, success or not: a timed-out or
+      // 500'd POST may still have been applied server-side, and "unknown" must not
+      // read as "unchanged". One chokepoint here beats invalidating at every
+      // mutating call site — a missed site would silently serve stale rows.
+      if(!isIdempotent&&typeof globalThis!=='undefined') globalThis.__apiMutationSeq=(globalThis.__apiMutationSeq||0)+1;
     }
   }
   throw lastErr;
@@ -531,6 +606,14 @@ function noteWorkspaceMutationsFromToolCall(tc){
 function noteWorkspaceMutationsFromToolCalls(toolCalls){
   if(!Array.isArray(toolCalls)) return;
   for(const tc of toolCalls) noteWorkspaceMutationsFromToolCall(tc);
+  // HWEB-43: this is the moment the client learns the agent may have changed the
+  // workspace server-side, without any client write to count. Advance the same
+  // write generation api() maintains, so the loadDir('.') that follows cannot be
+  // merged into an /api/list request that was already in flight before the tools
+  // ran and would answer with the pre-tool tree. Counted for any non-empty tool
+  // list rather than only recorded mutations: the cost of a false positive is one
+  // extra fetch, and this must fail closed.
+  if(toolCalls.length&&typeof globalThis!=='undefined') globalThis.__apiMutationSeq=(globalThis.__apiMutationSeq||0)+1;
 }
 
 function _isOpenPreviewPathMutated(){

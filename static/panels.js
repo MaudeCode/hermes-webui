@@ -47,6 +47,75 @@ const APP_TITLEBAR_KEYS = {
 const MAIN_VIEW_PANELS = ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'];
 const MAIN_VIEW_SIDEBAR_PANEL_FALLBACKS = { plugin: 'settings' };
 
+// HWEB-43: switchPanel() reloads a panel's data on every entry, so toggling
+// between two panels N times costs N loads of each. Gate the loader dispatch on
+// a bounded freshness window, the same shape as the sidebar's project/session
+// caches. Only switchPanel() stamps this: a mutation inside a panel refreshes by
+// calling its loader directly, which leaves the stamp older than the data — an
+// unnecessary reload at worst, never a stale one. The key carries the active
+// profile because crons, skills, memory and todos are all profile-scoped.
+const PANEL_DATA_TTL_MS = 15000;
+const _panelDataLoadedAt = new Map();
+
+// The key is the union of the client state the panel loaders read, so a change to
+// any of it invalidates every panel rather than an allowlist of the ones known to
+// care today — an allowlist rots as panels gain dependencies, and over-keying only
+// costs an extra load. Profile: crons, skills, memory and todos are profile-scoped.
+// Session: loadMemory() requests /api/memory?session_id= and Todos reads
+// session-owned todo state. Workspace: renderWorkspacesPanel() derives its active
+// badge from S.session.workspace, which switchToWorkspace() mutates in place
+// without changing the session id. A panel that starts reading some other piece of
+// S must be added here.
+function _panelDataFreshnessKey(panel){
+  const profile = (typeof S !== 'undefined' && S && S.activeProfile) || 'default';
+  const session = (typeof S !== 'undefined' && S && S.session) || null;
+  const sid = (session && session.session_id) || '';
+  const workspace = (session && session.workspace) || '';
+  return `${panel} ${profile} ${sid} ${workspace}`;
+}
+
+// Freshness is checked against the failure counter at READ time, against the count
+// observed before the load was dispatched. Checking only at stamp time would miss
+// the loaders' own fire-and-forget work (loadCrons() launches
+// loadCronGatewayNotice(), loadSettingsPanel() launches _loadAuxiliaryModels()),
+// whose requests can fail after the outer loader has already resolved. Any api()
+// failure from dispatch onwards therefore invalidates the entry. That also catches
+// unrelated background failures, which costs one extra load — the behaviour before
+// this gate existed — and is the direction that fails closed.
+function _panelDataIsFresh(panel, force){
+  if (force) return false;
+  const entry = _panelDataLoadedAt.get(_panelDataFreshnessKey(panel));
+  if (!entry || !(entry.at > 0)) return false;
+  if (entry.failures !== _apiFailureCount()) return false;
+  return (Date.now() - entry.at) < PANEL_DATA_TTL_MS;
+}
+
+function _apiFailureCount(){
+  return (typeof globalThis !== 'undefined' && globalThis.__apiFailureCount) || 0;
+}
+
+// The panel loaders catch their own request failures and resolve normally, so a
+// failed load is indistinguishable from a successful one at this level. The entry
+// records the api() failure count observed at DISPATCH, and _panelDataIsFresh()
+// rejects it once the live count differs. One comparison covers both a failure
+// during the load and one in the loader's fire-and-forget tail.
+// `keyBefore` is the identity captured at dispatch. A load that started under one
+// profile/session and completed after a switch carries the previous identity's data,
+// so stamping the now-current key would mark the wrong scope fresh and suppress its
+// correction for the rest of the window.
+function _markPanelDataLoaded(panel, keyBefore, failuresBefore){
+  if (_panelDataFreshnessKey(panel) !== keyBefore) return;
+  // Drop entries that can no longer be fresh. A long-lived tab visits panels under
+  // many session/workspace identities, and nothing else deletes from this map, so
+  // without the sweep it grows for the life of the page. It runs on a panel switch
+  // over at most one entry per identity seen in the last window, so it stays cheap.
+  const cutoff = Date.now() - PANEL_DATA_TTL_MS;
+  for (const [key, entry] of _panelDataLoadedAt) {
+    if (!entry || !(entry.at > cutoff)) _panelDataLoadedAt.delete(key);
+  }
+  _panelDataLoadedAt.set(keyBefore, {at: Date.now(), failures: failuresBefore});
+}
+
 // HWEB-33: true while a main-view panel owns the screen. Such a panel replaces
 // BOTH the sidebar session list and the chat transcript, so the sidebar event
 // stream has no visible consumer and _sidebarSseBackgrounded() closes it —
@@ -463,21 +532,42 @@ async function switchPanel(name, opts = {}) {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
   }
-  // Lazy-load panel data
-  if (nextPanel === 'tasks') await loadCrons();
-  if (nextPanel === 'kanban') await loadKanban();
-  if (nextPanel === 'skills') await loadSkills();
-  if (nextPanel === 'memory') await loadMemory();
-  if (nextPanel === 'workspaces') await loadWorkspacesPanel();
-  if (nextPanel === 'profiles') await loadProfilesPanel();
-  if (nextPanel === 'todos') loadTodos();
-  if (nextPanel === 'insights') await loadInsights();
-  if (nextPanel === 'logs') await loadLogs();
+  // Lazy-load panel data, unless this panel's data is still inside its freshness
+  // window (HWEB-43). `opts.force` bypasses the gate for callers that just changed
+  // something and are re-entering the panel to show it.
+  // Kanban is excluded: switchPanel() stops its polling on the way out (above) and
+  // loadKanban() is what restarts it, so gating the loader would reopen a board with
+  // neither SSE nor fallback polling. It is the only loader that owns a lifecycle
+  // rather than just data; the rest are safe to skip.
+  const panelDataFresh = nextPanel !== 'kanban' && _panelDataIsFresh(nextPanel, opts.force);
+  const freshnessKeyBefore = _panelDataFreshnessKey(nextPanel);
+  const failuresBefore = _apiFailureCount();
+  if (!panelDataFresh) {
+    if (nextPanel === 'tasks') await loadCrons();
+    if (nextPanel === 'kanban') await loadKanban();
+    if (nextPanel === 'skills') await loadSkills();
+    if (nextPanel === 'memory') await loadMemory();
+    if (nextPanel === 'workspaces') await loadWorkspacesPanel();
+    if (nextPanel === 'profiles') await loadProfilesPanel();
+    if (nextPanel === 'todos') loadTodos();
+    if (nextPanel === 'insights') await loadInsights();
+    if (nextPanel === 'logs') await loadLogs();
+    if (nextPanel !== 'settings') _markPanelDataLoaded(nextPanel, freshnessKeyBefore, failuresBefore);
+  }
   _syncLogsAutoRefresh();
   if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
   if (nextPanel === 'settings') {
+    // switchSettingsSection() is view state, not a data load — the visible section
+    // must be re-applied on every entry — but the panel's own fetch is gated.
     switchSettingsSection(_currentSettingsSection);
-    loadSettingsPanel();
+    // loadSettingsPanel() stays unawaited so the sidebar/titlebar sync below is not
+    // held behind its fetch; the freshness stamp rides its completion instead, so a
+    // failed settings load does not suppress the next entry's retry.
+    if (!panelDataFresh) {
+      void Promise.resolve(loadSettingsPanel())
+        .then(() => _markPanelDataLoaded('settings', freshnessKeyBefore, failuresBefore))
+        .catch(() => {});
+    }
   }
   _resyncChatSidebarAfterPanelSwitch();
   if (nextPanel === 'chat' && typeof syncTopbar === 'function') syncTopbar();
@@ -8810,6 +8900,12 @@ function _showSettingsUnsavedBar(){
 
 function _discardSettings(){
   _revertSettingsPreview();
+  // Discard does not restore the form DOM — _revertSettingsPreview() is a
+  // deliberate no-op because appearance controls autosave — so the authoritative
+  // reload on the next entry IS the revert. Drop this panel's freshness entry so
+  // the gate cannot skip it and leave the discarded values sitting in the form for
+  // a later Save to persist. (HWEB-43)
+  _panelDataLoadedAt.delete(_panelDataFreshnessKey('settings'));
   _settingsDirty = false;
   _hideSettingsPanel();
 }
