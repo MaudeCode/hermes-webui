@@ -8900,6 +8900,12 @@ function _showSettingsUnsavedBar(){
 
 function _discardSettings(){
   _revertSettingsPreview();
+  // Discard does not restore the form DOM — _revertSettingsPreview() is a
+  // deliberate no-op because appearance controls autosave — so the authoritative
+  // reload on the next entry IS the revert. Drop this panel's freshness entry so
+  // the gate cannot skip it and leave the discarded values sitting in the form for
+  // a later Save to persist. (HWEB-43)
+  _panelDataLoadedAt.delete(_panelDataFreshnessKey('settings'));
   _settingsDirty = false;
   _hideSettingsPanel();
 }

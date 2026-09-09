@@ -279,6 +279,9 @@ def _panel_harness(body: str) -> str:
     {_js(PANELS_JS, '_panelDataIsFresh')}
     {_js(PANELS_JS, '_apiFailureCount')}
     {_js(PANELS_JS, '_markPanelDataLoaded')}
+    global._revertSettingsPreview = () => {{}};
+    global._hideSettingsPanel = () => {{}};
+    {_js(PANELS_JS, '_discardSettings')}
     {_js(PANELS_JS, 'switchPanel')}
     {body}
     """
@@ -463,6 +466,27 @@ def test_expired_freshness_entries_are_evicted_instead_of_accumulating():
     """)
     result = _run_node(script)
     assert result["entries"] <= 2, result
+
+
+def test_discarding_settings_forces_the_next_entry_to_reload():
+    """Codex P2: _revertSettingsPreview() is a no-op, so the reload IS the revert."""
+    script = _panel_harness("""
+    (async () => {
+      await switchPanel('settings');
+      await switchPanel('chat');
+      await new Promise(r => setTimeout(r, 0));
+      await switchPanel('settings');
+      const gated = loads.settings;
+      // The user edits a non-autosaved field and clicks Discard. The form DOM still
+      // holds the discarded values, so the next entry must refetch.
+      _discardSettings();
+      await switchPanel('chat');
+      await new Promise(r => setTimeout(r, 0));
+      await switchPanel('settings');
+      console.log(JSON.stringify({gated, afterDiscard: loads.settings}));
+    })();
+    """)
+    assert _run_node(script) == {"gated": 1, "afterDiscard": 2}
 
 
 def test_settings_section_still_syncs_on_every_entry_while_its_fetch_is_gated():
