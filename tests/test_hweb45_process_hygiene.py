@@ -1,0 +1,615 @@
+"""HWEB-45 — long-running-server resource hygiene.
+
+Four independent defects in the same class (a resource acquired on a process
+expected to run for weeks and never released), one test class each:
+
+1. The reveal-in-file-manager and open-in-editor routes fired
+   ``subprocess.Popen`` and dropped the handle, leaving a zombie per click.
+2. The terminal spawn supervisor recovered from a raising ``_spawn_queue.get()``
+   with a bare 10 ms sleep and no log call, so a persistently raising queue
+   spun a core silently.
+3. Turn-journal shards had no retention path at all.
+4. The account-usage probe pool was swept — and refilled — under its global
+   lock on a request thread.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from api import logging_hygiene, providers, subprocess_utils, terminal, turn_journal  # noqa: E402
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  1. Detached external-application spawns are reaped
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _assert_reaped(proc: subprocess.Popen) -> None:
+    """Fail unless ``proc`` has been waited on (no zombie left in the table)."""
+    assert proc.returncode is not None, (
+        f"pid {proc.pid} was never waited on — it is a zombie"
+    )
+    if hasattr(os, "waitpid"):
+        with pytest.raises(ChildProcessError):
+            os.waitpid(proc.pid, os.WNOHANG)
+
+
+class _FakeHandler:
+    """Minimal stand-in for the BaseHTTPRequestHandler the routes are given."""
+
+    command = "POST"
+
+
+class _FakeSession:
+    def __init__(self, workspace: Path):
+        self.workspace = str(workspace)
+
+
+@pytest.fixture
+def spawned(monkeypatch):
+    """Replace every detached spawn with a real, immediately-exiting child.
+
+    The routes hand ``open`` / ``explorer.exe`` / ``xdg-open`` / the configured
+    editor a path; running those for real would open GUI applications on the
+    test host. Substituting the argv keeps the process lifecycle — the thing
+    under test — completely real.
+    """
+    procs: list[subprocess.Popen] = []
+    real_popen = subprocess.Popen
+
+    def fake_popen(cmd, **kwargs):
+        proc = real_popen([sys.executable, "-c", ""], **kwargs)
+        procs.append(proc)
+        return proc
+
+    monkeypatch.setattr(subprocess_utils.subprocess, "Popen", fake_popen)
+    return procs
+
+
+class TestDetachedSpawnsAreReaped:
+    def test_helper_reaps_a_fast_exiting_child(self, spawned):
+        proc = subprocess_utils.spawn_detached_app(["open", "-R", "/tmp"])
+        assert spawned == [proc]
+        _assert_reaped(proc)
+
+    def test_slow_child_is_parked_and_swept(self, monkeypatch):
+        """A child that outlives the inline wait is reaped by the sweep, not leaked."""
+        monkeypatch.setattr(
+            subprocess_utils, "_DETACHED_SPAWN_REAP_TIMEOUT_SECONDS", 0.01
+        )
+        proc = subprocess_utils.spawn_detached_app(
+            [sys.executable, "-c", "import time; time.sleep(0.4)"]
+        )
+        assert proc in subprocess_utils._PENDING_DETACHED_SPAWNS
+        proc.wait(timeout=10)
+        # ``wait`` already reaped it here; the sweep must still drop the entry so
+        # the pending set does not grow one handle per slow spawn.
+        subprocess_utils.reap_detached_spawns()
+        assert proc not in subprocess_utils._PENDING_DETACHED_SPAWNS
+
+    def test_reveal_route_leaves_no_zombie(self, tmp_path, monkeypatch, spawned):
+        from api import routes
+
+        target = tmp_path / "note.txt"
+        target.write_text("hi", encoding="utf-8")
+        monkeypatch.setattr(
+            routes, "_file_ops_session_or_error", lambda h, sid: _FakeSession(tmp_path)
+        )
+        monkeypatch.setattr(routes, "j", lambda handler, payload, **kw: True)
+        monkeypatch.setattr(routes, "bad", lambda handler, msg, *a, **kw: pytest.fail(msg))
+
+        for system in ("Darwin", "Windows", "Linux"):
+            monkeypatch.setattr(routes.platform, "system", lambda s=system: s)
+            routes._handle_file_reveal(
+                _FakeHandler(), {"session_id": "s1", "path": "note.txt"}
+            )
+
+        assert len(spawned) == 3
+        for proc in spawned:
+            _assert_reaped(proc)
+
+    def test_open_in_editor_route_leaves_no_zombie(self, tmp_path, monkeypatch, spawned):
+        from api import routes
+
+        target = tmp_path / "note.txt"
+        target.write_text("hi", encoding="utf-8")
+        monkeypatch.setattr(
+            routes, "_file_ops_session_or_error", lambda h, sid: _FakeSession(tmp_path)
+        )
+        monkeypatch.setattr(routes, "j", lambda handler, payload, **kw: True)
+        monkeypatch.setattr(routes, "bad", lambda handler, msg, *a, **kw: pytest.fail(msg))
+        monkeypatch.setattr(routes.shutil, "which", lambda cmd: sys.executable)
+
+        routes._handle_file_open_vscode(
+            _FakeHandler(), {"session_id": "s1", "path": "note.txt"}
+        )
+
+        assert len(spawned) == 1
+        _assert_reaped(spawned[0])
+
+    def test_no_bare_popen_left_in_the_two_routes(self):
+        """Every external-app launch in these handlers goes through the helper."""
+        src = (Path(__file__).resolve().parent.parent / "api" / "routes.py").read_text(
+            encoding="utf-8"
+        )
+        for handler_name in ("_handle_file_reveal", "_handle_file_open_vscode"):
+            start = src.index(f"def {handler_name}(handler, body):")
+            body = src[start : src.index("\ndef ", start)]
+            assert "subprocess.Popen(" not in body, handler_name
+            assert "spawn_detached_app(" in body, handler_name
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  2. The terminal spawn supervisor logs once and backs off
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class _StopLoop(Exception):
+    pass
+
+
+class TestSpawnSupervisorBackoff:
+    @pytest.fixture(autouse=True)
+    def _reset_supervisor_backoff(self):
+        terminal._spawn_supervisor_failing = False
+        terminal._spawn_supervisor_backoff_seconds = (
+            terminal._SPAWN_SUPERVISOR_BACKOFF_MIN_SECONDS
+        )
+        yield
+        terminal._spawn_supervisor_failing = False
+        terminal._spawn_supervisor_backoff_seconds = (
+            terminal._SPAWN_SUPERVISOR_BACKOFF_MIN_SECONDS
+        )
+
+    def test_raising_queue_get_logs_once_and_backs_off(self, monkeypatch, caplog):
+        """A persistently raising get must not spin at 100 Hz, and must say so."""
+        slept: list[float] = []
+
+        class _RaisingQueue:
+            def get(self):
+                raise RuntimeError("queue is broken")
+
+        def fake_sleep(seconds):
+            slept.append(seconds)
+            if len(slept) >= 6:
+                raise _StopLoop
+
+        monkeypatch.setattr(terminal, "_spawn_queue", _RaisingQueue())
+        monkeypatch.setattr(terminal.time, "sleep", fake_sleep)
+
+        with caplog.at_level(logging.DEBUG, logger=terminal.__name__):
+            with pytest.raises(_StopLoop):
+                terminal._spawn_supervisor_loop()
+
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warnings) == 1, [r.getMessage() for r in warnings]
+        assert "spawn supervisor" in warnings[0].getMessage()
+
+        # Strictly increasing until the cap: the old code slept 0.01 forever.
+        assert slept[0] == terminal._SPAWN_SUPERVISOR_BACKOFF_MIN_SECONDS
+        assert slept == sorted(slept)
+        assert slept[-1] > slept[0]
+        assert max(slept) <= terminal._SPAWN_SUPERVISOR_BACKOFF_MAX_SECONDS
+
+    def test_backoff_is_capped(self, monkeypatch):
+        for _ in range(40):
+            monkeypatch.setattr(terminal.time, "sleep", lambda s: None)
+            terminal._spawn_supervisor_backoff(RuntimeError("boom"), "loop")
+        assert (
+            terminal._spawn_supervisor_backoff_seconds
+            == terminal._SPAWN_SUPERVISOR_BACKOFF_MAX_SECONDS
+        )
+
+    def test_recovery_resets_the_backoff_and_logs_again_next_run(self, monkeypatch):
+        monkeypatch.setattr(terminal.time, "sleep", lambda s: None)
+        terminal._spawn_supervisor_backoff(RuntimeError("boom"), "loop")
+        assert terminal._spawn_supervisor_failing is True
+
+        terminal._spawn_supervisor_recovered()
+        assert terminal._spawn_supervisor_failing is False
+        assert (
+            terminal._spawn_supervisor_backoff_seconds
+            == terminal._SPAWN_SUPERVISOR_BACKOFF_MIN_SECONDS
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  3. Journal retention and WebUI log rotation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _write_shard(
+    journal_dir: Path,
+    name: str,
+    age_days: float,
+    events: list[dict] | None = None,
+) -> Path:
+    journal_dir.mkdir(parents=True, exist_ok=True)
+    path = journal_dir / name
+    rows = events if events is not None else [{"event": "submitted"}]
+    path.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+    if age_days:
+        stamp = time.time() - age_days * 24 * 60 * 60
+        os.utime(path, (stamp, stamp))
+    return path
+
+
+class TestTurnJournalRetention:
+    def test_expired_shards_are_pruned_and_live_shards_are_not(self, tmp_path):
+        journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
+        expired = _write_shard(journal_dir, "old-session~4242.jsonl", age_days=30)
+        legacy_expired = _write_shard(journal_dir, "legacy-session.jsonl", age_days=30)
+        live = _write_shard(journal_dir, "new-session~4242.jsonl", age_days=0)
+        just_inside = _write_shard(journal_dir, "recent~4242.jsonl", age_days=13)
+
+        result = turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
+
+        assert result["pruned"] == 2
+        assert result["bytes_reclaimed"] > 0
+        assert not expired.exists()
+        assert not legacy_expired.exists()
+        assert live.exists()
+        assert just_inside.exists()
+
+    def test_this_process_own_shard_is_never_pruned(self, tmp_path):
+        """An idle session of the running server must keep its recovery data."""
+        journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
+        mine = _write_shard(journal_dir, f"mine~{os.getpid()}.jsonl", age_days=90)
+
+        result = turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
+
+        assert result["pruned"] == 0
+        assert mine.exists()
+
+    def test_dry_run_counts_without_deleting(self, tmp_path):
+        journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
+        expired = _write_shard(journal_dir, "old~4242.jsonl", age_days=30)
+
+        result = turn_journal.prune_stale_turn_journals(
+            session_dir=tmp_path, dry_run=True
+        )
+
+        assert result["pruned"] == 1
+        assert expired.exists()
+
+    def test_missing_journal_directory_is_a_no_op(self, tmp_path):
+        assert turn_journal.prune_stale_turn_journals(session_dir=tmp_path) == {
+            "examined": 0,
+            "pruned": 0,
+            "bytes_reclaimed": 0,
+        }
+
+    def test_a_session_with_a_pending_turn_is_kept(self, tmp_path):
+        """A nonterminal turn is still auditable/repairable — never drop it."""
+        journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
+        pending = _write_shard(
+            journal_dir,
+            "pending~4242.jsonl",
+            age_days=90,
+            events=[{"event": "submitted", "turn_id": "t1", "created_at": 1}],
+        )
+        settled = _write_shard(
+            journal_dir,
+            "settled~4242.jsonl",
+            age_days=90,
+            events=[
+                {"event": "submitted", "turn_id": "t2", "created_at": 1},
+                {"event": "completed", "turn_id": "t2", "created_at": 2},
+            ],
+        )
+
+        result = turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
+
+        assert result["pruned"] == 1
+        assert pending.exists()
+        assert not settled.exists()
+
+    def test_a_turn_completed_under_another_pid_is_prunable(self, tmp_path):
+        """Shards merge per session: half a turn read alone must not look pending."""
+        journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
+        first = _write_shard(
+            journal_dir,
+            "split~1111.jsonl",
+            age_days=90,
+            events=[{"event": "submitted", "turn_id": "t1", "created_at": 1}],
+        )
+        second = _write_shard(
+            journal_dir,
+            "split~2222.jsonl",
+            age_days=90,
+            events=[{"event": "completed", "turn_id": "t1", "created_at": 2}],
+        )
+
+        result = turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
+
+        assert result["pruned"] == 2
+        assert not first.exists()
+        assert not second.exists()
+
+    def test_one_live_shard_keeps_the_whole_session(self, tmp_path):
+        """A session written to yesterday keeps its older shards for the merge."""
+        journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
+        old_shard = _write_shard(journal_dir, "chatty~1111.jsonl", age_days=90)
+        new_shard = _write_shard(journal_dir, "chatty~2222.jsonl", age_days=1)
+
+        result = turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
+
+        assert result["pruned"] == 0
+        assert old_shard.exists()
+        assert new_shard.exists()
+
+    def test_retention_window_comes_from_the_environment(self, tmp_path, monkeypatch):
+        monkeypatch.setenv(turn_journal._TURN_JOURNAL_RETENTION_DAYS_ENV, "1")
+        journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
+        two_days = _write_shard(journal_dir, "two-days~4242.jsonl", age_days=2)
+
+        turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
+
+        assert not two_days.exists()
+
+
+class TestWebuiLogRotation:
+    def test_oversized_log_is_copy_truncated_in_place(self, tmp_path):
+        log = tmp_path / "bootstrap-8787.log"
+        log.write_bytes(b"x" * 4096)
+        inode_before = log.stat().st_ino
+
+        assert logging_hygiene.rotate_webui_log(path=log, max_bytes=1024) is True
+
+        # Same inode: an inherited O_APPEND descriptor keeps writing to the file
+        # the server was started with. A rename would have orphaned it.
+        assert log.stat().st_ino == inode_before
+        assert log.stat().st_size == 0
+        assert (tmp_path / "bootstrap-8787.log.1").read_bytes() == b"x" * 4096
+
+    def test_writes_after_rotation_land_at_the_start_of_the_file(self, tmp_path):
+        """An O_APPEND writer holding the fd across rotation must not leave a hole."""
+        log = tmp_path / "bootstrap-8787.log"
+        log.write_bytes(b"x" * 4096)
+        with open(log, "ab") as held:
+            logging_hygiene.rotate_webui_log(path=log, max_bytes=1024)
+            held.write(b"after\n")
+            held.flush()
+        assert log.read_bytes() == b"after\n"
+
+    def test_log_under_the_cap_is_left_alone(self, tmp_path):
+        log = tmp_path / "bootstrap-8787.log"
+        log.write_bytes(b"x" * 100)
+        assert logging_hygiene.rotate_webui_log(path=log, max_bytes=1024) is False
+        assert log.stat().st_size == 100
+        assert not (tmp_path / "bootstrap-8787.log.1").exists()
+
+    def test_missing_log_is_a_no_op(self, tmp_path):
+        assert (
+            logging_hygiene.rotate_webui_log(path=tmp_path / "absent.log", max_bytes=1)
+            is False
+        )
+
+    def test_zero_cap_disables_rotation(self, tmp_path):
+        log = tmp_path / "bootstrap-8787.log"
+        log.write_bytes(b"x" * 4096)
+        assert logging_hygiene.rotate_webui_log(path=log, max_bytes=0) is False
+        assert log.stat().st_size == 4096
+
+
+class TestHygieneRunsOnTheReaperTick:
+    def test_reaper_tick_drives_retention_rotation_and_eviction(self, monkeypatch):
+        from api import background_process as bp
+
+        called: list[str] = []
+        monkeypatch.setattr(bp, "_retention_last_run", None)
+        monkeypatch.setattr(
+            providers,
+            "_cleanup_account_usage_probe_workers",
+            lambda **kw: called.append("evict"),
+        )
+        monkeypatch.setattr(
+            logging_hygiene, "rotate_webui_log", lambda **kw: called.append("rotate")
+        )
+        monkeypatch.setattr(
+            subprocess_utils, "reap_detached_spawns", lambda: called.append("reap")
+        )
+        monkeypatch.setattr(
+            turn_journal,
+            "prune_stale_turn_journals",
+            lambda **kw: called.append("turn")
+            or {"examined": 0, "pruned": 0, "bytes_reclaimed": 0},
+        )
+        from api import run_journal
+
+        monkeypatch.setattr(
+            run_journal, "schedule_run_journal_prune", lambda **kw: called.append("run")
+        )
+
+        bp._run_process_hygiene()
+
+        assert set(called) == {"evict", "rotate", "reap", "turn", "run"}
+
+    def test_retention_is_coalesced_but_cheap_sweeps_are_not(self, monkeypatch):
+        """Retention must not re-scan every 60 s tick; eviction must run on each."""
+        from api import background_process as bp
+        from api import run_journal
+
+        cheap: list[int] = []
+        retention: list[int] = []
+        monkeypatch.setattr(bp, "_retention_last_run", None)
+        monkeypatch.setattr(
+            providers,
+            "_cleanup_account_usage_probe_workers",
+            lambda **kw: cheap.append(1),
+        )
+        monkeypatch.setattr(logging_hygiene, "rotate_webui_log", lambda **kw: None)
+        monkeypatch.setattr(subprocess_utils, "reap_detached_spawns", lambda: 0)
+        monkeypatch.setattr(
+            turn_journal,
+            "prune_stale_turn_journals",
+            lambda **kw: retention.append(1)
+            or {"examined": 0, "pruned": 0, "bytes_reclaimed": 0},
+        )
+        monkeypatch.setattr(run_journal, "schedule_run_journal_prune", lambda **kw: None)
+
+        bp._run_process_hygiene()
+        bp._run_process_hygiene()
+        bp._run_process_hygiene()
+
+        assert len(cheap) == 3
+        assert len(retention) == 1
+
+    def test_a_failing_step_does_not_abort_the_rest(self, monkeypatch, caplog):
+        from api import background_process as bp
+        from api import run_journal
+
+        monkeypatch.setattr(bp, "_retention_last_run", None)
+        monkeypatch.setattr(
+            providers,
+            "_cleanup_account_usage_probe_workers",
+            lambda **kw: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        reaped: list[int] = []
+        monkeypatch.setattr(logging_hygiene, "rotate_webui_log", lambda **kw: None)
+        monkeypatch.setattr(
+            subprocess_utils, "reap_detached_spawns", lambda: reaped.append(1)
+        )
+        monkeypatch.setattr(
+            turn_journal,
+            "prune_stale_turn_journals",
+            lambda **kw: {"examined": 0, "pruned": 0, "bytes_reclaimed": 0},
+        )
+        monkeypatch.setattr(run_journal, "schedule_run_journal_prune", lambda **kw: None)
+
+        with caplog.at_level(logging.WARNING, logger=bp.__name__):
+            bp._run_process_hygiene()
+
+        assert reaped == [1]
+        assert any("probe-pool eviction" in r.getMessage() for r in caplog.records)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  4. The probe pool is never refilled under its global lock on a request path
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class _StubProc:
+    """Stand-in for a probe worker subprocess that answers nothing."""
+
+    def __init__(self):
+        self.stdin = self
+        self.stdout = self
+        self.terminated = False
+
+    def write(self, _data):
+        return None
+
+    def flush(self):
+        return None
+
+    def readline(self):
+        return ""
+
+    def close(self):
+        return None
+
+    def poll(self):
+        return None if not self.terminated else 0
+
+    def terminate(self):
+        self.terminated = True
+
+    def wait(self, timeout=None):
+        self.terminated = True
+        return 0
+
+    def kill(self):
+        self.terminated = True
+
+
+@pytest.fixture
+def probe_pool(monkeypatch):
+    """Isolate the module-global probe pool and record every spawn attempt."""
+    monkeypatch.setattr(providers, "_account_usage_worker_pool", {})
+    spawns: list[bool] = []
+
+    def fake_popen(*args, **kwargs):
+        # ``acquire(blocking=False)`` failing means some frame up the stack still
+        # holds the pool lock — the exact defect this ticket removes.
+        acquired = providers._account_usage_worker_pool_lock.acquire(blocking=False)
+        spawns.append(acquired)
+        if acquired:
+            providers._account_usage_worker_pool_lock.release()
+        return _StubProc()
+
+    monkeypatch.setattr(providers.subprocess, "Popen", fake_popen)
+    return spawns
+
+
+class TestProbePoolLockHygiene:
+    def test_usage_fetch_spawns_no_subprocess_under_the_pool_lock(
+        self, tmp_path, probe_pool
+    ):
+        providers._agent_fetch_account_usage_for_home("anthropic", tmp_path)
+
+        assert probe_pool, "expected the fetch to launch a probe worker"
+        assert all(probe_pool), "a probe subprocess was spawned while holding the pool lock"
+
+    def test_cleanup_spawns_nothing_at_all(self, tmp_path, probe_pool):
+        """Eviction shrinks the pool; the next fetch refills it off the lock."""
+        key = str(Path(tmp_path))
+        workers = [
+            providers._AccountUsageProbeWorker(Path(tmp_path))
+            for _ in range(providers._ACCOUNT_USAGE_WORKERS_PER_HOME)
+        ]
+        for worker in workers:
+            worker.last_used = time.monotonic() - 10 * 60
+        providers._account_usage_worker_pool[key] = workers
+
+        providers._cleanup_account_usage_probe_workers()
+
+        assert probe_pool == []
+        assert key not in providers._account_usage_worker_pool
+
+    def test_fetch_no_longer_sweeps_the_pool_on_the_request_path(
+        self, tmp_path, monkeypatch, probe_pool
+    ):
+        swept: list[int] = []
+        monkeypatch.setattr(
+            providers,
+            "_cleanup_account_usage_probe_workers",
+            lambda **kw: swept.append(1),
+        )
+
+        providers._agent_fetch_account_usage_for_home("anthropic", tmp_path)
+
+        assert swept == []
+
+    def test_pool_refills_lazily_on_the_next_fetch(self, tmp_path, probe_pool):
+        key = str(Path(tmp_path))
+        worker = providers._get_account_usage_probe_worker(Path(tmp_path))
+        assert worker is not None
+        worker._lock.release()
+        assert (
+            len(providers._account_usage_worker_pool[key])
+            == providers._ACCOUNT_USAGE_WORKERS_PER_HOME
+        )
+        assert probe_pool == [], "constructing a pool worker must not spawn a process"
+
+    def test_worker_construction_holds_no_process(self, tmp_path):
+        worker = providers._AccountUsageProbeWorker(Path(tmp_path))
+        assert worker._proc is None
+
+
+def test_pool_lock_is_not_reentrant():
+    """The violation detector above relies on a non-reentrant pool lock."""
+    assert not isinstance(providers._account_usage_worker_pool_lock, type(threading.RLock()))
