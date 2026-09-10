@@ -71,6 +71,10 @@ sees the long-lived server as the original child. ``KeepAlive=true`` /
 
     <key>StandardErrorPath</key>
     <string>/Users/yourname/.hermes/webui/launchd-stderr.log</string>
+<!-- Both of these are size-bounded by the server itself: it resolves its own
+     stdout/stderr descriptors and copy-truncates either file past 32 MiB
+     (HERMES_WEBUI_LOG_MAX_BYTES; 0 disables). No newsyslog entry is required,
+     though one is harmless. -->
 
     <key>EnvironmentVariables</key>
     <dict>

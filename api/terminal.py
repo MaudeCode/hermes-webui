@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import errno
 import atexit
+import logging
 import codecs
 import collections
 import os
@@ -23,6 +24,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 _TERMINAL_SUPPORTED = sys.platform != "win32"
 
@@ -304,11 +307,63 @@ def _reap_terminal_descendants(
     return reaped
 
 
+# Spawn-supervisor failure backoff. The supervisor thread starts at import and
+# is never stopped, and its only recovery from a raising ``_spawn_queue.get()``
+# used to be a bare 10 ms sleep with no log call — so a queue that raises
+# persistently spun at ~100 Hz on a core, silently, for the life of the server.
+# Log the first failure of a run and double the delay up to a cap instead.
+_SPAWN_SUPERVISOR_BACKOFF_MIN_SECONDS = 0.01
+_SPAWN_SUPERVISOR_BACKOFF_MAX_SECONDS = 5.0
+_spawn_supervisor_backoff_seconds = _SPAWN_SUPERVISOR_BACKOFF_MIN_SECONDS
+_spawn_supervisor_failing = False
+
+
+def _spawn_supervisor_backoff(exc: BaseException, where: str) -> None:
+    """Log once per failure run, then sleep for the current backoff delay."""
+    global _spawn_supervisor_backoff_seconds, _spawn_supervisor_failing
+
+    delay = _spawn_supervisor_backoff_seconds
+    if not _spawn_supervisor_failing:
+        _spawn_supervisor_failing = True
+        # Guarded like the rest of this module: the supervisor thread has no
+        # owner to restart it, so a logging failure (a closed stderr during
+        # interpreter shutdown, say) must not be what kills it.
+        try:
+            logger.warning(
+                "Terminal spawn supervisor (%s) failed; backing off up to %.1fs "
+                "until it recovers",
+                where,
+                _SPAWN_SUPERVISOR_BACKOFF_MAX_SECONDS,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+        except BaseException:
+            pass
+    _spawn_supervisor_backoff_seconds = min(
+        delay * 2, _SPAWN_SUPERVISOR_BACKOFF_MAX_SECONDS
+    )
+    time.sleep(delay)
+
+
+def _spawn_supervisor_recovered() -> None:
+    """Clear the backoff after the supervisor completes a queue get again."""
+    global _spawn_supervisor_backoff_seconds, _spawn_supervisor_failing
+
+    if not _spawn_supervisor_failing:
+        return
+    _spawn_supervisor_failing = False
+    _spawn_supervisor_backoff_seconds = _SPAWN_SUPERVISOR_BACKOFF_MIN_SECONDS
+    try:
+        logger.info("Terminal spawn supervisor recovered")
+    except BaseException:
+        pass
+
+
 def _spawn_supervisor_loop() -> None:
     while True:
         request = None
         try:
             request = _spawn_queue.get()
+            _spawn_supervisor_recovered()
             if _cancel_spawn_before_popen(request):
                 continue
             try:
@@ -322,6 +377,7 @@ def _spawn_supervisor_loop() -> None:
                     request.done.set()
                 _release_abandoned_spawn_reservation(request)
             except BaseException as exc:
+                logger.debug("Terminal spawn failed", exc_info=True)
                 _close_spawn_request_fds(request)
                 with request.lock:
                     try:
@@ -340,16 +396,15 @@ def _spawn_supervisor_loop() -> None:
                     request.done.set()
                 except BaseException:
                     pass
-            time.sleep(0.01)
+            _spawn_supervisor_backoff(exc, "loop")
 
 
 def _spawn_supervisor_entry() -> None:
     while True:
         try:
             _spawn_supervisor_loop()
-        except BaseException:
-            time.sleep(0.01)
-            pass
+        except BaseException as exc:
+            _spawn_supervisor_backoff(exc, "entry")
 
 
 def _ensure_spawn_supervisor() -> None:

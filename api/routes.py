@@ -72,6 +72,7 @@ from api.session_events import (
 from api.gateway_restart import restart_active_profile_gateway
 from api.shares import create_or_refresh_share, load_share, revoke_share
 from api.reasoning_titles import normalize_reasoning_titles
+from api.subprocess_utils import spawn_detached_app
 
 logger = logging.getLogger(__name__)
 
@@ -28045,12 +28046,12 @@ def _handle_file_reveal(handler, body):
 
         system = platform.system()
         if system == "Darwin":
-            subprocess.Popen(["open", "-R", target_str])
+            spawn_detached_app(["open", "-R", target_str])
         elif system == "Windows":
-            subprocess.Popen(["explorer.exe", "/select," + target_str])
+            spawn_detached_app(["explorer.exe", "/select," + target_str])
         else:
             # Linux / other — open parent directory
-            subprocess.Popen(["xdg-open", str(Path(target_str).parent)])
+            spawn_detached_app(["xdg-open", str(Path(target_str).parent)])
 
         return j(handler, {"ok": True, "path": body["path"]})
     except (ValueError, PermissionError, OSError) as e:
@@ -28127,7 +28128,7 @@ def _handle_file_open_vscode(handler, body):
                 target_str = host_prefix + target_str[len(container_prefix):]
 
         cmd = vscode_cfg.get("command", "code")
-        # Resolve the command to an absolute path so subprocess.Popen finds it
+        # Resolve the command to an absolute path so the spawn helper finds it
         # even when the server process inherits a minimal PATH (e.g. when
         # launched via start.sh on macOS where /usr/local/bin may be absent).
         resolved_cmd = shutil.which(cmd)
@@ -28163,7 +28164,7 @@ def _handle_file_open_vscode(handler, body):
                 "Install VS Code and ensure the 'code' CLI is on PATH, "
                 "or set vscode.command in config.yaml to the full path.",
             )
-        subprocess.Popen([resolved_cmd, target_str])
+        spawn_detached_app([resolved_cmd, target_str])
 
         return j(handler, {"ok": True, "path": body["path"]})
     except (ValueError, PermissionError, OSError) as e:

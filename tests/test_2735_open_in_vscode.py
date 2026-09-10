@@ -12,10 +12,11 @@ Pins three layers:
    missing file, path traversal) behave correctly against the test server.
 
 The success path (VS Code actually opening) is not covered here because it
-requires VS Code to be installed on the CI host.  The subprocess call is
-intentionally fire-and-forget (matching ``_handle_file_reveal``), so its
+requires VS Code to be installed on the CI host.  The spawn is asynchronous
+(matching ``_handle_file_reveal``) but reaped rather than dropped, so its
 failure is surfaced via the OSError catch and a 400 response.  That
-observable is tested in ``TestOpenInVsCodeEndpointBehaviour``.
+observable is tested in ``TestOpenInVsCodeEndpointBehaviour``; the reaping
+itself is covered by ``tests/test_hweb45_process_hygiene.py``.
 """
 from __future__ import annotations
 
@@ -112,9 +113,13 @@ class TestOpenInVsCodeBackendWiring:
         assert "container_path_prefix" in body
         assert "host_path_prefix" in body
 
-    def test_handler_uses_subprocess_popen(self):
-        """Handler must use subprocess.Popen (async, non-blocking) consistent
-        with _handle_file_reveal."""
+    def test_handler_uses_the_detached_spawn_helper(self):
+        """Handler must launch the editor through ``spawn_detached_app``.
+
+        Still async and non-blocking, and still consistent with
+        ``_handle_file_reveal`` — but the handle is reaped rather than dropped,
+        so a click does not leave a zombie behind (HWEB-45).
+        """
         src = ROUTES.read_text(encoding="utf-8")
         m = re.search(
             r"def _handle_file_open_vscode\(handler, body\):.*?(?=\ndef )",
@@ -123,7 +128,8 @@ class TestOpenInVsCodeBackendWiring:
         )
         assert m
         body = m.group(0)
-        assert "subprocess.Popen(" in body
+        assert "spawn_detached_app(" in body
+        assert "subprocess.Popen(" not in body
 
     def test_handler_resolves_command_via_shutil_which(self):
         """Handler must use shutil.which() to find the command so it works

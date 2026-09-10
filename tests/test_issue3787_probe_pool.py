@@ -204,7 +204,14 @@ class TestProbeWorkerPoolPerHome(unittest.TestCase):
                 self.assertNotIn(str(Path(home)), _account_usage_worker_pool)
 
     def test_partial_cleanup_replenishes_pool(self):
-        """When cleanup removes one stale worker but the other is busy, pool replenishes to N=2."""
+        """A partially cleaned pool is back to N=2 by the time it is next used.
+
+        The replenish moved out of ``_cleanup_account_usage_probe_workers`` and
+        into ``_get_account_usage_probe_worker`` (HWEB-45): cleanup now runs on
+        the reaper tick, and refilling there would build pool entries under the
+        global lock for traffic that may never arrive. The #3787 guarantee is
+        unchanged — a partial cleanup must not permanently shrink the pool.
+        """
         home = Path("/tmp/test_replenish")
 
         worker = _get_account_usage_probe_worker(home)
@@ -238,9 +245,17 @@ class TestProbeWorkerPoolPerHome(unittest.TestCase):
 
             with _account_usage_worker_pool_lock:
                 remaining = _account_usage_worker_pool.get(key, [])
-                # Pool should be replenished back to 2
+                # Cleanup itself only evicts; the busy worker survives.
+                self.assertEqual(len(remaining), 1)
+                self.assertIn(workers[1], remaining)
+
+            # The next use refills the pool to N.
+            refilled = _get_account_usage_probe_worker(home)
+            self.assertIsNotNone(refilled)
+            refilled._lock.release()
+            with _account_usage_worker_pool_lock:
+                remaining = _account_usage_worker_pool.get(key, [])
                 self.assertEqual(len(remaining), _ACCOUNT_USAGE_WORKERS_PER_HOME)
-                # The original busy worker should still be present
                 self.assertIn(workers[1], remaining)
         finally:
             release_signal.set()

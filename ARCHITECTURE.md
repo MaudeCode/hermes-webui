@@ -868,6 +868,16 @@ background thread and in this order:
    change signal and projects only when it moves; see "Gateway watcher change
    detection" in `docs/sse-streams.md` for the polling and failure contract.
 
+The SessionChannel reaper's 60s tick is also the server's only always-on timer,
+so it owns process hygiene (`_run_process_hygiene`): every tick it evicts idle
+account-usage probe workers, rotates whichever stdout/stderr sinks its
+own descriptors point at, past their size cap, and reaps any detached external-app spawn that outlived its inline
+wait; every six hours it additionally runs run- and turn-journal retention. Each
+step is independently guarded — a failing one never stops the reaper from
+collecting channels. Putting this work on a timer rather than a request path is
+what keeps it reachable on an idle server; see "Run-journal storage keeps
+growing" in `docs/troubleshooting.md` for the retention policy and its env vars.
+
 While the gate is closed, every `/api/` request waits on it for up to
 `STARTUP_WAIT_SECONDS` (10s) and then returns **503 with `Retry-After: 5`** and a
 body carrying `condition: "startup_recovery"` plus the phase. `api()` in

@@ -27,6 +27,15 @@ else
 fi
 PID_FILE="${HERMES_WEBUI_PID_FILE:-${_ctl_runtime_root}/webui.pid}"
 LOG_FILE="${HERMES_WEBUI_LOG_FILE:-${_ctl_runtime_root}/webui.log}"
+# Absolutize before anything uses it. The shell resolves the `>>` redirections
+# below against the invocation directory, but the server is exec'd with a
+# different cwd and resolves the exported HERMES_WEBUI_LOG_FILE against that —
+# so a relative override would have rotation watching a different file, or none,
+# while the real log grew unbounded.
+case "${LOG_FILE}" in
+  /*) ;;
+  *) LOG_FILE="${PWD}/${LOG_FILE}" ;;
+esac
 STATE_FILE="${HERMES_WEBUI_CTL_STATE_FILE:-${_ctl_runtime_root}/webui.ctl.env}"
 DEFAULT_STATE_DIR="${HERMES_WEBUI_STATE_DIR:-${_ctl_runtime_root}/webui}"
 DEFAULT_LAUNCHD_LABEL="${HERMES_WEBUI_LAUNCHD_LABEL:-com.parantoux.hermes-webui}"
@@ -774,6 +783,11 @@ start_cmd() {
     cd "${REPO_ROOT}"
     trap '' HUP
     export HERMES_WEBUI_PRESERVE_ENV=1
+    # Hand the server the sink its stdout/stderr actually lands in. --foreground
+    # execs in place, so bootstrap never creates its own bootstrap-<port>.log and
+    # the running server would otherwise have no way to find — or size-bound —
+    # this file. See rotate_webui_log in api/logging_hygiene.py.
+    export HERMES_WEBUI_LOG_FILE="${LOG_FILE}"
     exec nohup "${python_exe}" "${REPO_ROOT}/bootstrap.py" --no-browser --foreground --host "${CTL_HOST}" "${CTL_PORT}" ${CTL_BOOTSTRAP_ARGS[@]+"${CTL_BOOTSTRAP_ARGS[@]}"}
   ) >> "${LOG_FILE}" 2>&1 &
   pid=$!
