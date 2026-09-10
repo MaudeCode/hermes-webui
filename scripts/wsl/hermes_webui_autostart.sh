@@ -36,6 +36,13 @@ HERMES_WEBUI_PID_FILE="${HERMES_WEBUI_PID_FILE:-${HERMES_WEBUI_LOG_DIR}/hermes-w
 HERMES_WEBUI_LOCK_FILE="${HERMES_WEBUI_LOCK_FILE:-/tmp/hermes-webui-autostart.lock}"
 AUTOSTART_LOG="${HERMES_WEBUI_LOG_DIR}/webui_autostart.log"
 WEBUI_LOG="${HERMES_WEBUI_LOG_DIR}/hermes_webui.log"
+# Absolutize before anything uses it: HERMES_WEBUI_LOG_DIR may be relative, the
+# redirection below is opened after cd'ing to the repo, and the server resolves
+# the exported path against its own cwd again. One resolved value for all three.
+case "${WEBUI_LOG}" in
+  /*) ;;
+  *) WEBUI_LOG="${PWD}/${WEBUI_LOG}" ;;
+esac
 
 # Make the WSL launcher knobs visible to start.sh/bootstrap.py.
 export HERMES_WEBUI_HOST HERMES_WEBUI_PORT

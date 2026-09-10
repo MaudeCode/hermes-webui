@@ -235,21 +235,24 @@ liveness probe keeps it until the session is deleted.
 ## The `bootstrap-<port>.log` file keeps growing
 
 The server's stdout and stderr are redirected at the file-descriptor level, so
-no in-process log handler owns that sink. Which file it is depends on the
-launcher:
+no in-process log handler owns that sink. Rather than depending on each launcher
+to declare its path, the server asks the OS where its own descriptors point —
+`/proc/self/fd/N` on Linux and WSL, `fcntl(F_GETPATH)` on macOS — so a launchd
+plist, a shell redirect, or any future launcher is covered without extra wiring.
+An explicit `HERMES_WEBUI_LOG_FILE` overrides the probe; `ctl.sh` and the WSL
+autostart script both set it.
 
-- `./ctl.sh start` — the documented daemon path — runs `bootstrap.py
-  --foreground`, which execs in place, and redirects into `${HERMES_HOME}/webui.log`
-  (or `$HERMES_WEBUI_LOG_FILE`).
-- `scripts/wsl/hermes_webui_autostart.sh` redirects into
-  `${HERMES_WEBUI_LOG_DIR}/hermes_webui.log`.
-- `bootstrap.py`'s detached path writes `{state_dir}/bootstrap-<port>.log`.
+Both descriptors are checked, so a launchd plist pointing `StandardOutPath` and
+`StandardErrorPath` at different files gets both bounded. A descriptor that is
+not a regular file — a terminal, a pipe, `/dev/null` — is not a sink and is
+skipped. If nothing is found, `{state_dir}/bootstrap-<port>.log` is the
+last resort.
 
-The first two export their resolved path as `HERMES_WEBUI_LOG_FILE` so the
-running server can find — and size-bound — the file it is actually writing to.
-
-Once the file passes 32 MiB the server copies it to `<log>.1` and truncates the
-original in place.
+Once a file passes 32 MiB the server copies it to `<log>.1` and truncates the
+original in place. The whole check-copy-truncate sequence runs against a single
+descriptor rather than re-resolving the path, so an external rotator
+(`newsyslog`, `logrotate`) renaming the file midway cannot cause the fresh
+replacement to be erased instead.
 
 Truncation, not rename: every writer holds an inherited `O_APPEND` descriptor on
 the open file, and renaming would leave all of them writing into the rotated

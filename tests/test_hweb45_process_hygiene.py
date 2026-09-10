@@ -776,16 +776,102 @@ class TestWebuiLogRotation:
         which execs in place and never creates a bootstrap-<port>.log.
         """
         root = Path(__file__).resolve().parent.parent
-        for script in ("ctl.sh", "scripts/wsl/hermes_webui_autostart.sh"):
+        for script, var in (
+            ("ctl.sh", "LOG_FILE"),
+            ("scripts/wsl/hermes_webui_autostart.sh", "WEBUI_LOG"),
+        ):
             text = (root / script).read_text(encoding="utf-8")
             assert "export HERMES_WEBUI_LOG_FILE=" in text, script
+            # A relative path resolves differently in the shell and the server.
+            assert f'{var}="${{PWD}}/${{{var}}}"' in text, script
 
-    def test_bootstrap_sink_is_the_fallback(self, monkeypatch):
+    def test_bootstrap_sink_is_the_last_resort(self, monkeypatch):
+        """Nothing configured and no file-backed descriptor: fall back."""
         from api.config import PORT
 
         monkeypatch.delenv(logging_hygiene._WEBUI_LOG_FILE_ENV, raising=False)
+        monkeypatch.setattr(logging_hygiene, "_path_for_fd", lambda fd: None)
 
-        assert logging_hygiene.webui_log_path().name == f"bootstrap-{PORT}.log"
+        assert logging_hygiene.webui_log_paths() == [
+            Path(logging_hygiene.webui_log_paths()[0].parent) / f"bootstrap-{PORT}.log"
+        ]
+
+    def test_the_sink_is_discovered_from_the_descriptor(self, tmp_path, monkeypatch):
+        """No launcher told us this path — the OS did.
+
+        This is what covers a launchd plist, or any future launcher that
+        forgets to export its sink.
+        """
+        monkeypatch.delenv(logging_hygiene._WEBUI_LOG_FILE_ENV, raising=False)
+        sink = tmp_path / "launchd-stdout.log"
+        fd = os.open(sink, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+        try:
+            discovered = logging_hygiene._path_for_fd(fd)
+        finally:
+            os.close(fd)
+
+        assert discovered is not None
+        assert discovered.resolve() == sink.resolve()
+
+    def test_separate_stdout_and_stderr_sinks_are_both_returned(
+        self, tmp_path, monkeypatch
+    ):
+        """A launchd plist points StandardOutPath and StandardErrorPath apart."""
+        monkeypatch.delenv(logging_hygiene._WEBUI_LOG_FILE_ENV, raising=False)
+        out = tmp_path / "launchd-stdout.log"
+        err = tmp_path / "launchd-stderr.log"
+        monkeypatch.setattr(
+            logging_hygiene, "_path_for_fd", lambda fd: out if fd == 1 else err
+        )
+
+        assert logging_hygiene.webui_log_paths() == [out, err]
+
+    def test_both_sinks_are_rotated(self, tmp_path, monkeypatch):
+        monkeypatch.delenv(logging_hygiene._WEBUI_LOG_FILE_ENV, raising=False)
+        out = tmp_path / "launchd-stdout.log"
+        err = tmp_path / "launchd-stderr.log"
+        for log in (out, err):
+            log.write_bytes(b"x" * 4096)
+        monkeypatch.setattr(
+            logging_hygiene, "_path_for_fd", lambda fd: out if fd == 1 else err
+        )
+
+        assert logging_hygiene.rotate_webui_log(max_bytes=1024) is True
+
+        assert out.stat().st_size == 0
+        assert err.stat().st_size == 0
+        assert (tmp_path / "launchd-stdout.log.1").read_bytes() == b"x" * 4096
+        assert (tmp_path / "launchd-stderr.log.1").read_bytes() == b"x" * 4096
+
+    def test_a_non_file_descriptor_is_not_a_sink(self, monkeypatch):
+        """A terminal or pipe has nothing to rotate."""
+        read_fd, write_fd = os.pipe()
+        try:
+            assert logging_hygiene._path_for_fd(write_fd) is None
+        finally:
+            os.close(read_fd)
+            os.close(write_fd)
+
+    def test_rotation_truncates_the_inode_it_copied(self, tmp_path, monkeypatch):
+        """An external rotator renaming the file mid-sequence must not cause the
+        fresh replacement to be erased."""
+        log = tmp_path / "webui.log"
+        log.write_bytes(b"old" * 2048)
+        real_copyfileobj = logging_hygiene.shutil.copyfileobj
+
+        def rename_midway(src, dst, *a, **kw):
+            real_copyfileobj(src, dst, *a, **kw)
+            # An external rotator moves our inode aside and a new log appears.
+            log.rename(tmp_path / "webui.log.external")
+            log.write_bytes(b"fresh")
+
+        monkeypatch.setattr(logging_hygiene.shutil, "copyfileobj", rename_midway)
+
+        logging_hygiene.rotate_webui_log(path=log, max_bytes=1024)
+
+        # The replacement is untouched; the old inode we held is the one emptied.
+        assert log.read_bytes() == b"fresh"
+        assert (tmp_path / "webui.log.external").stat().st_size == 0
 
     def test_log_under_the_cap_is_left_alone(self, tmp_path):
         log = tmp_path / "bootstrap-8787.log"
