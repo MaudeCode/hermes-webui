@@ -110,9 +110,16 @@ def test_permissions_policy_does_not_disable_microphone():
 
 
 def test_cache_control_no_store():
-    """API responses should have Cache-Control: no-store."""
+    """API responses should have Cache-Control: no-store.
+
+    HWEB-55 gave /api/sessions an ETag without weakening this: revalidation there
+    is application-managed (the client holds the validator and sends
+    If-None-Match itself), so session titles and profile metadata are still never
+    written to a browser or shared HTTP cache.
+    """
     d, status, headers = get("/api/sessions")
     assert headers.get("Cache-Control") == "no-store"
+    assert headers.get("ETag")
 
 
 # ── Settings password field ──────────────────────────────────────────────

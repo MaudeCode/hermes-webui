@@ -64,6 +64,7 @@ global.SESSION_PROJECT_REFRESH_INTERVAL_MS = 30000;
 global._sessionListLastFetchedAt = 0;
 global._sessionListLastFetchKey = '';
 global._sessionListLastPayload = null;
+global._sessionListLastEtag = null;
 global._sessionListLastMutationSeq = 0;
 global._sessionListLoadError = null;
 {_const(SESSIONS_JS, 'SESSION_LIST_REFRESH_TTL_MS')}

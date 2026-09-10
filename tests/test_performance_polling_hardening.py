@@ -25,7 +25,9 @@ def test_session_list_refreshes_are_coalesced_while_in_flight():
     assert "opts:_mergeRenderSessionListOptions" in src
     assert "if (_gen !== _renderSessionListGen) return" in src
     assert "const sessionRequestOpts={" in src
-    assert "api('/api/sessions' + sessionListQS,sessionRequestOpts)" in src
+    # HWEB-55 spreads sessionRequestOpts into a conditional-GET request object.
+    assert "const requestOpts={...(sessionRequestOpts||{}),cache:'no-store'};" in src
+    assert "api('/api/sessions' + sessionListQS,requestOpts)" in src
     assert "api('/api/projects' + projectQS,{timeoutToast:false})" in src
 
 

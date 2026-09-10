@@ -258,7 +258,11 @@ def test_passive_background_polls_suppress_timeout_toasts():
     assert "api('/api/client-events/log',{method:'POST',body:JSON.stringify(payload),timeoutMs:3000,timeoutToast:false})" in workspace
     assert "const sessionRequestOpts={" in sessions
     assert "timeoutToast:false" in sessions
-    assert "api('/api/sessions' + sessionListQS,sessionRequestOpts)" in sessions
+    # HWEB-55: the session list request now also carries conditional-GET options,
+    # so sessionRequestOpts is spread into the object rather than passed straight
+    # through. What matters here is that the caller's toast policy still reaches api().
+    assert "const requestOpts={...(sessionRequestOpts||{}),cache:'no-store'};" in sessions
+    assert "api('/api/sessions' + sessionListQS,requestOpts)" in sessions
     assert "api('/api/projects' + projectQS,{timeoutToast:false})" in sessions
     assert "api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`,{timeoutToast:false})" in sessions
     assert 'api("/api/approval/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false})' in messages

@@ -96,9 +96,11 @@ def test_sessions_api_always_retries_transient_upstream_statuses_and_boot_keeps_
     assert "sessionRequestOpts.retryTimeouts=true;" in refresh
     assert refresh.index("sessionRequestOpts.retryTimeouts=true;") > boot_gate
 
-    # HWEB-43 moved the fetch into the else branch of the freshness gate; the retry
-    # opts must still be the ones passed to it.
-    assert "sessData = await api('/api/sessions' + sessionListQS,sessionRequestOpts);" in helper
+    # HWEB-43 moved the fetch into the else branch of the freshness gate; HWEB-55
+    # spreads the opts into a conditional-GET request object. The retry opts must
+    # still be the ones that reach the fetch.
+    assert "const requestOpts={...(sessionRequestOpts||{}),cache:'no-store'};" in helper
+    assert "await api('/api/sessions' + sessionListQS,requestOpts);" in helper
     assert "api('/api/sessions' + sessionListQS,{timeoutToast:false})" not in helper
     assert "retryTimeouts" in workspace_src
     assert "retryStatuses" in workspace_src

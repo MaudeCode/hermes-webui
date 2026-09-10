@@ -458,6 +458,7 @@ const SESSION_LIST_REFRESH_TTL_MS = 2000;
 let _sessionListLastFetchedAt = 0;
 let _sessionListLastFetchKey = '';
 let _sessionListLastPayload = null;
+let _sessionListLastEtag = null;   // HWEB-55: validator of the rows behind _sessionListLastPayload
 let _sessionListLastMutationSeq = 0;
 const SESSION_LIST_INTERACTION_IDLE_MS = 700;
 const SESSION_SWIPE_DURATION_MS = 500;
@@ -6110,9 +6111,59 @@ async function _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts,
     // when it started at least as late as the stored one — an out-of-order older
     // response must not overwrite a newer snapshot.
     const requestedAt=now;
-    sessData = await api('/api/sessions' + sessionListQS,sessionRequestOpts);
+    // HWEB-55: revalidate instead of re-downloading. The sidebar polls every 30s
+    // per open tab while streaming, and the list is unchanged almost every time —
+    // at 2000 sessions that is ~188 KiB of gzipped, identical rows per poll over
+    // whatever uplink this self-hosted install is reached on.
+    //
+    // Both the validator and the body it stands for are captured here, before the
+    // await, so a concurrent load that replaces the module-level entry mid-flight
+    // cannot make us replay rows the 304 was not about.
+    const conditionalEtag=(_sessionListLastEtag&&_sessionListLastFetchKey===sessionListKey&&_sessionListLastPayload!==null)
+      ?_sessionListLastEtag:null;
+    const conditionalPayload=conditionalEtag?_sessionListLastPayload:null;
+    // `cache:'no-store'` keeps the browser's HTTP cache out of this path
+    // unconditionally, so revalidation is ours and only ours. The response is
+    // `no-store` too, so nothing is stored today — but if that header ever
+    // loosened, a transparent browser revalidation would replay a stored body,
+    // and its stale `server_time`, as a synthetic 200 this code could not tell
+    // from a real one. The guarantee belongs on both ends of the request.
+    const requestOpts={...(sessionRequestOpts||{}),cache:'no-store'};
+    if(conditionalEtag){
+      requestOpts.conditional=true;
+      requestOpts.headers={...(requestOpts.headers||{}),'If-None-Match':conditionalEtag};
+    }
+    const response = await api('/api/sessions' + sessionListQS,requestOpts);
+    if(response&&response.__notModified){
+      // Unchanged rows: replay them, minus `server_time`/`server_tz`.
+      //
+      // `server_time` was spliced fresh into the 200 this validator came from and
+      // is now stale by the whole polling gap, so re-deriving the clock skew from
+      // it would skew the estimate by exactly that gap.
+      // _applySessionListPayload() only updates _serverTimeDelta for a numeric
+      // server_time, so dropping it keeps the previously computed delta — a 304
+      // declines to update the skew rather than injecting a wrong one.
+      //
+      // `server_tz` is dropped for a different reason: it is part of the server's
+      // validator, so a DST step produces a new ETag and a full 200. A 304 is
+      // therefore proof the offset has not moved, and _serverTz is already right.
+      //
+      // This branch is reachable only when the request carried If-None-Match,
+      // which is exactly when conditionalPayload was captured. If that ever
+      // stopped holding, the destructure throws into the caller's catch and
+      // renders the load-error state rather than a blank sidebar.
+      const {server_time:_unchangedServerTime,server_tz:_unchangedServerTz,...replayed}=conditionalPayload;
+      sessData=replayed;
+    }else{
+      sessData=response;
+    }
     if(_sessionListLastFetchKey!==sessionListKey||requestedAt>=_sessionListLastFetchedAt){
+      // Store the payload we actually resolved — on a 304 that is the stripped
+      // one, so the short TTL replay above cannot hand a later render the
+      // server_time we just declined to apply. Only a real 200 carries a new
+      // validator; a 304 keeps the one it confirmed.
       _sessionListLastPayload=sessData;
+      if(!(response&&response.__notModified)) _sessionListLastEtag=(response&&response.__etag)||null;
       _sessionListLastFetchKey=sessionListKey;
       _sessionListLastFetchedAt=requestedAt;
       _sessionListLastMutationSeq=mutationSeq;

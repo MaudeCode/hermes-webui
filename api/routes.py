@@ -2892,15 +2892,46 @@ def _session_list_response_signature(
     return (live, active_stream_ids, running_cron_jobs, dict(attention_by_session), bool(redact_enabled))
 
 
-def _session_list_response_time_prefix() -> bytes:
+def _session_list_response_time_prefix(server_tz: str) -> bytes:
     return b'{"server_time":%s,"server_tz":%s,' % (
         json.dumps(time.time()).encode("utf-8"),
-        json.dumps(time.strftime("%z")).encode("utf-8"),
+        json.dumps(server_tz).encode("utf-8"),
     )
 
 
-def _session_list_response_body(key: tuple, payload: dict, *, settings: dict | None = None) -> bytes:
-    """Return the serialized /api/sessions body, reusing cached bytes when possible."""
+def _session_list_response_tail_digest(tail: bytes) -> str:
+    """Digest of the cached response tail — the O(N) half of the validator.
+
+    Cached alongside the tail it covers, so a revalidated poll never rehashes
+    megabytes of unchanged rows.
+    """
+    return hashlib.blake2b(tail, digest_size=16).hexdigest()
+
+
+def _session_list_response_etag(tail_digest: str, server_tz: str) -> str:
+    """Strong validator for the whole representation bar `server_time`.
+
+    `server_time` is the one field a 304 may legitimately decline to refresh:
+    it feeds a slowly-varying clock-skew estimate, so a client that keeps its
+    previous value stays accurate. `server_tz` is not like that — it steps by a
+    whole hour at a DST boundary while every row stays identical, and a client
+    holding the old offset renders every timestamp an hour out until some
+    unrelated change forces a 200. Folding it into the validator makes that
+    transition a normal 200. O(1) per request: the expensive half is the cached
+    tail digest.
+    """
+    return '"%s-%s"' % (tail_digest, server_tz)
+
+
+def _session_list_response_body(
+    key: tuple, payload: dict, *, settings: dict | None = None
+) -> tuple[bytes, str | None]:
+    """Return the serialized /api/sessions body and its ETag.
+
+    The ETag is ``None`` only on the degenerate path that cannot splice a
+    prefix, where the body carries `server_time` inline and therefore has no
+    stable identity to assert.
+    """
     if settings is None:
         try:
             settings = load_settings()
@@ -2919,8 +2950,14 @@ def _session_list_response_body(key: tuple, payload: dict, *, settings: dict | N
     row_ids = entry[1] if entry is not None else _session_list_response_row_ids(payload)
     attention_by_session = _session_attention_snapshot()
     signature = _session_list_response_signature(row_ids, redact_enabled, attention_by_session)
+    # Read the zone once and use it for both the prefix and the validator, so the
+    # two can never straddle a DST boundary and disagree within one response.
+    server_tz = time.strftime("%z")
     if entry is not None and signature is not None and entry[2] == signature:
-        return _session_list_response_time_prefix() + entry[3]
+        return (
+            _session_list_response_time_prefix(server_tz) + entry[3],
+            _session_list_response_etag(entry[4], server_tz),
+        )
 
     response = _session_list_payload_to_response(
         payload, settings=settings, attention_by_session=attention_by_session
@@ -2931,16 +2968,20 @@ def _session_list_response_body(key: tuple, payload: dict, *, settings: dict | N
     )
     if len(tail) <= 2:
         # Degenerate body ({}), so there is nothing to splice a prefix onto.
-        return _json_response_body(response, pretty=False)
+        return _json_response_body(response, pretty=False), None
     tail = tail[1:]
+    tail_digest = _session_list_response_tail_digest(tail)
 
     if signature is not None:
         with _SESSION_LIST_RESPONSE_CACHE_LOCK:
-            _SESSION_LIST_RESPONSE_CACHE[key] = (payload, row_ids, signature, tail)
+            _SESSION_LIST_RESPONSE_CACHE[key] = (payload, row_ids, signature, tail, tail_digest)
             _SESSION_LIST_RESPONSE_CACHE.move_to_end(key)
             while len(_SESSION_LIST_RESPONSE_CACHE) > _SESSION_LIST_RESPONSE_CACHE_MAX_ENTRIES:
                 _SESSION_LIST_RESPONSE_CACHE.popitem(last=False)
-    return _session_list_response_time_prefix() + tail
+    return (
+        _session_list_response_time_prefix(server_tz) + tail,
+        _session_list_response_etag(tail_digest, server_tz),
+    )
 
 
 def _hidden_archived_sidebar_reference_sessions(
@@ -3216,6 +3257,7 @@ from api.helpers import (
     strip_public_internal_fields,
     _redact_text,
     _json_response_body,
+    _if_none_match_matches,
     _CLIENT_DISCONNECT_ERRORS,
 )
 from api.agent_health import build_agent_health_payload
@@ -15522,11 +15564,15 @@ def handle_get(handler, parsed) -> bool:
                 diag=diag,
             )
             diag.stage("response_write")
-            return j(
-                handler,
-                _session_list_response_body(key, payload, settings=settings),
-                pretty=False,
-            )
+            body, etag = _session_list_response_body(key, payload, settings=settings)
+            # Still `no-store` (j()'s default). The ticket proposed `no-cache` so a
+            # stored copy could be revalidated, but this endpoint's revalidation is
+            # application-managed — the client holds the validator in memory and
+            # sends If-None-Match itself — so nothing needs to be storable. Keeping
+            # `no-store` means session titles and profile metadata are still never
+            # written to a browser or shared HTTP cache, including by the callers
+            # that hit this endpoint outside the sidebar poll (Codex round 1, P2).
+            return j(handler, body, pretty=False, etag=etag)
         finally:
             diag.finish()
 
@@ -21364,21 +21410,15 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
         # and "*" matches any existing resource. On match, GET/HEAD is
         # short-circuited with 304 — processed before Range since a matched
         # conditional request skips the entity entirely.
-        if_none_match = handler.headers.get("If-None-Match", "")
-        if if_none_match and etag is not None:
-            current = etag[2:] if etag.startswith("W/") else etag
-            matched = if_none_match.strip() == "*" or any(
-                (c.strip()[2:] if c.strip().startswith("W/") else c.strip()) == current
-                for c in if_none_match.split(",")
-                if c.strip()
-            )
-            if matched:
-                handler.send_response(304)
-                handler.send_header("ETag", etag)
-                handler.send_header("Cache-Control", cache_control)
-                _security_headers(handler)
-                handler.end_headers()
-                return True
+        if etag is not None and _if_none_match_matches(
+            handler.headers.get("If-None-Match", ""), etag
+        ):
+            handler.send_response(304)
+            handler.send_header("ETag", etag)
+            handler.send_header("Cache-Control", cache_control)
+            _security_headers(handler)
+            handler.end_headers()
+            return True
 
         byte_range = _parse_range_header(handler.headers.get("Range", ""), file_size)
         if handler.headers.get("Range") and byte_range is None:
