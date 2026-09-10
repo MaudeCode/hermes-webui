@@ -13773,6 +13773,14 @@ function _mcpStatusLabel(status){
   }[status]||'mcp_status_unknown';
   return t(key);
 }
+// Only the two actionable verdicts get a badge (HWEB-62). "Healthy" and
+// "unknown" would add a permanent second badge to every row for no decision.
+function _mcpHealthBadge(server){
+  const key={unhealthy:'mcp_health_unhealthy',needs_auth:'mcp_health_needs_auth'}[server&&server.health];
+  if(!key) return '';
+  const detail=server.health_detail?`${t(key)} — ${server.health_detail}`:t(key);
+  return `<span class="mcp-health-badge mcp-health-${esc(server.health)}" title="${esc(detail)}">${esc(t(key))}</span>`;
+}
 function toggleMcpServer(name, enabled){
   api('/api/mcp/servers/'+encodeURIComponent(name),{
     method:'PATCH',
@@ -13823,6 +13831,7 @@ function loadMcpServers(){
           <span class="mcp-server-name">${esc(s.name)}</span>
           ${transportBadge}
           ${statusBadge}
+          ${_mcpHealthBadge(s)}
         </div>
         <div class="mcp-server-detail">${esc(detail)}${secretInfo?' | '+esc(secretInfo):''}</div>
         <div class="mcp-server-meta"><span class="mcp-tool-count">${esc(t('mcp_tool_count',toolCount))}</span>${toggleBtn}</div>

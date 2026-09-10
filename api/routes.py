@@ -3261,6 +3261,7 @@ from api.helpers import (
     _CLIENT_DISCONNECT_ERRORS,
 )
 from api.agent_health import build_agent_health_payload
+from api import mcp_health
 from api.gateway_chat import gateway_chat_config_status
 from api.request_diagnostics import RequestDiagnostics
 from api.system_health import build_system_health_payload
@@ -30991,25 +30992,82 @@ def _parse_mcp_enabled(value) -> bool:
     return True
 
 
-def _mcp_runtime_status_by_name() -> dict[str, dict]:
+def _mcp_health_by_name(servers) -> dict[str, dict]:
+    """Kick off background health checks and read back the current verdicts.
+
+    Only enabled servers with a usable transport are checked; ``mcp_health``
+    prunes state for everything else, so toggling a server off both stops the
+    checks and clears its stale verdict (HWEB-62).
+    """
+    checkable = {}
+    if isinstance(servers, dict):
+        for name, cfg in servers.items():
+            if not isinstance(cfg, dict):
+                continue
+            if not _parse_mcp_enabled(cfg.get("enabled", True)):
+                continue
+            if not (cfg.get("url") or cfg.get("command")):
+                continue
+            checkable[str(name)] = cfg
+    try:
+        mcp_health.refresh_async(checkable)
+        return mcp_health.snapshot()
+    except Exception:
+        return {}
+
+
+def _mcp_runtime_status_by_name(servers=None) -> dict[str, dict]:
     """Return already-known MCP runtime status without starting servers.
 
     ``tools.mcp_tool.get_mcp_status()`` only reads the existing MCP registry and
     configuration; it does not probe or spawn MCP subprocesses. If Hermes Agent
     is unavailable, fall back to an empty map so the API remains safe.
+
+    Background health verdicts (HWEB-62) are folded into this same map so every
+    existing consumer picks them up; there is deliberately no second status
+    path. ``servers`` is the configured ``mcp_servers`` mapping; it is read from
+    the active profile config when the caller does not already have it.
     """
+    by_name: dict[str, dict] = {}
     try:
         from tools.mcp_tool import get_mcp_status
         statuses = get_mcp_status()
     except Exception:
-        return {}
-    if not isinstance(statuses, list):
-        return {}
-    return {
-        str(entry.get("name")): entry
-        for entry in statuses
-        if isinstance(entry, dict) and entry.get("name")
-    }
+        statuses = []
+    if isinstance(statuses, list):
+        for entry in statuses:
+            if isinstance(entry, dict) and entry.get("name"):
+                by_name[str(entry.get("name"))] = entry
+
+    if servers is None:
+        cfg = get_config_for_profile_home(get_active_hermes_home())
+        servers = cfg.get("mcp_servers", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(servers, dict):
+        servers = {}
+
+    health = _mcp_health_by_name(servers)
+    for raw_name, scfg in servers.items():
+        name = str(raw_name)
+        # Copy: entries above are owned by the agent registry, not by us.
+        entry = dict(by_name.get(name) or {"name": name})
+        by_name[name] = entry
+        enabled = _parse_mcp_enabled(scfg.get("enabled", True)) if isinstance(scfg, dict) else False
+        if not enabled:
+            entry["health"] = "not_checked"
+            entry["health_detail"] = ""
+            entry["health_checked_at"] = None
+            continue
+        row = health.get(name) or {}
+        state = row.get("health") or "unknown"
+        # A live connection is the strongest liveness signal we have, so it
+        # settles the transports the probe deliberately does not spawn (stdio).
+        # An expired credential still wins: it is the actionable one.
+        if state != "needs_auth" and entry.get("connected"):
+            state = "healthy"
+        entry["health"] = state
+        entry["health_detail"] = row.get("detail") or ""
+        entry["health_checked_at"] = row.get("checked_at")
+    return by_name
 
 
 def _server_summary(name, cfg, runtime_status=None):
@@ -31025,6 +31083,9 @@ def _server_summary(name, cfg, runtime_status=None):
             "active": False,
             "status": "invalid_config",
             "tool_count": None,
+            "health": "not_checked",
+            "health_detail": "",
+            "health_checked_at": None,
         })
         return out
 
@@ -31060,6 +31121,17 @@ def _server_summary(name, cfg, runtime_status=None):
     else:
         out["status"] = "configured"
     out["tool_count"] = runtime_status.get("tools") if runtime_status else None
+    # Health rides on the same runtime status map (HWEB-62). A server that is
+    # off or misconfigured is never probed, so it reports "not_checked" rather
+    # than an alarming verdict nobody can act on.
+    if not enabled or out["transport"] == "invalid":
+        out["health"] = "not_checked"
+        out["health_detail"] = ""
+        out["health_checked_at"] = None
+    else:
+        out["health"] = runtime_status.get("health") or "unknown"
+        out["health_detail"] = runtime_status.get("health_detail") or ""
+        out["health_checked_at"] = runtime_status.get("health_checked_at")
     return out
 
 
@@ -31219,7 +31291,7 @@ def _handle_mcp_tools_list(handler):
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
         servers = {}
-    runtime = _mcp_runtime_status_by_name()
+    runtime = _mcp_runtime_status_by_name(servers)
     server_summaries = {
         str(name): _server_summary(str(name), scfg, runtime.get(str(name)))
         for name, scfg in servers.items()
@@ -31428,7 +31500,7 @@ def _handle_notes_sources_list(handler):
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
         servers = {}
-    runtime = _mcp_runtime_status_by_name()
+    runtime = _mcp_runtime_status_by_name(servers)
     server_summaries = {
         str(name): _server_summary(str(name), scfg, runtime.get(str(name)))
         for name, scfg in servers.items()
@@ -31733,7 +31805,7 @@ def _handle_mcp_servers_list(handler):
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
         servers = {}
-    runtime = _mcp_runtime_status_by_name()
+    runtime = _mcp_runtime_status_by_name(servers)
     result = [
         _server_summary(name, scfg, runtime.get(str(name)))
         for name, scfg in servers.items()
