@@ -5757,7 +5757,10 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
                 )
             ):
                 merged_payload[key] = copy.deepcopy(incoming_value)
-        for key in ("preview", "command", "duration", "started_at"):
+        # cost_usd fills the same way: the provider-invocation row is pushed
+        # first and never carries one, so the session-summary row merged in
+        # behind it is the only source of the delegation cost.
+        for key in ("preview", "command", "duration", "started_at", "cost_usd"):
             incoming_value = incoming_tool.get(key)
             if not empty(incoming_value) and empty(merged_tool.get(key)):
                 merged_tool[key] = copy.deepcopy(incoming_value)

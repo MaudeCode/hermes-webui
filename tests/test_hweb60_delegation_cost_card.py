@@ -604,3 +604,99 @@ def test_reattach_without_a_cost_leaves_the_key_off(monkeypatch):
     row = _delegation_row(snapshot)
     assert "cost_usd" not in row["tool"]
     assert "cost_usd" not in row["payload"]
+
+
+# ── Cold reload: the hydrated anchor scene merges the persisted summary ──────
+
+
+def test_cold_load_hydration_carries_the_cost_into_the_merged_row():
+    """The provider-invocation row has no cost; the session summary is the source.
+
+    On a cold /api/session load `_complete_hydrated_anchor_scene()` pushes the
+    invocation row first and merges the session-summary row in behind it, so a
+    merge that drops `cost_usd` silently loses the chip after reload — and an
+    anchor-owned turn never reaches the legacy card fallback that would.
+    """
+    from api import routes
+
+    messages = [
+        {"role": "user", "content": "Delegate the audit"},
+        {
+            "role": "assistant",
+            "content": "Done.",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "function": {"name": "delegate_task", "arguments": '{"goal": "audit"}'},
+                }
+            ],
+        },
+    ]
+    scene = {
+        "version": "activity_scene_v1",
+        "final_answer": "Done.",
+        "activity_rows": [
+            {
+                "row_id": "tool-1",
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "tool": {"id": "call-1", "name": "delegate_task"},
+            }
+        ],
+    }
+    tool_calls = [
+        {"tid": "call-1", "name": "delegate_task", "snippet": "done", "done": True,
+         "assistant_msg_idx": 1, "cost_usd": 0.6125},
+    ]
+
+    completed = routes._complete_hydrated_anchor_scene(
+        messages, scene, 1, tool_calls=tool_calls, stream_id="stream-1"
+    )
+    row = next(
+        r for r in completed["activity_rows"]
+        if (r.get("tool") or {}).get("name") == "delegate_task"
+    )
+    assert row["tool"]["cost_usd"] == 0.6125
+    assert row["payload"]["cost_usd"] == 0.6125
+
+
+def test_cold_load_hydration_adds_no_cost_key_when_there_is_none():
+    from api import routes
+
+    messages = [
+        {"role": "user", "content": "Delegate the audit"},
+        {
+            "role": "assistant",
+            "content": "Done.",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "function": {"name": "delegate_task", "arguments": "{}"},
+                }
+            ],
+        },
+    ]
+    scene = {
+        "version": "activity_scene_v1",
+        "final_answer": "Done.",
+        "activity_rows": [
+            {
+                "row_id": "tool-1",
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "tool": {"id": "call-1", "name": "delegate_task"},
+            }
+        ],
+    }
+    completed = routes._complete_hydrated_anchor_scene(
+        messages, scene, 1,
+        tool_calls=[{"tid": "call-1", "name": "delegate_task", "snippet": "done",
+                     "done": True, "assistant_msg_idx": 1}],
+        stream_id="stream-1",
+    )
+    row = next(
+        r for r in completed["activity_rows"]
+        if (r.get("tool") or {}).get("name") == "delegate_task"
+    )
+    assert "cost_usd" not in row["tool"]
+    assert "cost_usd" not in row["payload"]
