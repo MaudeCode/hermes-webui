@@ -7773,6 +7773,60 @@ def _tool_result_snippet(raw, limit: int = _TOOL_RESULT_SNIPPET_MAX) -> str:
     return text[:limit]
 
 
+def _delegation_cost_usd(name, raw):
+    """Total spend reported by a ``delegate_task`` result, or None.
+
+    The agent serialises one entry per delegated task, each carrying a
+    ``cost_usd`` float (hermes-agent ``tools/delegate_tool.py``). It is summed
+    here, where the whole result is still in hand: ``cost_usd`` sits at the end
+    of an entry, behind the summary and the tool trace, so the card-facing
+    ``snippet`` (capped at _TOOL_RESULT_SNIPPET_MAX) routinely truncates it away.
+
+    Returns None — never ``0.0`` — when no entry reports spend, so a card can
+    tell "no cost data" apart from a real zero.
+    """
+    if str(name or '') != 'delegate_task':
+        return None
+    try:
+        data = raw if isinstance(raw, dict) else json.loads(str(raw or ''))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    results = data.get('results')
+    if not isinstance(results, list):
+        return None
+    total = 0.0
+    for entry in results:
+        if not isinstance(entry, dict):
+            continue
+        # A child whose provider could not report pricing makes the whole
+        # fan-out's total unknowable: summing the rest would show a lower
+        # bound as if it were the delegation's cost. Fail closed and render
+        # no chip instead — the card is the only place this number appears,
+        # so there is nowhere to caveat it.
+        if str(entry.get('cost_status') or '').strip().lower() == 'unknown':
+            return None
+        value = entry.get('cost_usd')
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        # Bounds double as a NaN/inf guard: both comparisons are False for NaN
+        # and the upper bound rejects inf, so a hostile result can never put a
+        # non-JSON-serialisable float on the wire.
+        if not (0 < value < 1e12):
+            continue
+        total += float(value)
+    return round(total, 6) if total > 0 else None
+
+
+def _attach_delegation_cost(call, name, raw):
+    """Stamp ``cost_usd`` on a tool-call summary when the result reports spend."""
+    cost = _delegation_cost_usd(name, raw)
+    if cost is not None:
+        call['cost_usd'] = cost
+    return call
+
+
 def _truncate_tool_args(args, limit: int = 6) -> dict:
     """Truncate tool args for compact session persistence.
 
@@ -7844,13 +7898,13 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
             if tid:
                 name = pending_names.get(tid, '')
                 if name and name != 'tool':
-                    tool_calls.append({
+                    tool_calls.append(_attach_delegation_cost({
                         'name': name,
                         'snippet': _tool_result_snippet(raw),
                         'tid': tid,
                         'assistant_msg_idx': pending_asst_idx.get(tid, -1),
                         'args': _truncate_tool_args(pending_args.get(tid, {})),
-                    })
+                    }, name, raw))
                     seq['resolved'] = True
             tool_msg_sequence.append(seq)
 
@@ -7862,13 +7916,13 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
             if seq_idx >= len(live):
                 break
             live_tc = live[seq_idx]
-            tool_calls.append({
+            tool_calls.append(_attach_delegation_cost({
                 'name': live_tc.get('name', 'tool'),
                 'snippet': _tool_result_snippet(seq.get('raw', '')),
                 'tid': live_tc.get('tid', '') or '',
                 'assistant_msg_idx': _nearest_assistant_msg_idx(messages, seq.get('msg_idx', -1)),
                 'args': _truncate_tool_args(live_tc.get('args', {}), limit=4),
-            })
+            }, live_tc.get('name', 'tool'), seq.get('raw', '')))
 
     return tool_calls
 
@@ -10738,6 +10792,15 @@ def _run_agent_streaming(
                     return
 
                 if event_type == 'tool.completed':
+                    # Same per-delegation spend the structured tool_complete
+                    # path reads, for builds without tool_complete_callback.
+                    # Prefer the structured `result` kwarg; `preview` is already
+                    # truncated, so on pre-`result` builds there is simply no
+                    # cost to report and the card renders without the chip.
+                    _legacy_result = cb_kwargs.get('result')
+                    delegation_cost = _delegation_cost_usd(
+                        name, _legacy_result if _legacy_result is not None else preview
+                    )
                     for live_tc in reversed(_live_tool_calls):
                         if live_tc.get('done'):
                             continue
@@ -10745,6 +10808,8 @@ def _run_agent_streaming(
                             live_tc['done'] = True
                             live_tc['duration'] = cb_kwargs.get('duration')
                             live_tc['is_error'] = bool(cb_kwargs.get('is_error', False))
+                            if delegation_cost is not None:
+                                live_tc['cost_usd'] = delegation_cost
                             break
                     # Mirror done state to shared dict (#1361 §B)
                     if stream_id in STREAM_LIVE_TOOL_CALLS:
@@ -10755,6 +10820,8 @@ def _run_agent_streaming(
                                 shared_tc['done'] = True
                                 shared_tc['duration'] = cb_kwargs.get('duration')
                                 shared_tc['is_error'] = bool(cb_kwargs.get('is_error', False))
+                                if delegation_cost is not None:
+                                    shared_tc['cost_usd'] = delegation_cost
                                 break
                     # Signal the checkpoint thread that new work has completed (Issue #765).
                     # Each completed tool call is a meaningful unit of progress worth persisting.
@@ -10766,6 +10833,7 @@ def _run_agent_streaming(
                         'args': args_snap,
                         'duration': cb_kwargs.get('duration'),
                         'is_error': bool(cb_kwargs.get('is_error', False)),
+                        **({'cost_usd': delegation_cost} if delegation_cost is not None else {}),
                     })
                     # Mirror the todo tool's in-memory state into a
                     # dedicated SSE event so the Todos panel can update
@@ -10841,12 +10909,17 @@ def _run_agent_streaming(
                     if tool_call_id and tool_call_id not in _live_tool_event_complete_ids:
                         _live_tool_event_complete_ids.add(tool_call_id)
                         result_snippet = _tool_result_snippet(function_result)
+                        # Read the per-delegation spend from the whole result,
+                        # before result_snippet's cap can truncate it away.
+                        delegation_cost = _delegation_cost_usd(name, function_result)
                         for live_tc in reversed(_live_tool_calls):
                             if live_tc.get('done'):
                                 continue
                             if live_tc.get('tid') == tool_call_id or (not live_tc.get('tid') and live_tc.get('name') == name):
                                 live_tc['done'] = True
                                 live_tc['snippet'] = result_snippet
+                                if delegation_cost is not None:
+                                    live_tc['cost_usd'] = delegation_cost
                                 break
                         if stream_id in STREAM_LIVE_TOOL_CALLS:
                             for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
@@ -10855,6 +10928,8 @@ def _run_agent_streaming(
                                 if shared_tc.get('tid') == tool_call_id or (not shared_tc.get('tid') and shared_tc.get('name') == name):
                                     shared_tc['done'] = True
                                     shared_tc['snippet'] = result_snippet
+                                    if delegation_cost is not None:
+                                        shared_tc['cost_usd'] = delegation_cost
                                     break
                         _checkpoint_activity[0] += 1
                         put('tool_complete', {
@@ -10864,6 +10939,7 @@ def _run_agent_streaming(
                             'args': _tool_args_snapshot(args),
                             'tid': tool_call_id,
                             'is_error': False,
+                            **({'cost_usd': delegation_cost} if delegation_cost is not None else {}),
                         })
                         # Mirror the todo tool's in-memory state into
                         # a dedicated SSE event so the Todos panel can
