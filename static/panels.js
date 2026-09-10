@@ -13797,13 +13797,31 @@ function toggleMcpServer(name, enabled){
 function _refreshMcpToolsetsCatalog(payload){
   if(typeof window.invalidateToolsetsCatalog==='function') window.invalidateToolsetsCatalog(payload);
 }
-function loadMcpServers(){
+// The first read of a cold health cache lands while the probe is still running,
+// so the panel would otherwise show no badge until the user reopens the section.
+// Bounded re-read: at most MCP_HEALTH_REREADS follow-ups, never a poll loop.
+const MCP_HEALTH_REREADS=4;
+const MCP_HEALTH_REREAD_MS=2500;
+let _mcpHealthRereads=0;
+let _mcpHealthRereadTimer=null;
+function _scheduleMcpHealthReread(pending){
+  if(_mcpHealthRereadTimer){clearTimeout(_mcpHealthRereadTimer);_mcpHealthRereadTimer=null;}
+  if(!pending||_mcpHealthRereads>=MCP_HEALTH_REREADS) return;
+  _mcpHealthRereads++;
+  _mcpHealthRereadTimer=setTimeout(()=>{_mcpHealthRereadTimer=null;loadMcpServers(true);},MCP_HEALTH_REREAD_MS);
+}
+function loadMcpServers(isReread){
   const list=$('mcpServerList');
   if(!list) return;
-  list.innerHTML=`<div style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t('loading'))}</div>`;
+  if(!isReread){
+    _mcpHealthRereads=0;
+    if(_mcpHealthRereadTimer){clearTimeout(_mcpHealthRereadTimer);_mcpHealthRereadTimer=null;}
+    list.innerHTML=`<div style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t('loading'))}</div>`;
+  }
   api('/api/mcp/servers').then(r=>{
     if(!r||!Array.isArray(r.servers)) return;
     _refreshMcpToolsetsCatalog(r);
+    _scheduleMcpHealthReread(r.health_pending);
     if(!r.servers.length){
       list.innerHTML=`<div class="mcp-empty-state" style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t('mcp_no_servers'))}</div>`;
       return;

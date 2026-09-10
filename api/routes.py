@@ -31010,10 +31010,17 @@ def _mcp_health_by_name(servers) -> dict[str, dict]:
                 continue
             checkable[str(name)] = cfg
     try:
-        mcp_health.refresh_async(checkable)
-        return mcp_health.snapshot()
+        return mcp_health.refresh_and_read(checkable)
     except Exception:
         return {}
+
+
+def _mcp_health_in_flight() -> bool:
+    """Return whether any health probe is still running, for the panel's re-read."""
+    try:
+        return bool(mcp_health.in_flight())
+    except Exception:
+        return False
 
 
 def _mcp_runtime_status_by_name(servers=None) -> dict[str, dict]:
@@ -31815,6 +31822,10 @@ def _handle_mcp_servers_list(handler):
         "servers": result,
         "toggle_supported": True,
         "reload_required": True,
+        # A cold cache answers "unknown" while the first probe is still running.
+        # Tell the panel to read back once more rather than sit on a stale view
+        # until the user reopens the section (HWEB-62).
+        "health_pending": bool(_mcp_health_in_flight()),
     })
 
 

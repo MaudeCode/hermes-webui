@@ -8,12 +8,15 @@ need different user actions. This module adds that missing signal.
 
 Design constraints, in order:
 
-- **Never block a request.** ``refresh_async()`` only schedules; every probe runs
-  on a short-lived daemon thread and the caller reads whatever
-  ``snapshot()`` already has (possibly ``unknown``).
+- **Never block a request.** ``refresh_and_read()`` only schedules; every probe
+  runs on a short-lived daemon thread and the caller reads back whatever the
+  cache already has (possibly ``unknown``).
 - **No long-lived process.** Checks are demand-driven: the MCP endpoints call
-  ``refresh_async()`` and a server is re-probed at most once per
+  ``refresh_and_read()`` and a server is re-probed at most once per
   ``HEALTH_INTERVAL_S``.
+- **A verdict names the config it measured.** Entries carry a fingerprint of the
+  server config, so an edited server or a profile whose same-named server points
+  elsewhere never inherits the previous server's health.
 - **Bounded and non-accumulating.** A server already in flight is never
   scheduled again, so a slow server cannot pile up overlapping probes.
 - **Contained failures.** One server's probe raising or timing out leaves that
@@ -25,6 +28,7 @@ Health states: ``healthy``, ``needs_auth``, ``unhealthy``, ``unknown``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -42,6 +46,7 @@ logger = logging.getLogger(__name__)
 # must be fresh while the MCP panel is closed, hook this into a periodic ticker.
 HEALTH_INTERVAL_S: float = 120.0
 PROBE_TIMEOUT_S: float = 8.0
+_MAX_PROBE_BODY_BYTES = 64 * 1024
 
 HEALTHY = "healthy"
 NEEDS_AUTH = "needs_auth"
@@ -68,12 +73,12 @@ _INITIALIZE_REQUEST = {
 }
 
 _LOCK = threading.Lock()
-# name -> {"health": str, "detail": str, "checked_at": float}
+# name -> {"health": str, "detail": str, "checked_at": float, "fingerprint": str}
 _STATE: dict[str, dict] = {}
 _IN_FLIGHT: set[str] = set()
-# name -> monotonic timestamp of the last *started* probe. Started, not finished,
-# so a slow probe still holds its slot in the interval budget.
-_STARTED_AT: dict[str, float] = {}
+# name -> (monotonic timestamp, fingerprint) of the last *started* probe. Started,
+# not finished, so a slow probe still holds its slot in the interval budget.
+_STARTED_AT: dict[str, tuple[float, str]] = {}
 
 
 class _NoRedirect(urllib_request.HTTPRedirectHandler):
@@ -97,12 +102,61 @@ def _urlopen(request):
     return _OPENER.open(request, timeout=PROBE_TIMEOUT_S)
 
 
-def _status_result(code: int) -> tuple[str, str]:
+def _jsonrpc_from_body(raw: bytes) -> dict | None:
+    """Pull the JSON-RPC envelope out of an ``initialize`` response body.
+
+    Streamable HTTP answers with a bare JSON object; the SSE form wraps the same
+    object in a ``data:`` line. Anything else — an HTML login page, a reverse
+    proxy's catch-all, an empty 200 — yields ``None``.
+    """
+    text = raw.decode("utf-8", "replace").strip()
+    if not text:
+        return None
+    candidates = [text]
+    candidates.extend(
+        line.strip()[5:].strip()
+        for line in text.splitlines()
+        if line.strip().startswith("data:")
+    )
+    for candidate in candidates:
+        if not candidate.startswith("{"):
+            continue
+        try:
+            payload = json.loads(candidate)
+        except ValueError:
+            continue
+        if isinstance(payload, dict) and payload.get("jsonrpc") == "2.0":
+            return payload
+    return None
+
+
+def _ok_result(raw: bytes, code: int) -> tuple[str, str]:
+    """Grade a 2xx body. A 2xx alone proves only that *something* answered.
+
+    Healthy verdicts are deliberately silent in the panel, so calling an HTML
+    login page or a proxy catch-all healthy would hide a server that cannot
+    serve a single tool. Only a real ``initialize`` result earns HEALTHY.
+    """
+    payload = _jsonrpc_from_body(raw)
+    if payload is None:
+        return UNKNOWN, f"HTTP {code}, not an MCP response"
+    if isinstance(payload.get("error"), dict):
+        # It speaks MCP and refused to initialize: a real, actionable failure.
+        return UNHEALTHY, f"HTTP {code}, initialize rejected"
+    result = payload.get("result")
+    if isinstance(result, dict) and any(
+        key in result for key in ("protocolVersion", "serverInfo", "capabilities")
+    ):
+        return HEALTHY, f"HTTP {code}"
+    return UNKNOWN, f"HTTP {code}, unrecognized initialize result"
+
+
+def _status_result(code: int, raw: bytes | None = None) -> tuple[str, str]:
     detail = f"HTTP {code}"
     if code in _AUTH_STATUSES:
         return NEEDS_AUTH, detail
     if 200 <= code < 300:
-        return HEALTHY, detail
+        return _ok_result(raw or b"", code)
     if 300 <= code < 400 or code in _PROTOCOL_MISMATCH_STATUSES:
         return UNKNOWN, detail
     return UNHEALTHY, detail
@@ -138,7 +192,10 @@ def _probe_http(url: str, cfg: dict) -> tuple[str, str]:
     )
     try:
         with _urlopen(request) as response:
-            return _status_result(int(getattr(response, "status", None) or response.getcode()))
+            code = int(getattr(response, "status", None) or response.getcode())
+            # Bounded read: an initialize result is small, and a health probe
+            # must never be the thing that pulls a huge body into memory.
+            return _status_result(code, response.read(_MAX_PROBE_BODY_BYTES))
     except urllib_error.HTTPError as exc:
         return _status_result(int(exc.code))
     except (urllib_error.URLError, OSError, ValueError) as exc:
@@ -167,7 +224,21 @@ def probe_server(name: str, cfg: dict) -> tuple[str, str]:
     return UNHEALTHY, "invalid config"
 
 
-def _run_check(name: str, cfg: dict) -> None:
+def _fingerprint(cfg) -> str:
+    """Identify the exact config a verdict was measured against.
+
+    Two servers that share a name but not a url/token are different servers, and
+    editing one in place makes the old verdict describe something that no longer
+    exists. Identical configs deliberately collide: that really is one server.
+    """
+    try:
+        canonical = json.dumps(cfg, sort_keys=True, default=str)
+    except Exception:
+        canonical = repr(cfg)
+    return hashlib.sha256(canonical.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _run_check(name: str, cfg: dict, fingerprint: str) -> None:
     try:
         try:
             health, detail = probe_server(name, cfg)
@@ -175,45 +246,71 @@ def _run_check(name: str, cfg: dict) -> None:
             logger.debug("MCP health check for %r failed", name, exc_info=True)
             health, detail = UNKNOWN, "health check failed"
         with _LOCK:
-            _STATE[name] = {"health": health, "detail": detail, "checked_at": time.time()}
+            _STATE[name] = {
+                "health": health,
+                "detail": detail,
+                "checked_at": time.time(),
+                "fingerprint": fingerprint,
+            }
     finally:
         with _LOCK:
             _IN_FLIGHT.discard(name)
 
 
-def refresh_async(servers: dict) -> None:
-    """Schedule background probes for ``servers`` and return immediately.
+def refresh_and_read(servers: dict) -> dict[str, dict]:
+    """Schedule due probes and return the verdicts that match ``servers`` *now*.
 
     ``servers`` is the set of servers that *should* be checked — the caller has
     already dropped disabled ones. State for anything outside that set is
     discarded, so toggling a server off both stops checking it and clears its
     stale verdict.
+
+    A verdict is only ever returned for the exact config it was measured
+    against. Entries carry the fingerprint of the config that produced them, so
+    editing a server's url/headers/command, or switching to a profile whose
+    same-named server points somewhere else, neither returns the old server's
+    verdict nor waits out the interval before re-probing. A probe already in
+    flight when the config changes still publishes, but its fingerprint no
+    longer matches and it is filtered out here rather than shown as the new
+    server's health.
     """
     if not isinstance(servers, dict):
         servers = {}
     now = time.monotonic()
-    due: list[tuple[str, dict]] = []
+    due: list[tuple[str, dict, str]] = []
+    current = {str(name): _fingerprint(cfg) for name, cfg in servers.items()}
+    configs = {str(name): (cfg if isinstance(cfg, dict) else {}) for name, cfg in servers.items()}
     with _LOCK:
-        wanted = {str(name) for name in servers}
-        for stale in set(_STATE) - wanted:
+        for stale in set(_STATE) - set(current):
             _STATE.pop(stale, None)
-        for stale in set(_STARTED_AT) - wanted:
+        for stale in set(_STARTED_AT) - set(current):
             _STARTED_AT.pop(stale, None)
-        for raw_name, cfg in servers.items():
-            name = str(raw_name)
+        for name, fingerprint in current.items():
+            stored = _STATE.get(name)
+            if stored is not None and stored.get("fingerprint") != fingerprint:
+                # The config changed under us; the old verdict describes a
+                # different server. Drop it and re-probe now, not in 120s.
+                _STATE.pop(name, None)
+                _STARTED_AT.pop(name, None)
             if name in _IN_FLIGHT:
                 continue
             started = _STARTED_AT.get(name)
-            if started is not None and (now - started) < HEALTH_INTERVAL_S:
+            if (started is not None and started[1] == fingerprint
+                    and (now - started[0]) < HEALTH_INTERVAL_S):
                 continue
             _IN_FLIGHT.add(name)
-            _STARTED_AT[name] = now
-            due.append((name, cfg if isinstance(cfg, dict) else {}))
-    for name, cfg in due:
+            _STARTED_AT[name] = (now, fingerprint)
+            due.append((name, configs[name], fingerprint))
+        readable = {
+            name: {k: v for k, v in row.items() if k != "fingerprint"}
+            for name, row in _STATE.items()
+            if row.get("fingerprint") == current.get(name)
+        }
+    for name, cfg, fingerprint in due:
         try:
             threading.Thread(
                 target=_run_check,
-                args=(name, cfg),
+                args=(name, cfg, fingerprint),
                 name=f"mcp-health-{name}"[:60],
                 daemon=True,
             ).start()
@@ -221,6 +318,7 @@ def refresh_async(servers: dict) -> None:
             logger.debug("could not start MCP health thread for %r", name, exc_info=True)
             with _LOCK:
                 _IN_FLIGHT.discard(name)
+    return readable
 
 
 def snapshot() -> dict[str, dict]:

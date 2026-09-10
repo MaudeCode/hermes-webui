@@ -97,6 +97,39 @@ class TestProbeVerdicts:
         with patch("api.mcp_health.shutil.which", return_value="/usr/bin/true"):
             assert mcp_health.probe_server("a", {"command": "true"})[0] == "unknown"
 
+    def test_a_2xx_that_is_not_an_mcp_initialize_result_is_not_called_healthy(self):
+        """An HTML login page or proxy catch-all answers 200 and serves no tools."""
+        cases = {
+            b"<html><body>Please sign in</body></html>": ("unknown", "HTTP 200, not an MCP response"),
+            b"": ("unknown", "HTTP 200, not an MCP response"),
+            b'{"ok": true}': ("unknown", "HTTP 200, not an MCP response"),
+            b'{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}':
+                ("unknown", "HTTP 200, unrecognized initialize result"),
+            b'{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"nope"}}':
+                ("unhealthy", "HTTP 200, initialize rejected"),
+        }
+        for body, expected in cases.items():
+            assert self._probe_body(body) == expected, body
+
+    def test_a_real_initialize_result_is_healthy_over_json_and_sse(self):
+        result = b'{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","serverInfo":{"name":"x"}}}'
+        assert self._probe_body(result) == ("healthy", "HTTP 200")
+        sse = b"event: message\ndata: " + result + b"\n\n"
+        assert self._probe_body(sse) == ("healthy", "HTTP 200")
+
+    @staticmethod
+    def _probe_body(body: bytes, code: int = 200):
+        response = MagicMock()
+        response.status = code
+        response.read.return_value = body
+        response.__enter__ = lambda self: self
+        response.__exit__ = lambda *a: False
+        with patch("api.mcp_health._urlopen", return_value=response):
+            verdict = mcp_health.probe_server("a", {"url": "https://x/mcp"})
+        # Bounded read: a probe must never pull an unbounded body into memory.
+        response.read.assert_called_once_with(mcp_health._MAX_PROBE_BODY_BYTES)
+        return verdict
+
     def test_probe_refuses_redirects_so_the_bearer_token_never_leaves_the_host(self):
         """urllib copies request headers onto a redirect; following one would leak the token."""
         assert mcp_health._OPENER.open.__self__ is mcp_health._OPENER
@@ -268,6 +301,95 @@ class TestSchedulingIsBackgroundAndBounded:
         assert mcp_health.snapshot() == {}
         assert runtime["web"]["health"] == "not_checked"
 
+    def test_editing_a_server_drops_the_old_verdict_instead_of_waiting_out_the_interval(self):
+        """Same name, different url — a different server, so not the same verdict."""
+        before = {"web": {"url": "https://old.example/mcp"}}
+        after = {"web": {"url": "https://new.example/mcp"}}
+        seen = []
+
+        def probe(name, cfg):
+            seen.append(cfg["url"])
+            return ("unhealthy", "unreachable") if "old" in cfg["url"] else ("healthy", "HTTP 200")
+
+        with patch("api.mcp_health.probe_server", side_effect=probe):
+            _runtime(before)
+            _join_health_threads()
+            assert _runtime(before)["web"]["health"] == "unhealthy"
+            # Well inside HEALTH_INTERVAL_S: the edit must still force a re-probe.
+            runtime = _runtime(after)
+            _join_health_threads()
+            runtime = _runtime(after)
+        assert seen == ["https://old.example/mcp", "https://new.example/mcp"]
+        assert runtime["web"]["health"] == "healthy"
+
+    def test_a_same_named_server_with_different_credentials_does_not_inherit_health(self):
+        """Two profiles can define "web" with different tokens; verdicts must not cross."""
+        profile_a = {"web": {"url": "https://web.example/mcp", "headers": {"Authorization": "Bearer a"}}}
+        profile_b = {"web": {"url": "https://web.example/mcp", "headers": {"Authorization": "Bearer b"}}}
+        with patch("api.mcp_health.probe_server", return_value=("needs_auth", "HTTP 401")):
+            _runtime(profile_a)
+            _join_health_threads()
+            assert _runtime(profile_a)["web"]["health"] == "needs_auth"
+            # Switching profiles must not report profile A's verdict for B's server.
+            assert _runtime(profile_b)["web"]["health"] == "unknown"
+
+    def test_a_probe_that_finishes_after_a_config_change_is_not_published_as_the_new_health(self):
+        before = {"web": {"url": "https://old.example/mcp"}}
+        after = {"web": {"url": "https://new.example/mcp"}}
+        release = threading.Event()
+        entered = threading.Event()
+
+        def hang(name, cfg):
+            if "old" in cfg["url"]:
+                entered.set()
+                release.wait(10)
+                return ("healthy", "HTTP 200")
+            return ("unhealthy", "unreachable")
+
+        try:
+            with patch("api.mcp_health.probe_server", side_effect=hang):
+                _runtime(before)
+                assert entered.wait(5)
+                # Config changes while the old probe is still in flight.
+                assert _runtime(after)["web"]["health"] == "unknown"
+                release.set()
+                _join_health_threads()
+                # The obsolete probe published, but it measured the old server.
+                assert _runtime(after)["web"]["health"] == "unknown"
+                _join_health_threads()
+                assert _runtime(after)["web"]["health"] == "unhealthy"
+        finally:
+            release.set()
+            _join_health_threads()
+
+    def test_the_endpoint_tells_the_panel_to_read_back_while_a_probe_is_in_flight(self):
+        servers = {"slow": {"url": "https://slow.example/mcp"}}
+        release = threading.Event()
+        entered = threading.Event()
+
+        def hang(name, cfg):
+            entered.set()
+            release.wait(10)
+            return ("unhealthy", "timed out")
+
+        try:
+            with patch("api.mcp_health.probe_server", side_effect=hang), \
+                 patch("api.routes.get_active_hermes_home", return_value=object()), \
+                 patch("api.routes.get_config_for_profile_home",
+                       return_value={"mcp_servers": servers}):
+                h = _make_handler()
+                _handle_mcp_servers_list(h)
+                assert entered.wait(5)
+                assert _payload(h)["health_pending"] is True
+                release.set()
+                _join_health_threads()
+                h2 = _make_handler()
+                _handle_mcp_servers_list(h2)
+            assert _payload(h2)["health_pending"] is False
+        finally:
+            release.set()
+            _join_health_threads()
+
     def test_endpoints_do_not_block_on_an_in_flight_check(self):
         """A hung probe must not hold up /api/mcp/servers or /api/mcp/tools."""
         servers = {"slow": {"url": "https://slow.example/mcp"}}
@@ -312,7 +434,7 @@ class TestSchedulingIsBackgroundAndBounded:
         try:
             with patch("api.mcp_health.probe_server", side_effect=hang):
                 for _ in range(25):
-                    mcp_health.refresh_async(servers)
+                    mcp_health.refresh_and_read(servers)
                 assert entered.wait(5), "probe never started in the background"
                 assert starts == ["slow"], f"overlapping probes accumulated: {starts}"
                 assert len([th for th in threading.enumerate()
@@ -327,14 +449,16 @@ class TestSchedulingIsBackgroundAndBounded:
         with patch("api.mcp_health.probe_server",
                    side_effect=lambda n, c: calls.append(n) or ("healthy", "HTTP 200")):
             for _ in range(10):
-                mcp_health.refresh_async(servers)
+                mcp_health.refresh_and_read(servers)
                 _join_health_threads()
             assert calls == ["web"], "a re-probe ran inside the interval"
 
             # Age the last start past the interval; exactly one more probe runs.
             with mcp_health._LOCK:
-                mcp_health._STARTED_AT["web"] -= mcp_health.HEALTH_INTERVAL_S + 1
-            mcp_health.refresh_async(servers)
+                started, fingerprint = mcp_health._STARTED_AT["web"]
+                mcp_health._STARTED_AT["web"] = (
+                    started - mcp_health.HEALTH_INTERVAL_S - 1, fingerprint)
+            mcp_health.refresh_and_read(servers)
             _join_health_threads()
         assert calls == ["web", "web"]
         assert mcp_health.HEALTH_INTERVAL_S > 0
@@ -355,6 +479,11 @@ class TestServerSummaryAndPanel:
         assert "${_mcpHealthBadge(s)}" in js
         assert "mcp_health_unhealthy" in js
         assert "mcp_health_needs_auth" in js
+        # Bounded re-read for a cold cache, never an unbounded poll loop.
+        assert "MCP_HEALTH_REREADS" in js
+        assert "_mcpHealthRereads>=MCP_HEALTH_REREADS" in js
+        assert "_scheduleMcpHealthReread(r.health_pending)" in js
+        assert "setInterval" not in js.split("function loadMcpServers")[1][:1500]
         i18n = (ROOT / "static/i18n.js").read_text(encoding="utf-8")
         assert "mcp_health_unhealthy:" in i18n
         assert "mcp_health_needs_auth:" in i18n
