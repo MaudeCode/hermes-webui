@@ -195,8 +195,9 @@ another, and half a turn read on its own looks pending:
 - every event carries a `turn_id`, an `event` name and a `created_at` that is
   present, numeric and finite — a JSON-decodable line missing those is valid
   syntax but unusable evidence;
-- the live `{session_id}.json` sidecar exists and parses (a session whose
-  sidecar is gone or corrupt is awaiting repair, and the audit below only walks
+- the live `{session_id}.json` sidecar is readable and session-shaped, judged
+  by the same `_msg_count` the recovery code uses (a session whose sidecar is
+  gone, corrupt, or shapeless is awaiting repair, and the audit below only walks
   the sidecars it *can* read, so it never reports this case);
 - `audit_session_recovery` reports no finding for it. That is the RFC's
   precondition and only the audit can see, for example, a `shrunken_live`
@@ -239,9 +240,13 @@ launcher:
 
 - `./ctl.sh start` — the documented daemon path — runs `bootstrap.py
   --foreground`, which execs in place, and redirects into `${HERMES_HOME}/webui.log`
-  (or `$HERMES_WEBUI_LOG_FILE`). `ctl.sh` exports that resolved path so the
-  running server can find it.
+  (or `$HERMES_WEBUI_LOG_FILE`).
+- `scripts/wsl/hermes_webui_autostart.sh` redirects into
+  `${HERMES_WEBUI_LOG_DIR}/hermes_webui.log`.
 - `bootstrap.py`'s detached path writes `{state_dir}/bootstrap-<port>.log`.
+
+The first two export their resolved path as `HERMES_WEBUI_LOG_FILE` so the
+running server can find — and size-bound — the file it is actually writing to.
 
 Once the file passes 32 MiB the server copies it to `<log>.1` and truncates the
 original in place.

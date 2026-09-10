@@ -548,6 +548,26 @@ class TestTurnJournalRetention:
         assert result["pruned"] == 0
         assert orphan.exists()
 
+    @pytest.mark.parametrize("body", ["{}", "[]", '{"messages": "no"}', "null"])
+    def test_a_json_but_not_session_shaped_sidecar_keeps_the_session(
+        self, tmp_path, body
+    ):
+        """Decodable is not the same as usable. `{}` passed a bare dict check
+        while `session_recovery._msg_count` calls it invalid."""
+        from api.session_recovery import _msg_count
+
+        journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
+        shard = _write_shard(
+            journal_dir, f"shapeless~{_DEAD_PID}.jsonl", age_days=90, events=_settled("t1")
+        )
+        _write_sidecar(tmp_path, "shapeless", body=body)
+        assert _msg_count(tmp_path / "shapeless.json") < 0, "fixture must be invalid"
+
+        result = turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
+
+        assert result["pruned"] == 0
+        assert shard.exists()
+
     def test_an_unparseable_sidecar_keeps_the_session(self, tmp_path):
         journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
         shard = _write_shard(
@@ -748,6 +768,17 @@ class TestWebuiLogRotation:
         )
         assert 'LOG_FILE="${PWD}/${LOG_FILE}"' in ctl
         assert 'export HERMES_WEBUI_LOG_FILE="${LOG_FILE}"' in ctl
+
+    def test_every_launcher_exports_its_log_sink(self):
+        """Each launcher that redirects stdout must tell the server where.
+
+        ctl.sh and the WSL autostart script both run bootstrap --foreground,
+        which execs in place and never creates a bootstrap-<port>.log.
+        """
+        root = Path(__file__).resolve().parent.parent
+        for script in ("ctl.sh", "scripts/wsl/hermes_webui_autostart.sh"):
+            text = (root / script).read_text(encoding="utf-8")
+            assert "export HERMES_WEBUI_LOG_FILE=" in text, script
 
     def test_bootstrap_sink_is_the_fallback(self, monkeypatch):
         from api.config import PORT

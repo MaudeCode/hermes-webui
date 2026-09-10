@@ -392,18 +392,24 @@ def _event_is_well_formed(event: object) -> bool:
 
 
 def _session_sidecar_is_intact(session_id: str, root: Path) -> bool:
-    """True when the session's live sidecar exists and parses as a mapping.
+    """True when the session's live sidecar is a readable, session-shaped file.
 
     Complements the recovery-audit gate rather than duplicating it: the audit
-    walks the sidecars it can read, so a `{sid}.json` that is absent or corrupt
-    produces no finding at all — and that is exactly the case where the journal
-    is the session's only surviving evidence.
+    walks the sidecars it can read, so a ``{sid}.json`` that is absent,
+    unreadable, or not session-shaped produces no finding at all — and that is
+    exactly the case where the journal is the sole surviving evidence.
+
+    Delegates to ``session_recovery._msg_count`` instead of re-deriving what a
+    session file looks like. A parallel shape check here drifted from it once
+    already: ``{}`` is a mapping and passed, while ``_msg_count`` correctly
+    calls it invalid. One definition, one answer.
     """
     try:
-        payload = json.loads((root / f"{session_id}.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, ValueError):
+        from api.session_recovery import _msg_count  # noqa: PLC0415
+
+        return _msg_count(root / f"{session_id}.json") >= 0
+    except Exception:
         return False
-    return isinstance(payload, dict)
 
 
 def _session_is_prunable(session_id: str, root: Path) -> bool:

@@ -39,6 +39,11 @@ WEBUI_LOG="${HERMES_WEBUI_LOG_DIR}/hermes_webui.log"
 
 # Make the WSL launcher knobs visible to start.sh/bootstrap.py.
 export HERMES_WEBUI_HOST HERMES_WEBUI_PORT
+# Hand the server the sink its stdout/stderr actually lands in. start.sh runs
+# --foreground, so bootstrap never creates its own bootstrap-<port>.log and the
+# running server would otherwise have no way to size-bound this file. See
+# rotate_webui_log in api/logging_hygiene.py.
+export HERMES_WEBUI_LOG_FILE="${WEBUI_LOG}"
 
 mkdir -p "${HERMES_WEBUI_LOG_DIR}"
 chmod 700 "${HERMES_WEBUI_LOG_DIR}" 2>/dev/null || true
