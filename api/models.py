@@ -3404,6 +3404,8 @@ def _append_journaled_partial_output(
                         tool_call['snippet'] = str(payload.get('preview') or '')
                     if payload.get('duration') is not None:
                         tool_call['duration'] = payload.get('duration')
+                    if payload.get('cost_usd') is not None:
+                        tool_call['cost_usd'] = payload.get('cost_usd')
                     tool_call['is_error'] = bool(payload.get('is_error', False))
                     break
             continue

@@ -20685,7 +20685,7 @@ function buildToolCard(tc){
         <span class="tool-card-icon">${icon}</span>
         <span class="tool-card-name"><span class="tool-card-name-label">${esc(displayName)}</span><span class="tool-card-name-generic">${esc(genericName)}</span></span>
         <span class="tool-card-preview">${esc(previewText)}</span>
-        ${delegationCost!=null?`<span class="tool-card-cost" title="${esc(t('usage_estimated_cost'))}">~${esc(_fmtCostUsd(delegationCost))}</span>`:''}
+        ${delegationCost!=null?`<span class="tool-card-cost" title="${esc(typeof t==='function'?t('usage_estimated_cost'):'Estimated cost')}">~${esc(_fmtCostUsd(delegationCost))}</span>`:''}
         ${hasDetail?`<span class="tool-card-toggle">${li('chevron-right',12)}</span>`:''}
       ${headerEnd}
       ${hasDetail?`<div id="${detailId}" class="tool-card-detail"${openClass?'':' hidden'}>
