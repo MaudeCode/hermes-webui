@@ -700,3 +700,151 @@ def test_cold_load_hydration_adds_no_cost_key_when_there_is_none():
     )
     assert "cost_usd" not in row["tool"]
     assert "cost_usd" not in row["payload"]
+
+
+_MESSAGES_FNS = r"""
+const messagesFns = [
+		  '_anchorSceneMessageText','_anchorSceneCleanText','_anchorSceneTextKey',
+		  '_anchorSceneContentText','_anchorSceneContentVisibleText','_anchorSceneMessageHasContentToolUse',
+          '_anchorSceneFinalAnswerText',
+		  '_anchorSceneSafePayload','_anchorSceneToolId','_anchorSceneToolName',
+	  '_anchorSceneToolArgs','_anchorSceneContentTool','_anchorSceneStringPayload','_anchorSceneRowBase',
+	  '_anchorSceneProseRow','_anchorSceneThinkingRow','_anchorSceneToolRowFromCall',
+	  '_anchorSceneToolRowName','_anchorSceneToolRowId',
+	  '_anchorSceneToolRowsHaveNonConflictingIds','_anchorSceneToolRowsHaveDifferentExplicitIds',
+	  '_anchorSceneToolRowStartedAt','_anchorSceneToolRowsHaveSameStartedAt',
+	  '_anchorSceneToolRowBodyText','_anchorSceneToolRowsHaveCompatibleBody',
+	  '_anchorSceneToolRowsHaveCompatibleNames',
+	  '_anchorSceneToolRowArgs','_anchorSceneObjectContainsSubset',
+	  '_anchorSceneToolRowsHaveCompatibleInvocation',
+	  '_anchorSceneToolRowHasInvocationEvidence','_anchorSceneToolRowsCanNameMatch',
+	  '_anchorSceneMatchingContentToolRow',
+	  '_anchorSceneMessageReasoningText','_anchorSceneRowsFromContentParts',
+	  '_enrichSettledToolRowBodyFromLive',
+	  '_anchorSceneRowsByMessageIndex',
+	];
+"""
+
+
+# ── Fresh settlement: the live card is replaced by a rebuilt settled row ─────
+
+_SETTLED_DRIVER_GEN = r"""
+'use strict';
+const fs = require('fs');
+const mSrc = fs.readFileSync(process.argv[2], 'utf8');
+const uSrc = fs.readFileSync(process.argv[3], 'utf8');
+function extractFunc(src, name) {
+  const re = new RegExp('function\\s+' + name + '\\s*\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{', start), depth = 1; i++;
+  while (depth > 0 && i < src.length) {
+    if (src[i] === '{') depth++; else if (src[i] === '}') depth--; i++;
+  }
+  return src.slice(start, i);
+}
+__FNS__
+const uiFns = ['_anchorSceneToolCallFromRow'];
+let code = '(function(){\n';
+code += 'var activeSid="test-session"; var streamId="test-stream"; var S;\n';
+for (const n of messagesFns) code += extractFunc(mSrc, n) + '\n';
+for (const n of uiFns) code += extractFunc(uSrc, n) + '\n';
+code += `
+var buf='';
+process.stdin.on('data',c=>buf+=c);
+process.stdin.on('end',()=>{
+  var p=JSON.parse(buf||'{}');
+  S=p.S||{toolCalls:[]};
+  var messages=p.messages||[];
+  var byIdx=_anchorSceneRowsByMessageIndex(messages,0,messages.length-1);
+  var out=[];
+  byIdx.forEach(function(bucket){
+    bucket.forEach(function(row){
+      if(row.role!=='tool') return;
+      var tc=_anchorSceneToolCallFromRow(row,{settled:true});
+      out.push({
+        name:(row.tool&&row.tool.name)||'',
+        toolHasCost:!!(row.tool&&Object.prototype.hasOwnProperty.call(row.tool,'cost_usd')),
+        payloadHasCost:!!(row.payload&&Object.prototype.hasOwnProperty.call(row.payload,'cost_usd')),
+        toolCost:row.tool?row.tool.cost_usd:undefined,
+        payloadCost:row.payload?row.payload.cost_usd:undefined,
+        cardCost:tc.cost_usd,
+      });
+    });
+  });
+  process.stdout.write(JSON.stringify(out));
+});
+})();
+`;
+process.stdout.write(code);
+"""
+
+
+@pytest.fixture(scope="module")
+def settled_driver(tmp_path_factory):
+    if NODE is None:
+        pytest.skip("node not on PATH")
+    gen = tmp_path_factory.mktemp("hweb60_gen") / "gen.js"
+    gen.write_text(_SETTLED_DRIVER_GEN.replace("__FNS__", _MESSAGES_FNS), encoding="utf-8")
+    built = subprocess.run(
+        [NODE, str(gen), str(REPO_ROOT / "static" / "messages.js"), str(UI_JS_PATH)],
+        capture_output=True, text=True, timeout=20,
+    )
+    assert built.returncode == 0, built.stderr
+    driver = tmp_path_factory.mktemp("hweb60_driver") / "driver.js"
+    driver.write_text(built.stdout, encoding="utf-8")
+    return str(driver)
+
+
+def _settle(settled_driver, live_call):
+    """Settle a turn whose persisted tool_calls carry no cost, only the live one."""
+    payload = {
+        "messages": [
+            {"role": "user", "content": "delegate the audit"},
+            {
+                "role": "assistant",
+                "content": "Done.",
+                "tool_calls": [
+                    {"id": "call-1", "name": "delegate_task", "started_at": 100,
+                     "args": {"goal": "audit"}, "snippet": "done"}
+                ],
+            },
+            {"role": "assistant", "content": "final answer"},
+        ],
+        "S": {"toolCalls": [live_call]},
+    }
+    result = subprocess.run(
+        [NODE, settled_driver], input=json.dumps(payload),
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    rows = json.loads(result.stdout)
+    return next(r for r in rows if r["name"] == "delegate_task")
+
+
+def test_fresh_settlement_keeps_the_delegation_cost(settled_driver):
+    """messages[].tool_calls never carries a cost; the live entry is the source.
+
+    Settlement rebuilds the row from the persisted tool_calls and dedupes the
+    matching live S.toolCalls entry away, so a rebuild that drops cost_usd
+    persists an anchor scene without it and the chip disappears.
+    """
+    row = _settle(settled_driver, {
+        "id": "call-1", "name": "delegate_task", "assistant_msg_idx": 1,
+        "started_at": 100, "args": {"goal": "audit"}, "snippet": "done",
+        "cost_usd": 0.6125,
+    })
+    assert row["toolCost"] == 0.6125
+    assert row["payloadCost"] == 0.6125
+    assert row["cardCost"] == 0.6125
+
+
+def test_fresh_settlement_adds_no_cost_key_when_there_is_none(settled_driver):
+    row = _settle(settled_driver, {
+        "id": "call-1", "name": "delegate_task", "assistant_msg_idx": 1,
+        "started_at": 100, "args": {"goal": "audit"}, "snippet": "done",
+    })
+    assert row["toolHasCost"] is False
+    assert row["payloadHasCost"] is False
+    # undefined in JS, so JSON.stringify drops the key entirely
+    assert "cardCost" not in row

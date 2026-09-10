@@ -3643,6 +3643,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const preview=_anchorSceneStringPayload(tool&&(tool.preview||tool.summary));
     const snippet=_anchorSceneStringPayload(tool&&(tool.snippet||tool.result||tool.output));
     const isError=!!(tool&&(tool.is_error||tool.error));
+    // Per-delegation spend, when the settled call carries one. Omitted rather
+    // than nulled so a costless tool row keeps its exact previous shape.
+    const costUsd=(tool&&typeof tool.cost_usd==='number'&&isFinite(tool.cost_usd))?tool.cost_usd:null;
     row.row_id=tid?`settled:${activeSid||'session'}:${streamId||'stream'}:tool:${tid}`:row.row_id;
     row.tool_call_id=tid||null;
     row.tool={
@@ -3659,6 +3662,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       duration:tool&&tool.duration!==undefined?tool.duration:null,
       started_at:tool&&tool.started_at!==undefined?tool.started_at:null,
       signature:[name,tid||'',JSON.stringify(args||{})].join('|'),
+      ...(costUsd!=null?{cost_usd:costUsd}:{}),
     };
     row.payload={
       ...row.payload,
@@ -3672,6 +3676,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       is_error:isError,
       duration:tool&&tool.duration!==undefined?tool.duration:undefined,
       started_at:tool&&tool.started_at!==undefined?tool.started_at:undefined,
+      ...(costUsd!=null?{cost_usd:costUsd}:{}),
     };
     return row;
   }
@@ -3928,6 +3933,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     if(!_empty(live.started_at)&&_empty(tool.started_at)&&_empty(payload.started_at)){
       tool.started_at=live.started_at; payload.started_at=live.started_at; enriched=true;
+    }
+    // Delegation cost: the settled row is rebuilt from messages[].tool_calls,
+    // which never carries one — the live S.toolCalls entry is the only source.
+    if(typeof live.cost_usd==='number'&&isFinite(live.cost_usd)&&_empty(tool.cost_usd)&&_empty(payload.cost_usd)){
+      tool.cost_usd=live.cost_usd; payload.cost_usd=live.cost_usd; enriched=true;
     }
     const liveArgs=_anchorSceneToolArgs(live);
     if(liveArgs&&typeof liveArgs==='object'&&Object.keys(liveArgs).length){
@@ -5032,6 +5042,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         payload.id=payload.id||row.tool.id||row.tool.tid;
         payload.is_error=payload.is_error||row.tool.is_error;
         payload.duration=payload.duration||row.tool.duration;
+        if(payload.cost_usd==null&&row.tool.cost_usd!=null) payload.cost_usd=row.tool.cost_usd;
       }
       if(row.group&&typeof row.group==='object'){
         payload.activitySegmentSeq=payload.activitySegmentSeq||row.group.activity_segment_seq;
