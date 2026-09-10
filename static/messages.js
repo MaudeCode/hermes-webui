@@ -5088,7 +5088,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(matchEntry){
         used.add(matchEntry.idx);
         const live=matchEntry.tc||{};
-        for(const key of ['activityBurstId','duration','started_at']){
+        for(const key of ['activityBurstId','duration','started_at','cost_usd']){
           if((next[key]===undefined||next[key]===null)&&live[key]!==undefined&&live[key]!==null) next[key]=live[key];
         }
       }
@@ -6324,6 +6324,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     if(d.args!==undefined) tc.args=d.args;
     if(d.snippet!==undefined) tc.snippet=d.snippet;
+    if(d.cost_usd!==undefined) tc.cost_usd=d.cost_usd;
     tc._liveToolCallSignature = _toolCallSignature(tc,tc.activityBurstId,tc.activitySegmentSeq);
     tc.activityBurstId = Number.isFinite(Number(tc.activityBurstId))
       ? Number(tc.activityBurstId)

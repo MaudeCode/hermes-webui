@@ -937,6 +937,7 @@
     const done=_activityRowToolDone(kind,status,payload);
     const isError=_activityRowToolIsError(status,payload);
     const isDiff=_own(payload,'is_diff')===true||_own(payload,'isDiff')===true;
+    const costUsd=_own(payload,'cost_usd');
     const signatureParts=[
       toolName,
       toolCallId||'',
@@ -953,6 +954,7 @@
       done,
       is_error:isError,
       ...(isDiff?{is_diff:true}:{}),
+      ...(typeof costUsd==='number'?{cost_usd:costUsd}:{}),
       duration:_activityPayloadFirst(payload,['duration','duration_seconds','elapsed'])??null,
       started_at:_activityPayloadFirst(payload,['started_at','startedAt'])??null,
       signature:signatureParts.join('|'),

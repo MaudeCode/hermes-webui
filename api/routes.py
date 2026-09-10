@@ -4087,6 +4087,11 @@ def _run_journal_live_snapshot(
             "activitySegmentSeq": segment_seq,
             "activityBurstId": burst_id or 0,
         }
+        # Per-delegation spend rides alongside the snippet so a reattached
+        # delegate_task card keeps its cost chip (api.streaming stamps it).
+        if call.get("cost_usd") is not None:
+            tool["cost_usd"] = call["cost_usd"]
+            payload["cost_usd"] = call["cost_usd"]
         return {
             "row_id": row_id,
             "order_index": len(anchor_activity_rows),
@@ -5275,6 +5280,9 @@ def _anchor_scene_tool_row(tool, order_index, message_index, stream_id=""):
         "signature": f"{name}|{tid}|{json.dumps(args, sort_keys=True, default=str)}",
     }
     row["payload"].update({"tid": tid, "id": tid, "name": name, "args": args, "preview": preview, "snippet": snippet})
+    if isinstance(tool, dict) and tool.get("cost_usd") is not None:
+        row["tool"]["cost_usd"] = tool["cost_usd"]
+        row["payload"]["cost_usd"] = tool["cost_usd"]
     return row
 
 

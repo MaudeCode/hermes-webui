@@ -4227,6 +4227,11 @@ button.tool-card-header{width:calc(100% + 8px);border:0;background:transparent;t
 .tl-del{color:var(--error);}
 .tool-card-header:hover .tool-card-title,.tl-head:hover .tl-title{opacity:.66;}
 .tool-card-preview{display:none;}
+/* Per-delegation spend on a delegate_task card. Right-aligned like the caret;
+   the caret drops its own auto margin when the chip is present so the two sit
+   together instead of splitting the free space between them. */
+.tool-card-cost{margin-left:auto;flex-shrink:0;font-family:var(--font-mono);font-size:var(--font-size-xs);color:var(--muted);opacity:.72;white-space:nowrap;}
+.tool-card-header:has(.tool-card-cost) .tool-card-toggle{margin-left:6px;}
 .tool-card-duration{display:none;font-size:var(--font-size-xs);color:var(--muted);opacity:.72;white-space:nowrap;margin-left:auto;}
 .tool-card-toggle,.tl-caret{margin-left:auto;font-size:10px;color:var(--muted);opacity:.4;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;transform-origin:center;transition:transform .18s ease;will-change:transform;}
 .tool-card.open .tool-card-toggle,.tl.open .tl-caret{transform:rotate(90deg);}

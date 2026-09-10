@@ -7088,6 +7088,14 @@ if(typeof window!=='undefined'){
   });
 })();
 function _fmtTokens(n){if(!n||n<0)return'0';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'k';return String(n);}
+// One place decides how a USD cost reads. Sub-cent amounts keep 4 decimals so a
+// $0.0032 delegation is not rounded to a misleading "$0.00"; anything else gets
+// the usual 2. Callers own the '~' estimate prefix.
+function _fmtCostUsd(value){
+  const n=Number(value);
+  if(!Number.isFinite(n)) return '';
+  return '$'+(Math.abs(n)<0.01?n.toFixed(4):n.toFixed(2));
+}
 function _formatTurnDuration(seconds){
   const n=Number(seconds);
   if(!Number.isFinite(n)||n<0)return'';
@@ -7597,7 +7605,7 @@ function _syncCtxIndicator(usage){
   const contextLabel=hasPostCompressionEstimate?'Estimated next model context':'Context window';
   let label=hasPromptTok?`${contextLabel} ${pct}% used`:`${_fmtTokens(totalTok)} tokens used`;
   if(!hasExplicitCtx&&hasPromptTok) label+=' (est. 128K)';
-  if(cost) label+=` \u00b7 $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
+  if(cost) label+=` \u00b7 ${_fmtCostUsd(cost)}`;
   if(cacheText) label+=` \u00b7 ${cacheText}`;
   el.setAttribute('aria-label',label);
   const usageText=hasPromptTok?(overflowed?`${contextLabel}: ${rawPct}% used (context exceeded)`:`${contextLabel}: ${pct}% used (${100-pct}% left)`):`${_fmtTokens(totalTok)} tokens used`;
@@ -7619,7 +7627,7 @@ function _syncCtxIndicator(usage){
   let costText='';
   if(costLine){
     if(cost){
-      costText=`Estimated cost: $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
+      costText=`Estimated cost: ${_fmtCostUsd(cost)}`;
       if(cacheText) costText+=` \u00b7 ${cacheText}`;
       costLine.style.display='';
       costLine.textContent=costText;
@@ -14176,6 +14184,7 @@ function _anchorSceneToolCallFromRow(row, opts){
     done:settled?true:(tool.done!==null&&tool.done!==undefined?tool.done:(row.status!=='running'&&row.status!=='pending')),
     is_error:!!(tool.is_error||payload.is_error||row.status==='error'||row.status==='failed'),
     is_diff:!!(tool.is_diff||payload.is_diff||payload.isDiff),
+    cost_usd:tool.cost_usd!==undefined?tool.cost_usd:payload.cost_usd,
     duration:tool.duration||payload.duration||payload.duration_seconds,
     started_at:firstValidTimestampSeconds(tool.started_at, payload.started_at, rowTs),
     created_at:firstValidTimestampSeconds(tool.created_at, payload.created_at, rowTs),
@@ -19319,6 +19328,9 @@ function renderMessages(options){
     // join below misses (id mismatch, recovery-rebuilt turn), use this so the
     // terminal output / diff body still renders instead of vanishing (#4927).
     const persistedSnippetByTid={};
+    // The delegation cost chip has no snippet to be re-derived from — it only
+    // exists on the persisted summary — so it rides the same tid index.
+    const persistedCostByTid={};
     try{
       const persisted=(S.session&&Array.isArray(S.session.tool_calls))?S.session.tool_calls:[];
       persisted.forEach(tc=>{
@@ -19326,6 +19338,7 @@ function renderMessages(options){
         const ptid=tc.tid||tc.id||tc.tool_call_id||tc.call_id||'';
         const psnip=tc.snippet||tc.result||tc.output||tc.preview||'';
         if(ptid&&psnip&&!persistedSnippetByTid[ptid]) persistedSnippetByTid[ptid]=String(psnip);
+        if(ptid&&tc.cost_usd!=null&&persistedCostByTid[ptid]===undefined) persistedCostByTid[ptid]=tc.cost_usd;
       });
     }catch(e){}
     S.messages.forEach((m,rawIdx)=>{
@@ -19373,10 +19386,11 @@ function renderMessages(options){
       if(matchEntry){
         usedLiveToolMetadata.add(matchEntry.idx);
         const live=matchEntry.tc||{};
-        for(const key of ['activityBurstId','duration','started_at']){
+        for(const key of ['activityBurstId','duration','started_at','cost_usd']){
           if((next[key]===undefined||next[key]===null)&&live[key]!==undefined&&live[key]!==null) next[key]=live[key];
         }
       }
+      if(next.cost_usd==null&&tid&&persistedCostByTid[tid]!=null) next.cost_usd=persistedCostByTid[tid];
       return next;
     };
     fallbackToolSources.forEach(({m,rawIdx})=>{
@@ -19837,7 +19851,7 @@ function renderMessages(options){
         const outTok=msg._turnUsage.output_tokens||0;
         const cost=msg._turnUsage.estimated_cost;
         let text=`${_fmtTokens(inTok)} in · ${_fmtTokens(outTok)} out`;
-        if(cost) text+=` · ~$${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
+        if(cost) text+=` · ~${_fmtCostUsd(cost)}`;
         const cacheHitPct=msg._turnUsage.cache_hit_percent;
         if(cacheHitPct!=null) text+=` · ${t('usage_cached_percent',cacheHitPct)}`;
         usage.textContent=text;
@@ -20601,6 +20615,16 @@ function _toolDetailLeadText(kind, tc){
   if(!target) return '';
   return target;
 }
+// Per-delegation spend for a delegate_task card. api.streaming reads `cost_usd`
+// (the field hermes-agent's tools/delegate_tool.py emits per delegated task) off
+// the whole result and stamps it here — the card's own snippet is capped and
+// routinely truncates the field away, so parsing the snippet is not an option.
+// Returns null for a missing, unparseable, or zero cost so the chip stays off
+// rather than implying a real $0.00.
+function _delegationCostUsd(tc){
+  const n=Number(tc&&tc.cost_usd);
+  return Number.isFinite(n)&&n>0?n:null;
+}
 function buildToolCard(tc){
   const row=document.createElement('div');
   row.className='tool-card-row';
@@ -20637,6 +20661,7 @@ function buildToolCard(tc){
   const lessLabel=tc.is_diff?'Hide diff':'Show less';
   const isSubagent=tc.name==='subagent_progress';
   const isDelegation=tc.name==='delegate_task';
+  const delegationCost=isDelegation?_delegationCostUsd(tc):null;
   const openClass=hasDetail&&typeof _worklogDetailsExpandedDefault==='function'&&_worklogDetailsExpandedDefault()?' open':'';
   const cardClass='tool-card'+(tc.done===false?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'')+(hasDetail?'':' tool-card-no-detail')+openClass;
   const headerStart=hasDetail
@@ -20660,6 +20685,7 @@ function buildToolCard(tc){
         <span class="tool-card-icon">${icon}</span>
         <span class="tool-card-name"><span class="tool-card-name-label">${esc(displayName)}</span><span class="tool-card-name-generic">${esc(genericName)}</span></span>
         <span class="tool-card-preview">${esc(previewText)}</span>
+        ${delegationCost!=null?`<span class="tool-card-cost" title="${esc(t('usage_estimated_cost'))}">~${esc(_fmtCostUsd(delegationCost))}</span>`:''}
         ${hasDetail?`<span class="tool-card-toggle">${li('chevron-right',12)}</span>`:''}
       ${headerEnd}
       ${hasDetail?`<div id="${detailId}" class="tool-card-detail"${openClass?'':' hidden'}>
