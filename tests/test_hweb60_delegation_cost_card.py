@@ -366,3 +366,175 @@ def test_card_cost_uses_the_shared_session_cost_format(driver_path):
         "a second inline cost format survived — every USD display must go "
         "through _fmtCostUsd()"
     )
+
+
+# ── Both live completion paths report the cost ───────────────────────────────
+
+
+def _run_delegation_turn(monkeypatch, tmp_path, *, structured: bool):
+    """Drive a real _run_agent_streaming turn whose agent runs one delegation.
+
+    ``_run_agent_streaming`` branches on the agent constructor's real signature,
+    so the fake agent declares exactly the callbacks the build under test has:
+    a modern build takes ``tool_complete_callback``, an older one only reaches
+    the ``on_tool`` ``tool.completed`` fallback. Both must carry the cost.
+    """
+    import queue
+    import sys
+    import types
+
+    from api import models, streaming
+    from api.models import Session
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+    for registry in (models.SESSIONS, streaming.SESSIONS, streaming.STREAMS,
+                     streaming.AGENT_INSTANCES, streaming.SESSION_AGENT_LOCKS):
+        registry.clear()
+    # A cached agent from an earlier test leaks its constructor signature into
+    # the callback-capability probe, which is exactly what this test varies.
+    from api.config import SESSION_AGENT_CACHE
+
+    SESSION_AGENT_CACHE.clear()
+
+    session_id, stream_id = "hweb60_session", "hweb60_stream"
+    session = Session(
+        session_id=session_id,
+        title="delegation cost",
+        workspace=str(tmp_path),
+        model="gpt-4o",
+        messages=[],
+        context_messages=[],
+    )
+    session.active_stream_id = stream_id
+    session.pending_user_message = "Delegate the audit."
+    session.pending_started_at = 1.0
+    session.save()
+    models.SESSIONS[session_id] = session
+    streaming.SESSIONS[session_id] = session
+    event_queue: "queue.Queue" = queue.Queue()
+    streaming.STREAMS[stream_id] = event_queue
+
+    raw_result = _delegate_result(0.6125, trace_entries=200)
+    assert "cost_usd" not in _tool_result_snippet(raw_result)
+
+    agent_messages = [
+        {"role": "user", "content": "Delegate the audit."},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "function": {"name": "delegate_task", "arguments": '{"goal": "audit"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": raw_result},
+        {"role": "assistant", "content": "Delegation finished."},
+    ]
+
+    class _BaseFakeAgent:
+        def __init__(self, **kwargs):
+            self._kwargs = kwargs
+            self.session_id = kwargs.get("session_id")
+            self.stream_delta_callback = kwargs.get("stream_delta_callback")
+            self.context_compressor = None
+            self.session_prompt_tokens = 0
+            self.session_completion_tokens = 0
+            self.session_estimated_cost_usd = None
+            self.session_cache_read_tokens = 0
+            self.session_cache_write_tokens = 0
+            self.reasoning_config = None
+            self.ephemeral_system_prompt = None
+            self._last_error = None
+            self._persist_user_message_idx = None
+            self._current_turn_id = ""
+
+        def interrupt(self, _message):
+            return None
+
+    class ModernFakeAgent(_BaseFakeAgent):
+        def __init__(self, tool_progress_callback=None, tool_start_callback=None,
+                     tool_complete_callback=None, **kwargs):
+            super().__init__(
+                tool_progress_callback=tool_progress_callback,
+                tool_start_callback=tool_start_callback,
+                tool_complete_callback=tool_complete_callback,
+                **kwargs,
+            )
+
+        def run_conversation(self, **_kwargs):
+            self._kwargs["tool_start_callback"]("call_1", "delegate_task", {"goal": "audit"})
+            self._kwargs["tool_complete_callback"](
+                "call_1", "delegate_task", {"goal": "audit"}, raw_result
+            )
+            return {"messages": list(agent_messages)}
+
+    class LegacyFakeAgent(_BaseFakeAgent):
+        def __init__(self, tool_progress_callback=None, **kwargs):
+            super().__init__(tool_progress_callback=tool_progress_callback, **kwargs)
+
+        def run_conversation(self, **_kwargs):
+            progress = self._kwargs["tool_progress_callback"]
+            progress("tool.started", "delegate_task", None, {"goal": "audit"})
+            progress(
+                "tool.completed",
+                "delegate_task",
+                _tool_result_snippet(raw_result),
+                {"goal": "audit"},
+                result=raw_result,
+                duration=1.0,
+                is_error=False,
+            )
+            return {"messages": list(agent_messages)}
+
+    fake_hermes_state = types.ModuleType("hermes_state")
+    fake_hermes_state.SessionDB = lambda *_a, **_k: object()
+
+    with monkeypatch.context() as m:
+        m.setattr(streaming, "get_session", lambda _sid: session)
+        m.setattr(streaming, "_get_ai_agent",
+                  lambda: ModernFakeAgent if structured else LegacyFakeAgent)
+        m.setattr(streaming, "resolve_model_provider", lambda *_a, **_k: ("gpt-4o", "openai", None))
+        m.setattr(streaming, "_streaming_requires_process_env_fallback", lambda **_k: False)
+        m.setattr("api.config.get_config", lambda *_a, **_k: {})
+        m.setattr("api.config._resolve_cli_toolsets", lambda *_a, **_k: [])
+        m.setitem(sys.modules, "hermes_state", fake_hermes_state)
+        streaming._run_agent_streaming(
+            session_id=session_id,
+            msg_text="Delegate the audit.",
+            model="gpt-4o",
+            workspace=str(tmp_path),
+            stream_id=stream_id,
+        )
+
+    events = []
+    while not event_queue.empty():
+        events.append(event_queue.get_nowait())
+    return events, json.loads((session_dir / f"{session_id}.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    "structured", [True, False], ids=["tool_complete_callback", "legacy_on_tool"]
+)
+def test_both_live_completion_paths_report_the_cost(monkeypatch, tmp_path, structured):
+    events, payload = _run_delegation_turn(monkeypatch, tmp_path, structured=structured)
+
+    completes = []
+    for name, data in events:
+        if name != "tool_complete":
+            continue
+        parsed = json.loads(data) if isinstance(data, str) else data
+        if parsed.get("name") == "delegate_task":
+            completes.append(parsed)
+    assert completes, f"no delegate_task tool_complete event: {sorted({n for n, _ in events})}"
+    assert completes[-1]["cost_usd"] == 0.6125
+
+    persisted = [
+        tc for tc in (payload.get("tool_calls") or []) if tc.get("name") == "delegate_task"
+    ]
+    assert persisted and persisted[-1]["cost_usd"] == 0.6125

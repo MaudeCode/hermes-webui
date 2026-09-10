@@ -10785,6 +10785,15 @@ def _run_agent_streaming(
                     return
 
                 if event_type == 'tool.completed':
+                    # Same per-delegation spend the structured tool_complete
+                    # path reads, for builds without tool_complete_callback.
+                    # Prefer the structured `result` kwarg; `preview` is already
+                    # truncated, so on pre-`result` builds there is simply no
+                    # cost to report and the card renders without the chip.
+                    _legacy_result = cb_kwargs.get('result')
+                    delegation_cost = _delegation_cost_usd(
+                        name, _legacy_result if _legacy_result is not None else preview
+                    )
                     for live_tc in reversed(_live_tool_calls):
                         if live_tc.get('done'):
                             continue
@@ -10792,6 +10801,8 @@ def _run_agent_streaming(
                             live_tc['done'] = True
                             live_tc['duration'] = cb_kwargs.get('duration')
                             live_tc['is_error'] = bool(cb_kwargs.get('is_error', False))
+                            if delegation_cost is not None:
+                                live_tc['cost_usd'] = delegation_cost
                             break
                     # Mirror done state to shared dict (#1361 §B)
                     if stream_id in STREAM_LIVE_TOOL_CALLS:
@@ -10802,6 +10813,8 @@ def _run_agent_streaming(
                                 shared_tc['done'] = True
                                 shared_tc['duration'] = cb_kwargs.get('duration')
                                 shared_tc['is_error'] = bool(cb_kwargs.get('is_error', False))
+                                if delegation_cost is not None:
+                                    shared_tc['cost_usd'] = delegation_cost
                                 break
                     # Signal the checkpoint thread that new work has completed (Issue #765).
                     # Each completed tool call is a meaningful unit of progress worth persisting.
@@ -10813,6 +10826,7 @@ def _run_agent_streaming(
                         'args': args_snap,
                         'duration': cb_kwargs.get('duration'),
                         'is_error': bool(cb_kwargs.get('is_error', False)),
+                        **({'cost_usd': delegation_cost} if delegation_cost is not None else {}),
                     })
                     # Mirror the todo tool's in-memory state into a
                     # dedicated SSE event so the Todos panel can update
