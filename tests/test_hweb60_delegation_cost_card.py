@@ -538,3 +538,69 @@ def test_both_live_completion_paths_report_the_cost(monkeypatch, tmp_path, struc
         tc for tc in (payload.get("tool_calls") or []) if tc.get("name") == "delegate_task"
     ]
     assert persisted and persisted[-1]["cost_usd"] == 0.6125
+
+
+# ── Reattach mid-turn: the journal snapshot rebuilds the card ───────────────
+
+
+def _journal_snapshot(monkeypatch, events):
+    from api import routes
+
+    stream_id = "stream-hweb60"
+    tail = [
+        {"event": ev, "seq": i + 1, "event_id": f"{stream_id}:{i + 1}",
+         "created_at": float(i + 1), "payload": payload}
+        for i, (ev, payload) in enumerate(events)
+    ]
+    monkeypatch.setattr(routes, "find_run_summary", lambda sid: {
+        "session_id": "session-hweb60",
+        "last_seq": len(tail),
+        "last_event_id": f"{stream_id}:{len(tail)}",
+    })
+    monkeypatch.setattr(routes, "read_run_event_tail",
+                        lambda session_id, run_id: {"events": tail})
+    return routes._run_journal_live_snapshot(stream_id)
+
+
+def _delegation_row(snapshot):
+    rows = snapshot["anchor_activity_scene"]["activity_rows"]
+    return next(r for r in rows if (r.get("tool") or {}).get("name") == "delegate_task")
+
+
+@pytest.mark.parametrize(
+    "with_start", [True, False], ids=["started_then_completed", "completion_only"]
+)
+def test_reattach_mid_turn_keeps_the_delegation_cost(monkeypatch, with_start):
+    """Refreshing while the parent turn still runs must not drop the chip.
+
+    Only the completion payload can carry a final cost, so both journal
+    reconstruction branches — updating a call the `tool` event already opened,
+    and synthesising one from the completion alone — have to copy it.
+    """
+    events = []
+    if with_start:
+        events.append(("tool", {"name": "delegate_task", "tid": "call-1", "args": {"goal": "audit"}}))
+    events.append(("tool_complete", {
+        "name": "delegate_task", "tid": "call-1", "preview": "done", "cost_usd": 0.6125,
+    }))
+
+    snapshot = _journal_snapshot(monkeypatch, events)
+    (call,) = [c for c in snapshot["tool_calls"] if c.get("name") == "delegate_task"]
+    assert call["cost_usd"] == 0.6125
+
+    row = _delegation_row(snapshot)
+    assert row["tool"]["cost_usd"] == 0.6125
+    assert row["payload"]["cost_usd"] == 0.6125
+
+
+def test_reattach_without_a_cost_leaves_the_key_off(monkeypatch):
+    snapshot = _journal_snapshot(monkeypatch, [
+        ("tool", {"name": "delegate_task", "tid": "call-1", "args": {"goal": "audit"}}),
+        ("tool_complete", {"name": "delegate_task", "tid": "call-1", "preview": "done"}),
+    ])
+    (call,) = [c for c in snapshot["tool_calls"] if c.get("name") == "delegate_task"]
+    assert "cost_usd" not in call
+
+    row = _delegation_row(snapshot)
+    assert "cost_usd" not in row["tool"]
+    assert "cost_usd" not in row["payload"]

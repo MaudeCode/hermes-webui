@@ -3758,6 +3758,11 @@ def _run_journal_live_snapshot(
                     call["duration"] = payload.get("duration")
                 if payload.get("is_error") is not None:
                     call["is_error"] = bool(payload.get("is_error"))
+                # Only the completion payload can carry a final delegation
+                # cost — the preceding `tool` event has none — so it has to be
+                # copied here or a reattach drops the chip.
+                if payload.get("cost_usd") is not None:
+                    call["cost_usd"] = payload.get("cost_usd")
                 return
 
         if not name or name == "clarify":
@@ -3768,6 +3773,7 @@ def _run_journal_live_snapshot(
             "snippet": str(payload.get("preview") or ""),
             "args": _run_journal_snapshot_recovery_args(payload),
             "done": True,
+            **({"cost_usd": payload["cost_usd"]} if payload.get("cost_usd") is not None else {}),
             "_live": True,
             "_journal_snapshot": True,
             "_journal_stream_id": stream_id,
