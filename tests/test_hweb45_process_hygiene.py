@@ -241,12 +241,21 @@ def _write_shard(
     name: str,
     age_days: float,
     events: list[dict] | None = None,
+    raw: bool = False,
 ) -> Path:
     journal_dir.mkdir(parents=True, exist_ok=True)
     path = journal_dir / name
     # Default to one settled turn: well-formed evidence that the session is done,
     # which is what most of these cases want the retention gate to act on.
     rows = events if events is not None else _settled("t0")
+    if not raw:
+        # Fill in what `append_turn_journal_event` always writes, so a fixture
+        # only has to state the fields its case is actually about. An explicit
+        # key in the row still wins.
+        stem = name[: -len(".jsonl")]
+        tilde = stem.find("~")
+        sid = stem[:tilde] if tilde > 0 else stem
+        rows = [{"version": 1, "session_id": sid, **row} for row in rows]
     path.write_text(
         "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
     )
@@ -444,6 +453,81 @@ class TestTurnJournalRetention:
             journal_dir, f"odd~{_DEAD_PID}.jsonl", age_days=90, events=events
         )
         _write_sidecar(tmp_path, "odd")
+
+        result = turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
+
+        assert result["pruned"] == 0
+        assert shard.exists()
+
+    def test_a_double_terminal_turn_keeps_the_session(self, tmp_path):
+        """`completed` and `interrupted` on one turn is a contradiction the
+        journal is the only remaining record of."""
+        journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
+        events = [
+            {"event": "submitted", "turn_id": "t1", "created_at": 1},
+            {"event": "completed", "turn_id": "t1", "created_at": 2},
+            {"event": "interrupted", "turn_id": "t1", "created_at": 3},
+        ]
+        shard = _write_shard(
+            journal_dir, f"clash~{_DEAD_PID}.jsonl", age_days=90, events=events
+        )
+        _write_sidecar(tmp_path, "clash")
+        _, collisions = turn_journal.derive_turn_journal_states(events)
+        assert collisions, "fixture must actually produce a collision"
+
+        result = turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
+
+        assert result["pruned"] == 0
+        assert shard.exists()
+
+    @pytest.mark.parametrize("missing", ["version", "session_id"])
+    def test_an_event_missing_writer_fields_keeps_the_session(self, tmp_path, missing):
+        """Every append sets both; an event without them came from elsewhere."""
+        journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
+        rows = [
+            {
+                "version": 1,
+                "session_id": "partial",
+                "event": "completed",
+                "turn_id": "t1",
+                "created_at": 1,
+            }
+        ]
+        rows[0].pop(missing)
+        shard = _write_shard(
+            journal_dir,
+            f"partial~{_DEAD_PID}.jsonl",
+            age_days=90,
+            events=rows,
+            raw=True,
+        )
+        _write_sidecar(tmp_path, "partial")
+
+        result = turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
+
+        assert result["pruned"] == 0
+        assert shard.exists()
+
+    def test_an_event_claiming_another_session_keeps_the_session(self, tmp_path):
+        """A shard whose events name a different session is not evidence of
+        *this* session being settled."""
+        journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
+        shard = _write_shard(
+            journal_dir,
+            f"mixed~{_DEAD_PID}.jsonl",
+            age_days=90,
+            events=[
+                {
+                    "version": 1,
+                    "session_id": "someone-else",
+                    "event": "completed",
+                    "turn_id": "t1",
+                    "created_at": 1,
+                }
+            ],
+            raw=True,
+        )
+        _write_sidecar(tmp_path, "mixed")
 
         result = turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
 

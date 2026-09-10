@@ -363,7 +363,7 @@ def _sessions_with_recovery_findings(root: Path) -> set[str] | None:
     }
 
 
-def _event_is_well_formed(event: object) -> bool:
+def _event_is_well_formed(event: object, session_id: str) -> bool:
     """True when an event carries the fields the settled check depends on.
 
     A line can be valid JSON and still be unusable evidence — a ``submitted``
@@ -380,6 +380,13 @@ def _event_is_well_formed(event: object) -> bool:
     if not str(event.get("turn_id") or "").strip():
         return False
     if not str(event.get("event") or "").strip():
+        return False
+    # `version` and `session_id` are set on every append — the former by
+    # `setdefault`, the latter unconditionally — so an event without them, or
+    # claiming a different session, did not come from this writer.
+    if event.get("version") is None:
+        return False
+    if str(event.get("session_id") or "") != str(session_id):
         return False
     created_at = event.get("created_at")
     # A real number, not "whatever coerces": `float(x or 0)` accepted a missing
@@ -421,8 +428,12 @@ def _session_is_prunable(session_id: str, root: Path) -> bool:
     * an id ``read_turn_journal`` rejects, or a shard it cannot read;
     * a malformed line — a crash-torn event is exactly the evidence recovery
       flags for manual review, and deleting it destroys the only record;
-    * a JSON-decodable event missing ``turn_id``, ``event`` or a present,
-      finite, numeric ``created_at``, none of which the malformed list sees;
+    * an event that is not the shape ``append_turn_journal_event`` produces —
+      missing ``turn_id``, ``event``, ``version``, a matching ``session_id``, or
+      a present, finite, numeric ``created_at``. None of these reach the
+      malformed list, because they decode perfectly well;
+    * a turn holding both ``completed`` and ``interrupted``, which
+      ``derive_turn_journal_states`` reports as a collision;
     * a nonterminal turn, which the startup audit still reports as pending;
     * a missing or unparseable live sidecar. The recovery audit walks only the
       sidecars it can parse, so it never reports these — the journal is the
@@ -438,9 +449,15 @@ def _session_is_prunable(session_id: str, root: Path) -> bool:
     if journal.get("malformed"):
         return False
     events = journal.get("events") or []
-    if not all(_event_is_well_formed(event) for event in events):
+    if not all(_event_is_well_formed(event, session_id) for event in events):
         return False
-    states, _ = derive_turn_journal_states(events)
+    states, collisions = derive_turn_journal_states(events)
+    # A turn that recorded both `completed` and `interrupted` is an anomaly
+    # `derive_turn_journal_states` goes out of its way to surface. The derived
+    # state picks one by timestamp and looks settled; the journal is the only
+    # place the contradiction is still visible.
+    if collisions:
+        return False
     if any(not is_terminal_turn_event(event) for event in states.values()):
         return False
     # The audit gate below is about *recovery* findings; it does not notice a

@@ -192,9 +192,12 @@ another, and half a turn read on its own looks pending:
 - no nonterminal turn is left;
 - no malformed line is present (a crash-torn event is exactly what the startup
   recovery audit flags for manual review, and the journal is the only record);
-- every event carries a `turn_id`, an `event` name and a `created_at` that is
-  present, numeric and finite — a JSON-decodable line missing those is valid
-  syntax but unusable evidence;
+- every event has the shape `append_turn_journal_event` writes: a `turn_id`, an
+  `event` name, a `version`, a `session_id` matching the shard, and a
+  `created_at` that is present, numeric and finite. A JSON-decodable line
+  missing any of those is valid syntax but unusable evidence;
+- no turn recorded both `completed` and `interrupted` — that contradiction is
+  reported as a collision, and the journal is the only place it stays visible;
 - the live `{session_id}.json` sidecar is readable and session-shaped, judged
   by the same `_msg_count` the recovery code uses (a session whose sidecar is
   gone, corrupt, or shapeless is awaiting repair, and the audit below only walks
