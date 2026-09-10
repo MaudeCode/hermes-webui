@@ -2892,21 +2892,35 @@ def _session_list_response_signature(
     return (live, active_stream_ids, running_cron_jobs, dict(attention_by_session), bool(redact_enabled))
 
 
-def _session_list_response_time_prefix() -> bytes:
+def _session_list_response_time_prefix(server_tz: str) -> bytes:
     return b'{"server_time":%s,"server_tz":%s,' % (
         json.dumps(time.time()).encode("utf-8"),
-        json.dumps(time.strftime("%z")).encode("utf-8"),
+        json.dumps(server_tz).encode("utf-8"),
     )
 
 
-def _session_list_response_etag(tail: bytes) -> str:
-    """Strong validator over the cached response tail.
+def _session_list_response_tail_digest(tail: bytes) -> str:
+    """Digest of the cached response tail — the O(N) half of the validator.
 
-    The tail is everything except the freshly-spliced `server_time`/`server_tz`
-    prefix, so it is exactly the content whose identity the client is asking
-    about — and it is already in hand, so this adds no O(N) work.
+    Cached alongside the tail it covers, so a revalidated poll never rehashes
+    megabytes of unchanged rows.
     """
-    return '"%s"' % hashlib.blake2b(tail, digest_size=16).hexdigest()
+    return hashlib.blake2b(tail, digest_size=16).hexdigest()
+
+
+def _session_list_response_etag(tail_digest: str, server_tz: str) -> str:
+    """Strong validator for the whole representation bar `server_time`.
+
+    `server_time` is the one field a 304 may legitimately decline to refresh:
+    it feeds a slowly-varying clock-skew estimate, so a client that keeps its
+    previous value stays accurate. `server_tz` is not like that — it steps by a
+    whole hour at a DST boundary while every row stays identical, and a client
+    holding the old offset renders every timestamp an hour out until some
+    unrelated change forces a 200. Folding it into the validator makes that
+    transition a normal 200. O(1) per request: the expensive half is the cached
+    tail digest.
+    """
+    return '"%s-%s"' % (tail_digest, server_tz)
 
 
 def _session_list_response_body(
@@ -2936,8 +2950,14 @@ def _session_list_response_body(
     row_ids = entry[1] if entry is not None else _session_list_response_row_ids(payload)
     attention_by_session = _session_attention_snapshot()
     signature = _session_list_response_signature(row_ids, redact_enabled, attention_by_session)
+    # Read the zone once and use it for both the prefix and the validator, so the
+    # two can never straddle a DST boundary and disagree within one response.
+    server_tz = time.strftime("%z")
     if entry is not None and signature is not None and entry[2] == signature:
-        return _session_list_response_time_prefix() + entry[3], entry[4]
+        return (
+            _session_list_response_time_prefix(server_tz) + entry[3],
+            _session_list_response_etag(entry[4], server_tz),
+        )
 
     response = _session_list_payload_to_response(
         payload, settings=settings, attention_by_session=attention_by_session
@@ -2950,15 +2970,18 @@ def _session_list_response_body(
         # Degenerate body ({}), so there is nothing to splice a prefix onto.
         return _json_response_body(response, pretty=False), None
     tail = tail[1:]
-    etag = _session_list_response_etag(tail)
+    tail_digest = _session_list_response_tail_digest(tail)
 
     if signature is not None:
         with _SESSION_LIST_RESPONSE_CACHE_LOCK:
-            _SESSION_LIST_RESPONSE_CACHE[key] = (payload, row_ids, signature, tail, etag)
+            _SESSION_LIST_RESPONSE_CACHE[key] = (payload, row_ids, signature, tail, tail_digest)
             _SESSION_LIST_RESPONSE_CACHE.move_to_end(key)
             while len(_SESSION_LIST_RESPONSE_CACHE) > _SESSION_LIST_RESPONSE_CACHE_MAX_ENTRIES:
                 _SESSION_LIST_RESPONSE_CACHE.popitem(last=False)
-    return _session_list_response_time_prefix() + tail, etag
+    return (
+        _session_list_response_time_prefix(server_tz) + tail,
+        _session_list_response_etag(tail_digest, server_tz),
+    )
 
 
 def _hidden_archived_sidebar_reference_sessions(
@@ -15542,16 +15565,14 @@ def handle_get(handler, parsed) -> bool:
             )
             diag.stage("response_write")
             body, etag = _session_list_response_body(key, payload, settings=settings)
-            # `no-cache` (revalidate on every use), not `no-store` (never keep a
-            # copy): a stored copy is what makes the conditional GET above
-            # possible, and the sidebar's poll is overwhelmingly unchanged.
-            return j(
-                handler,
-                body,
-                pretty=False,
-                etag=etag,
-                cache_control="no-cache",
-            )
+            # Still `no-store` (j()'s default). The ticket proposed `no-cache` so a
+            # stored copy could be revalidated, but this endpoint's revalidation is
+            # application-managed — the client holds the validator in memory and
+            # sends If-None-Match itself — so nothing needs to be storable. Keeping
+            # `no-store` means session titles and profile metadata are still never
+            # written to a browser or shared HTTP cache, including by the callers
+            # that hit this endpoint outside the sidebar poll (Codex round 1, P2).
+            return j(handler, body, pretty=False, etag=etag)
         finally:
             diag.finish()
 

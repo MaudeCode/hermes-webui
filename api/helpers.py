@@ -283,7 +283,6 @@ def j(
     *,
     pretty: bool = True,
     etag: str | None = None,
-    cache_control: str = 'no-store',
 ) -> None:
     """Send a JSON response.
 
@@ -293,10 +292,11 @@ def j(
     *etag*: opt-in conditional GET.  When supplied, a matching ``If-None-Match``
     (RFC 7232 3.2 weak comparison) is answered with a bodiless 304 and *payload*
     is never serialized -- the point is the wire bytes, so the short-circuit runs
-    before serialization.  A caller passing an ETag must also pass a
-    *cache_control* that permits storing the response (``no-cache``): the
-    ``no-store`` default forbids storing it at all, which makes revalidation
-    impossible and the ETag dead weight.
+    before serialization.
+
+    Revalidation here is application-managed: the client keeps the validator and
+    sends ``If-None-Match`` itself, so the response stays ``no-store`` and API
+    payloads are still never written to a browser or shared HTTP cache.
     """
     request_headers = getattr(handler, 'headers', None)
     if (
@@ -307,10 +307,7 @@ def j(
     ):
         handler.send_response(304)
         handler.send_header('ETag', etag)
-        handler.send_header('Cache-Control', cache_control)
-        # The 200 for this ETag may or may not be gzipped depending on the
-        # request's Accept-Encoding, so a shared cache must key on it.
-        handler.send_header('Vary', 'Accept-Encoding')
+        handler.send_header('Cache-Control', 'no-store')
         _security_headers(handler)
         flush_pending_auth_cookies(handler)
         if extra_headers:
@@ -332,10 +329,9 @@ def j(
         handler.send_header('Content-Encoding', 'gzip')
 
     handler.send_header('Content-Length', str(len(body)))
-    handler.send_header('Cache-Control', cache_control)
+    handler.send_header('Cache-Control', 'no-store')
     if etag:
         handler.send_header('ETag', etag)
-        handler.send_header('Vary', 'Accept-Encoding')
     _security_headers(handler)
     flush_pending_auth_cookies(handler)
     if extra_headers:

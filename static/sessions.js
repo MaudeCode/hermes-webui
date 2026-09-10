@@ -6122,10 +6122,12 @@ async function _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts,
     const conditionalEtag=(_sessionListLastEtag&&_sessionListLastFetchKey===sessionListKey&&_sessionListLastPayload!==null)
       ?_sessionListLastEtag:null;
     const conditionalPayload=conditionalEtag?_sessionListLastPayload:null;
-    // `cache:'no-store'` keeps the browser's HTTP cache out of it entirely: the
-    // response is now `Cache-Control: no-cache`, so a transparent revalidation
-    // would replay a stored body — and its stale `server_time` — as a synthetic
-    // 200 that this code could not tell from a real one.
+    // `cache:'no-store'` keeps the browser's HTTP cache out of this path
+    // unconditionally, so revalidation is ours and only ours. The response is
+    // `no-store` too, so nothing is stored today — but if that header ever
+    // loosened, a transparent browser revalidation would replay a stored body,
+    // and its stale `server_time`, as a synthetic 200 this code could not tell
+    // from a real one. The guarantee belongs on both ends of the request.
     const requestOpts={...(sessionRequestOpts||{}),cache:'no-store'};
     if(conditionalEtag){
       requestOpts.conditional=true;
@@ -6133,13 +6135,18 @@ async function _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts,
     }
     const response = await api('/api/sessions' + sessionListQS,requestOpts);
     if(response&&response.__notModified){
-      // Unchanged rows: replay them, minus `server_time`/`server_tz`. Those were
-      // spliced fresh into the 200 this validator came from and are now stale by
-      // the whole polling gap, so re-deriving the clock skew from them would skew
-      // it by exactly that gap. _applySessionListPayload() only updates
-      // _serverTimeDelta for a numeric server_time, so dropping them keeps the
-      // previously computed delta — a 304 declines to update the skew rather than
-      // injecting a wrong one.
+      // Unchanged rows: replay them, minus `server_time`/`server_tz`.
+      //
+      // `server_time` was spliced fresh into the 200 this validator came from and
+      // is now stale by the whole polling gap, so re-deriving the clock skew from
+      // it would skew the estimate by exactly that gap.
+      // _applySessionListPayload() only updates _serverTimeDelta for a numeric
+      // server_time, so dropping it keeps the previously computed delta — a 304
+      // declines to update the skew rather than injecting a wrong one.
+      //
+      // `server_tz` is dropped for a different reason: it is part of the server's
+      // validator, so a DST step produces a new ETag and a full 200. A 304 is
+      // therefore proof the offset has not moved, and _serverTz is already right.
       //
       // This branch is reachable only when the request carried If-None-Match,
       // which is exactly when conditionalPayload was captured. If that ever

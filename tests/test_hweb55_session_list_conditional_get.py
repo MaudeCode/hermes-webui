@@ -107,12 +107,23 @@ def test_unchanged_store_revalidates_with_an_empty_304(monkeypatch):
     assert "Content-Length" not in second.sent
 
 
-def test_response_is_storable_so_a_client_can_revalidate(monkeypatch):
-    """`no-store` forbids keeping a copy, which makes revalidation impossible."""
+def test_revalidation_does_not_make_the_response_storable(monkeypatch):
+    """Session titles must not reach a browser or shared HTTP cache.
+
+    Codex round 1 (P2): `no-cache` permits *storing* the response, it only
+    requires revalidation before reuse — and callers outside the sidebar poll
+    request this endpoint without opting out of the HTTP cache. Since the
+    validator is application-managed (the client sends If-None-Match itself),
+    `no-store` costs nothing and keeps the previous privacy posture.
+    """
     _install_store(monkeypatch, _rows())
     first = _get_sessions()
-    assert first.sent["Cache-Control"] == "no-cache"
-    assert _get_sessions({"If-None-Match": first.sent["ETag"]}).sent["Cache-Control"] == "no-cache"
+    assert first.sent["Cache-Control"] == "no-store"
+    assert first.sent["ETag"]
+
+    revalidated = _get_sessions({"If-None-Match": first.sent["ETag"]})
+    assert revalidated.status == 304, "no-store must not disable revalidation"
+    assert revalidated.sent["Cache-Control"] == "no-store"
 
 
 def test_mismatched_validator_still_returns_a_full_body(monkeypatch):
@@ -192,6 +203,56 @@ def test_validator_tracks_the_runtime_overlay_not_just_the_cached_payload(monkey
     assert _get_sessions({"If-None-Match": before}).status == 200
     # The new one is itself stable while the overlay stays put.
     assert _get_sessions({"If-None-Match": after.sent["ETag"]}).status == 304
+
+
+def test_validator_changes_when_the_server_timezone_steps(monkeypatch):
+    """A DST boundary moves `server_tz` while every row stays identical.
+
+    Codex round 1 (P2): `server_tz` is not like `server_time`. It steps by a whole
+    hour and a client holding the old offset renders every sidebar timestamp an
+    hour out, so a 304 must not be the answer across that step.
+    """
+    _install_store(monkeypatch, _rows(3))
+    import time as _time
+
+    real_strftime = _time.strftime
+    zone = {"offset": "+0000"}
+    # Only "%z" is faked; every other strftime caller (request diagnostics) is
+    # left alone, since `time` is a process-global module.
+    monkeypatch.setattr(
+        routes.time,
+        "strftime",
+        lambda fmt, *a: zone["offset"] if fmt == "%z" else real_strftime(fmt, *a),
+    )
+    winter = _get_sessions()
+    assert winter.status == 200
+
+    # Same store, same cached tail, one hour later on the wall clock.
+    zone["offset"] = "+0100"
+    summer = _get_sessions({"If-None-Match": winter.sent["ETag"]})
+    assert summer.status == 200, "a zone step must produce a full body, not a 304"
+    assert summer.sent["ETag"] != winter.sent["ETag"]
+    assert summer.json_body()["server_tz"] == "+0100"
+
+    # And the response's own tz and its validator can never disagree.
+    assert summer.sent["ETag"].endswith('+0100"')
+
+
+def test_validator_is_o1_per_request_over_an_unchanged_store(monkeypatch):
+    """Folding the zone in must not rehash the rows on every poll."""
+    _install_store(monkeypatch, _rows(50))
+    _get_sessions()
+
+    digests = {"n": 0}
+    real = routes._session_list_response_tail_digest
+
+    def _counting(tail):
+        digests["n"] += 1
+        return real(tail)
+
+    monkeypatch.setattr(routes, "_session_list_response_tail_digest", _counting)
+    _get_sessions()
+    assert digests["n"] == 0, "a cache hit rehashed the whole response tail"
 
 
 # ── Server: RFC 7232 §3.2 handling, matching the media path ──────────────────
