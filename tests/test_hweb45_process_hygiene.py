@@ -276,7 +276,10 @@ def _write_sidecar(root: Path, session_id: str, body: str | None = None) -> Path
     """The live `{sid}.json` whose absence means the session awaits repair."""
     path = root / f"{session_id}.json"
     path.write_text(
-        body if body is not None else json.dumps({"messages": []}), encoding="utf-8"
+        body
+        if body is not None
+        else json.dumps({"session_id": session_id, "messages": []}),
+        encoding="utf-8",
     )
     return path
 
@@ -544,6 +547,59 @@ class TestTurnJournalRetention:
         assert written["version"] == turn_journal._SUPPORTED_JOURNAL_VERSION
         assert turn_journal._event_is_well_formed(written, "agree") is True
 
+    @pytest.mark.parametrize("version", [True, 1.0])
+    def test_a_version_equal_to_one_but_not_an_int_keeps_the_session(
+        self, tmp_path, version
+    ):
+        """Python says `True == 1` and `1.0 == 1`; the writer emits an int."""
+        journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
+        assert version == turn_journal._SUPPORTED_JOURNAL_VERSION, "premise"
+        shard = _write_shard(
+            journal_dir,
+            f"looselike~{_DEAD_PID}.jsonl",
+            age_days=90,
+            events=[
+                {
+                    "version": version,
+                    "session_id": "looselike",
+                    "event": "completed",
+                    "turn_id": "t1",
+                    "created_at": 1,
+                }
+            ],
+            raw=True,
+        )
+        _write_sidecar(tmp_path, "looselike")
+
+        result = turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
+
+        assert result["pruned"] == 0
+        assert shard.exists()
+
+    @pytest.mark.parametrize("claimed", ["someone-else", None])
+    def test_a_sidecar_that_names_another_session_keeps_the_journal(
+        self, tmp_path, claimed
+    ):
+        """A sidecar copied under the wrong filename is a valid session file
+        that is not *this* session, and neither _msg_count nor the audit says so."""
+        journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
+        shard = _write_shard(
+            journal_dir, f"borrowed~{_DEAD_PID}.jsonl", age_days=90, events=_settled("t1")
+        )
+        payload = {"messages": [{"role": "user", "content": "hi"}]}
+        if claimed is not None:
+            payload["session_id"] = claimed
+        _write_sidecar(tmp_path, "borrowed", body=json.dumps(payload))
+
+        from api.session_recovery import _msg_count
+
+        assert _msg_count(tmp_path / "borrowed.json") >= 0, "fixture must look valid"
+
+        result = turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
+
+        assert result["pruned"] == 0
+        assert shard.exists()
+
     def test_an_event_claiming_another_session_keeps_the_session(self, tmp_path):
         """A shard whose events name a different session is not evidence of
         *this* session being settled."""
@@ -714,7 +770,11 @@ class TestTurnJournalRetention:
             journal_dir, f"whole~{_DEAD_PID}.jsonl", age_days=90, events=_settled("t2")
         )
         # A live sidecar with fewer messages than its backup is `shrunken_live`.
-        _write_sidecar(tmp_path, "shrunk", body=json.dumps({"messages": []}))
+        _write_sidecar(
+            tmp_path,
+            "shrunk",
+            body=json.dumps({"session_id": "shrunk", "messages": []}),
+        )
         (tmp_path / "shrunk.json.bak").write_text(
             json.dumps({"messages": [{"role": "user", "content": "hi"}]}),
             encoding="utf-8",
@@ -962,6 +1022,25 @@ class TestWebuiLogRotation:
         assert err.stat().st_size == 0
         assert (tmp_path / "launchd-stdout.log.1").read_bytes() == b"x" * 4096
         assert (tmp_path / "launchd-stderr.log.1").read_bytes() == b"x" * 4096
+
+    def test_a_relative_override_does_not_shadow_the_descriptors(
+        self, tmp_path, monkeypatch
+    ):
+        """The launcher opened the relative path against its own cwd; the server
+        would resolve it against a different one, so the descriptors win."""
+        real = tmp_path / "actual-sink.log"
+        monkeypatch.setenv(logging_hygiene._WEBUI_LOG_FILE_ENV, "webui.log")
+        monkeypatch.setattr(logging_hygiene, "_path_for_fd", lambda fd: real)
+
+        assert logging_hygiene.webui_log_paths() == [real]
+
+    def test_an_absolute_override_still_wins(self, tmp_path, monkeypatch):
+        chosen = tmp_path / "chosen.log"
+        other = tmp_path / "other.log"
+        monkeypatch.setenv(logging_hygiene._WEBUI_LOG_FILE_ENV, str(chosen))
+        monkeypatch.setattr(logging_hygiene, "_path_for_fd", lambda fd: other)
+
+        assert logging_hygiene.webui_log_paths() == [chosen]
 
     def test_a_non_file_descriptor_is_not_a_sink(self, monkeypatch):
         """A terminal or pipe has nothing to rotate."""

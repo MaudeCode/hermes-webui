@@ -108,7 +108,14 @@ def webui_log_paths() -> list[Path]:
 
     configured = os.environ.get(_WEBUI_LOG_FILE_ENV, "").strip()
     if configured:
-        return [Path(configured).expanduser()]
+        override = Path(configured).expanduser()
+        # Only an absolute override is authoritative. A relative one was opened
+        # by the launcher against *its* cwd, and bootstrap chdirs before we get
+        # here, so resolving it now would point at a different file than the one
+        # the descriptors are actually writing to. The descriptors always win
+        # over a path we cannot resolve the same way its opener did.
+        if override.is_absolute():
+            return [override]
 
     found: list[Path] = []
     for fd in (1, 2):

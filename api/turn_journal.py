@@ -391,7 +391,12 @@ def _event_is_well_formed(event: object, session_id: str) -> bool:
     # must match, not merely be present: a `version: 2` shard from a newer
     # server sharing this state directory holds data whose semantics this
     # reader cannot judge, and judging it wrongly means deleting it.
-    if event.get("version") != _SUPPORTED_JOURNAL_VERSION:
+    version = event.get("version")
+    # `True == 1` and `1.0 == 1` in Python, so equality alone is not identity of
+    # format. The writer emits an int; anything else is an unknown shape.
+    if isinstance(version, bool) or not isinstance(version, int):
+        return False
+    if version != _SUPPORTED_JOURNAL_VERSION:
         return False
     if str(event.get("session_id") or "") != str(session_id):
         return False
@@ -413,17 +418,29 @@ def _session_sidecar_is_intact(session_id: str, root: Path) -> bool:
     unreadable, or not session-shaped produces no finding at all — and that is
     exactly the case where the journal is the sole surviving evidence.
 
-    Delegates to ``session_recovery._msg_count`` instead of re-deriving what a
-    session file looks like. A parallel shape check here drifted from it once
-    already: ``{}`` is a mapping and passed, while ``_msg_count`` correctly
-    calls it invalid. One definition, one answer.
+    Delegates the *shape* question to ``session_recovery._msg_count`` instead of
+    re-deriving what a session file looks like. A parallel check here drifted
+    from it once already: ``{}`` is a mapping and passed, while ``_msg_count``
+    correctly calls it invalid. One definition, one answer.
+
+    Identity is checked here on top, because ``_msg_count`` deliberately does
+    not care whose session it is reading.
     """
+    path = root / f"{session_id}.json"
     try:
         from api.session_recovery import _msg_count  # noqa: PLC0415
 
-        return _msg_count(root / f"{session_id}.json") >= 0
+        if _msg_count(path) < 0:
+            return False
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return False
+    # A sidecar copied under the wrong filename is a readable, message-bearing
+    # session file that simply is not *this* session — and neither `_msg_count`
+    # nor the recovery audit notices the mismatch. Deleting this journal on its
+    # word would destroy the correctly-identified evidence.
+    claimed = str((payload or {}).get("session_id") or "")
+    return claimed == str(session_id)
 
 
 def _session_is_prunable(session_id: str, root: Path) -> bool:

@@ -201,9 +201,12 @@ another, and half a turn read on its own looks pending:
 - no turn recorded both `completed` and `interrupted` — that contradiction is
   reported as a collision, and the journal is the only place it stays visible;
 - the live `{session_id}.json` sidecar is readable and session-shaped, judged
-  by the same `_msg_count` the recovery code uses (a session whose sidecar is
-  gone, corrupt, or shapeless is awaiting repair, and the audit below only walks
-  the sidecars it *can* read, so it never reports this case);
+  by the same `_msg_count` the recovery code uses, *and* its own top-level
+  `session_id` names this session (a sidecar copied under the wrong filename is
+  a perfectly valid session file that belongs to someone else). A session whose
+  sidecar is gone, corrupt, shapeless or misidentified is awaiting repair, and
+  the audit below only walks the sidecars it *can* read, so it never reports
+  these cases;
 - `audit_session_recovery` reports no finding for it. That is the RFC's
   precondition and only the audit can see, for example, a `shrunken_live`
   sidecar that parses perfectly but holds fewer messages than its `.json.bak`.
@@ -244,8 +247,10 @@ no in-process log handler owns that sink. Rather than depending on each launcher
 to declare its path, the server asks the OS where its own descriptors point —
 `/proc/self/fd/N` on Linux and WSL, `fcntl(F_GETPATH)` on macOS — so a launchd
 plist, a shell redirect, or any future launcher is covered without extra wiring.
-An explicit `HERMES_WEBUI_LOG_FILE` overrides the probe; `ctl.sh` and the WSL
-autostart script both set it.
+An *absolute* `HERMES_WEBUI_LOG_FILE` overrides the probe; `ctl.sh` and the WSL
+autostart script both set one. A relative value is ignored in favour of the
+descriptors, because the launcher opened it against its own working directory
+and the server would resolve it against a different one.
 
 Both descriptors are checked, so a launchd plist pointing `StandardOutPath` and
 `StandardErrorPath` at different files gets both bounded. A descriptor that is
