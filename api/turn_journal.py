@@ -24,6 +24,10 @@ except ImportError:  # pragma: no cover
     _fcntl = None
 
 TURN_JOURNAL_DIR_NAME = "_turn_journal"
+# The journal format this module writes and knows how to reason about. Retention
+# refuses to delete a shard carrying anything else: a newer server sharing the
+# same state directory may write events whose semantics this reader cannot judge.
+_SUPPORTED_JOURNAL_VERSION = 1
 _TERMINAL_EVENTS = {"completed", "interrupted"}
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _STREAM_TURN_CACHE_MAX = 4096
@@ -88,7 +92,7 @@ def append_turn_journal_event(
     if not event_name:
         raise ValueError("event is required")
     payload = dict(event)
-    payload.setdefault("version", 1)
+    payload.setdefault("version", _SUPPORTED_JOURNAL_VERSION)
     payload["session_id"] = str(session_id)
     payload.setdefault("turn_id", _make_turn_id())
     payload.setdefault("created_at", time.time())
@@ -383,8 +387,11 @@ def _event_is_well_formed(event: object, session_id: str) -> bool:
         return False
     # `version` and `session_id` are set on every append — the former by
     # `setdefault`, the latter unconditionally — so an event without them, or
-    # claiming a different session, did not come from this writer.
-    if event.get("version") is None:
+    # claiming a different session, did not come from this writer. The version
+    # must match, not merely be present: a `version: 2` shard from a newer
+    # server sharing this state directory holds data whose semantics this
+    # reader cannot judge, and judging it wrongly means deleting it.
+    if event.get("version") != _SUPPORTED_JOURNAL_VERSION:
         return False
     if str(event.get("session_id") or "") != str(session_id):
         return False
@@ -429,7 +436,8 @@ def _session_is_prunable(session_id: str, root: Path) -> bool:
     * a malformed line — a crash-torn event is exactly the evidence recovery
       flags for manual review, and deleting it destroys the only record;
     * an event that is not the shape ``append_turn_journal_event`` produces —
-      missing ``turn_id``, ``event``, ``version``, a matching ``session_id``, or
+      missing ``turn_id``, ``event``, a matching ``session_id``, a
+      ``version`` equal to the one this module writes, or
       a present, finite, numeric ``created_at``. None of these reach the
       malformed list, because they decode perfectly well;
     * a turn holding both ``completed`` and ``interrupted``, which

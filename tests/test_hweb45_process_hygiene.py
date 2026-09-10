@@ -508,6 +508,42 @@ class TestTurnJournalRetention:
         assert result["pruned"] == 0
         assert shard.exists()
 
+    @pytest.mark.parametrize("version", [2, "1", None, 0, 1.5])
+    def test_an_unsupported_journal_version_keeps_the_session(self, tmp_path, version):
+        """A newer server may share this state directory; its events mean
+        something this reader cannot judge, so it must not delete them."""
+        journal_dir = tmp_path / turn_journal.TURN_JOURNAL_DIR_NAME
+        shard = _write_shard(
+            journal_dir,
+            f"future~{_DEAD_PID}.jsonl",
+            age_days=90,
+            events=[
+                {
+                    "version": version,
+                    "session_id": "future",
+                    "event": "completed",
+                    "turn_id": "t1",
+                    "created_at": 1,
+                }
+            ],
+            raw=True,
+        )
+        _write_sidecar(tmp_path, "future")
+
+        result = turn_journal.prune_stale_turn_journals(session_dir=tmp_path)
+
+        assert result["pruned"] == 0
+        assert shard.exists()
+
+    def test_the_writer_and_the_retention_reader_agree_on_the_version(self, tmp_path):
+        """Whatever `append_turn_journal_event` stamps must be prunable."""
+        written = turn_journal.append_turn_journal_event(
+            "agree", {"event": "completed"}, session_dir=tmp_path
+        )
+
+        assert written["version"] == turn_journal._SUPPORTED_JOURNAL_VERSION
+        assert turn_journal._event_is_well_formed(written, "agree") is True
+
     def test_an_event_claiming_another_session_keeps_the_session(self, tmp_path):
         """A shard whose events name a different session is not evidence of
         *this* session being settled."""
