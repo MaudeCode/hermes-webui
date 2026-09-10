@@ -109,9 +109,19 @@ def test_permissions_policy_does_not_disable_microphone():
         "Permissions-Policy must not block microphone access or desktop/mobile voice input cannot work"
 
 
-def test_cache_control_no_store():
-    """API responses should have Cache-Control: no-store."""
+def test_api_responses_are_never_blind_cached():
+    """API responses must never be served from cache without asking the server.
+
+    /api/sessions is `no-cache` rather than `no-store` (HWEB-55): it carries an
+    ETag, and `no-store` would forbid keeping the copy that revalidation needs.
+    Both directives require a round trip before reuse, which is what this asserts.
+    Endpoints without a validator stay on `no-store`.
+    """
     d, status, headers = get("/api/sessions")
+    assert headers.get("Cache-Control") == "no-cache"
+    assert headers.get("ETag")
+
+    d, status, headers = get("/api/settings")
     assert headers.get("Cache-Control") == "no-store"
 
 

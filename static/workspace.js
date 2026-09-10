@@ -55,6 +55,7 @@ async function api(path,opts={}){
     started.then(clear,clear);
     return started;
   }
+  const conditional=opts.conditional===true;
   const timeoutMs=Object.prototype.hasOwnProperty.call(opts,'timeoutMs')?opts.timeoutMs:30000;
   const timeoutToast=opts.timeoutToast!==false;
   const redirect401=opts.redirect401!==false;
@@ -89,6 +90,7 @@ async function api(path,opts={}){
       delete fetchOpts.retryStatuses;
       delete fetchOpts.retryDelayMs;
       delete fetchOpts.dedupe;
+      delete fetchOpts.conditional;
 
       const useTimeout=Number.isFinite(Number(timeoutMs))&&Number(timeoutMs)>0;
       if(useTimeout&&typeof AbortController!=='undefined'){
@@ -103,6 +105,13 @@ async function api(path,opts={}){
       }
       const requestPromise=(async()=>{
         const res=await fetch(url.href,{credentials:'include',headers:{'Content-Type':'application/json'},...fetchOpts});
+        // HWEB-55: conditional GET. Opt-in, because 304 is not `res.ok` and every
+        // other caller expects a parsed body or a thrown error. The caller supplies
+        // If-None-Match itself rather than leaning on the browser's HTTP cache: a
+        // transparent revalidation would hand JS the *stored* 200 body, and for
+        // /api/sessions that body carries a `server_time` which is stale by the whole
+        // polling gap. Seeing the 304 lets the caller decline to update instead.
+        if(conditional&&res.status===304) return {__notModified:true,__etag:res.headers.get('ETag')};
         if(!res.ok){
           // 401 means the auth session expired. Redirect to login so the user can
           // re-authenticate. This is especially important for iOS PWA (standalone mode)
@@ -140,7 +149,17 @@ async function api(path,opts={}){
           throw err;
         }
         const ct=res.headers.get('content-type')||'';
-        return ct.includes('application/json')?await res.json():await res.text();
+        const data=ct.includes('application/json')?await res.json():await res.text();
+        // Carry the validator on any response that has one, not just on a request
+        // that was already conditional — the FIRST poll is unconditional by
+        // definition, and it is the one that has to hand the second poll something
+        // to revalidate with. Non-enumerable, so it never leaks into a spread, a
+        // JSON.stringify or a rendered row.
+        const etagHeader=res.headers.get('ETag');
+        if(etagHeader&&data&&typeof data==='object'){
+          try{ Object.defineProperty(data,'__etag',{value:etagHeader}); }catch(_){}
+        }
+        return data;
       })();
       return useTimeout?await Promise.race([
         requestPromise,

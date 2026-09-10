@@ -255,12 +255,70 @@ def _json_response_body(payload, *, pretty: bool = True) -> bytes:
     return _json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
 
 
-def j(handler, payload, status: int=200, extra_headers: dict=None, *, pretty: bool = True) -> None:
+def _if_none_match_matches(header_value: str, etag: str) -> bool:
+    """RFC 7232 3.2 weak comparison of an ``If-None-Match`` header against *etag*.
+
+    ``W/`` prefixes are ignored on both sides, the header may carry a
+    comma-separated list, and ``*`` matches any existing representation.
+    Shared by every conditional-GET path (JSON via :func:`j`, media, ...) so the
+    comparison rule is written once.
+    """
+    if not header_value or not etag:
+        return False
+    if header_value.strip() == "*":
+        return True
+    current = etag[2:] if etag.startswith("W/") else etag
+    return any(
+        (c.strip()[2:] if c.strip().startswith("W/") else c.strip()) == current
+        for c in header_value.split(",")
+        if c.strip()
+    )
+
+
+def j(
+    handler,
+    payload,
+    status: int=200,
+    extra_headers: dict=None,
+    *,
+    pretty: bool = True,
+    etag: str | None = None,
+    cache_control: str = 'no-store',
+) -> None:
     """Send a JSON response.
 
     *extra_headers*: optional dict of additional headers to include
     (e.g., {'Set-Cookie': '...'}).  Headers are sent before end_headers().
+
+    *etag*: opt-in conditional GET.  When supplied, a matching ``If-None-Match``
+    (RFC 7232 3.2 weak comparison) is answered with a bodiless 304 and *payload*
+    is never serialized -- the point is the wire bytes, so the short-circuit runs
+    before serialization.  A caller passing an ETag must also pass a
+    *cache_control* that permits storing the response (``no-cache``): the
+    ``no-store`` default forbids storing it at all, which makes revalidation
+    impossible and the ETag dead weight.
     """
+    request_headers = getattr(handler, 'headers', None)
+    if (
+        etag
+        and status == 200
+        and request_headers is not None
+        and _if_none_match_matches(request_headers.get('If-None-Match', ''), etag)
+    ):
+        handler.send_response(304)
+        handler.send_header('ETag', etag)
+        handler.send_header('Cache-Control', cache_control)
+        # The 200 for this ETag may or may not be gzipped depending on the
+        # request's Accept-Encoding, so a shared cache must key on it.
+        handler.send_header('Vary', 'Accept-Encoding')
+        _security_headers(handler)
+        flush_pending_auth_cookies(handler)
+        if extra_headers:
+            for k, v in extra_headers.items():
+                handler.send_header(k, v)
+        _safe_write(handler, b'')
+        return
+
     body = _json_response_body(payload, pretty=pretty)
     handler.send_response(status)
     handler.send_header('Content-Type', 'application/json; charset=utf-8')
@@ -274,7 +332,10 @@ def j(handler, payload, status: int=200, extra_headers: dict=None, *, pretty: bo
         handler.send_header('Content-Encoding', 'gzip')
 
     handler.send_header('Content-Length', str(len(body)))
-    handler.send_header('Cache-Control', 'no-store')
+    handler.send_header('Cache-Control', cache_control)
+    if etag:
+        handler.send_header('ETag', etag)
+        handler.send_header('Vary', 'Accept-Encoding')
     _security_headers(handler)
     flush_pending_auth_cookies(handler)
     if extra_headers:

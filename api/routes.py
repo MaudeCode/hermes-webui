@@ -2899,8 +2899,25 @@ def _session_list_response_time_prefix() -> bytes:
     )
 
 
-def _session_list_response_body(key: tuple, payload: dict, *, settings: dict | None = None) -> bytes:
-    """Return the serialized /api/sessions body, reusing cached bytes when possible."""
+def _session_list_response_etag(tail: bytes) -> str:
+    """Strong validator over the cached response tail.
+
+    The tail is everything except the freshly-spliced `server_time`/`server_tz`
+    prefix, so it is exactly the content whose identity the client is asking
+    about — and it is already in hand, so this adds no O(N) work.
+    """
+    return '"%s"' % hashlib.blake2b(tail, digest_size=16).hexdigest()
+
+
+def _session_list_response_body(
+    key: tuple, payload: dict, *, settings: dict | None = None
+) -> tuple[bytes, str | None]:
+    """Return the serialized /api/sessions body and its ETag.
+
+    The ETag is ``None`` only on the degenerate path that cannot splice a
+    prefix, where the body carries `server_time` inline and therefore has no
+    stable identity to assert.
+    """
     if settings is None:
         try:
             settings = load_settings()
@@ -2920,7 +2937,7 @@ def _session_list_response_body(key: tuple, payload: dict, *, settings: dict | N
     attention_by_session = _session_attention_snapshot()
     signature = _session_list_response_signature(row_ids, redact_enabled, attention_by_session)
     if entry is not None and signature is not None and entry[2] == signature:
-        return _session_list_response_time_prefix() + entry[3]
+        return _session_list_response_time_prefix() + entry[3], entry[4]
 
     response = _session_list_payload_to_response(
         payload, settings=settings, attention_by_session=attention_by_session
@@ -2931,16 +2948,17 @@ def _session_list_response_body(key: tuple, payload: dict, *, settings: dict | N
     )
     if len(tail) <= 2:
         # Degenerate body ({}), so there is nothing to splice a prefix onto.
-        return _json_response_body(response, pretty=False)
+        return _json_response_body(response, pretty=False), None
     tail = tail[1:]
+    etag = _session_list_response_etag(tail)
 
     if signature is not None:
         with _SESSION_LIST_RESPONSE_CACHE_LOCK:
-            _SESSION_LIST_RESPONSE_CACHE[key] = (payload, row_ids, signature, tail)
+            _SESSION_LIST_RESPONSE_CACHE[key] = (payload, row_ids, signature, tail, etag)
             _SESSION_LIST_RESPONSE_CACHE.move_to_end(key)
             while len(_SESSION_LIST_RESPONSE_CACHE) > _SESSION_LIST_RESPONSE_CACHE_MAX_ENTRIES:
                 _SESSION_LIST_RESPONSE_CACHE.popitem(last=False)
-    return _session_list_response_time_prefix() + tail
+    return _session_list_response_time_prefix() + tail, etag
 
 
 def _hidden_archived_sidebar_reference_sessions(
@@ -3216,6 +3234,7 @@ from api.helpers import (
     strip_public_internal_fields,
     _redact_text,
     _json_response_body,
+    _if_none_match_matches,
     _CLIENT_DISCONNECT_ERRORS,
 )
 from api.agent_health import build_agent_health_payload
@@ -15522,10 +15541,16 @@ def handle_get(handler, parsed) -> bool:
                 diag=diag,
             )
             diag.stage("response_write")
+            body, etag = _session_list_response_body(key, payload, settings=settings)
+            # `no-cache` (revalidate on every use), not `no-store` (never keep a
+            # copy): a stored copy is what makes the conditional GET above
+            # possible, and the sidebar's poll is overwhelmingly unchanged.
             return j(
                 handler,
-                _session_list_response_body(key, payload, settings=settings),
+                body,
                 pretty=False,
+                etag=etag,
+                cache_control="no-cache",
             )
         finally:
             diag.finish()
@@ -21364,21 +21389,15 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
         # and "*" matches any existing resource. On match, GET/HEAD is
         # short-circuited with 304 — processed before Range since a matched
         # conditional request skips the entity entirely.
-        if_none_match = handler.headers.get("If-None-Match", "")
-        if if_none_match and etag is not None:
-            current = etag[2:] if etag.startswith("W/") else etag
-            matched = if_none_match.strip() == "*" or any(
-                (c.strip()[2:] if c.strip().startswith("W/") else c.strip()) == current
-                for c in if_none_match.split(",")
-                if c.strip()
-            )
-            if matched:
-                handler.send_response(304)
-                handler.send_header("ETag", etag)
-                handler.send_header("Cache-Control", cache_control)
-                _security_headers(handler)
-                handler.end_headers()
-                return True
+        if etag is not None and _if_none_match_matches(
+            handler.headers.get("If-None-Match", ""), etag
+        ):
+            handler.send_response(304)
+            handler.send_header("ETag", etag)
+            handler.send_header("Cache-Control", cache_control)
+            _security_headers(handler)
+            handler.end_headers()
+            return True
 
         byte_range = _parse_range_header(handler.headers.get("Range", ""), file_size)
         if handler.headers.get("Range") and byte_range is None:
