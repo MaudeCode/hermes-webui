@@ -12549,6 +12549,8 @@ const LOCALES = {
     mcp_status_disabled: '已停用',
     mcp_status_invalid_config: '設定無效',
     mcp_status_unknown: '未知',
+    mcp_health_unhealthy: '無法連線',
+    mcp_health_needs_auth: '需要重新登入',
     mcp_tool_count: '{0} 個工具',
     mcp_enabled_yes: '已啟用',
     mcp_enabled_no: '已停用',

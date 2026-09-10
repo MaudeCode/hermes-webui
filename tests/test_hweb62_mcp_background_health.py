@@ -48,13 +48,12 @@ def _runtime(servers, *, agent_statuses=None):
     """Run the real ``_mcp_runtime_status_by_name`` against a config, no agent."""
     with patch("api.routes.get_active_hermes_home", return_value=object()), \
          patch("api.routes.get_config_for_profile_home", return_value={"mcp_servers": servers}):
-        with patch.dict("sys.modules", {}, clear=False):
-            if agent_statuses is None:
-                return _mcp_runtime_status_by_name(servers)
-            fake = MagicMock()
-            fake.get_mcp_status.return_value = agent_statuses
-            with patch.dict("sys.modules", {"tools": MagicMock(), "tools.mcp_tool": fake}):
-                return _mcp_runtime_status_by_name(servers)
+        if agent_statuses is None:
+            return _mcp_runtime_status_by_name(servers)
+        fake = MagicMock()
+        fake.get_mcp_status.return_value = agent_statuses
+        with patch.dict("sys.modules", {"tools": MagicMock(), "tools.mcp_tool": fake}):
+            return _mcp_runtime_status_by_name(servers)
 
 
 class TestProbeVerdicts:
@@ -63,27 +62,27 @@ class TestProbeVerdicts:
         from urllib import error as urllib_error
 
         def raising(code):
-            def _open(request, timeout=None):
+            def _open(request):
                 raise urllib_error.HTTPError(request.full_url, code, "no", {}, None)
             return _open
 
-        with patch("api.mcp_health.urllib_request.urlopen", raising(401)):
+        with patch("api.mcp_health._urlopen", raising(401)):
             assert mcp_health.probe_server("a", {"url": "https://x/mcp"}) == ("needs_auth", "HTTP 401")
-        with patch("api.mcp_health.urllib_request.urlopen", raising(500)):
+        with patch("api.mcp_health._urlopen", raising(500)):
             assert mcp_health.probe_server("a", {"url": "https://x/mcp"}) == ("unhealthy", "HTTP 500")
 
     def test_transport_failure_and_timeout_are_unhealthy_with_a_reason(self):
         from urllib import error as urllib_error
 
-        with patch("api.mcp_health.urllib_request.urlopen",
+        with patch("api.mcp_health._urlopen",
                    side_effect=urllib_error.URLError(ConnectionRefusedError())):
             assert mcp_health.probe_server("a", {"url": "https://x/mcp"}) == ("unhealthy", "unreachable")
-        with patch("api.mcp_health.urllib_request.urlopen",
+        with patch("api.mcp_health._urlopen",
                    side_effect=urllib_error.URLError(TimeoutError())):
             assert mcp_health.probe_server("a", {"url": "https://x/mcp"}) == ("unhealthy", "timed out")
 
     def test_non_http_url_scheme_is_rejected_without_being_opened(self):
-        with patch("api.mcp_health.urllib_request.urlopen") as opener:
+        with patch("api.mcp_health._urlopen") as opener:
             state, detail = mcp_health.probe_server("a", {"url": "file:///etc/passwd"})
         assert (state, detail) == ("unhealthy", "unsupported url scheme")
         opener.assert_not_called()
@@ -97,6 +96,15 @@ class TestProbeVerdicts:
     def test_stdio_command_that_exists_is_not_spawned_and_stays_unknown(self):
         with patch("api.mcp_health.shutil.which", return_value="/usr/bin/true"):
             assert mcp_health.probe_server("a", {"command": "true"})[0] == "unknown"
+
+    def test_probe_refuses_redirects_so_the_bearer_token_never_leaves_the_host(self):
+        """urllib copies request headers onto a redirect; following one would leak the token."""
+        assert mcp_health._OPENER.open.__self__ is mcp_health._OPENER
+        handler = next(h for h in mcp_health._OPENER.handlers
+                       if isinstance(h, mcp_health._NoRedirect))
+        assert handler.redirect_request(None, None, 302, "", {}, "https://evil.example/") is None
+        # An unfollowed redirect is inconclusive, not a health verdict.
+        assert mcp_health._status_result(302) == ("unknown", "HTTP 302")
 
 
 class TestRuntimeStatusMapFold:
@@ -178,6 +186,17 @@ class TestRuntimeStatusMapFold:
             runtime = _runtime(servers, agent_statuses=agent)
         assert runtime["local"]["health"] == "healthy"
         assert runtime["remote"]["health"] == "needs_auth"
+
+    def test_a_stale_connected_flag_never_overrules_a_probe_that_saw_a_failure(self):
+        """``connected`` can be stale; it may only upgrade "unknown", never a failed probe."""
+        servers = {"web": {"url": "https://web.example/mcp"}}
+        agent = [{"name": "web", "connected": True, "tools": 3}]
+        with patch("api.mcp_health.probe_server", return_value=("unhealthy", "HTTP 503")):
+            _runtime(servers, agent_statuses=agent)
+            _join_health_threads()
+            runtime = _runtime(servers, agent_statuses=agent)
+        assert runtime["web"]["connected"] is True
+        assert runtime["web"]["health"] == "unhealthy"
 
     def test_health_rides_the_existing_runtime_map_with_no_second_status_path(self):
         """The endpoint's health output is fully determined by the runtime status map."""
@@ -279,12 +298,14 @@ class TestSchedulingIsBackgroundAndBounded:
     def test_a_slow_server_cannot_accumulate_overlapping_checks(self):
         servers = {"slow": {"url": "https://slow.example/mcp"}}
         release = threading.Event()
+        entered = threading.Event()
         starts = []
         lock = threading.Lock()
 
         def hang(name, cfg):
             with lock:
                 starts.append(name)
+            entered.set()
             release.wait(10)
             return ("unhealthy", "timed out")
 
@@ -292,7 +313,7 @@ class TestSchedulingIsBackgroundAndBounded:
             with patch("api.mcp_health.probe_server", side_effect=hang):
                 for _ in range(25):
                     mcp_health.refresh_async(servers)
-                time.sleep(0.05)
+                assert entered.wait(5), "probe never started in the background"
                 assert starts == ["slow"], f"overlapping probes accumulated: {starts}"
                 assert len([th for th in threading.enumerate()
                             if th.name.startswith("mcp-health-")]) == 1

@@ -31059,10 +31059,11 @@ def _mcp_runtime_status_by_name(servers=None) -> dict[str, dict]:
             continue
         row = health.get(name) or {}
         state = row.get("health") or "unknown"
-        # A live connection is the strongest liveness signal we have, so it
-        # settles the transports the probe deliberately does not spawn (stdio).
-        # An expired credential still wins: it is the actionable one.
-        if state != "needs_auth" and entry.get("connected"):
+        # A live registry connection settles the transports the probe
+        # deliberately does not spawn (stdio). It only ever upgrades "unknown":
+        # ``connected`` can be stale, so it must never overrule a probe that
+        # just saw the server fail or reject our credentials.
+        if state == "unknown" and entry.get("connected"):
             state = "healthy"
         entry["health"] = state
         entry["health_detail"] = row.get("detail") or ""

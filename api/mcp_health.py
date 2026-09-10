@@ -76,13 +76,34 @@ _IN_FLIGHT: set[str] = set()
 _STARTED_AT: dict[str, float] = {}
 
 
+class _NoRedirect(urllib_request.HTTPRedirectHandler):
+    """Refuse redirects so a probe never forwards ``Authorization`` to a new host.
+
+    ``urllib`` copies the original request headers onto the redirected request,
+    so following a redirect out of a config-supplied URL would hand the server's
+    bearer token to whatever host the redirect names. Returning ``None`` makes
+    urllib surface the 3xx as an ``HTTPError`` instead, which we report as
+    ``unknown`` — we did not learn whether the server is healthy.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib_request.build_opener(_NoRedirect())
+
+
+def _urlopen(request):
+    return _OPENER.open(request, timeout=PROBE_TIMEOUT_S)
+
+
 def _status_result(code: int) -> tuple[str, str]:
     detail = f"HTTP {code}"
     if code in _AUTH_STATUSES:
         return NEEDS_AUTH, detail
     if 200 <= code < 300:
         return HEALTHY, detail
-    if code in _PROTOCOL_MISMATCH_STATUSES:
+    if 300 <= code < 400 or code in _PROTOCOL_MISMATCH_STATUSES:
         return UNKNOWN, detail
     return UNHEALTHY, detail
 
@@ -116,7 +137,7 @@ def _probe_http(url: str, cfg: dict) -> tuple[str, str]:
         method="POST",
     )
     try:
-        with urllib_request.urlopen(request, timeout=PROBE_TIMEOUT_S) as response:
+        with _urlopen(request) as response:
             return _status_result(int(getattr(response, "status", None) or response.getcode()))
     except urllib_error.HTTPError as exc:
         return _status_result(int(exc.code))
