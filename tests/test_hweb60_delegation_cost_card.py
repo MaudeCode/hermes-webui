@@ -127,6 +127,45 @@ def test_hostile_cost_values_are_dropped(hostile):
     json.dumps({"cost_usd": total}, allow_nan=False)
 
 
+def _mixed_fanout(*entries) -> str:
+    """A fan-out whose entries carry explicit (cost_usd, cost_status) pairs."""
+    return json.dumps({
+        "results": [
+            {"task_index": i, "status": "completed", "summary": f"child {i}",
+             **({"cost_usd": cost} if cost is not None else {}),
+             **({"cost_status": status} if status is not None else {})}
+            for i, (cost, status) in enumerate(entries)
+        ],
+        "total_duration_seconds": 12.0,
+    })
+
+
+def test_one_unpriced_child_makes_the_whole_total_unknown():
+    """A lower bound must not be shown as if it were the delegation's cost.
+
+    The card is the only place this number appears, so there is nowhere to
+    caveat a partial sum — fail closed and render no chip.
+    """
+    raw = _mixed_fanout((0.5, "estimated"), (0.0, "unknown"))
+    assert _delegation_cost_usd("delegate_task", raw) is None
+
+
+def test_an_unknown_child_with_a_nonzero_cost_still_suppresses_the_total():
+    raw = _mixed_fanout((0.5, "estimated"), (0.7, "unknown"))
+    assert _delegation_cost_usd("delegate_task", raw) is None
+
+
+def test_a_fully_priced_fanout_still_totals():
+    raw = _mixed_fanout((0.5, "estimated"), (1.25, "estimated"))
+    assert _delegation_cost_usd("delegate_task", raw) == 1.75
+
+
+def test_entries_without_a_cost_status_are_trusted():
+    """Absence is an older agent build, not an unpriced child."""
+    raw = _mixed_fanout((0.5, None), (1.25, None))
+    assert _delegation_cost_usd("delegate_task", raw) == 1.75
+
+
 # ── Why it cannot be parsed back out of the card's snippet ───────────────────
 
 

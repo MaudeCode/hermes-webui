@@ -7800,6 +7800,13 @@ def _delegation_cost_usd(name, raw):
     for entry in results:
         if not isinstance(entry, dict):
             continue
+        # A child whose provider could not report pricing makes the whole
+        # fan-out's total unknowable: summing the rest would show a lower
+        # bound as if it were the delegation's cost. Fail closed and render
+        # no chip instead — the card is the only place this number appears,
+        # so there is nowhere to caveat it.
+        if str(entry.get('cost_status') or '').strip().lower() == 'unknown':
+            return None
         value = entry.get('cost_usd')
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             continue
