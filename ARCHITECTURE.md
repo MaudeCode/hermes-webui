@@ -860,7 +860,7 @@ a restart answers `/health` promptly instead of hiding behind a full session sca
 background thread and in this order:
 
 1. `recover_all_sessions_on_startup()` — then releases the readiness gate, on
-   success *or* failure, so later stages can never hold a request.
+   success *or* failure, so later stages can never hold a session-state request.
 2. `verify_hermes_imports()`, and `auto_install_agent_deps()` only if an agent
    import actually failed.
 3. Gateway watcher, `bg_task_complete` drain thread, SessionChannel reaper,
@@ -886,11 +886,12 @@ body carrying `condition: "startup_recovery"` plus the phase. `api()` in
 authoritative answer instead of committing fallback settings. The worker-overflow
 503 is real backpressure and is deliberately *not* retried there.
 
-Never gated: `/health`, the UI shell, static assets, `/api/health/restart`,
-`/api/csp-report`, and every path in `api.auth.PUBLIC_PATHS` — the auth surface is
-public precisely because it authenticates a caller rather than reading session
-state, so gating it would lock users out for the whole recovery window
-(`static/login.js` posts with a bare `fetch()` and never sees the retry).
+Never gated: `/health`, the UI shell, the WebUI's own static assets,
+`/api/health/restart`, `/api/csp-report`, and every path in `api.auth.PUBLIC_PATHS`
+— the auth surface is public precisely because it authenticates a caller rather
+than reading session state, so gating it would lock users out for the whole
+recovery window (`static/login.js` posts with a bare `fetch()` and never sees the
+retry). Dashboard-plugin assets are the exception; see `PLUGINS_READY` below.
 
 Two bounds keep the gate from becoming its own outage:
 
@@ -906,6 +907,22 @@ Two bounds keep the gate from becoming its own outage:
 waits on it for up to `AGENT_DEPS_WAIT_SECONDS` (30s) before giving up, and the
 "AIAgent not available" diagnostic reports an in-flight install rather than
 sending the user to troubleshoot a `sys.path` problem they do not have.
+
+`PLUGINS_READY` is the third dimension, covering `load_plugins()` in step 3
+(HWEB-64). Discovery publishes `PLUGIN_MANIFESTS` atomically but late — behind
+recovery *and* the pip repair — so until it lands the registry is empty, which is
+not the same as "no plugins installed". `api.startup.await_plugins_ready()` gates
+exactly the registry's readers in `handle_get`: `/api/plugins`, and the tail of
+the router — `/dashboard-plugins/<name>/...` assets and plugin pages — which also
+means an otherwise-unknown GET path waits during the window instead of 404ing,
+because it may be a plugin page that has not been discovered yet. It uses the same
+`STARTUP_WAIT_SECONDS` bound, the same `STARTUP_WAIT_SLOTS` cap and the same
+retryable 503 shape (`condition: "startup_recovery"`, `phase: "plugin discovery"`),
+so `api()` retries it under the same 120s budget. `/plugins/plugin.css` reads the
+plugin directory, not the registry, and is not gated. The event is set in a
+`finally` around `load_plugins()`, and `run_deferred_startup()` wraps every step
+in one more `finally` that sets all three events, so a raise that escapes a
+step's own guard cannot leave a later dimension armed for the process lifetime.
 
 ---
 
