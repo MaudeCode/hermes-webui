@@ -87,34 +87,59 @@ def _render(src: str, variant: str) -> str:
     return head + stubs + src[end:]
 
 
+# Declared locale codes, keyed by (path, size, mtime_ns). The app-shell route
+# resolves the server language setting on every navigation (HWEB-65), so the
+# 1.5 MB source must not be re-read and re-scanned for a list that only
+# changes on redeploy.
+_CODES: tuple = ()
+
+
 def locale_codes(path: Path) -> list:
     """Every locale code declared in the source file, `en` first."""
-    return _blocks(path.read_text(encoding="utf-8"))[0]
+    global _CODES
+    st = path.stat()
+    key = (str(path), st.st_size, st.st_mtime_ns)
+    with _LOCK:
+        if _CODES and _CODES[0] == key:
+            return list(_CODES[1])
+    codes = _blocks(path.read_text(encoding="utf-8"))[0]
+    with _LOCK:
+        _CODES = (key, tuple(codes))
+    return list(codes)
 
 
-def resolve_variant(path: Path, lang: str) -> str:
-    """Map a raw ``?lang=`` value to a cache variant.
+def resolve_code(path: Path, lang: str) -> str | None:
+    """Resolve a raw language tag to a declared locale code, or None.
 
-    Mirrors `resolveLocale()` in static/i18n.js. Returns "" when no `lang` was
-    requested (serve the core), the resolved code when it matches a locale, and
-    "?" — a no-op body — when a value was given but resolves to nothing or to
-    `en`, which the core already carries in full.
+    Mirrors `resolveLocale()` in static/i18n.js: exact key, case-insensitive
+    key, the common Chinese aliases, then the base subtag.
     """
-    if not lang:
-        return ""
+    if not lang or not isinstance(lang, str):
+        return None
     codes = locale_codes(path)
     if lang in codes:
-        return "?" if lang == "en" else lang
+        return lang
     low = lang.lower().replace("_", "-")
     by_low = {c.lower(): c for c in codes}
     if low in by_low:
         return by_low[low]
     if low == "zh" or low.startswith(("zh-cn", "zh-sg", "zh-hans")):
-        resolved = by_low.get("zh")
-    elif low.startswith(("zh-tw", "zh-hk", "zh-mo", "zh-hant")):
-        resolved = by_low.get("zh-hant")
-    else:
-        resolved = by_low.get(low.split("-")[0])
+        return by_low.get("zh")
+    if low.startswith(("zh-tw", "zh-hk", "zh-mo", "zh-hant")):
+        return by_low.get("zh-hant")
+    return by_low.get(low.split("-")[0])
+
+
+def resolve_variant(path: Path, lang: str) -> str:
+    """Map a raw ``?lang=`` value to a cache variant.
+
+    Returns "" when no `lang` was requested (serve the core), the resolved code
+    when it matches a locale, and "?" — a no-op body — when a value was given
+    but resolves to nothing or to `en`, which the core already carries in full.
+    """
+    if not lang:
+        return ""
+    resolved = resolve_code(path, lang)
     return "?" if (not resolved or resolved == "en") else resolved
 
 
