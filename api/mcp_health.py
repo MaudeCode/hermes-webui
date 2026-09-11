@@ -190,9 +190,11 @@ def _probe_http(url: str, cfg: dict) -> tuple[str, str]:
         headers=headers,
         method="POST",
     )
+    session_id = None
     try:
         with _urlopen(request) as response:
             code = int(getattr(response, "status", None) or response.getcode())
+            session_id = response.headers.get("Mcp-Session-Id")
             # Bounded read: an initialize result is small, and a health probe
             # must never be the thing that pulls a huge body into memory.
             return _status_result(code, response.read(_MAX_PROBE_BODY_BYTES))
@@ -200,6 +202,30 @@ def _probe_http(url: str, cfg: dict) -> tuple[str, str]:
         return _status_result(int(exc.code))
     except (urllib_error.URLError, OSError, ValueError) as exc:
         return UNHEALTHY, _transport_detail(exc)
+    finally:
+        if session_id:
+            _end_session(url, headers, session_id)
+
+
+def _end_session(url: str, headers: dict, session_id: str) -> None:
+    """Terminate the session our ``initialize`` just opened.
+
+    A stateful streamable-HTTP server allocates a session per ``initialize``
+    and hands back ``Mcp-Session-Id``. Walking away would leave one abandoned
+    session per probe until the server expires it. The spec's client-side
+    termination is a DELETE carrying that id; a server that does not support
+    it answers 405, and either way the outcome does not change the verdict.
+    """
+    request = urllib_request.Request(
+        url,
+        headers={**headers, "Mcp-Session-Id": session_id},
+        method="DELETE",
+    )
+    try:
+        with _urlopen(request):
+            pass
+    except Exception:
+        logger.debug("MCP health probe could not end session for %r", url, exc_info=True)
 
 
 def _probe_stdio(command: str) -> tuple[str, str]:

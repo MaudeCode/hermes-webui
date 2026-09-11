@@ -31015,14 +31015,6 @@ def _mcp_health_by_name(servers) -> dict[str, dict]:
         return {}
 
 
-def _mcp_health_in_flight() -> bool:
-    """Return whether any health probe is still running, for the panel's re-read."""
-    try:
-        return bool(mcp_health.in_flight())
-    except Exception:
-        return False
-
-
 def _mcp_runtime_status_by_name(servers=None) -> dict[str, dict]:
     """Return already-known MCP runtime status without starting servers.
 
@@ -31807,6 +31799,15 @@ def _handle_notes_item(handler, parsed):
         return j(handler, {"source": "joplin", "error": str(exc)}, status=502)
 
 
+def _mcp_health_verdict_pending(row: dict) -> bool:
+    """A checkable server with no verdict yet: probed, but not answered."""
+    return bool(
+        row.get("enabled")
+        and row.get("health") == "unknown"
+        and row.get("health_checked_at") is None
+    )
+
+
 def _handle_mcp_servers_list(handler):
     """List configured MCP servers with safe, read-only runtime visibility."""
     cfg = get_config_for_profile_home(get_active_hermes_home())
@@ -31823,9 +31824,12 @@ def _handle_mcp_servers_list(handler):
         "toggle_supported": True,
         "reload_required": True,
         # A cold cache answers "unknown" while the first probe is still running.
-        # Tell the panel to read back once more rather than sit on a stale view
-        # until the user reopens the section (HWEB-62).
-        "health_pending": bool(_mcp_health_in_flight()),
+        # Tell the panel to read back rather than sit on a stale view until the
+        # user reopens the section (HWEB-62). Derived from the same rows we are
+        # returning — not from a separate in-flight check, which could observe a
+        # probe that finished *after* the rows were read and report nothing
+        # pending while the rows still say "unknown".
+        "health_pending": any(_mcp_health_verdict_pending(row) for row in result),
     })
 
 

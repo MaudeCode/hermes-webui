@@ -118,17 +118,53 @@ class TestProbeVerdicts:
         assert self._probe_body(sse) == ("healthy", "HTTP 200")
 
     @staticmethod
-    def _probe_body(body: bytes, code: int = 200):
+    def _response(body: bytes, code: int = 200, headers: dict | None = None):
         response = MagicMock()
         response.status = code
+        response.headers = headers or {}
         response.read.return_value = body
         response.__enter__ = lambda self: self
         response.__exit__ = lambda *a: False
+        return response
+
+    @classmethod
+    def _probe_body(cls, body: bytes, code: int = 200):
+        response = cls._response(body, code)
         with patch("api.mcp_health._urlopen", return_value=response):
             verdict = mcp_health.probe_server("a", {"url": "https://x/mcp"})
         # Bounded read: a probe must never pull an unbounded body into memory.
         response.read.assert_called_once_with(mcp_health._MAX_PROBE_BODY_BYTES)
         return verdict
+
+    _INIT_OK = b'{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18"}}'
+
+    def test_a_session_opened_by_the_probe_is_terminated_on_every_exit(self):
+        """A stateful server allocates a session per initialize; we must not leak one per probe."""
+        initialize = self._response(self._INIT_OK, headers={"Mcp-Session-Id": "sess-123"})
+        terminate = self._response(b"")
+        with patch("api.mcp_health._urlopen", side_effect=[initialize, terminate]) as opener:
+            verdict = mcp_health.probe_server("a", {
+                "url": "https://x/mcp", "headers": {"Authorization": "Bearer t"},
+            })
+        assert verdict == ("healthy", "HTTP 200")
+        assert opener.call_count == 2
+        delete = opener.call_args_list[1].args[0]
+        assert delete.get_method() == "DELETE"
+        assert delete.full_url == "https://x/mcp"
+        assert delete.get_header("Mcp-session-id") == "sess-123"
+        assert delete.get_header("Authorization") == "Bearer t"
+
+        # No session header → nothing to terminate, and no extra request.
+        with patch("api.mcp_health._urlopen", return_value=self._response(self._INIT_OK)) as opener:
+            mcp_health.probe_server("a", {"url": "https://x/mcp"})
+        assert opener.call_count == 1
+
+        # A server that refuses DELETE (405) does not change the verdict.
+        from urllib import error as urllib_error
+        initialize = self._response(self._INIT_OK, headers={"Mcp-Session-Id": "sess-456"})
+        refused = urllib_error.HTTPError("https://x/mcp", 405, "no", {}, None)
+        with patch("api.mcp_health._urlopen", side_effect=[initialize, refused]):
+            assert mcp_health.probe_server("a", {"url": "https://x/mcp"}) == ("healthy", "HTTP 200")
 
     def test_probe_refuses_redirects_so_the_bearer_token_never_leaves_the_host(self):
         """urllib copies request headers onto a redirect; following one would leak the token."""
@@ -361,6 +397,40 @@ class TestSchedulingIsBackgroundAndBounded:
         finally:
             release.set()
             _join_health_threads()
+
+    def test_pending_is_derived_from_the_rows_not_from_a_separate_in_flight_check(self):
+        """A probe that finishes between reading the rows and checking in-flight must still re-read."""
+        servers = {"web": {"url": "https://web.example/mcp"}}
+        # The rows say "no verdict yet" while nothing is in flight any more:
+        # exactly the window a fast 401 lands in.
+        no_verdict = {"web": {"name": "web", "health": "unknown", "health_detail": "",
+                              "health_checked_at": None}}
+        assert mcp_health.in_flight() == set()
+        h = _make_handler()
+        with patch("api.routes.get_active_hermes_home", return_value=object()), \
+             patch("api.routes.get_config_for_profile_home", return_value={"mcp_servers": servers}), \
+             patch("api.routes._mcp_runtime_status_by_name", return_value=no_verdict):
+            _handle_mcp_servers_list(h)
+        assert _payload(h)["health_pending"] is True
+
+        # A *settled* unknown (stdio not probed, protocol mismatch) is not pending.
+        settled = {"web": {"name": "web", "health": "unknown", "health_detail": "HTTP 405",
+                           "health_checked_at": 1234.0}}
+        h = _make_handler()
+        with patch("api.routes.get_active_hermes_home", return_value=object()), \
+             patch("api.routes.get_config_for_profile_home", return_value={"mcp_servers": servers}), \
+             patch("api.routes._mcp_runtime_status_by_name", return_value=settled):
+            _handle_mcp_servers_list(h)
+        assert _payload(h)["health_pending"] is False
+
+        # A disabled server never counts as pending.
+        off = {"web": {"url": "https://web.example/mcp", "enabled": False}}
+        h = _make_handler()
+        with patch("api.routes.get_active_hermes_home", return_value=object()), \
+             patch("api.routes.get_config_for_profile_home", return_value={"mcp_servers": off}), \
+             patch("api.routes._mcp_runtime_status_by_name", return_value={}):
+            _handle_mcp_servers_list(h)
+        assert _payload(h)["health_pending"] is False
 
     def test_the_endpoint_tells_the_panel_to_read_back_while_a_probe_is_in_flight(self):
         servers = {"slow": {"url": "https://slow.example/mcp"}}
