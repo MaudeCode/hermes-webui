@@ -916,9 +916,13 @@ exactly the registry's readers in `handle_get`: `/api/plugins`, and the tail of
 the router — `/dashboard-plugins/<name>/...` assets and plugin pages — which also
 means an otherwise-unknown GET path waits during the window instead of 404ing,
 because it may be a plugin page that has not been discovered yet. It uses the same
-`STARTUP_WAIT_SECONDS` bound, the same `STARTUP_WAIT_SLOTS` cap and the same
-retryable 503 shape (`condition: "startup_recovery"`, `phase: "plugin discovery"`),
-so `api()` retries it under the same 120s budget. `/plugins/plugin.css` reads the
+`STARTUP_WAIT_SECONDS` bound and the same `STARTUP_WAIT_SLOTS` cap. `/api/plugins`
+gets the same retryable JSON 503 (`condition: "startup_recovery"`, `phase:
+"plugin discovery"`), so `api()` retries it under the same 120s budget; plugin
+pages and assets are browser navigations and sandboxed iframe loads with no
+`api()` to retry for them, so their 503 is an HTML document
+(`PLUGIN_PAGE_STARTING_HTML`) with `<meta http-equiv="refresh" content="5">` that
+re-requests itself until the real page serves. `/plugins/plugin.css` reads the
 plugin directory, not the registry, and is not gated. The event is set in a
 `finally` around `load_plugins()`, and `run_deferred_startup()` wraps every step
 in one more `finally` that sets all three events, so a raise that escapes a

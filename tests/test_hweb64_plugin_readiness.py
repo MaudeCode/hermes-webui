@@ -71,9 +71,13 @@ def test_enabled_plugin_page_does_not_404_during_discovery(boot_server, monkeypa
 
     boot = _boot_into_plugin_discovery(boot_server)
 
-    status, _headers, body = boot.get("/demo", timeout=10)
+    status, headers, body = boot.get("/demo", timeout=10)
     assert status == 503, f"undiscovered plugin page must not 404, got {status}: {body}"
-    assert json.loads(body).get("phase") == "plugin discovery"
+    # A navigation or sandboxed iframe load has no api() to retry for it, so the
+    # 503 is an HTML document that retries itself until the real page serves.
+    assert "text/html" in headers.get("Content-Type", ""), headers
+    assert headers.get("Retry-After") == "5"
+    assert 'http-equiv="refresh"' in body, body
 
     # Discovery publishes, exactly as load_plugins() does, then releases.
     plugins.PLUGIN_MANIFESTS.update({"demo": {"name": "demo", "label": "Demo", "tab": {"path": "/demo"}}})
@@ -120,7 +124,7 @@ def test_plugin_gate_fails_open_when_no_deferred_startup_was_armed():
     from api import startup
 
     assert startup.PLUGINS_READY.is_set()
-    assert startup.await_plugins_ready(handler=None) is True
+    assert startup.await_plugins_ready(handler=None, parsed=None) is True
 
 
 # The worker re-raises after its finally so the traceback still reaches the

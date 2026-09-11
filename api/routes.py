@@ -14648,7 +14648,7 @@ def handle_get(handler, parsed) -> bool:
         # The registry publishes late in deferred startup; an empty pre-publish
         # read would hide the Plugins tab as if nothing were installed. (HWEB-64)
         from api.startup import await_plugins_ready
-        if not await_plugins_ready(handler):
+        if not await_plugins_ready(handler, parsed):
             return True
         return _handle_plugins(handler, parsed)
     if parsed.path == "/api/provider/quotas":
@@ -16182,7 +16182,7 @@ def handle_get(handler, parsed) -> bool:
     # for publication instead of answering 404 during the window. Unknown
     # paths pay this wait only while discovery is running. (HWEB-64)
     from api.startup import await_plugins_ready
-    if not await_plugins_ready(handler):
+    if not await_plugins_ready(handler, parsed):
         return True
 
     # ── Plugin static assets ──

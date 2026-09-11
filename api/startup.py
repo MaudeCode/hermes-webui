@@ -37,6 +37,25 @@ AGENT_DEPS_WAIT_SECONDS = 30.0
 PLUGINS_READY = threading.Event()
 PLUGINS_READY.set()
 PLUGINS_PHASE = 'plugin discovery'
+# Plugin pages are browser navigations and iframe loads, not api() calls, so
+# nothing retries their startup 503 for them. Answer those with HTML that
+# retries itself: meta refresh works in a sandboxed iframe (no script needed)
+# and in a bare tab, and it stops as soon as the real page is served.
+PLUGIN_PAGE_STARTING_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="refresh" content="5">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hermes is starting</title>
+</head>
+<body style="margin:0;padding:2rem;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#111827;color:#e5e7eb;">
+  <main style="max-width:40rem;margin:10vh auto;line-height:1.5;">
+    <h1 style="font-size:1.5rem;margin:0 0 0.75rem;">Hermes is starting…</h1>
+    <p style="margin:0;color:#cbd5e1;">Plugins are still being discovered. This page retries automatically.</p>
+  </main>
+</body>
+</html>"""
 # Cap on requests allowed to block on the gate at once. Each waiter occupies one
 # of HTTPWorkerBudgetMixin's request-worker slots (max_request_workers // 2 = 64),
 # and process_request() acquires those non-blocking — so an uncapped wait lets
@@ -252,7 +271,28 @@ def await_startup_ready(handler, parsed) -> bool:
     return False
 
 
-def await_plugins_ready(handler) -> bool:
+def _send_plugins_starting(handler, path: str) -> None:
+    """Answer a plugin-registry read with a retryable 503 in the caller's shape.
+
+    /api/ callers come through api() and retry the JSON condition themselves;
+    everything else is a navigation or iframe load, which only retries if the
+    document tells it to.
+    """
+    if path.startswith('/api/'):
+        _send_still_starting(handler, PLUGINS_PHASE)
+        return
+    from api.helpers import t
+    handler.close_connection = True
+    t(
+        handler,
+        PLUGIN_PAGE_STARTING_HTML,
+        status=503,
+        content_type='text/html; charset=utf-8',
+        extra_headers={'Retry-After': '5'},
+    )
+
+
+def await_plugins_ready(handler, parsed) -> bool:
     """Return True once the plugin registry is published, else emit 503.
 
     Same bounded wait and shared waiter cap as await_startup_ready(), so plugin
@@ -262,14 +302,14 @@ def await_plugins_ready(handler) -> bool:
     if PLUGINS_READY.is_set():
         return True
     if not STARTUP_WAIT_SLOTS.acquire(blocking=False):
-        _send_still_starting(handler, PLUGINS_PHASE)
+        _send_plugins_starting(handler, parsed.path)
         return False
     try:
         if PLUGINS_READY.wait(timeout=STARTUP_WAIT_SECONDS):
             return True
     finally:
         STARTUP_WAIT_SLOTS.release()
-    _send_still_starting(handler, PLUGINS_PHASE)
+    _send_plugins_starting(handler, parsed.path)
     return False
 
 
