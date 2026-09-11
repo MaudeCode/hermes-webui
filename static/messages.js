@@ -3299,6 +3299,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       activityBurstId:raw.activityBurstId??raw.activity_burst_id??_currentActivityBurstId,
     };
     if(eventId) sourceEvent.event_id=eventId;
+    if(sourceEventType==='compressed'&&sourceEvent.compression_pass==null){
+      // A `compressing` row hydrated from the journal snapshot carries the
+      // server pass identity; the live (or synthetic) completion carries none.
+      // Inherit the open pass so the completion replaces the running card
+      // instead of rendering beside it after a mid-compaction reload.
+      const events=_anchorActivityEvents();
+      const runningIndex=_latestAnchorCompressionEventIndex('compressing');
+      const running=(events&&runningIndex>=0&&!_anchorCompressionCompletedAfter(runningIndex))?events[runningIndex]:null;
+      const pass=running&&running.payload&&typeof running.payload==='object'?running.payload.compression_pass:null;
+      if(pass!=null) sourceEvent.compression_pass=pass;
+    }
     try{
       const result=_anchorApi.applyAssistantTurnAnchorSourceEvent(
         _anchorRegistry,
