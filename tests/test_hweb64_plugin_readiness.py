@@ -11,10 +11,13 @@ from __future__ import annotations
 import json
 import time
 
-from tests.test_hweb35_deferred_startup import (  # noqa: F401 - fixture import
-    GATE_WAIT_SECONDS,
-    boot_server,
-)
+import pytest
+
+from tests import test_hweb35_deferred_startup as _hweb35
+
+GATE_WAIT_SECONDS = _hweb35.GATE_WAIT_SECONDS
+# Re-export the HWEB-35 boot fixture so pytest finds it in this module.
+boot_server = _hweb35.boot_server
 
 
 def _boot_into_plugin_discovery(boot_server, **kwargs):
@@ -118,3 +121,26 @@ def test_plugin_gate_fails_open_when_no_deferred_startup_was_armed():
 
     assert startup.PLUGINS_READY.is_set()
     assert startup.await_plugins_ready(handler=None) is True
+
+
+# The worker re-raises after its finally so the traceback still reaches the
+# thread excepthook in production; pytest reports that as a warning.
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_every_readiness_event_is_released_when_a_step_escapes_its_guard(monkeypatch):
+    """A raise that escapes an earlier step must not leave later gates armed forever."""
+    import threading
+
+    from api import startup
+
+    for name in ("STARTUP_READY", "AGENT_DEPS_READY", "PLUGINS_READY"):
+        monkeypatch.setattr(startup, name, threading.Event())
+
+    def boom():
+        raise BrokenPipeError("stdout closed")
+
+    monkeypatch.setattr(startup, "_run_deferred_startup_steps", boom)
+    thread = startup.start_deferred_startup()
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+    for name in ("STARTUP_READY", "AGENT_DEPS_READY", "PLUGINS_READY"):
+        assert getattr(startup, name).is_set(), f"{name} left armed after the worker died"

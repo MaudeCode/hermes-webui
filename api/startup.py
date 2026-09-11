@@ -302,6 +302,19 @@ def run_deferred_startup() -> None:
     or failure — so a slow pip install or plugin import can never hold a
     request.
     """
+    try:
+        _run_deferred_startup_steps()
+    finally:
+        # Each step guards its own event, but a raise that escapes a step's
+        # guard (a print() on a closed stdout, an import error in the step
+        # itself) would exit this thread before the later steps ever arm their
+        # events — leaving their consumers 503ing for the process lifetime.
+        STARTUP_READY.set()
+        AGENT_DEPS_READY.set()
+        PLUGINS_READY.set()
+
+
+def _run_deferred_startup_steps() -> None:
     from api.config import SESSION_DIR, verify_hermes_imports, _HERMES_FOUND
 
     try:
