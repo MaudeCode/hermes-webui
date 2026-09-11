@@ -110,6 +110,7 @@ function extractFunc(name) {
 var USER_MSG_COLLAPSE_CHARS = Number(src.match(/const USER_MSG_COLLAPSE_CHARS=(\d+);/)[1]);
 var USER_MSG_COLLAPSE_LINES = Number(src.match(/const USER_MSG_COLLAPSE_LINES=(\d+);/)[1]);
 var USER_MSG_COLLAPSED_ROW_PX = Number(src.match(/const USER_MSG_COLLAPSED_ROW_PX=(\d+);/)[1]);
+var USER_MSG_ATTACHMENT_PX = Number(src.match(/const USER_MSG_ATTACHMENT_PX=(\d+);/)[1]);
 eval(extractFunc('_userMessageNeedsCollapse'));"""
     return prelude + body
 
@@ -155,6 +156,10 @@ console.log(JSON.stringify({
   collapsedDefault: _estimateUserRowIntrinsicHeight(longText),
   short: _estimateUserRowIntrinsicHeight(shortText),
   cap: USER_MSG_COLLAPSED_ROW_PX,
+  // Attachments sit above the text in both states; two uploads add two strips.
+  collapsedFiles: _estimateUserRowIntrinsicHeight(longText, false, 2),
+  tallFiles: _estimateUserRowIntrinsicHeight(longText, true, '2'),
+  perFile: USER_MSG_ATTACHMENT_PX,
 }));
 """
     m = json.loads(_run_node(source))
@@ -174,6 +179,10 @@ console.log(JSON.stringify({
     assert m["collapsed"] < m["tall"], "the collapsed reserve must be below the full estimate"
     # A short row must never reserve LESS than today's 96px floor (no regression).
     assert m["short"] == 96, f"short row must floor at 96px, got {m['short']}"
+    # The attachment strip is not in rawText, so it is added per attachment on top
+    # of either state's text estimate (a string count, as read from a dataset).
+    assert m["collapsedFiles"] == m["cap"] + 2 * m["perFile"], m
+    assert m["tallFiles"] == m["tall"] + 2 * m["perFile"], m
 
 
 def test_apply_uses_remembered_measured_height_over_estimate():
@@ -456,13 +465,19 @@ console.log(JSON.stringify({
     assert m["expandedFlag"] == "1", "sanity: the row attribute flipped back to expanded"
 
 
-def test_collapsed_row_cap_covers_the_rendered_collapsed_height():
-    """Re-justifies USER_MSG_COLLAPSED_ROW_PX against the shipped stylesheet in a
-    real browser: a collapsed long user row at the mobile width must render no
-    taller than the cap at every font-size setting (under-reserving is the #5638
-    jump-back), and the cap must stay close to the tallest real height so it does
-    not drift into a loose over-reserve. Measured at the time of writing:
-    241 / 266 / 290 / 315px for small / normal / large / xlarge."""
+def test_collapsed_row_reserve_covers_the_rendered_production_row():
+    """Re-justifies USER_MSG_COLLAPSED_ROW_PX and USER_MSG_ATTACHMENT_PX against the
+    shipped stylesheet in a real browser, through renderMessages so the row carries
+    everything production does: the attachment strip, the clipped body, the
+    disclosure button and the action footer (opacity 0 on user rows, but still
+    laid out — 40px touch targets under 640px). For a never-painted folded row
+    the inline reserve is all content-visibility:auto has, so at the mobile width
+    and every font-size setting the reserve must be at least the rendered height
+    (under-reserving is the #5638 jump-back), and the plain-text cap must stay
+    within 40px of the tallest real row so it does not drift loose. Measured at
+    the time of writing (plain / 1 image / 3 images / 3 file badges):
+    small 285/391/493/394, normal 310/416/518/419, large 334/440/542/444,
+    xlarge 359/465/567/469."""
     from tests.test_hweb3_user_message_collapse import _page
 
     playwright, browser, page = _page(390)
@@ -470,16 +485,41 @@ def test_collapsed_row_cap_covers_the_rendered_collapsed_height():
         m = page.evaluate(
             """
             (sizes) => {
-              const inner = document.getElementById('msgInner');
-              const out = { cap: USER_MSG_COLLAPSED_ROW_PX, heights: {} };
-              sizes.forEach((sz, i) => {
+              const long = 'y'.repeat(10000);
+              const variants = {
+                plain: [],
+                img1: ['a.png'],
+                img3: ['a.png', 'b.png', 'c.png'],
+                file3: ['notes-long-name-1.txt', 'notes-long-name-2.txt', 'notes-long-name-3.txt'],
+              };
+              const out = { cap: USER_MSG_COLLAPSED_ROW_PX, rows: {} };
+              const px = (v) => parseInt(String(v).replace(/[^0-9]/g, ''), 10) || 0;
+              sizes.forEach((sz) => {
                 document.documentElement.setAttribute('data-font-size', sz);
-                inner.innerHTML = '';
-                const row = window.__hweb3Row('y'.repeat(10000), 9300 + i);
-                inner.appendChild(row);
-                out.heights[sz] = row.getBoundingClientRect().height;
+                for (const [name, attachments] of Object.entries(variants)) {
+                  // Start from an empty transcript and cleared caches so the row is
+                  // built FRESH (no remembered measurement): the reserve read below
+                  // is exactly what a never-painted off-screen row would carry.
+                  S.messages = [];
+                  renderMessages();
+                  window._clearUserMessageExpandState();
+                  window._clearMessageVirtualHeightCache();
+                  S.messages = [{ role: 'user', content: name + sz + long, attachments },
+                                { role: 'assistant', content: 'ok' }];
+                  renderMessages();
+                  const row = document.querySelector('#msgInner .msg-row[data-role="user"]');
+                  out.rows[sz + '/' + name] = {
+                    real: row.getBoundingClientRect().height,
+                    reserve: px(row.style.containIntrinsicSize),
+                    folded: !!row.querySelector('.msg-expand-btn') && row.dataset.msgExpanded !== '1',
+                    hasFoot: !!row.querySelector('.msg-foot'),
+                    files: row.querySelectorAll('.msg-files > *').length,
+                  };
+                }
               });
               document.documentElement.removeAttribute('data-font-size');
+              S.messages = [];
+              renderMessages();
               return out;
             }
             """,
@@ -488,13 +528,14 @@ def test_collapsed_row_cap_covers_the_rendered_collapsed_height():
     finally:
         browser.close()
         playwright.stop()
-    tallest = max(m["heights"].values())
-    for size, h in m["heights"].items():
-        assert h <= m["cap"], (
-            f"collapsed row at font-size={size} renders {h}px, above the "
-            f"{m['cap']}px reserve — raise USER_MSG_COLLAPSED_ROW_PX"
+    for key, r in m["rows"].items():
+        assert r["folded"] and r["hasFoot"], f"{key}: sanity — production folded row with a footer; got {r}"
+        assert r["reserve"] >= r["real"], (
+            f"{key}: fresh folded row renders {r['real']}px but reserves only "
+            f"{r['reserve']}px — raise USER_MSG_COLLAPSED_ROW_PX / USER_MSG_ATTACHMENT_PX"
         )
-    assert m["cap"] <= tallest + 40, (
+    tallest_plain = max(r["real"] for k, r in m["rows"].items() if k.endswith("/plain"))
+    assert m["cap"] <= tallest_plain + 40, (
         f"USER_MSG_COLLAPSED_ROW_PX={m['cap']} is loose against the tallest real "
-        f"collapsed row ({tallest}px); re-measure and tighten it"
+        f"folded row ({tallest_plain}px); re-measure and tighten it"
     )

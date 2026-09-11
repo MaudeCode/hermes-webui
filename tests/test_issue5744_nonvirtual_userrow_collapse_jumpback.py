@@ -120,6 +120,7 @@ function extractFunc(name) {
 var USER_MSG_COLLAPSE_CHARS = Number(src.match(/const USER_MSG_COLLAPSE_CHARS=(\d+);/)[1]);
 var USER_MSG_COLLAPSE_LINES = Number(src.match(/const USER_MSG_COLLAPSE_LINES=(\d+);/)[1]);
 var USER_MSG_COLLAPSED_ROW_PX = Number(src.match(/const USER_MSG_COLLAPSED_ROW_PX=(\d+);/)[1]);
+var USER_MSG_ATTACHMENT_PX = Number(src.match(/const USER_MSG_ATTACHMENT_PX=(\d+);/)[1]);
 eval(extractFunc('_userMessageNeedsCollapse'));"""
     return prelude + body
 

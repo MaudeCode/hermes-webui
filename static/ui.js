@@ -1693,15 +1693,19 @@ function _rememberUserRowIntrinsicHeight(sessionMsgIdx, height){
   if(!Number.isFinite(key)||!(height>0)) return;
   _userRowIntrinsicHeightBySessionIdx[key]=Math.round(height);
 }
-function _estimateUserRowIntrinsicHeight(rawText, expanded){
+function _estimateUserRowIntrinsicHeight(rawText, expanded, attachmentCount){
+  // HWEB-66: the attachment strip above the text is not in rawText; reserve it
+  // per attachment on top of every text estimate so a row with uploads never
+  // under-reserves in either disclosure state.
+  const files=(Number(attachmentCount)||0)*USER_MSG_ATTACHMENT_PX;
   const t=String(rawText||'');
-  if(!t) return 96;
+  if(!t) return 96+files;
   // HWEB-66: a long message the reader has NOT opened renders clipped to the
   // USER_MSG_COLLAPSE_LINES preview plus its disclosure button, so its real height
   // is the flat collapsed-row size whatever the text length. Estimating from the
   // full text there over-reserves by thousands of px for a never-painted row, and
   // that space collapses on paint — the other half of the #5637/#5638 jump.
-  if(!expanded&&_userMessageNeedsCollapse(t)) return USER_MSG_COLLAPSED_ROW_PX;
+  if(!expanded&&_userMessageNeedsCollapse(t)) return USER_MSG_COLLAPSED_ROW_PX+files;
   // ~48 half-width chars/line at the mobile user-bubble width (≈90% of a phone viewport),
   // ~22px per line + ~24px row chrome; floored at the stylesheet's 96px so a short row never
   // reserves LESS than today (estimate can only add reserved height for tall rows, never
@@ -1723,13 +1727,14 @@ function _estimateUserRowIntrinsicHeight(rawText, expanded){
   }
   const wrapLines=Math.ceil(columns/48);
   const lines=Math.max(explicitLines, wrapLines);
-  return Math.max(96, Math.round(lines*22+24));
+  return Math.max(96, Math.round(lines*22+24))+files;
 }
 function _applyUserRowIntrinsicHeight(row, rawText){
   if(!row||!row.style||!row.dataset) return;
   const key=Number(row.dataset.sessionMsgIdx);
   const remembered=Number.isFinite(key)?Number(_userRowIntrinsicHeightBySessionIdx[key])||0:0;
-  const estimate=_estimateUserRowIntrinsicHeight(rawText!=null?rawText:row.dataset.rawText, row.dataset.msgExpanded==='1');
+  const estimate=_estimateUserRowIntrinsicHeight(rawText!=null?rawText:row.dataset.rawText,
+    row.dataset.msgExpanded==='1', row.dataset.attachmentCount);
   // Reserve the LARGER of the remembered measurement and the content estimate. A remembered
   // height can be a PARTIAL paint: a user row taller than the viewport that only ever had its
   // top slice scrolled through content-visibility:auto reports just the painted portion, not
@@ -1851,7 +1856,7 @@ function _rememberRenderedUserRowIntrinsicHeights(){
     const inView=(r.bottom>=cRect.top-margin)&&(r.top<=cRect.bottom+margin);
     if(!inView) continue;
     const estimate=(typeof _estimateUserRowIntrinsicHeight==='function')
-      ? _estimateUserRowIntrinsicHeight(row.dataset.rawText, row.dataset.msgExpanded==='1') : 0;
+      ? _estimateUserRowIntrinsicHeight(row.dataset.rawText, row.dataset.msgExpanded==='1', row.dataset.attachmentCount) : 0;
     const h=Math.max(measured, estimate);
     if(!(h>0)) continue;
     const key=Number(row.dataset.sessionMsgIdx);
@@ -9648,14 +9653,20 @@ function copyStatusSessionId(btn){
 const USER_MSG_COLLAPSE_CHARS=600;
 const USER_MSG_COLLAPSE_LINES=8;
 // Rendered height of a collapsed user row on a coarse-pointer layout, for the
-// contain-intrinsic-size reserve (HWEB-66). Measured in Chromium at 390px/700px:
-// 241px (small font) → 266 (normal) → 290 (large) → 315 (xlarge); 8 clipped
-// lines + the 44px touch-target disclosure + row chrome. Sized to the largest so
-// no font setting under-reserves (under-reserving is the #5638 jump-back); the
-// ~50px over-reserve at the default size is replaced by the real measurement
-// once the row paints. Re-measure when --msg-collapse-lines or the button
-// sizing changes.
-const USER_MSG_COLLAPSED_ROW_PX=320;
+// contain-intrinsic-size reserve (HWEB-66). Measured through renderMessages in
+// Chromium at 390px: 285px (small font) → 310 (normal) → 334 (large) → 359
+// (xlarge); 8 clipped lines + the 44px touch-target disclosure + the 40px
+// action footer + row chrome. Sized to the largest so no font setting
+// under-reserves (under-reserving is the #5638 jump-back); the ~60px
+// over-reserve at the default size is replaced by the real measurement once
+// the row paints. Re-measure when --msg-collapse-lines, the button or the
+// footer sizing changes; test_issue5638 pins it against the stylesheet.
+const USER_MSG_COLLAPSED_ROW_PX=370;
+// Reserve per attachment in the .msg-files strip: one 120x90 image thumbnail
+// row with its margins measures 106px at 390px; file badges are shorter (39px)
+// and several thumbnails share a row, so counting each as a full image row
+// over-reserves for those but never under-reserves.
+const USER_MSG_ATTACHMENT_PX=106;
 function _userMessageNeedsCollapse(text){
   const s=String(text==null?'':text);
   if(s.length>USER_MSG_COLLAPSE_CHARS) return true;
@@ -19048,6 +19059,7 @@ function renderMessages(options){
         row.dataset.sessionMsgIdx=sessionMsgIdx;
         row.dataset.messageAnchorKey=messageAnchorKey;
         row.dataset.msgExpandKey=expandIdentity;
+        row.dataset.attachmentCount=String((m.attachments&&m.attachments.length)||0);
         row.dataset.role='user';
         delete row.dataset.editing;
         if(row.dataset.rawText!==newRawText||row.innerHTML!==nextRowHtml){
@@ -19062,6 +19074,7 @@ function renderMessages(options){
         row.dataset.sessionMsgIdx=sessionMsgIdx;
         row.dataset.messageAnchorKey=messageAnchorKey;
         row.dataset.msgExpandKey=expandIdentity;
+        row.dataset.attachmentCount=String((m.attachments&&m.attachments.length)||0);
         row.dataset.role='user';
         row.dataset.rawText=newRawText;
         row.innerHTML=nextRowHtml;
