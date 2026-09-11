@@ -1,4 +1,5 @@
 """Hermes Web UI -- Session model and in-memory session store."""
+import bisect
 import collections
 import copy
 import datetime
@@ -10798,38 +10799,73 @@ def _tool_call_assistant_should_precede_content_assistant(existing: dict, msg: d
     )
 
 
-def _insert_state_message_chronologically(messages: list, msg: dict) -> bool:
+class _ChronologicalInsertIndex:
+    """Prefix-max timestamp index over a message list.
+
+    Lets ``_insert_state_message_chronologically`` find "the first row newer
+    than T" with a bisect instead of a linear scan. Valid as long as the owning
+    list only grows by ``append`` (synced lazily) or by the insert helper (synced
+    eagerly). ``prefix_max[i]`` is the max finite timestamp over rows ``0..i``,
+    so it is monotone and ``bisect_right(prefix_max, T)`` is exactly the first
+    index whose own timestamp is ``> T``.
+    """
+
+    __slots__ = ("timestamps", "prefix_max")
+
+    def __init__(self):
+        self.timestamps: list = []
+        self.prefix_max: list = []
+
+    def sync(self, messages: list) -> None:
+        n = len(self.timestamps)
+        if n > len(messages):
+            # The owner shrank the list: rebuild rather than trust stale slots.
+            self.timestamps = []
+            self.prefix_max = []
+            n = 0
+        for message in messages[n:]:
+            self.insert(len(self.timestamps), _message_timestamp_as_float(message))
+
+    def insert(self, idx: int, timestamp) -> None:
+        prev = self.prefix_max[idx - 1] if idx > 0 else float("-inf")
+        self.timestamps.insert(idx, timestamp)
+        self.prefix_max.insert(idx, prev if timestamp is None else max(prev, timestamp))
+
+
+def _insert_state_message_chronologically(
+    messages: list, msg: dict, *, index: _ChronologicalInsertIndex | None = None
+) -> bool:
     """Insert a state.db-only row before newer sidecar rows when safe.
 
     Returns False when the only chronological slot would resurrect an old state
     row before the sidecar/context begins. This keeps no-watermark compression
     display paths from reintroducing rows that were already compacted out.
+
+    ``index`` is the caller-owned ``_ChronologicalInsertIndex`` for ``messages``;
+    without it a throwaway index is built (O(n)) so single calls stay correct.
     """
+    if index is None:
+        index = _ChronologicalInsertIndex()
+    index.sync(messages)
     timestamp = _message_timestamp_as_float(msg)
     if timestamp is None:
         messages.append(msg)
+        index.insert(len(index.timestamps), None)
         return True
-    idx = 0
-    while idx < len(messages):
-        existing = messages[idx]
-        existing_timestamp = _message_timestamp_as_float(existing)
-        should_insert = existing_timestamp is not None and (
-            existing_timestamp > timestamp
-            or (
-                existing_timestamp == timestamp
-                and (
-                    (
-                        msg.get("role") == "user"
-                        and existing.get("role") == "assistant"
-                    )
-                    or _tool_call_assistant_should_precede_content_assistant(existing, msg)
-                )
-            )
-        )
-        if not should_insert:
-            idx += 1
-            continue
-        if idx == 0 and existing_timestamp is not None and existing_timestamp > timestamp:
+    timestamps = index.timestamps
+    # First row strictly newer than this one; rows before `start` are all older.
+    end = bisect.bisect_right(index.prefix_max, timestamp)
+    idx = end
+    for candidate in range(bisect.bisect_left(index.prefix_max, timestamp), end):
+        existing = messages[candidate]
+        if timestamps[candidate] == timestamp and (
+            (msg.get("role") == "user" and existing.get("role") == "assistant")
+            or _tool_call_assistant_should_precede_content_assistant(existing, msg)
+        ):
+            idx = candidate
+            break
+    if idx < len(messages):
+        if idx == 0 and timestamps[0] is not None and timestamps[0] > timestamp:
             # With no surviving sidecar/context row before this slot, a real
             # interruption rescue is indistinguishable from a compacted-out old
             # prompt; prefer avoiding no-watermark resurrection in that shape.
@@ -10874,16 +10910,15 @@ def _insert_state_message_chronologically(messages: list, msg: dict) -> bool:
                 idx < len(messages)
                 and idx > 0
                 and messages[idx - 1].get("role") == msg.get("role")
-                and _message_timestamp_as_float(messages[idx]) == timestamp
+                and timestamps[idx] == timestamp
                 and not _tool_call_assistant_should_precede_content_assistant(messages[idx], msg)
             ):
                 idx += 1
                 advanced = True
             if not advanced:
                 break
-        messages.insert(idx, msg)
-        return True
-    messages.append(msg)
+    messages.insert(idx, msg)
+    index.insert(idx, timestamp)
     return True
 
 
@@ -11087,6 +11122,7 @@ def merge_session_messages_append_only(
         return deduped
 
     merged_messages = []
+    _chrono_index = _ChronologicalInsertIndex()
     seen_message_keys = set()
     seen_dedup_keys = set()
     seen_content_keys = set()
@@ -11455,7 +11491,7 @@ def merge_session_messages_append_only(
                         # the row in timestamp order. Falling through to the
                         # generic append path would move older tool-call-only
                         # assistant rows after the settled final answer.
-                        if _insert_state_message_chronologically(merged_messages, msg):
+                        if _insert_state_message_chronologically(merged_messages, msg, index=_chrono_index):
                             seen_message_keys.add(key)
                             seen_dedup_keys.add(dedup_key)
                             seen_content_keys.add(content_key)
@@ -11467,7 +11503,7 @@ def merge_session_messages_append_only(
                         continue
                 else:
                     if msg.get("role") == "user" and content_key not in seen_content_keys:
-                        if _insert_state_message_chronologically(merged_messages, msg):
+                        if _insert_state_message_chronologically(merged_messages, msg, index=_chrono_index):
                             seen_message_keys.add(key)
                             seen_dedup_keys.add(dedup_key)
                             seen_content_keys.add(content_key)
