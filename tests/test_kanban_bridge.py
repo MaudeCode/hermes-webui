@@ -1343,6 +1343,66 @@ def test_sse_connects_on_the_board_it_resolved_not_a_second_resolution(monkeypat
     assert held is not None and held[1] == "experiments"
 
 
+def test_sse_unpinned_pass_fails_closed_when_the_pointer_is_unreadable(monkeypatch):
+    """HWEB-63: an unpinned stream that cannot read the active-board
+    pointer must read nothing that pass and drop its handle.
+
+    Serving the previously resolved board would be the permissive branch
+    on uncertainty: it emits events from a board that may no longer be
+    active and advances the cursor against it, so a recovery onto a
+    different board would silently skip that board's lower-id events.
+    """
+    bridge = _load_bridge(monkeypatch)
+    kb = bridge._kb()
+
+    held, cursor, events = bridge._kanban_sse_poll(None, None, 0)
+    assert held is not None and cursor == 7 and len(events) == 1
+    closed = []
+    held[0].close = lambda: closed.append(True)
+    kb.events.append(FakeEvent(8, "t_1", None, "updated", {"status": "ready"}, 124))
+
+    def unreadable_pointer():
+        raise OSError("simulated unreadable active-board pointer")
+
+    monkeypatch.setattr(kb, "get_current_board", unreadable_pointer)
+    connects = []
+    original_connect = kb.connect
+    monkeypatch.setattr(kb, "connect", lambda **kw: connects.append(kw) or original_connect(**kw))
+
+    held, cursor, events = bridge._kanban_sse_poll(held, None, cursor)
+    assert events == [], "an unresolved pass must not serve the last-resolved board"
+    assert cursor == 7, "an unresolved pass must not move the cursor"
+    assert held is None and closed == [True], "the stale handle must be dropped"
+    assert connects == [], "an unresolved pass must not reconnect"
+
+    # Recovery: once the pointer reads again, the stream reconnects and
+    # picks up the event it refused to serve while unresolved.
+    monkeypatch.setattr(kb, "get_current_board", lambda: "default")
+    held, cursor, events = bridge._kanban_sse_poll(held, None, cursor)
+    assert connects == [{"board": "default"}]
+    assert held is not None and held[1] == "default"
+    assert [e["id"] for e in events] == [8] and cursor == 8
+
+
+def test_sse_pinned_pass_ignores_an_unreadable_pointer(monkeypatch):
+    """HWEB-63: a ?board=<slug> stream never consults the pointer, so an
+    unreadable pointer must not touch it — same handle, events served."""
+    bridge = _load_bridge(monkeypatch)
+    kb = bridge._kb()
+    bridge._create_board_payload({"slug": "experiments", "name": "Exp"})
+    held, cursor, _events = bridge._kanban_sse_poll(None, "experiments", 0)
+    conn = held[0]
+    kb.events.append(FakeEvent(8, "t_1", None, "updated", {"status": "ready"}, 124))
+
+    def unreadable_pointer():
+        raise OSError("simulated unreadable active-board pointer")
+
+    monkeypatch.setattr(kb, "get_current_board", unreadable_pointer)
+    held, cursor, events = bridge._kanban_sse_poll(held, "experiments", cursor)
+    assert held is not None and held[0] is conn and held[1] == "experiments"
+    assert [e["id"] for e in events] == [8] and cursor == 8
+
+
 def test_handle_kanban_patch_routes_boards_slug_before_board_query_param(monkeypatch):
     """Opus advisor SHOULD-FIX #1: PATCH /api/kanban/boards/<slug>?board=ghost
     must edit `<slug>`, NOT 404 on `ghost`. The board management routes

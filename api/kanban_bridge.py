@@ -1034,9 +1034,9 @@ def _kanban_sse_resolve_board(board):
     re-read explicitly or an unpinned stream would stay attached to the
     board that happened to be active when it opened.
 
-    Returns ``None`` when the pointer cannot be read, which the caller
-    treats as "no change" — that is what ``kb.connect(board=None)`` would
-    have resolved to anyway.
+    Returns ``None`` when the pointer cannot be read. The caller treats
+    that as "unknown", not "unchanged": it reads nothing that pass rather
+    than serving whichever board it last resolved (HWEB-63).
     """
     if board is not None:
         return board
@@ -1068,7 +1068,16 @@ def _kanban_sse_poll(held, board, cursor):
     # is one pointer read per pass at 1 Hz, versus the connect + stat +
     # query + close this loop used to do 3.3 times a second.
     resolved = _kanban_sse_resolve_board(board)
-    if held is not None and resolved is not None and held[1] != resolved:
+    if resolved is None:
+        # Unpinned stream, pointer unreadable: we cannot confirm the held
+        # board is still the authoritative one, so serve nothing this pass
+        # and drop the handle. Treating "unknown" as "unchanged" would emit
+        # and advance the cursor against a board that may already have
+        # been switched away from (HWEB-63). The next successful read
+        # reconnects — one pass of latency, never a per-pass reconnect.
+        _kanban_sse_close(held)
+        return None, cursor, []
+    if held is not None and held[1] != resolved:
         _kanban_sse_close(held)
         held = None
     # Guard against a board that's been archived/removed mid-stream:
@@ -1094,9 +1103,8 @@ def _kanban_sse_poll(held, board, cursor):
             # the next pass's equality check would see B == B and keep
             # the stream on C forever, emitting C's events against B's
             # cursor. Decision, handle and stored identity share one
-            # resolved value. `resolved is None` only when `board` is
-            # too (pointer unreadable), which degrades to the old
-            # connect(board=None).
+            # resolved value. `resolved` is never None here: an
+            # unreadable pointer already returned above.
             held = (kb.connect(board=resolved), resolved)
         except Exception:
             return None, cursor, []
