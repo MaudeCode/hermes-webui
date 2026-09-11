@@ -257,8 +257,15 @@ User bubbles are right-aligned inside that column and may use up to 80% of it
 (90% under 600px), sized as a percentage of `--msg-max` rather than of the
 center pane. Length is handled by progressive disclosure, not by a narrower
 bubble: a user message longer than 600 characters or 8 lines renders clipped to
-8 lines behind a quiet fade with a **Show full message** / **Show less** button
-that carries `aria-expanded`. The thresholds live in two places that must move
+8 lines behind a quiet fade with a **Show full message** / **Show less** button.
+The clip is visual-only (`max-height` + `overflow: hidden` on `.msg-clip`): the
+complete text stays in the accessibility tree at all times, so the button is a
+toggle button — `aria-pressed` reflects the visual state, its accessible name is
+"Show full message visually" / "Show less of message visually", and it carries
+no `aria-expanded` / `aria-controls`, which would falsely claim a collapsed
+region. Keyboard focus landing on a control below the visible boundary opens
+the clip through the same `toggleMessageExpand` path, so the pressed state and
+label stay truthful. The thresholds live in two places that must move
 together — `USER_MSG_COLLAPSE_CHARS` / `USER_MSG_COLLAPSE_LINES` in
 `static/ui.js` and `--msg-collapse-lines` in `static/style.css`. The fade sits
 on the `.msg-clip` wrapper, not on `.msg-body`, so skins that repaint the bubble
