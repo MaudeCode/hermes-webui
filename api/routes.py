@@ -14672,6 +14672,11 @@ def handle_get(handler, parsed) -> bool:
 
     # ── Plugins/hooks visibility (read-only, no callback/source internals) ──
     if parsed.path == "/api/plugins":
+        # The registry publishes late in deferred startup; an empty pre-publish
+        # read would hide the Plugins tab as if nothing were installed. (HWEB-64)
+        from api.startup import await_plugins_ready
+        if not await_plugins_ready(handler, parsed):
+            return True
         return _handle_plugins(handler, parsed)
     if parsed.path == "/api/provider/quotas":
         query = parse_qs(parsed.query)
@@ -16198,6 +16203,14 @@ def handle_get(handler, parsed) -> bool:
             handler.end_headers()
             handler.wfile.write(data)
             return True
+
+    # Everything below reads the dashboard-plugin registry, and any path that
+    # reached here may be a plugin page we have not discovered yet — so wait
+    # for publication instead of answering 404 during the window. Unknown
+    # paths pay this wait only while discovery is running. (HWEB-64)
+    from api.startup import await_plugins_ready
+    if not await_plugins_ready(handler, parsed):
+        return True
 
     # ── Plugin static assets ──
     if parsed.path.startswith("/dashboard-plugins/"):

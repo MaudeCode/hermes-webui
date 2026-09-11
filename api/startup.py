@@ -27,6 +27,35 @@ AGENT_DEPS_READY.set()
 # under the pip timeout: the point is an accurate, retryable message, not
 # holding an SSE worker for the whole install.
 AGENT_DEPS_WAIT_SECONDS = 30.0
+# Plugin discovery is the third readiness dimension. load_plugins() runs last
+# in run_deferred_startup() — behind recovery AND the pip repair — and imports
+# arbitrary plugin modules, so its registry can stay empty for most of a slow
+# boot. An empty registry is not "no plugins installed": /api/plugins would
+# hide the Plugins tab and an enabled plugin's page would 404 until discovery
+# publishes. Only the registry's consumers wait on this; every other route
+# stays on STARTUP_READY. Same fail-open default as the other two. (HWEB-64)
+PLUGINS_READY = threading.Event()
+PLUGINS_READY.set()
+PLUGINS_PHASE = 'plugin discovery'
+# Plugin pages are browser navigations and iframe loads, not api() calls, so
+# nothing retries their startup 503 for them. Answer those with HTML that
+# retries itself: meta refresh works in a sandboxed iframe (no script needed)
+# and in a bare tab, and it stops as soon as the real page is served.
+PLUGIN_PAGE_STARTING_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="refresh" content="5">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hermes is starting</title>
+</head>
+<body style="margin:0;padding:2rem;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#111827;color:#e5e7eb;">
+  <main style="max-width:40rem;margin:10vh auto;line-height:1.5;">
+    <h1 style="font-size:1.5rem;margin:0 0 0.75rem;">Hermes is starting…</h1>
+    <p style="margin:0;color:#cbd5e1;">Plugins are still being discovered. This page retries automatically.</p>
+  </main>
+</body>
+</html>"""
 # Cap on requests allowed to block on the gate at once. Each waiter occupies one
 # of HTTPWorkerBudgetMixin's request-worker slots (max_request_workers // 2 = 64),
 # and process_request() acquires those non-blocking — so an uncapped wait lets
@@ -38,8 +67,9 @@ AGENT_DEPS_WAIT_SECONDS = 30.0
 # ever stops holding.
 STARTUP_WAIT_SLOT_COUNT = 8
 STARTUP_WAIT_SLOTS = threading.BoundedSemaphore(STARTUP_WAIT_SLOT_COUNT)
-# Session recovery is the only phase the readiness event gates; dependency
-# repair, the watcher and plugins run after it and never hold a request.
+# Session recovery is the only phase STARTUP_READY gates; dependency repair and
+# the watcher run after it and never hold a request. Plugin discovery has its
+# own event (PLUGINS_READY) and holds only the registry's readers.
 STARTUP_PHASE = 'session recovery'
 # Machine-readable marker on the startup 503, mirroring the worker-overflow
 # response's "condition" field. Clients retry on this rather than treating a
@@ -194,7 +224,7 @@ def _startup_exempt(path: str) -> bool:
     return is_public_path(path)
 
 
-def _send_still_starting(handler) -> None:
+def _send_still_starting(handler, phase: str = STARTUP_PHASE) -> None:
     """Answer a gated request with a retryable startup 503."""
     from api.helpers import j
 
@@ -209,8 +239,8 @@ def _send_still_starting(handler) -> None:
     j(
         handler,
         {
-            'error': f'Server is still starting: {STARTUP_PHASE}',
-            'phase': STARTUP_PHASE,
+            'error': f'Server is still starting: {phase}',
+            'phase': phase,
             # Distinguishes this from the worker-overflow 503 so clients can
             # retry it instead of committing fallback state (static/workspace.js).
             'condition': STARTUP_RECOVERY_CONDITION,
@@ -241,6 +271,55 @@ def await_startup_ready(handler, parsed) -> bool:
     return False
 
 
+def _send_plugins_starting(handler, path: str) -> None:
+    """Answer a plugin-registry read with a retryable 503 in the caller's shape.
+
+    /api/ callers come through api() and retry the JSON condition themselves;
+    everything else is a navigation or iframe load, which only retries if the
+    document tells it to.
+    """
+    if path.startswith('/api/'):
+        _send_still_starting(handler, PLUGINS_PHASE)
+        return
+    # Not api.helpers.t(): its blanket security headers (X-Frame-Options: DENY,
+    # frame-ancestors 'none') would block the same-origin plugin iframe from
+    # loading this document at all, so its refresh would never run. Mirror the
+    # headers the real plugin page is served with instead.
+    body = PLUGIN_PAGE_STARTING_HTML.encode('utf-8')
+    handler.close_connection = True
+    handler.send_response(503)
+    handler.send_header('Content-Type', 'text/html; charset=utf-8')
+    handler.send_header('Content-Security-Policy', 'sandbox')
+    handler.send_header('X-Content-Type-Options', 'nosniff')
+    handler.send_header('Cache-Control', 'no-store')
+    handler.send_header('Retry-After', '5')
+    handler.send_header('Content-Length', str(len(body)))
+    handler.send_header('Connection', 'close')
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def await_plugins_ready(handler, parsed) -> bool:
+    """Return True once the plugin registry is published, else emit 503.
+
+    Same bounded wait and shared waiter cap as await_startup_ready(), so plugin
+    consumers cannot hold request workers any longer than the recovery gate
+    can. Callers route only the registry's readers here.
+    """
+    if PLUGINS_READY.is_set():
+        return True
+    if not STARTUP_WAIT_SLOTS.acquire(blocking=False):
+        _send_plugins_starting(handler, parsed.path)
+        return False
+    try:
+        if PLUGINS_READY.wait(timeout=STARTUP_WAIT_SECONDS):
+            return True
+    finally:
+        STARTUP_WAIT_SLOTS.release()
+    _send_plugins_starting(handler, parsed.path)
+    return False
+
+
 def start_deferred_startup() -> threading.Thread:
     """Arm the readiness gate and run the deferred startup work on a thread.
 
@@ -250,6 +329,7 @@ def start_deferred_startup() -> threading.Thread:
     """
     STARTUP_READY.clear()
     AGENT_DEPS_READY.clear()
+    PLUGINS_READY.clear()
     thread = threading.Thread(
         target=run_deferred_startup,
         name="webui-deferred-startup",
@@ -268,8 +348,32 @@ def run_deferred_startup() -> None:
     runs first and releases the readiness event as soon as it settles — success
     or failure — so a slow pip install or plugin import can never hold a
     request.
+
+    Each step guards its own readiness event, but a raise that escapes a step's
+    guard (a print() on a closed stdout, an import error in the step itself)
+    must not skip the steps after it: a skipped discovery would leave
+    PLUGINS_READY armed forever, and setting it without attempting discovery
+    would publish an empty registry as authoritative. So every step is also
+    isolated here, and each event is set only once its own step has run.
     """
-    from api.config import SESSION_DIR, verify_hermes_imports, _HERMES_FOUND
+    for step in (
+        _recover_sessions_step,
+        _repair_agent_deps_step,
+        _start_background_workers_step,
+        _load_plugins_step,
+        _start_talaria_relay_step,
+    ):
+        try:
+            step()
+        except Exception as exc:
+            try:
+                print(f'[!!] WARNING: deferred startup step {step.__name__} failed: {exc}', flush=True)
+            except Exception:
+                pass  # stdout may be what raised; the next step still runs
+
+
+def _recover_sessions_step() -> None:
+    from api.config import SESSION_DIR
 
     try:
         from api.models import _active_state_db_path
@@ -288,6 +392,10 @@ def run_deferred_startup() -> None:
         # Released on every exit path, so a raising recovery cannot wedge every
         # /api/ request behind the readiness bound for the process lifetime.
         STARTUP_READY.set()
+
+
+def _repair_agent_deps_step() -> None:
+    from api.config import verify_hermes_imports, _HERMES_FOUND
 
     try:
         ok, missing, errors = verify_hermes_imports()
@@ -311,6 +419,8 @@ def run_deferred_startup() -> None:
         # agent-dependent actions waiting for a repair that is no longer running.
         AGENT_DEPS_READY.set()
 
+
+def _start_background_workers_step() -> None:
     try:
         from api.gateway_watcher import start_watcher
 
@@ -338,10 +448,19 @@ def run_deferred_startup() -> None:
     except Exception as e:
         print(f'[!!] WARNING: SessionChannel reaper failed to start: {e}', flush=True)
 
+
+def _load_plugins_step() -> None:
     try:
         from api.plugins import load_plugins
         load_plugins()
-        from api.talaria_relay import start_talaria_relay_publisher
-        start_talaria_relay_publisher()
     except Exception as e:
         print(f'[!!] WARNING: Plugin loading failed: {e}', flush=True)
+    finally:
+        # Released on every exit path, so a raising discovery cannot leave
+        # /api/plugins and plugin pages answering 503 for the process lifetime.
+        PLUGINS_READY.set()
+
+
+def _start_talaria_relay_step() -> None:
+    from api.talaria_relay import start_talaria_relay_publisher
+    start_talaria_relay_publisher()
