@@ -73,12 +73,17 @@ _INITIALIZE_REQUEST = {
 }
 
 _LOCK = threading.Lock()
-# name -> {"health": str, "detail": str, "checked_at": float, "fingerprint": str}
-_STATE: dict[str, dict] = {}
+# Both maps are keyed by (name, config fingerprint): one server identity, not
+# one name. Two profiles' same-named servers each keep their own verdict and
+# their own interval slot.
+# (name, fingerprint) -> {"health": str, "detail": str, "checked_at": float}
+_STATE: dict[tuple[str, str], dict] = {}
+# Names, not identities: at most one probe per name at a time is the bound that
+# stops a slow server from accumulating overlapping checks.
 _IN_FLIGHT: set[str] = set()
-# name -> (monotonic timestamp, fingerprint) of the last *started* probe. Started,
-# not finished, so a slow probe still holds its slot in the interval budget.
-_STARTED_AT: dict[str, tuple[float, str]] = {}
+# (name, fingerprint) -> monotonic timestamp of the last *started* probe.
+# Started, not finished, so a slow probe still holds its slot in the budget.
+_STARTED_AT: dict[tuple[str, str], float] = {}
 
 
 class _NoRedirect(urllib_request.HTTPRedirectHandler):
@@ -103,11 +108,13 @@ def _urlopen(request):
 
 
 def _jsonrpc_from_body(raw: bytes) -> dict | None:
-    """Pull the JSON-RPC envelope out of an ``initialize`` response body.
+    """Pull *our* ``initialize`` reply out of a response body.
 
     Streamable HTTP answers with a bare JSON object; the SSE form wraps the same
-    object in a ``data:`` line. Anything else — an HTML login page, a reverse
-    proxy's catch-all, an empty 200 — yields ``None``.
+    object in a ``data:`` line. Only the envelope answering this probe's request
+    id counts — a catch-all that echoes some other JSON-RPC message, or a stream
+    carrying unrelated notifications, is not an answer. Anything else — an HTML
+    login page, a reverse proxy's catch-all, an empty 200 — yields ``None``.
     """
     text = raw.decode("utf-8", "replace").strip()
     if not text:
@@ -125,38 +132,54 @@ def _jsonrpc_from_body(raw: bytes) -> dict | None:
             payload = json.loads(candidate)
         except ValueError:
             continue
-        if isinstance(payload, dict) and payload.get("jsonrpc") == "2.0":
+        if (isinstance(payload, dict) and payload.get("jsonrpc") == "2.0"
+                and payload.get("id") == _INITIALIZE_REQUEST["id"]):
             return payload
     return None
 
 
-def _ok_result(raw: bytes, code: int) -> tuple[str, str]:
-    """Grade a 2xx body. A 2xx alone proves only that *something* answered.
+def _initialize_result(payload: dict | None) -> dict | None:
+    """Return the ``initialize`` result only if it is complete.
+
+    The spec makes ``protocolVersion``, ``capabilities`` and ``serverInfo`` all
+    required. A result missing any of them did not prove negotiation happened.
+    """
+    result = (payload or {}).get("result")
+    if not isinstance(result, dict):
+        return None
+    if not isinstance(result.get("protocolVersion"), str):
+        return None
+    if not isinstance(result.get("capabilities"), dict):
+        return None
+    if not isinstance(result.get("serverInfo"), dict):
+        return None
+    return result
+
+
+def _ok_result(payload: dict | None, code: int) -> tuple[str, str]:
+    """Grade a 2xx reply. A 2xx alone proves only that *something* answered.
 
     Healthy verdicts are deliberately silent in the panel, so calling an HTML
     login page or a proxy catch-all healthy would hide a server that cannot
-    serve a single tool. Only a real ``initialize`` result earns HEALTHY.
+    serve a single tool. Only a complete ``initialize`` result to *our* request
+    earns HEALTHY.
     """
-    payload = _jsonrpc_from_body(raw)
     if payload is None:
         return UNKNOWN, f"HTTP {code}, not an MCP response"
     if isinstance(payload.get("error"), dict):
         # It speaks MCP and refused to initialize: a real, actionable failure.
         return UNHEALTHY, f"HTTP {code}, initialize rejected"
-    result = payload.get("result")
-    if isinstance(result, dict) and any(
-        key in result for key in ("protocolVersion", "serverInfo", "capabilities")
-    ):
+    if _initialize_result(payload) is not None:
         return HEALTHY, f"HTTP {code}"
     return UNKNOWN, f"HTTP {code}, unrecognized initialize result"
 
 
-def _status_result(code: int, raw: bytes | None = None) -> tuple[str, str]:
+def _status_result(code: int, payload: dict | None = None) -> tuple[str, str]:
     detail = f"HTTP {code}"
     if code in _AUTH_STATUSES:
         return NEEDS_AUTH, detail
     if 200 <= code < 300:
-        return _ok_result(raw or b"", code)
+        return _ok_result(payload, code)
     if 300 <= code < 400 or code in _PROTOCOL_MISMATCH_STATUSES:
         return UNKNOWN, detail
     return UNHEALTHY, detail
@@ -191,34 +214,45 @@ def _probe_http(url: str, cfg: dict) -> tuple[str, str]:
         method="POST",
     )
     session_id = None
+    protocol_version = None
     try:
         with _urlopen(request) as response:
             code = int(getattr(response, "status", None) or response.getcode())
             session_id = response.headers.get("Mcp-Session-Id")
             # Bounded read: an initialize result is small, and a health probe
             # must never be the thing that pulls a huge body into memory.
-            return _status_result(code, response.read(_MAX_PROBE_BODY_BYTES))
+            payload = _jsonrpc_from_body(response.read(_MAX_PROBE_BODY_BYTES))
+            result = _initialize_result(payload)
+            if result is not None:
+                protocol_version = result["protocolVersion"]
+            return _status_result(code, payload)
     except urllib_error.HTTPError as exc:
         return _status_result(int(exc.code))
     except (urllib_error.URLError, OSError, ValueError) as exc:
         return UNHEALTHY, _transport_detail(exc)
     finally:
         if session_id:
-            _end_session(url, headers, session_id)
+            _end_session(url, headers, session_id, protocol_version)
 
 
-def _end_session(url: str, headers: dict, session_id: str) -> None:
+def _end_session(url: str, headers: dict, session_id: str, protocol_version: str | None) -> None:
     """Terminate the session our ``initialize`` just opened.
 
     A stateful streamable-HTTP server allocates a session per ``initialize``
     and hands back ``Mcp-Session-Id``. Walking away would leave one abandoned
     session per probe until the server expires it. The spec's client-side
-    termination is a DELETE carrying that id; a server that does not support
-    it answers 405, and either way the outcome does not change the verdict.
+    termination is a DELETE carrying that id and, once negotiated, the
+    ``MCP-Protocol-Version`` every post-initialize request must carry — a
+    server that enforces it would otherwise 400 the DELETE and keep the
+    session. A server that does not support termination answers 405; either
+    way the outcome does not change the verdict.
     """
+    terminate_headers = {**headers, "Mcp-Session-Id": session_id}
+    if protocol_version:
+        terminate_headers["MCP-Protocol-Version"] = protocol_version
     request = urllib_request.Request(
         url,
-        headers={**headers, "Mcp-Session-Id": session_id},
+        headers=terminate_headers,
         method="DELETE",
     )
     try:
@@ -272,11 +306,10 @@ def _run_check(name: str, cfg: dict, fingerprint: str) -> None:
             logger.debug("MCP health check for %r failed", name, exc_info=True)
             health, detail = UNKNOWN, "health check failed"
         with _LOCK:
-            _STATE[name] = {
+            _STATE[(name, fingerprint)] = {
                 "health": health,
                 "detail": detail,
                 "checked_at": time.time(),
-                "fingerprint": fingerprint,
             }
     finally:
         with _LOCK:
@@ -292,13 +325,12 @@ def refresh_and_read(servers: dict) -> dict[str, dict]:
     stale verdict.
 
     A verdict is only ever returned for the exact config it was measured
-    against. Entries carry the fingerprint of the config that produced them, so
-    editing a server's url/headers/command, or switching to a profile whose
-    same-named server points somewhere else, neither returns the old server's
-    verdict nor waits out the interval before re-probing. A probe already in
-    flight when the config changes still publishes, but its fingerprint no
-    longer matches and it is filtered out here rather than shown as the new
-    server's health.
+    against. Entries are keyed by the fingerprint of the config that produced
+    them, so editing a server's url/headers/command, or switching to a profile
+    whose same-named server points somewhere else, neither returns the old
+    server's verdict nor waits out the interval before re-probing. A probe
+    already in flight when the config changes still publishes — under its own
+    identity, where it is simply not read for the new one.
     """
     if not isinstance(servers, dict):
         servers = {}
@@ -307,30 +339,36 @@ def refresh_and_read(servers: dict) -> dict[str, dict]:
     current = {str(name): _fingerprint(cfg) for name, cfg in servers.items()}
     configs = {str(name): (cfg if isinstance(cfg, dict) else {}) for name, cfg in servers.items()}
     with _LOCK:
-        for stale in set(_STATE) - set(current):
-            _STATE.pop(stale, None)
-        for stale in set(_STARTED_AT) - set(current):
-            _STARTED_AT.pop(stale, None)
+        for key in list(_STARTED_AT):
+            name, fingerprint = key
+            if name not in current:
+                keep = False
+            elif fingerprint == current[name]:
+                keep = True
+            else:
+                # Another identity for a still-configured name: a sibling
+                # profile's same-named server. Keep it while its interval would
+                # still suppress a re-probe, so alternating profiles do not
+                # start an initialize/DELETE cycle on every switch. Past that
+                # it would be re-probed anyway, so it is dead weight.
+                keep = (now - _STARTED_AT[key]) < HEALTH_INTERVAL_S
+            if not keep:
+                _STARTED_AT.pop(key, None)
+                _STATE.pop(key, None)
         for name, fingerprint in current.items():
-            stored = _STATE.get(name)
-            if stored is not None and stored.get("fingerprint") != fingerprint:
-                # The config changed under us; the old verdict describes a
-                # different server. Drop it and re-probe now, not in 120s.
-                _STATE.pop(name, None)
-                _STARTED_AT.pop(name, None)
+            key = (name, fingerprint)
             if name in _IN_FLIGHT:
                 continue
-            started = _STARTED_AT.get(name)
-            if (started is not None and started[1] == fingerprint
-                    and (now - started[0]) < HEALTH_INTERVAL_S):
+            started = _STARTED_AT.get(key)
+            if started is not None and (now - started) < HEALTH_INTERVAL_S:
                 continue
             _IN_FLIGHT.add(name)
-            _STARTED_AT[name] = (now, fingerprint)
+            _STARTED_AT[key] = now
             due.append((name, configs[name], fingerprint))
         readable = {
-            name: {k: v for k, v in row.items() if k != "fingerprint"}
-            for name, row in _STATE.items()
-            if row.get("fingerprint") == current.get(name)
+            name: dict(_STATE[(name, fingerprint)])
+            for name, fingerprint in current.items()
+            if (name, fingerprint) in _STATE
         }
     for name, cfg, fingerprint in due:
         try:

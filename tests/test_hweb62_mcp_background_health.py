@@ -103,19 +103,29 @@ class TestProbeVerdicts:
             b"<html><body>Please sign in</body></html>": ("unknown", "HTTP 200, not an MCP response"),
             b"": ("unknown", "HTTP 200, not an MCP response"),
             b'{"ok": true}': ("unknown", "HTTP 200, not an MCP response"),
-            b'{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}':
+            b'{"jsonrpc":"2.0","id":"hermes-webui-health","result":{"tools":[]}}':
                 ("unknown", "HTTP 200, unrecognized initialize result"),
-            b'{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"nope"}}':
+            # One required field is not a negotiated protocol.
+            b'{"jsonrpc":"2.0","id":"hermes-webui-health","result":{"capabilities":{}}}':
+                ("unknown", "HTTP 200, unrecognized initialize result"),
+            # A reply to some other request is not a reply to ours.
+            b'{"jsonrpc":"2.0","id":"wrong","result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"x"}}}':
+                ("unknown", "HTTP 200, not an MCP response"),
+            b'{"jsonrpc":"2.0","id":"hermes-webui-health","error":{"code":-32600,"message":"nope"}}':
                 ("unhealthy", "HTTP 200, initialize rejected"),
         }
         for body, expected in cases.items():
             assert self._probe_body(body) == expected, body
 
     def test_a_real_initialize_result_is_healthy_over_json_and_sse(self):
-        result = b'{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","serverInfo":{"name":"x"}}}'
+        result = self._INIT_OK
         assert self._probe_body(result) == ("healthy", "HTTP 200")
         sse = b"event: message\ndata: " + result + b"\n\n"
         assert self._probe_body(sse) == ("healthy", "HTTP 200")
+        # A stream that carries an unrelated message first still finds ours.
+        noisy = (b'data: {"jsonrpc":"2.0","method":"notifications/message","params":{}}\n\n'
+                 b"data: " + result + b"\n\n")
+        assert self._probe_body(noisy) == ("healthy", "HTTP 200")
 
     @staticmethod
     def _response(body: bytes, code: int = 200, headers: dict | None = None):
@@ -136,7 +146,8 @@ class TestProbeVerdicts:
         response.read.assert_called_once_with(mcp_health._MAX_PROBE_BODY_BYTES)
         return verdict
 
-    _INIT_OK = b'{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18"}}'
+    _INIT_OK = (b'{"jsonrpc":"2.0","id":"hermes-webui-health","result":'
+                b'{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"x"}}}')
 
     def test_a_session_opened_by_the_probe_is_terminated_on_every_exit(self):
         """A stateful server allocates a session per initialize; we must not leak one per probe."""
@@ -153,6 +164,9 @@ class TestProbeVerdicts:
         assert delete.full_url == "https://x/mcp"
         assert delete.get_header("Mcp-session-id") == "sess-123"
         assert delete.get_header("Authorization") == "Bearer t"
+        # Post-initialize requests must carry the negotiated version, or a
+        # strict server 400s the DELETE and keeps the session.
+        assert delete.get_header("Mcp-protocol-version") == "2025-06-18"
 
         # No session header → nothing to terminate, and no extra request.
         with patch("api.mcp_health._urlopen", return_value=self._response(self._INIT_OK)) as opener:
@@ -328,7 +342,7 @@ class TestSchedulingIsBackgroundAndBounded:
         with patch("api.mcp_health.probe_server", return_value=("unhealthy", "unreachable")):
             _runtime(servers)
             _join_health_threads()
-        assert mcp_health.snapshot()["web"]["health"] == "unhealthy"
+        assert [row["health"] for row in mcp_health.snapshot().values()] == ["unhealthy"]
 
         disabled = {"web": {"url": "https://web.example/mcp", "enabled": False}}
         with patch("api.mcp_health.probe_server", return_value=("unhealthy", "unreachable")):
@@ -368,6 +382,39 @@ class TestSchedulingIsBackgroundAndBounded:
             assert _runtime(profile_a)["web"]["health"] == "needs_auth"
             # Switching profiles must not report profile A's verdict for B's server.
             assert _runtime(profile_b)["web"]["health"] == "unknown"
+
+    def test_alternating_same_named_servers_each_keep_their_own_interval_slot(self):
+        """Switching between two profiles must not re-probe (and re-open a session) on every switch."""
+        profile_a = {"web": {"url": "https://a.example/mcp"}}
+        profile_b = {"web": {"url": "https://b.example/mcp"}}
+        probed = []
+        with patch("api.mcp_health.probe_server",
+                   side_effect=lambda n, c: probed.append(c["url"]) or ("healthy", "HTTP 200")):
+            for _ in range(5):
+                _runtime(profile_a)
+                _join_health_threads()
+                _runtime(profile_b)
+                _join_health_threads()
+            assert _runtime(profile_a)["web"]["health"] == "healthy"
+            assert _runtime(profile_b)["web"]["health"] == "healthy"
+        assert sorted(probed) == ["https://a.example/mcp", "https://b.example/mcp"]
+
+    def test_a_sibling_identity_is_dropped_once_its_interval_has_lapsed(self):
+        """Retained identities are bounded: past the interval they would be re-probed anyway."""
+        profile_a = {"web": {"url": "https://a.example/mcp"}}
+        profile_b = {"web": {"url": "https://b.example/mcp"}}
+        with patch("api.mcp_health.probe_server", return_value=("healthy", "HTTP 200")):
+            _runtime(profile_a)
+            _join_health_threads()
+            _runtime(profile_b)
+            _join_health_threads()
+            assert len(mcp_health.snapshot()) == 2
+            with mcp_health._LOCK:
+                key = ("web", mcp_health._fingerprint(profile_a["web"]))
+                mcp_health._STARTED_AT[key] -= mcp_health.HEALTH_INTERVAL_S + 1
+            _runtime(profile_b)
+            _join_health_threads()
+        assert len(mcp_health.snapshot()) == 1
 
     def test_a_probe_that_finishes_after_a_config_change_is_not_published_as_the_new_health(self):
         before = {"web": {"url": "https://old.example/mcp"}}
@@ -525,9 +572,8 @@ class TestSchedulingIsBackgroundAndBounded:
 
             # Age the last start past the interval; exactly one more probe runs.
             with mcp_health._LOCK:
-                started, fingerprint = mcp_health._STARTED_AT["web"]
-                mcp_health._STARTED_AT["web"] = (
-                    started - mcp_health.HEALTH_INTERVAL_S - 1, fingerprint)
+                (key,) = [k for k in mcp_health._STARTED_AT if k[0] == "web"]
+                mcp_health._STARTED_AT[key] -= mcp_health.HEALTH_INTERVAL_S + 1
             mcp_health.refresh_and_read(servers)
             _join_health_threads()
         assert calls == ["web", "web"]
