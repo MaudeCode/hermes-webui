@@ -110,7 +110,9 @@ function extractFunc(name) {
 var USER_MSG_COLLAPSE_CHARS = Number(src.match(/const USER_MSG_COLLAPSE_CHARS=(\d+);/)[1]);
 var USER_MSG_COLLAPSE_LINES = Number(src.match(/const USER_MSG_COLLAPSE_LINES=(\d+);/)[1]);
 var USER_MSG_COLLAPSED_ROW_PX = Number(src.match(/const USER_MSG_COLLAPSED_ROW_PX=(\d+);/)[1]);
-var USER_MSG_ATTACHMENT_PX = Number(src.match(/const USER_MSG_ATTACHMENT_PX=(\d+);/)[1]);
+eval(src.match(/const USER_MSG_FILES_PX=\{[^}]*\};/)[0].replace('const', 'var'));
+eval(extractFunc('_estimateUserRowFilesHeight'));
+eval(extractFunc('_userRowFilesReserve'));
 eval(extractFunc('_userMessageNeedsCollapse'));"""
     return prelude + body
 
@@ -156,10 +158,9 @@ console.log(JSON.stringify({
   collapsedDefault: _estimateUserRowIntrinsicHeight(longText),
   short: _estimateUserRowIntrinsicHeight(shortText),
   cap: USER_MSG_COLLAPSED_ROW_PX,
-  // Attachments sit above the text in both states; two uploads add two strips.
-  collapsedFiles: _estimateUserRowIntrinsicHeight(longText, false, 2),
-  tallFiles: _estimateUserRowIntrinsicHeight(longText, true, '2'),
-  perFile: USER_MSG_ATTACHMENT_PX,
+  // The attachment strip sits above the text in both states.
+  collapsedFiles: _estimateUserRowIntrinsicHeight(longText, false, 200),
+  tallFiles: _estimateUserRowIntrinsicHeight(longText, true, '200'),
 }));
 """
     m = json.loads(_run_node(source))
@@ -181,8 +182,48 @@ console.log(JSON.stringify({
     assert m["short"] == 96, f"short row must floor at 96px, got {m['short']}"
     # The attachment strip is not in rawText, so it is added per attachment on top
     # of either state's text estimate (a string count, as read from a dataset).
-    assert m["collapsedFiles"] == m["cap"] + 2 * m["perFile"], m
-    assert m["tallFiles"] == m["tall"] + 2 * m["perFile"], m
+    assert m["collapsedFiles"] == m["cap"] + 200, m
+    assert m["tallFiles"] == m["tall"] + 200, m
+
+
+def test_files_strip_estimate_by_kind_and_column_width():
+    """HWEB-66: the strip reserve is sized per attachment kind and by how many
+    thumbnails share a row at the current transcript column width — a flat
+    per-attachment figure over-reserved three file badges by ~270px (Codex
+    round-2 finding). Rows from the browser fixture, normal font: 3 images =
+    198px strip at 390px (2 per row) and 300px at 700px (1 per row, the sidebar
+    narrows the column); 3 wrapped long badges = 100px; an audio player 150px;
+    a video player 266px; every strip ends in a 10px margin."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + _fake_row_prelude() + r"""
+const px = USER_MSG_FILES_PX;
+const row = makeRow('user', 1, 0);
+row.dataset.attachmentKinds = 'image,badge';
+console.log(JSON.stringify({
+  none: _estimateUserRowFilesHeight('', 370),
+  img3phone: _estimateUserRowFilesHeight('image,image,image', 370),   // 2 per row -> 2 rows
+  img3narrow: _estimateUserRowFilesHeight('image,image,image', 312),  // 1 per row -> 3 rows
+  img3unknown: _estimateUserRowFilesHeight('image,image,image', NaN), // fail closed: 1 per row
+  badges3: _estimateUserRowFilesHeight('badge,badge,badge', 370),
+  media: _estimateUserRowFilesHeight('audio,video', 370),
+  unknownKind: _estimateUserRowFilesHeight('zip', 370),
+  // The row helper reads the stamped kinds; with no $() it fails closed to 1 per row.
+  viaRow: _userRowFilesReserve(row),
+  px,
+}));
+"""
+    m = json.loads(_run_node(source))
+    px = m["px"]
+    assert m["none"] == 0
+    assert m["img3phone"] == px["strip"] + 2 * px["image"], m
+    assert m["img3narrow"] == px["strip"] + 3 * px["image"], m
+    assert m["img3unknown"] == m["img3narrow"], "unknown width must fail closed to one thumbnail per row"
+    assert m["badges3"] == px["strip"] + 3 * px["badge"], m
+    assert m["media"] == px["strip"] + px["audio"] + px["video"], m
+    assert m["unknownKind"] == px["strip"] + px["badge"], "an unknown kind counts as a badge"
+    assert m["viaRow"] == px["strip"] + px["image"] + px["badge"], m
+    # Each figure covers its measured row (96 / 150 / 266 / 29 + the 6px gap).
+    assert px["image"] >= 102 and px["audio"] >= 156 and px["video"] >= 272 and px["badge"] >= 35, px
 
 
 def test_apply_uses_remembered_measured_height_over_estimate():
@@ -465,7 +506,8 @@ console.log(JSON.stringify({
     assert m["expandedFlag"] == "1", "sanity: the row attribute flipped back to expanded"
 
 
-def test_collapsed_row_reserve_covers_the_rendered_production_row():
+@pytest.mark.parametrize("viewport_width", [320, 390, 700])
+def test_collapsed_row_reserve_covers_the_rendered_production_row(viewport_width):
     """Re-justifies USER_MSG_COLLAPSED_ROW_PX and USER_MSG_ATTACHMENT_PX against the
     shipped stylesheet in a real browser, through renderMessages so the row carries
     everything production does: the attachment strip, the clipped body, the
@@ -475,12 +517,21 @@ def test_collapsed_row_reserve_covers_the_rendered_production_row():
     and every font-size setting the reserve must be at least the rendered height
     (under-reserving is the #5638 jump-back), and the plain-text cap must stay
     within 40px of the tallest real row so it does not drift loose. Measured at
-    the time of writing (plain / 1 image / 3 images / 3 file badges):
+    the time of writing at 390px (plain / 1 image / 3 images / 3 file badges):
     small 285/391/493/394, normal 310/416/518/419, large 334/440/542/444,
-    xlarge 359/465/567/469."""
+    xlarge 359/465/567/469; at 700px the sidebar narrows the column so
+    thumbnails stack one per row (3 images = 300px strip).
+
+    Both bounds matter (Codex round 2): every variant must also reserve no more
+    than its rendered height plus the slack the constants deliberately carry —
+    the collapsed cap's font-size headroom (60px at the default size) plus, for
+    attachment rows, one thumbnail row for the fail-closed per-row count at
+    320px and one badge/gap allowance per attachment for badges that share a
+    row. Over-reserving by more than that recreates the paint-time shrink this
+    change removes."""
     from tests.test_hweb3_user_message_collapse import _page
 
-    playwright, browser, page = _page(390)
+    playwright, browser, page = _page(viewport_width)
     try:
         m = page.evaluate(
             """
@@ -491,6 +542,7 @@ def test_collapsed_row_reserve_covers_the_rendered_production_row():
                 img1: ['a.png'],
                 img3: ['a.png', 'b.png', 'c.png'],
                 file3: ['notes-long-name-1.txt', 'notes-long-name-2.txt', 'notes-long-name-3.txt'],
+                media: ['voice.mp3', 'clip.mp4'],
               };
               const out = { cap: USER_MSG_COLLAPSED_ROW_PX, rows: {} };
               const px = (v) => parseInt(String(v).replace(/[^0-9]/g, ''), 10) || 0;
@@ -514,6 +566,7 @@ def test_collapsed_row_reserve_covers_the_rendered_production_row():
                     folded: !!row.querySelector('.msg-expand-btn') && row.dataset.msgExpanded !== '1',
                     hasFoot: !!row.querySelector('.msg-foot'),
                     files: row.querySelectorAll('.msg-files > *').length,
+                    kinds: row.dataset.attachmentKinds || '',
                   };
                 }
               });
@@ -528,14 +581,26 @@ def test_collapsed_row_reserve_covers_the_rendered_production_row():
     finally:
         browser.close()
         playwright.stop()
-    for key, r in m["rows"].items():
-        assert r["folded"] and r["hasFoot"], f"{key}: sanity — production folded row with a footer; got {r}"
-        assert r["reserve"] >= r["real"], (
-            f"{key}: fresh folded row renders {r['real']}px but reserves only "
-            f"{r['reserve']}px — raise USER_MSG_COLLAPSED_ROW_PX / USER_MSG_ATTACHMENT_PX"
-        )
     tallest_plain = max(r["real"] for k, r in m["rows"].items() if k.endswith("/plain"))
     assert m["cap"] <= tallest_plain + 40, (
         f"USER_MSG_COLLAPSED_ROW_PX={m['cap']} is loose against the tallest real "
         f"folded row ({tallest_plain}px); re-measure and tighten it"
     )
+    for key, r in m["rows"].items():
+        variant = key.split("/")[1]
+        assert r["folded"] and r["hasFoot"], f"{key}: sanity — production folded row with a footer; got {r}"
+        assert r["files"] == len(r["kinds"].split(",")) if r["kinds"] else r["files"] == 0, (
+            f"{key}: stamped kinds must mirror the rendered strip; got {r}"
+        )
+        assert r["reserve"] >= r["real"], (
+            f"{key}: fresh folded row renders {r['real']}px but reserves only "
+            f"{r['reserve']}px — raise USER_MSG_COLLAPSED_ROW_PX / USER_MSG_FILES_PX"
+        )
+        # The cap's font-size headroom at this size, then the per-kind allowances.
+        slack = m["cap"] - m["rows"][key.split("/")[0] + "/plain"]["real"]
+        slack += 102 if variant.startswith("img") else 0          # one fail-closed thumbnail row
+        slack += 36 * r["files"] if variant in ("file3", "media") else 0  # badges sharing a row / gap
+        assert r["reserve"] <= r["real"] + slack + 40, (
+            f"{key}: reserve {r['reserve']}px is loose against the rendered {r['real']}px "
+            f"(allowed slack {slack + 40}px) — tighten USER_MSG_FILES_PX"
+        )

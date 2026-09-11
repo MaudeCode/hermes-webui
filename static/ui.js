@@ -1693,11 +1693,36 @@ function _rememberUserRowIntrinsicHeight(sessionMsgIdx, height){
   if(!Number.isFinite(key)||!(height>0)) return;
   _userRowIntrinsicHeightBySessionIdx[key]=Math.round(height);
 }
-function _estimateUserRowIntrinsicHeight(rawText, expanded, attachmentCount){
-  // HWEB-66: the attachment strip above the text is not in rawText; reserve it
-  // per attachment on top of every text estimate so a row with uploads never
-  // under-reserves in either disclosure state.
-  const files=(Number(attachmentCount)||0)*USER_MSG_ATTACHMENT_PX;
+// HWEB-66: reserve for the .msg-files strip above a user message's text, by
+// attachment kind, since rawText knows nothing about it. `kinds` is the
+// comma-separated data-attachment-kinds renderMessages stamps on the row and
+// `columnWidth` the transcript column (#msgInner) width. Measured through
+// renderMessages at 320/390/430/700px: a 120x90 thumbnail row is 96px, an audio
+// player 150, a video player 266, a file badge 29, each followed by the strip's
+// 6px flex gap, and the strip ends in a 10px margin. Thumbnails (120px + 4px
+// margin + 6px gap) share a row inside a bubble that is at most ~80% of the
+// column — 2 per row on a phone, 1 at 700px where the sidebar narrows the
+// column; fail closed to 1 per row when the width is unknown. Badges and
+// players are counted one per row so a wrapped long file name never
+// under-reserves (under-reserving is the #5638 jump-back).
+const USER_MSG_FILES_PX={image:102, audio:156, video:272, badge:36, strip:10};
+function _estimateUserRowFilesHeight(kinds, columnWidth){
+  const list=String(kinds||'').split(',').filter(Boolean);
+  if(!list.length) return 0;
+  const n={image:0, audio:0, video:0, badge:0};
+  for(const k of list) n[k in n?k:'badge']++;
+  const perRow=(Number.isFinite(columnWidth)&&columnWidth>0)?Math.max(1, Math.floor((columnWidth*0.8+6)/130)):1;
+  return USER_MSG_FILES_PX.strip+Math.ceil(n.image/perRow)*USER_MSG_FILES_PX.image
+    +n.audio*USER_MSG_FILES_PX.audio+n.video*USER_MSG_FILES_PX.video+n.badge*USER_MSG_FILES_PX.badge;
+}
+function _userRowFilesReserve(row){
+  const inner=(typeof $==='function')?$('msgInner'):null;
+  return _estimateUserRowFilesHeight(row.dataset.attachmentKinds, inner?inner.clientWidth:0);
+}
+function _estimateUserRowIntrinsicHeight(rawText, expanded, filesPx){
+  // HWEB-66: the attachment strip (see _estimateUserRowFilesHeight) sits above
+  // the text in either disclosure state, so it is added to every text estimate.
+  const files=Number(filesPx)||0;
   const t=String(rawText||'');
   if(!t) return 96+files;
   // HWEB-66: a long message the reader has NOT opened renders clipped to the
@@ -1734,7 +1759,7 @@ function _applyUserRowIntrinsicHeight(row, rawText){
   const key=Number(row.dataset.sessionMsgIdx);
   const remembered=Number.isFinite(key)?Number(_userRowIntrinsicHeightBySessionIdx[key])||0:0;
   const estimate=_estimateUserRowIntrinsicHeight(rawText!=null?rawText:row.dataset.rawText,
-    row.dataset.msgExpanded==='1', row.dataset.attachmentCount);
+    row.dataset.msgExpanded==='1', _userRowFilesReserve(row));
   // Reserve the LARGER of the remembered measurement and the content estimate. A remembered
   // height can be a PARTIAL paint: a user row taller than the viewport that only ever had its
   // top slice scrolled through content-visibility:auto reports just the painted portion, not
@@ -1856,7 +1881,7 @@ function _rememberRenderedUserRowIntrinsicHeights(){
     const inView=(r.bottom>=cRect.top-margin)&&(r.top<=cRect.bottom+margin);
     if(!inView) continue;
     const estimate=(typeof _estimateUserRowIntrinsicHeight==='function')
-      ? _estimateUserRowIntrinsicHeight(row.dataset.rawText, row.dataset.msgExpanded==='1', row.dataset.attachmentCount) : 0;
+      ? _estimateUserRowIntrinsicHeight(row.dataset.rawText, row.dataset.msgExpanded==='1', _userRowFilesReserve(row)) : 0;
     const h=Math.max(measured, estimate);
     if(!(h>0)) continue;
     const key=Number(row.dataset.sessionMsgIdx);
@@ -9662,11 +9687,6 @@ const USER_MSG_COLLAPSE_LINES=8;
 // the row paints. Re-measure when --msg-collapse-lines, the button or the
 // footer sizing changes; test_issue5638 pins it against the stylesheet.
 const USER_MSG_COLLAPSED_ROW_PX=370;
-// Reserve per attachment in the .msg-files strip: one 120x90 image thumbnail
-// row with its margins measures 106px at 390px; file badges are shorter (39px)
-// and several thumbnails share a row, so counting each as a full image row
-// over-reserves for those but never under-reserves.
-const USER_MSG_ATTACHMENT_PX=106;
 function _userMessageNeedsCollapse(text){
   const s=String(text==null?'':text);
   if(s.length>USER_MSG_COLLAPSE_CHARS) return true;
@@ -18888,12 +18908,16 @@ function renderMessages(options){
     const nextRendered=renderVisWithIdx[vi+1];
     const isTurnFinalAssistant=!isUser&&(!nextRendered||!nextRendered.m||nextRendered.m.role!=='assistant');
     let filesHtml='';
+    // HWEB-66: attachment kinds, stamped on user rows so the off-screen reserve
+    // can size the strip (_estimateUserRowFilesHeight) without parsing markup.
+    const attachmentKinds=[];
     if(m.attachments&&m.attachments.length){
       // Static regression tests intentionally look for msg-media-img/msg-file-badge near this branch.
       const _attachSid=(S.session&&S.session.session_id)||'';
       filesHtml=`<div class="msg-files">${m.attachments.map(f=>{
         const fLabel=typeof f==='string'?f:(f&&(f.name||f.filename||f.path))||'';
         const fname=String(fLabel).split('/').pop()||String(fLabel);
+        attachmentKinds.push((typeof _mediaKindForName==='function'&&_mediaKindForName(fname))||'badge');
         // Use api/file/raw which resolves filename relative to the session workspace.
         const fileUrl='api/file/raw?session_id='+encodeURIComponent(_attachSid)+'&path='+encodeURIComponent(fname);
         return _renderAttachmentHtml(fname,fileUrl);
@@ -19059,7 +19083,7 @@ function renderMessages(options){
         row.dataset.sessionMsgIdx=sessionMsgIdx;
         row.dataset.messageAnchorKey=messageAnchorKey;
         row.dataset.msgExpandKey=expandIdentity;
-        row.dataset.attachmentCount=String((m.attachments&&m.attachments.length)||0);
+        row.dataset.attachmentKinds=attachmentKinds.join(',');
         row.dataset.role='user';
         delete row.dataset.editing;
         if(row.dataset.rawText!==newRawText||row.innerHTML!==nextRowHtml){
@@ -19074,7 +19098,7 @@ function renderMessages(options){
         row.dataset.sessionMsgIdx=sessionMsgIdx;
         row.dataset.messageAnchorKey=messageAnchorKey;
         row.dataset.msgExpandKey=expandIdentity;
-        row.dataset.attachmentCount=String((m.attachments&&m.attachments.length)||0);
+        row.dataset.attachmentKinds=attachmentKinds.join(',');
         row.dataset.role='user';
         row.dataset.rawText=newRawText;
         row.innerHTML=nextRowHtml;
