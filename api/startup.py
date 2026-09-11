@@ -27,6 +27,16 @@ AGENT_DEPS_READY.set()
 # under the pip timeout: the point is an accurate, retryable message, not
 # holding an SSE worker for the whole install.
 AGENT_DEPS_WAIT_SECONDS = 30.0
+# Plugin discovery is the third readiness dimension. load_plugins() runs last
+# in run_deferred_startup() — behind recovery AND the pip repair — and imports
+# arbitrary plugin modules, so its registry can stay empty for most of a slow
+# boot. An empty registry is not "no plugins installed": /api/plugins would
+# hide the Plugins tab and an enabled plugin's page would 404 until discovery
+# publishes. Only the registry's consumers wait on this; every other route
+# stays on STARTUP_READY. Same fail-open default as the other two. (HWEB-64)
+PLUGINS_READY = threading.Event()
+PLUGINS_READY.set()
+PLUGINS_PHASE = 'plugin discovery'
 # Cap on requests allowed to block on the gate at once. Each waiter occupies one
 # of HTTPWorkerBudgetMixin's request-worker slots (max_request_workers // 2 = 64),
 # and process_request() acquires those non-blocking — so an uncapped wait lets
@@ -38,8 +48,9 @@ AGENT_DEPS_WAIT_SECONDS = 30.0
 # ever stops holding.
 STARTUP_WAIT_SLOT_COUNT = 8
 STARTUP_WAIT_SLOTS = threading.BoundedSemaphore(STARTUP_WAIT_SLOT_COUNT)
-# Session recovery is the only phase the readiness event gates; dependency
-# repair, the watcher and plugins run after it and never hold a request.
+# Session recovery is the only phase STARTUP_READY gates; dependency repair and
+# the watcher run after it and never hold a request. Plugin discovery has its
+# own event (PLUGINS_READY) and holds only the registry's readers.
 STARTUP_PHASE = 'session recovery'
 # Machine-readable marker on the startup 503, mirroring the worker-overflow
 # response's "condition" field. Clients retry on this rather than treating a
@@ -194,7 +205,7 @@ def _startup_exempt(path: str) -> bool:
     return is_public_path(path)
 
 
-def _send_still_starting(handler) -> None:
+def _send_still_starting(handler, phase: str = STARTUP_PHASE) -> None:
     """Answer a gated request with a retryable startup 503."""
     from api.helpers import j
 
@@ -209,8 +220,8 @@ def _send_still_starting(handler) -> None:
     j(
         handler,
         {
-            'error': f'Server is still starting: {STARTUP_PHASE}',
-            'phase': STARTUP_PHASE,
+            'error': f'Server is still starting: {phase}',
+            'phase': phase,
             # Distinguishes this from the worker-overflow 503 so clients can
             # retry it instead of committing fallback state (static/workspace.js).
             'condition': STARTUP_RECOVERY_CONDITION,
@@ -241,6 +252,27 @@ def await_startup_ready(handler, parsed) -> bool:
     return False
 
 
+def await_plugins_ready(handler) -> bool:
+    """Return True once the plugin registry is published, else emit 503.
+
+    Same bounded wait and shared waiter cap as await_startup_ready(), so plugin
+    consumers cannot hold request workers any longer than the recovery gate
+    can. Callers route only the registry's readers here.
+    """
+    if PLUGINS_READY.is_set():
+        return True
+    if not STARTUP_WAIT_SLOTS.acquire(blocking=False):
+        _send_still_starting(handler, PLUGINS_PHASE)
+        return False
+    try:
+        if PLUGINS_READY.wait(timeout=STARTUP_WAIT_SECONDS):
+            return True
+    finally:
+        STARTUP_WAIT_SLOTS.release()
+    _send_still_starting(handler, PLUGINS_PHASE)
+    return False
+
+
 def start_deferred_startup() -> threading.Thread:
     """Arm the readiness gate and run the deferred startup work on a thread.
 
@@ -250,6 +282,7 @@ def start_deferred_startup() -> threading.Thread:
     """
     STARTUP_READY.clear()
     AGENT_DEPS_READY.clear()
+    PLUGINS_READY.clear()
     thread = threading.Thread(
         target=run_deferred_startup,
         name="webui-deferred-startup",
@@ -341,7 +374,15 @@ def run_deferred_startup() -> None:
     try:
         from api.plugins import load_plugins
         load_plugins()
+    except Exception as e:
+        print(f'[!!] WARNING: Plugin loading failed: {e}', flush=True)
+    finally:
+        # Released on every exit path, so a raising discovery cannot leave
+        # /api/plugins and plugin pages answering 503 for the process lifetime.
+        PLUGINS_READY.set()
+
+    try:
         from api.talaria_relay import start_talaria_relay_publisher
         start_talaria_relay_publisher()
     except Exception as e:
-        print(f'[!!] WARNING: Plugin loading failed: {e}', flush=True)
+        print(f'[!!] WARNING: Talaria relay publisher failed to start: {e}', flush=True)

@@ -29,10 +29,16 @@ GATE_WAIT_SECONDS = 0.5
 class _Boot:
     """Handle on one in-process server started from ``server.main()``."""
 
-    def __init__(self, recovery_error):
+    def __init__(self, recovery_error, plugins_error=None):
         self.recovery_error = recovery_error
         self.recovery_started = threading.Event()
         self.release_recovery = threading.Event()
+        # Plugin discovery runs after recovery; released by default so tests
+        # that only exercise the recovery gate never wait on it.
+        self.plugins_error = plugins_error
+        self.plugins_started = threading.Event()
+        self.release_plugins = threading.Event()
+        self.release_plugins.set()
         self.deferred_finished = threading.Event()
         self.auto_install_calls = []
         self.httpd = None
@@ -71,8 +77,8 @@ def boot_server(monkeypatch):
 
     boots = []
 
-    def _start(*, recovery_error=None):
-        boot = _Boot(recovery_error)
+    def _start(*, recovery_error=None, plugins_error=None):
+        boot = _Boot(recovery_error, plugins_error)
 
         def fake_recovery(*_args, **_kwargs):
             boot.recovery_started.set()
@@ -80,6 +86,12 @@ def boot_server(monkeypatch):
             if boot.recovery_error is not None:
                 raise boot.recovery_error
             return {"restored": 0, "scanned": 0}
+
+        def fake_load_plugins(*_args, **_kwargs):
+            boot.plugins_started.set()
+            assert boot.release_plugins.wait(timeout=30), "plugin gate never released"
+            if boot.plugins_error is not None:
+                raise boot.plugins_error
 
         monkeypatch.setattr(session_recovery, "recover_all_sessions_on_startup", fake_recovery)
         monkeypatch.setattr(config, "verify_hermes_imports", lambda: (True, [], {}))
@@ -100,7 +112,7 @@ def boot_server(monkeypatch):
         monkeypatch.setattr(background_process, "start_session_channel_reaper", lambda *a, **k: False)
         monkeypatch.setattr(background_process, "stop_session_channel_reaper", lambda *a, **k: None)
         monkeypatch.setattr(session_lifecycle, "drain_all_on_shutdown", lambda *a, **k: None)
-        monkeypatch.setattr(plugins, "load_plugins", lambda *a, **k: None)
+        monkeypatch.setattr(plugins, "load_plugins", fake_load_plugins)
         # Last call in run_deferred_startup — signals the thread ran to the end.
         monkeypatch.setattr(
             talaria_relay,
@@ -118,6 +130,7 @@ def boot_server(monkeypatch):
         monkeypatch.setattr(server, "HOST", "127.0.0.1")
         monkeypatch.setattr(server, "PORT", 0)  # ephemeral; real port read back off httpd
         monkeypatch.setattr(startup, "STARTUP_READY", threading.Event())
+        monkeypatch.setattr(startup, "PLUGINS_READY", threading.Event())
         monkeypatch.setattr(startup, "STARTUP_WAIT_SECONDS", GATE_WAIT_SECONDS)
 
         boot.main_thread = threading.Thread(target=server.main, daemon=True)
@@ -133,6 +146,7 @@ def boot_server(monkeypatch):
 
     for boot in boots:
         boot.release_recovery.set()
+        boot.release_plugins.set()
         if boot.httpd is not None:
             boot.httpd.shutdown()
         if boot.main_thread is not None:
