@@ -2370,8 +2370,64 @@ function _installOwnedLiveStreamSource(sessionId, streamId, ownerGeneration, sou
   if(existing&&existing.source&&existing.source!==source){
     try{if(existing.source.readyState!==2)existing.source.close();}catch(_){ }
   }
-  LIVE_STREAMS[sessionId]={streamId,source,ownerGeneration};
+  LIVE_STREAMS[sessionId]={streamId,source,ownerGeneration,healthy:false};
+  // Every (re)attach is a gap the pollers must close: a prompt published
+  // between the last poll and this subscribe is on neither channel.
+  _notifyChatStreamHealth(sessionId,false);
   return true;
+}
+
+// HWEB-69: chat-stream health signal. Health lives on the LIVE_STREAMS entry
+// so a torn-down stream reads unhealthy for free; `open` marks it healthy and
+// the stream's error handler clears it. Only the source that is currently
+// installed may flip it — a stale reconnect probe's error must not touch the
+// live transport's state.
+const _chatStreamHealthListeners=new Set();
+function chatStreamIsHealthy(sid){const live=LIVE_STREAMS[sid];return !!(live&&live.healthy);}
+function _notifyChatStreamHealth(sid,healthy){
+  for(const fn of Array.from(_chatStreamHealthListeners)) fn(sid,healthy);
+}
+function _setChatStreamHealth(sid,source,healthy){
+  const live=LIVE_STREAMS[sid];
+  if(!live||live.source!==source||live.healthy===healthy) return;
+  live.healthy=healthy;
+  _notifyChatStreamHealth(sid,healthy);
+}
+
+// The approval and clarify polls duplicate frames the per-turn chat stream
+// already pushes, so while that stream is healthy they drop to a 15 s safety
+// cadence (the subscriber queue is bounded and may drop a frame for a slow
+// consumer). Any (re)attach or error runs one catch-up tick and restores the
+// fast cadence until the stream reports `open` again. Wraps startVisiblePoll,
+// so the hidden-tab gate still applies to every tick. Returns the stop
+// function; it releases the interval and the health listener together.
+const STREAM_HEALTHY_SAFETY_POLL_MS=15000;
+function startStreamGatedPoll(sid,tick,ms){
+  let stop=null,armedHealthy=null;
+  const arm=healthy=>{
+    if(stop) stop();
+    armedHealthy=healthy;
+    stop=startVisiblePoll(run,healthy?STREAM_HEALTHY_SAFETY_POLL_MS:ms);
+  };
+  // Re-check on every tick: closeLiveStream() drops the entry without a health
+  // event, and a poll left at the slow cadence over a dead stream is the one
+  // state this gate must never settle into.
+  function run(){
+    const healthy=chatStreamIsHealthy(sid);
+    if(healthy!==armedHealthy) arm(healthy);
+    tick();
+  }
+  const onHealth=(hsid,healthy)=>{
+    if(hsid!==sid||!stop) return;
+    arm(healthy);
+    if(!healthy&&tabIsVisibleForPolling()) tick();
+  };
+  _chatStreamHealthListeners.add(onHealth);
+  arm(chatStreamIsHealthy(sid));
+  return function stopStreamGatedPoll(){
+    _chatStreamHealthListeners.delete(onHealth);
+    if(stop){stop();stop=null;}
+  };
 }
 const _STREAM_NOTIFICATION_BACKGROUND={};
 
@@ -6489,6 +6545,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!_installOwnedLiveStreamSource(
       activeSid,streamId,_streamOwnerGeneration,source,expectedSource
     )) return false;
+    source.addEventListener('open',()=>_setChatStreamHealth(activeSid,source,true));
 
     // Note on #631 Bug B: the original PR description stated the server
     // "replays buffered token events" on reconnect, and proposed resetting
@@ -7567,6 +7624,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('error',async e=>{
+      _setChatStreamHealth(activeSid,source,false);
       if(_bailOutOfTerminalEventsFromStaleStream(source) && !_streamFinalized){
         return;
       }
@@ -8863,8 +8921,9 @@ function _startApprovalFallbackPoll(sid) {
   // turn). startVisiblePoll fires one catch-up tick the instant the tab is shown
   // again, so the card is current within a tick of the user coming back.
   // 1500ms matches the v0.50.247 polling cadence so degraded-mode users see the
-  // same responsiveness.
-  _approvalPollStop = startVisiblePoll(_tick, 1500);
+  // same responsiveness. While the chat stream is healthy it already pushes
+  // `approval` frames, so the gate drops this to the 15 s safety cadence.
+  _approvalPollStop = startStreamGatedPoll(sid, _tick, 1500);
   // Store the stop function before the first tick: _tick can decide the session
   // is gone and call stopApprovalPolling() synchronously, and a stop that ran
   // before the assignment would leave the interval running.
@@ -10235,10 +10294,11 @@ function _startClarifyFallbackPoll(sid) {
       inFlight = false;
     }
   };
-  // Visible-only, same reasoning as the approval fallback poll: the clarify card
-  // is invisible to a backgrounded tab, and startVisiblePoll's catch-up tick
-  // brings it current within one interval of the tab regaining focus.
-  _clarifyFallbackStop = startVisiblePoll(_tick, 3000);
+  // Visible-only and stream-gated, same reasoning as the approval fallback poll:
+  // the clarify card is invisible to a backgrounded tab, the catch-up tick
+  // brings it current within one interval of the tab regaining focus, and a
+  // healthy chat stream already pushes `clarify` frames.
+  _clarifyFallbackStop = startStreamGatedPoll(sid, _tick, 3000);
   // Assignment before the first tick, same reason as the approval poll: _tick
   // calls stopClarifyPolling() synchronously when the session no longer matches.
   if (tabIsVisibleForPolling()) _tick();

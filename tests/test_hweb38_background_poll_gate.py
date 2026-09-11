@@ -54,8 +54,11 @@ def test_shared_driver_gates_and_releases():
 
 
 def test_every_previously_ungated_poller_uses_the_driver():
-    assert "_approvalPollStop = startVisiblePoll(_tick, 1500);" in MESSAGES_JS
-    assert "_clarifyFallbackStop = startVisiblePoll(_tick, 3000);" in MESSAGES_JS
+    # HWEB-69 wraps these two in the chat-stream health gate; that wrapper
+    # still runs every tick through startVisiblePoll.
+    assert "_approvalPollStop = startStreamGatedPoll(sid, _tick, 1500);" in MESSAGES_JS
+    assert "_clarifyFallbackStop = startStreamGatedPoll(sid, _tick, 3000);" in MESSAGES_JS
+    assert "stop=startVisiblePoll(run,healthy?STREAM_HEALTHY_SAFETY_POLL_MS:ms);" in MESSAGES_JS
     # The start tick is gated too, and runs only after the stop function is
     # stored — a first tick that stops the poller must not be overwritten.
     assert MESSAGES_JS.count("if (tabIsVisibleForPolling()) _tick();") == 2
@@ -260,8 +263,16 @@ _HARNESS = textwrap.dedent(
     global._currentPanel = 'logs';
     global.loadLogs = () => record('/api/logs');
 
+    // HWEB-69 stream gate: no live chat stream in this harness, so the
+    // approval/clarify pollers stay on their fast cadence.
+    global.LIVE_STREAMS = {};
+    global._chatStreamHealthListeners = new Set();
+    global.STREAM_HEALTHY_SAFETY_POLL_MS = 15000;
+
     eval(extractFn(UI, 'tabIsVisibleForPolling'));
     eval(extractFn(UI, 'startVisiblePoll'));
+    eval(extractFn(MSG, 'chatStreamIsHealthy'));
+    eval(extractFn(MSG, 'startStreamGatedPoll'));
     eval(extractFn(MSG, '_startApprovalFallbackPoll'));
     eval(extractFn(MSG, '_startClarifyFallbackPoll'));
     eval(extractFn(PAN, '_startCronWatch'));
