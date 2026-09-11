@@ -1958,3 +1958,65 @@ def test_live_journal_snapshot_orders_pre_text_compression_before_later_activity
     # The relative order of the reasoning and interim rows is existing behavior
     # this fix does not change; only the compression divider's position is.
     assert {row[1] for row in rows[1:]} == {"reasoning", "token"}
+
+
+def _compression_passes(snapshot):
+    return [
+        row.get("compression_pass")
+        for row in snapshot["anchor_activity_scene"]["activity_rows"]
+        if row.get("role") == "lifecycle"
+    ]
+
+
+def test_live_journal_snapshot_keeps_pre_text_compression_after_earlier_tool(monkeypatch):
+    """HWEB-68: a burst-0 pass renders after the burst-0 tool that ran first."""
+    snapshot = _compression_journal_snapshot(
+        monkeypatch,
+        [
+            ("tool", {"tid": "t1", "name": "x", "args": {}}),
+            ("tool_complete", {"tid": "t1", "name": "x", "snippet": "ok"}),
+            ("compressing", {"message": "Compressing context"}),
+        ],
+    )
+
+    assert [row[:3] for row in _visible_scene_rows(snapshot)] == [
+        ("tool", "tool_complete", "completed"),
+        ("lifecycle", "compressing", "running"),
+    ]
+
+
+def test_live_journal_snapshot_orphan_compressed_does_not_collide_with_next_pass(monkeypatch):
+    """HWEB-68: a `compressed` whose start fell out of the tail window keeps its own identity."""
+    journal = [
+        ("compressed", {"message": "Compression finished"}),
+        ("token", {"text": "a"}),
+        ("compressing", {"message": "Compressing context"}),
+    ]
+    snapshot = _compression_journal_snapshot(monkeypatch, journal)
+
+    assert _visible_scene_rows(snapshot) == [
+        ("lifecycle", "compressed", "completed", "Context auto-compressed"),
+        ("prose", "token", "completed", "a"),
+        ("lifecycle", "compressing", "running", "Compressing context"),
+    ]
+    passes = _compression_passes(snapshot)
+    assert len(set(passes)) == 2
+    # Identity is the journal seq of the pass's opening event (own seq when the
+    # opening `compressing` is outside the window), not a running counter.
+    assert passes == [1, 3]
+    assert _compression_passes(_compression_journal_snapshot(monkeypatch, journal)) == passes
+
+
+def test_live_journal_snapshot_compressed_shares_identity_with_its_compressing(monkeypatch):
+    snapshot = _compression_journal_snapshot(
+        monkeypatch,
+        [
+            ("token", {"text": "a"}),
+            ("compressing", {"message": "Compressing context"}),
+            ("compressed", {"message": "Compression finished"}),
+            ("token", {"text": "b"}),
+            ("compressing", {"message": "Compressing context"}),
+        ],
+    )
+
+    assert _compression_passes(snapshot) == [2, 2, 5]

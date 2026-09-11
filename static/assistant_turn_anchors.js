@@ -997,7 +997,9 @@
     const text=_activityRowText(event);
     const toolCallId=_activityRowToolId(event,kind);
     const sanitizedPayload=_sanitizePayload(payload);
+    const compressionPass=_own(sanitizedPayload,'compression_pass');
     return Object.freeze({
+      ...(compressionPass!=null?{compression_pass:compressionPass}:{}),
       row_id:_activityRowId(event,index),
       order_index:index,
       kind,

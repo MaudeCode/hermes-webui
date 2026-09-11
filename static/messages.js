@@ -5048,6 +5048,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         payload.activitySegmentSeq=payload.activitySegmentSeq||row.group.activity_segment_seq;
         payload.activityBurstId=payload.activityBurstId||row.group.activity_burst_id;
       }
+      // Server-projected compaction rows carry their pass identity as a
+      // top-level field. Drop it here and every registry-rebuilt row keys as
+      // bare `lifecycle:compression`, collapsing a multi-pass turn to one card.
+      if(row.compression_pass!=null&&payload.compression_pass==null) payload.compression_pass=row.compression_pass;
       const rowIdentity=(row.identity&&typeof row.identity==='object')?row.identity:{};
       const sourceEvent={
         ...payload,
