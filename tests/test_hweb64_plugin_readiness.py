@@ -11,8 +11,6 @@ from __future__ import annotations
 import json
 import time
 
-import pytest
-
 from tests import test_hweb35_deferred_startup as _hweb35
 
 GATE_WAIT_SECONDS = _hweb35.GATE_WAIT_SECONDS
@@ -78,6 +76,11 @@ def test_enabled_plugin_page_does_not_404_during_discovery(boot_server, monkeypa
     assert "text/html" in headers.get("Content-Type", ""), headers
     assert headers.get("Retry-After") == "5"
     assert 'http-equiv="refresh"' in body, body
+    # The in-app plugin iframe is same-origin; the shared security headers
+    # (X-Frame-Options: DENY, frame-ancestors 'none') would block this document
+    # from loading in it, so the refresh would never run.
+    assert "X-Frame-Options" not in headers, headers
+    assert "frame-ancestors" not in headers.get("Content-Security-Policy", ""), headers
 
     # Discovery publishes, exactly as load_plugins() does, then releases.
     plugins.PLUGIN_MANIFESTS.update({"demo": {"name": "demo", "label": "Demo", "tab": {"path": "/demo"}}})
@@ -127,24 +130,47 @@ def test_plugin_gate_fails_open_when_no_deferred_startup_was_armed():
     assert startup.await_plugins_ready(handler=None, parsed=None) is True
 
 
-# The worker re-raises after its finally so the traceback still reaches the
-# thread excepthook in production; pytest reports that as a warning.
-@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
-def test_every_readiness_event_is_released_when_a_step_escapes_its_guard(monkeypatch):
-    """A raise that escapes an earlier step must not leave later gates armed forever."""
+def test_a_step_escaping_its_guard_does_not_skip_plugin_discovery(monkeypatch):
+    """A raise out of an earlier step must neither strand PLUGINS_READY nor
+    set it without attempting discovery (an empty registry read as authoritative)."""
     import threading
 
-    from api import startup
+    from api import plugins, startup, talaria_relay
 
     for name in ("STARTUP_READY", "AGENT_DEPS_READY", "PLUGINS_READY"):
         monkeypatch.setattr(startup, name, threading.Event())
+    calls = []
+    monkeypatch.setattr(startup, "_recover_sessions_step", lambda: calls.append("recover"))
 
-    def boom():
+    def deps_step_escapes_its_guard():
+        # e.g. the post-repair print() hitting a closed stdout — nothing set yet.
         raise BrokenPipeError("stdout closed")
 
-    monkeypatch.setattr(startup, "_run_deferred_startup_steps", boom)
+    monkeypatch.setattr(startup, "_repair_agent_deps_step", deps_step_escapes_its_guard)
+    monkeypatch.setattr(startup, "_start_background_workers_step", lambda: calls.append("workers"))
+    monkeypatch.setattr(plugins, "load_plugins", lambda: calls.append("load_plugins"))
+    monkeypatch.setattr(talaria_relay, "start_talaria_relay_publisher", lambda: calls.append("relay"))
+
     thread = startup.start_deferred_startup()
     thread.join(timeout=10)
     assert not thread.is_alive()
-    for name in ("STARTUP_READY", "AGENT_DEPS_READY", "PLUGINS_READY"):
-        assert getattr(startup, name).is_set(), f"{name} left armed after the worker died"
+    assert calls == ["recover", "workers", "load_plugins", "relay"], calls
+    assert startup.PLUGINS_READY.is_set(), "PLUGINS_READY left armed after an earlier step raised"
+
+
+def test_plugin_gate_sets_plugins_ready_only_after_discovery_was_attempted(monkeypatch):
+    """PLUGINS_READY means 'discovery ran', not 'the worker exited'."""
+    import threading
+
+    from api import plugins, startup
+
+    monkeypatch.setattr(startup, "PLUGINS_READY", threading.Event())
+    seen = []
+
+    def load_plugins():
+        seen.append(startup.PLUGINS_READY.is_set())
+
+    monkeypatch.setattr(plugins, "load_plugins", load_plugins)
+    startup._load_plugins_step()
+    assert seen == [False], "PLUGINS_READY was set before discovery ran"
+    assert startup.PLUGINS_READY.is_set()

@@ -922,11 +922,17 @@ gets the same retryable JSON 503 (`condition: "startup_recovery"`, `phase:
 pages and assets are browser navigations and sandboxed iframe loads with no
 `api()` to retry for them, so their 503 is an HTML document
 (`PLUGIN_PAGE_STARTING_HTML`) with `<meta http-equiv="refresh" content="5">` that
-re-requests itself until the real page serves. `/plugins/plugin.css` reads the
-plugin directory, not the registry, and is not gated. The event is set in a
-`finally` around `load_plugins()`, and `run_deferred_startup()` wraps every step
-in one more `finally` that sets all three events, so a raise that escapes a
-step's own guard cannot leave a later dimension armed for the process lifetime.
+re-requests itself until the real page serves. That document is sent with the
+plugin page's own headers (`Content-Security-Policy: sandbox`), not
+`api.helpers.t()`'s blanket `X-Frame-Options: DENY` / `frame-ancestors 'none'`,
+which would stop the same-origin plugin iframe from loading it at all.
+`/plugins/plugin.css` reads the plugin directory, not the registry, and is not
+gated. The event is set in a `finally` around `load_plugins()`, and
+`run_deferred_startup()` runs each step (`_recover_sessions_step`,
+`_repair_agent_deps_step`, `_start_background_workers_step`, `_load_plugins_step`,
+`_start_talaria_relay_step`) under its own guard, so a raise that escapes one
+step's guard neither skips discovery (which would strand `PLUGINS_READY`) nor
+publishes an empty registry as authoritative.
 
 ---
 

@@ -281,15 +281,22 @@ def _send_plugins_starting(handler, path: str) -> None:
     if path.startswith('/api/'):
         _send_still_starting(handler, PLUGINS_PHASE)
         return
-    from api.helpers import t
+    # Not api.helpers.t(): its blanket security headers (X-Frame-Options: DENY,
+    # frame-ancestors 'none') would block the same-origin plugin iframe from
+    # loading this document at all, so its refresh would never run. Mirror the
+    # headers the real plugin page is served with instead.
+    body = PLUGIN_PAGE_STARTING_HTML.encode('utf-8')
     handler.close_connection = True
-    t(
-        handler,
-        PLUGIN_PAGE_STARTING_HTML,
-        status=503,
-        content_type='text/html; charset=utf-8',
-        extra_headers={'Retry-After': '5'},
-    )
+    handler.send_response(503)
+    handler.send_header('Content-Type', 'text/html; charset=utf-8')
+    handler.send_header('Content-Security-Policy', 'sandbox')
+    handler.send_header('X-Content-Type-Options', 'nosniff')
+    handler.send_header('Cache-Control', 'no-store')
+    handler.send_header('Retry-After', '5')
+    handler.send_header('Content-Length', str(len(body)))
+    handler.send_header('Connection', 'close')
+    handler.end_headers()
+    handler.wfile.write(body)
 
 
 def await_plugins_ready(handler, parsed) -> bool:
@@ -341,21 +348,32 @@ def run_deferred_startup() -> None:
     runs first and releases the readiness event as soon as it settles — success
     or failure — so a slow pip install or plugin import can never hold a
     request.
+
+    Each step guards its own readiness event, but a raise that escapes a step's
+    guard (a print() on a closed stdout, an import error in the step itself)
+    must not skip the steps after it: a skipped discovery would leave
+    PLUGINS_READY armed forever, and setting it without attempting discovery
+    would publish an empty registry as authoritative. So every step is also
+    isolated here, and each event is set only once its own step has run.
     """
-    try:
-        _run_deferred_startup_steps()
-    finally:
-        # Each step guards its own event, but a raise that escapes a step's
-        # guard (a print() on a closed stdout, an import error in the step
-        # itself) would exit this thread before the later steps ever arm their
-        # events — leaving their consumers 503ing for the process lifetime.
-        STARTUP_READY.set()
-        AGENT_DEPS_READY.set()
-        PLUGINS_READY.set()
+    for step in (
+        _recover_sessions_step,
+        _repair_agent_deps_step,
+        _start_background_workers_step,
+        _load_plugins_step,
+        _start_talaria_relay_step,
+    ):
+        try:
+            step()
+        except Exception as exc:
+            try:
+                print(f'[!!] WARNING: deferred startup step {step.__name__} failed: {exc}', flush=True)
+            except Exception:
+                pass  # stdout may be what raised; the next step still runs
 
 
-def _run_deferred_startup_steps() -> None:
-    from api.config import SESSION_DIR, verify_hermes_imports, _HERMES_FOUND
+def _recover_sessions_step() -> None:
+    from api.config import SESSION_DIR
 
     try:
         from api.models import _active_state_db_path
@@ -374,6 +392,10 @@ def _run_deferred_startup_steps() -> None:
         # Released on every exit path, so a raising recovery cannot wedge every
         # /api/ request behind the readiness bound for the process lifetime.
         STARTUP_READY.set()
+
+
+def _repair_agent_deps_step() -> None:
+    from api.config import verify_hermes_imports, _HERMES_FOUND
 
     try:
         ok, missing, errors = verify_hermes_imports()
@@ -397,6 +419,8 @@ def _run_deferred_startup_steps() -> None:
         # agent-dependent actions waiting for a repair that is no longer running.
         AGENT_DEPS_READY.set()
 
+
+def _start_background_workers_step() -> None:
     try:
         from api.gateway_watcher import start_watcher
 
@@ -424,6 +448,8 @@ def _run_deferred_startup_steps() -> None:
     except Exception as e:
         print(f'[!!] WARNING: SessionChannel reaper failed to start: {e}', flush=True)
 
+
+def _load_plugins_step() -> None:
     try:
         from api.plugins import load_plugins
         load_plugins()
@@ -434,8 +460,7 @@ def _run_deferred_startup_steps() -> None:
         # /api/plugins and plugin pages answering 503 for the process lifetime.
         PLUGINS_READY.set()
 
-    try:
-        from api.talaria_relay import start_talaria_relay_publisher
-        start_talaria_relay_publisher()
-    except Exception as e:
-        print(f'[!!] WARNING: Talaria relay publisher failed to start: {e}', flush=True)
+
+def _start_talaria_relay_step() -> None:
+    from api.talaria_relay import start_talaria_relay_publisher
+    start_talaria_relay_publisher()
