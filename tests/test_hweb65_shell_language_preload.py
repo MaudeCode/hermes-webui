@@ -7,7 +7,8 @@ diverged (new browser profile, another tab changed the setting, localStorage
 cleared) the page fetched and painted the stale locale, then a third bundle.
 
 The server now emits its resolved language in ``__HERMES_CONFIG__``; the
-preload and ``loadLocale()`` read it first, mirroring boot.js's precedence.
+preload and ``loadLocale()`` read it first, mirroring boot.js's precedence,
+without depending on localStorage being readable or writable.
 """
 import json
 import re
@@ -101,10 +102,12 @@ _RESOURCES = """() => performance.getEntriesByType('resource')
     .map(e => e.name).filter(n => /\\/static\\/i18n\\.js\\b/.test(n))"""
 
 
-def _load_with_local_storage(browser, lang):
+def _load_with_local_storage(browser, lang, init_script=None):
     """Load `/` with `hermes-lang` already set, the way a stale profile has it."""
     ctx = browser.new_context(viewport={"width": 1280, "height": 800})
-    ctx.add_init_script(f"localStorage.setItem('hermes-lang', {json.dumps(lang)})")
+    ctx.add_init_script(
+        init_script or f"localStorage.setItem('hermes-lang', {json.dumps(lang)})"
+    )
     page = ctx.new_page()
     # Deferred scripts — the core and the preloaded bundle — have run by
     # DOMContentLoaded; the settings fetch that lets boot.js re-apply the
@@ -172,5 +175,30 @@ def test_unresolvable_server_language_falls_back_to_local_storage(server_languag
             bundles = page2.evaluate(_RESOURCES)
             assert len(bundles) == 1, bundles
             assert page2.evaluate("() => t('copy')") == "Copy"
+        finally:
+            browser.close()
+
+
+def test_server_locale_paints_when_storage_is_unavailable(server_language):
+    """The authoritative locale must not depend on localStorage being writable
+    or even readable (storage disabled, quota exceeded, third-party context)."""
+    pw = pytest.importorskip("playwright.sync_api")
+    server_language("de")
+    blocked = """Object.defineProperty(window, 'localStorage', {
+        get() { throw new DOMException('blocked', 'SecurityError'); }
+    });"""
+    with pw.sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=_BROWSER_ARGS)
+        try:
+            page = _load_with_local_storage(browser, None, init_script=blocked)
+            assert page.evaluate("() => document.documentElement.lang") == "de-DE"
+            assert page.evaluate("() => t('copy')") == "Kopieren"
+            # Give the settings round-trip and any would-be extra fetch time to land.
+            page.wait_for_timeout(1500)
+            bundles = page.evaluate(_RESOURCES)
+            assert len(bundles) <= 2, bundles
+            assert any("lang=de" in b for b in bundles), bundles
+            assert page.evaluate("() => t('copy')") == "Kopieren"
+            assert page.evaluate("() => !LOCALES.de._stub") is True
         finally:
             browser.close()

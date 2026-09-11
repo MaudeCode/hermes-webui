@@ -1778,11 +1778,11 @@
      parser-inserted defer scripts); the same technique sets <base> at the top of
      this file. `&amp;` is mandatory: a bare `&lang=` parses as the &lang; entity. -->
 <!-- The server language setting wins over hermes-lang once settings load (boot.js),
-     so fold it into localStorage here, before i18n.js's loadLocale() reads it: the
-     preload below and first paint then use the authoritative locale instead of a
-     stale one that a third bundle would replace (HWEB-65). An empty value means the
-     stored setting resolved to nothing; fall back to localStorage, then English. -->
-<script>(function(){try{var l=(window.__HERMES_CONFIG__||{}).language;if(l){try{localStorage.setItem('hermes-lang',l);}catch(e){}}else{l=localStorage.getItem('hermes-lang');}if(!l||!/^[A-Za-z][A-Za-z0-9-]{0,14}$/.test(l)||l.toLowerCase()==='en')return;window.__HERMES_I18N_PRELOAD__=l;document.write('<script src="static/i18n.js?v=__WEBUI_VERSION__&amp;lang='+encodeURIComponent(l)+'" defer><\/script>');}catch(e){}})()</script>
+     and i18n.js's loadLocale() applies the same order at boot, so preload from it
+     first: the authoritative locale paints instead of a stale one that a third
+     bundle would replace (HWEB-65). An empty value means the stored setting resolved
+     to nothing; fall back to localStorage, then English. -->
+<script>(function(){try{var l=(window.__HERMES_CONFIG__||{}).language||localStorage.getItem('hermes-lang');if(!l||!/^[A-Za-z][A-Za-z0-9-]{0,14}$/.test(l)||l.toLowerCase()==='en')return;window.__HERMES_I18N_PRELOAD__=l;document.write('<script src="static/i18n.js?v=__WEBUI_VERSION__&amp;lang='+encodeURIComponent(l)+'" defer><\/script>');}catch(e){}})()</script>
 <script src="static/icons.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/assistant_turn_anchors.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/ui.js?v=__WEBUI_VERSION__" defer></script>
