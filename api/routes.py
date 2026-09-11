@@ -14130,6 +14130,30 @@ def _render_index_shell_base() -> str:
     return base
 
 
+def _shell_language() -> str:
+    """The server `language` setting, resolved to a locale code, for the shell.
+
+    boot.js gives the server setting precedence over `hermes-lang` once
+    settings load; emitting it with the shell lets index.html fold it into
+    localStorage before i18n.js reads it, so the locale preload and first paint
+    use the same bundle instead of fetching a stale localStorage locale and
+    then a third one (HWEB-65). The settings read is memoized on file identity,
+    so this costs a stat() per navigation. Returns "" when the stored value
+    resolves to nothing, so the client falls back to localStorage, then
+    English, and emits no bogus `lang=` request.
+    """
+    try:
+        from api import i18n_assets
+
+        lang = load_settings().get("language")
+        return i18n_assets.resolve_code(
+            api_config.get_static_root() / "i18n.js", lang
+        ) or ""
+    except Exception:
+        logger.debug("Failed to resolve the shell language", exc_info=True)
+        return ""
+
+
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
     proxy_result = _handle_extension_sidecar_proxy(handler, parsed, "GET")
@@ -14170,10 +14194,13 @@ def handle_get(handler, parsed) -> bool:
                 csrf_token = ""
 
             # The disk read + process-constant token substitutions are cached;
-            # only the per-session CSRF token and per-request extension tags are
-            # applied here (see _render_index_shell_base).
-            html = _render_index_shell_base().replace(
-                "__CSRF_TOKEN_JSON__", json.dumps(csrf_token)
+            # only the per-session CSRF token, the server language, and the
+            # per-request extension tags are applied here (see
+            # _render_index_shell_base).
+            html = (
+                _render_index_shell_base()
+                .replace("__CSRF_TOKEN_JSON__", json.dumps(csrf_token))
+                .replace("__WEBUI_LANG_JSON__", json.dumps(_shell_language()))
             )
             return t(
                 handler,

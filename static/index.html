@@ -33,7 +33,7 @@
 <script>(function(){function d(){var p=location.pathname||'';if(p.indexOf('/session/')>=0)return true;var s=location.search||'';return /[?&](session|session_id)=[^&]/.test(s);}try{if(d()||localStorage.getItem('hermes-webui-session'))document.documentElement.dataset.sessionBoot='1';}catch(e){if(d())document.documentElement.dataset.sessionBoot='1';}})()</script>
 <link rel="preload" href="static/pwa-startup.js?v=__WEBUI_VERSION__" as="script">
 <script src="static/pwa-startup.js?v=__WEBUI_VERSION__"></script>
-<script>window.__HERMES_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__,csrfToken:__CSRF_TOKEN_JSON__};</script>
+<script>window.__HERMES_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__,csrfToken:__CSRF_TOKEN_JSON__,language:__WEBUI_LANG_JSON__};</script>
 <script>window.__HERMES_WEBUI_BUNDLE_VERSION__='__WEBUI_VERSION__';</script>
 <script>(function(){
   var cfg=window.__HERMES_CONFIG__||{},token=cfg.csrfToken||'';
@@ -1777,7 +1777,12 @@
      the ordering guarantee (a dynamically inserted script is not ordered against
      parser-inserted defer scripts); the same technique sets <base> at the top of
      this file. `&amp;` is mandatory: a bare `&lang=` parses as the &lang; entity. -->
-<script>(function(){try{var l=localStorage.getItem('hermes-lang');if(!l||!/^[A-Za-z][A-Za-z0-9-]{0,14}$/.test(l)||l.toLowerCase()==='en')return;window.__HERMES_I18N_PRELOAD__=l;document.write('<script src="static/i18n.js?v=__WEBUI_VERSION__&amp;lang='+encodeURIComponent(l)+'" defer><\/script>');}catch(e){}})()</script>
+<!-- The server language setting wins over hermes-lang once settings load (boot.js),
+     and i18n.js's loadLocale() applies the same order at boot, so preload from it
+     first: the authoritative locale paints instead of a stale one that a third
+     bundle would replace (HWEB-65). An empty value means the stored setting resolved
+     to nothing; fall back to localStorage, then English. -->
+<script>(function(){try{var l=(window.__HERMES_CONFIG__||{}).language||localStorage.getItem('hermes-lang');if(!l||!/^[A-Za-z][A-Za-z0-9-]{0,14}$/.test(l)||l.toLowerCase()==='en')return;window.__HERMES_I18N_PRELOAD__=l;document.write('<script src="static/i18n.js?v=__WEBUI_VERSION__&amp;lang='+encodeURIComponent(l)+'" defer><\/script>');}catch(e){}})()</script>
 <script src="static/icons.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/assistant_turn_anchors.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/ui.js?v=__WEBUI_VERSION__" defer></script>

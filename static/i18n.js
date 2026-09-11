@@ -26924,6 +26924,8 @@ function _i18nToolSummaryJoinCs(parts) {
 
 // Active locale — defaults to English; overridden by loadLocale() at boot.
 let _locale = LOCALES.en;
+// The resolved code behind _locale; null until loadLocale() has run at boot.
+let _localeCode = null;
 
 // HWEB-37: the server serves this file split — the `en` block plus a metadata
 // stub (`_stub: true`) for every other locale, with the real strings delivered
@@ -27052,19 +27054,29 @@ function t(key, ...args) {
 function setLocale(lang) {
   const resolved = resolveLocale(lang) || 'en';
   _locale = LOCALES[resolved];
+  _localeCode = resolved;
   try { localStorage.setItem('hermes-lang', resolved); } catch (_) {}
   document.documentElement.lang = _locale._speech || resolved;
   return _locale._stub ? _loadLocaleBundle(resolved) : Promise.resolve();
 }
 
 /**
- * Load locale from localStorage (called once at boot, before DOMContentLoaded).
- * Server-persisted preference is applied later in loadSettingsPanel().
+ * Resolve and apply the boot locale (called once, before DOMContentLoaded).
+ * The shell carries the server-persisted language in __HERMES_CONFIG__, and it
+ * takes precedence over localStorage — the same order boot.js re-applies once
+ * settings load — so first paint uses the authoritative locale even when the
+ * two stores disagree or storage is unavailable (HWEB-65).
+ *
+ * An on-demand locale bundle (HWEB-37) calls this again after merging its
+ * strings; that re-entry re-points _locale at the merged object for whatever is
+ * active now, since the user may have switched since boot.
  */
 function loadLocale() {
-  let stored = null;
+  if (_localeCode) { setLocale(_localeCode); return; }
+  let stored = null, server = null;
   try { stored = localStorage.getItem('hermes-lang'); } catch (_) {}
-  setLocale(resolvePreferredLocale(null, stored));
+  try { server = (window.__HERMES_CONFIG__ || {}).language; } catch (_) {}
+  setLocale(resolvePreferredLocale(server, stored));
 }
 
 /**
