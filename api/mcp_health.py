@@ -138,6 +138,30 @@ def _jsonrpc_from_body(raw: bytes) -> dict | None:
     return None
 
 
+def _read_jsonrpc_reply(response) -> dict | None:
+    """Read the body line by line and stop as soon as our reply has arrived.
+
+    A streamable-HTTP server that answers over ``text/event-stream`` commonly
+    leaves the stream open after the initialize event, so a single
+    ``read(n)`` would block until the socket timeout and call a working server
+    unhealthy. Framing on SSE event boundaries (a blank line) lets us return
+    the moment the reply is complete; a plain JSON body simply reads to EOF.
+    The byte cap and the deadline both still hold.
+    """
+    buf = bytearray()
+    deadline = time.monotonic() + PROBE_TIMEOUT_S
+    while len(buf) < _MAX_PROBE_BODY_BYTES and time.monotonic() < deadline:
+        line = response.readline(_MAX_PROBE_BODY_BYTES - len(buf))
+        if not line:
+            break
+        buf += line
+        if line in (b"\n", b"\r\n"):
+            payload = _jsonrpc_from_body(bytes(buf))
+            if payload is not None:
+                return payload
+    return _jsonrpc_from_body(bytes(buf))
+
+
 def _initialize_result(payload: dict | None) -> dict | None:
     """Return the ``initialize`` result only if it is complete.
 
@@ -219,9 +243,7 @@ def _probe_http(url: str, cfg: dict) -> tuple[str, str]:
         with _urlopen(request) as response:
             code = int(getattr(response, "status", None) or response.getcode())
             session_id = response.headers.get("Mcp-Session-Id")
-            # Bounded read: an initialize result is small, and a health probe
-            # must never be the thing that pulls a huge body into memory.
-            payload = _jsonrpc_from_body(response.read(_MAX_PROBE_BODY_BYTES))
+            payload = _read_jsonrpc_reply(response)
             result = _initialize_result(payload)
             if result is not None:
                 protocol_version = result["protocolVersion"]
@@ -320,9 +342,9 @@ def refresh_and_read(servers: dict) -> dict[str, dict]:
     """Schedule due probes and return the verdicts that match ``servers`` *now*.
 
     ``servers`` is the set of servers that *should* be checked — the caller has
-    already dropped disabled ones. State for anything outside that set is
-    discarded, so toggling a server off both stops checking it and clears its
-    stale verdict.
+    already dropped disabled ones. Nothing outside that set is scheduled or
+    read back, so toggling a server off both stops checking it and hides its
+    stale verdict; the entry itself lives on only until its interval lapses.
 
     A verdict is only ever returned for the exact config it was measured
     against. Entries are keyed by the fingerprint of the config that produced
@@ -339,20 +361,14 @@ def refresh_and_read(servers: dict) -> dict[str, dict]:
     current = {str(name): _fingerprint(cfg) for name, cfg in servers.items()}
     configs = {str(name): (cfg if isinstance(cfg, dict) else {}) for name, cfg in servers.items()}
     with _LOCK:
+        # Prune by expiry only, never by "not in this request": a sibling
+        # profile's servers — same name or a different one — must keep their
+        # verdict and interval slot across a switch, or alternating profiles
+        # start an initialize/DELETE cycle every time. Past the interval an
+        # identity would be re-probed anyway, so that is where it is dropped;
+        # the read below is what filters to the identities configured *now*.
         for key in list(_STARTED_AT):
-            name, fingerprint = key
-            if name not in current:
-                keep = False
-            elif fingerprint == current[name]:
-                keep = True
-            else:
-                # Another identity for a still-configured name: a sibling
-                # profile's same-named server. Keep it while its interval would
-                # still suppress a re-probe, so alternating profiles do not
-                # start an initialize/DELETE cycle on every switch. Past that
-                # it would be re-probed anyway, so it is dead weight.
-                keep = (now - _STARTED_AT[key]) < HEALTH_INTERVAL_S
-            if not keep:
+            if (now - _STARTED_AT[key]) >= HEALTH_INTERVAL_S and key[1] != current.get(key[0]):
                 _STARTED_AT.pop(key, None)
                 _STATE.pop(key, None)
         for name, fingerprint in current.items():

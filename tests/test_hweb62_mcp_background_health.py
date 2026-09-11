@@ -128,23 +128,39 @@ class TestProbeVerdicts:
         assert self._probe_body(noisy) == ("healthy", "HTTP 200")
 
     @staticmethod
-    def _response(body: bytes, code: int = 200, headers: dict | None = None):
+    def _response(body: bytes, code: int = 200, headers: dict | None = None, *,
+                  stays_open: bool = False):
+        """A response whose body is served line by line, like an HTTP socket.
+
+        ``stays_open`` models an SSE stream the server never closes: after the
+        last line, the next read blocks until the socket times out.
+        """
         response = MagicMock()
         response.status = code
         response.headers = headers or {}
-        response.read.return_value = body
+        lines = body.splitlines(keepends=True)
+        tail = [TimeoutError("socket timed out")] if stays_open else [b""]
+        response.readline.side_effect = lines + tail
         response.__enter__ = lambda self: self
         response.__exit__ = lambda *a: False
         return response
 
     @classmethod
-    def _probe_body(cls, body: bytes, code: int = 200):
-        response = cls._response(body, code)
+    def _probe_body(cls, body: bytes, code: int = 200, *, stays_open: bool = False):
+        response = cls._response(body, code, stays_open=stays_open)
         with patch("api.mcp_health._urlopen", return_value=response):
             verdict = mcp_health.probe_server("a", {"url": "https://x/mcp"})
-        # Bounded read: a probe must never pull an unbounded body into memory.
-        response.read.assert_called_once_with(mcp_health._MAX_PROBE_BODY_BYTES)
+        # Bounded read: every line request is capped by what is left of the budget.
+        for call in response.readline.call_args_list:
+            assert call.args[0] <= mcp_health._MAX_PROBE_BODY_BYTES
         return verdict
+
+    def test_an_sse_stream_the_server_keeps_open_is_parsed_without_waiting_for_eof(self):
+        """A working server that never closes the stream must not be timed out into unhealthy."""
+        sse = b"event: message\ndata: " + self._INIT_OK + b"\n\n"
+        assert self._probe_body(sse, stays_open=True) == ("healthy", "HTTP 200")
+        # ...but a stream that sends nothing usable before timing out is still down.
+        assert self._probe_body(b": keepalive\n\n", stays_open=True) == ("unhealthy", "timed out")
 
     _INIT_OK = (b'{"jsonrpc":"2.0","id":"hermes-webui-health","result":'
                 b'{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"x"}}}')
@@ -270,6 +286,36 @@ class TestRuntimeStatusMapFold:
         assert runtime["local"]["health"] == "healthy"
         assert runtime["remote"]["health"] == "needs_auth"
 
+    def test_a_cold_connected_row_stays_pending_until_its_probe_settles(self):
+        """connected + cold cache must not read "healthy" with nothing pending, or the
+        re-read that would surface an expired token never fires."""
+        servers = {"web": {"url": "https://web.example/mcp"}}
+        agent = [{"name": "web", "connected": True, "tools": 3}]
+        release = threading.Event()
+
+        def hang(name, cfg):
+            release.wait(10)
+            return ("needs_auth", "HTTP 401")
+
+        try:
+            with patch("api.mcp_health.probe_server", side_effect=hang):
+                cold = _runtime(servers, agent_statuses=agent)
+                assert cold["web"]["health"] == "unknown"
+                assert cold["web"]["health_checked_at"] is None
+                h = _make_handler()
+                with patch("api.routes.get_active_hermes_home", return_value=object()), \
+                     patch("api.routes.get_config_for_profile_home",
+                           return_value={"mcp_servers": servers}), \
+                     patch("api.routes._mcp_runtime_status_by_name", return_value=cold):
+                    _handle_mcp_servers_list(h)
+                assert _payload(h)["health_pending"] is True
+                release.set()
+                _join_health_threads()
+                assert _runtime(servers, agent_statuses=agent)["web"]["health"] == "needs_auth"
+        finally:
+            release.set()
+            _join_health_threads()
+
     def test_a_stale_connected_flag_never_overrules_a_probe_that_saw_a_failure(self):
         """``connected`` can be stale; it may only upgrade "unknown", never a failed probe."""
         servers = {"web": {"url": "https://web.example/mcp"}}
@@ -345,11 +391,13 @@ class TestSchedulingIsBackgroundAndBounded:
         assert [row["health"] for row in mcp_health.snapshot().values()] == ["unhealthy"]
 
         disabled = {"web": {"url": "https://web.example/mcp", "enabled": False}}
-        with patch("api.mcp_health.probe_server", return_value=("unhealthy", "unreachable")):
+        with patch("api.mcp_health.probe_server", return_value=("unhealthy", "unreachable")) as probe:
             runtime = _runtime(disabled)
             _join_health_threads()
-        assert mcp_health.snapshot() == {}
+        probe.assert_not_called()
         assert runtime["web"]["health"] == "not_checked"
+        assert runtime["web"]["health_detail"] == ""
+        assert mcp_health.refresh_and_read({}) == {}
 
     def test_editing_a_server_drops_the_old_verdict_instead_of_waiting_out_the_interval(self):
         """Same name, different url — a different server, so not the same verdict."""
@@ -398,6 +446,21 @@ class TestSchedulingIsBackgroundAndBounded:
             assert _runtime(profile_a)["web"]["health"] == "healthy"
             assert _runtime(profile_b)["web"]["health"] == "healthy"
         assert sorted(probed) == ["https://a.example/mcp", "https://b.example/mcp"]
+
+    def test_profiles_with_disjoint_server_names_do_not_evict_each_other(self):
+        profile_a = {"foo": {"url": "https://foo.example/mcp"}}
+        profile_b = {"bar": {"url": "https://bar.example/mcp"}}
+        probed = []
+        with patch("api.mcp_health.probe_server",
+                   side_effect=lambda n, c: probed.append(n) or ("healthy", "HTTP 200")):
+            for _ in range(5):
+                _runtime(profile_a)
+                _join_health_threads()
+                _runtime(profile_b)
+                _join_health_threads()
+            assert _runtime(profile_a)["foo"]["health"] == "healthy"
+            assert "bar" not in _runtime(profile_a)
+        assert sorted(probed) == ["bar", "foo"]
 
     def test_a_sibling_identity_is_dropped_once_its_interval_has_lapsed(self):
         """Retained identities are bounded: past the interval they would be re-probed anyway."""

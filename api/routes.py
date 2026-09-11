@@ -31059,10 +31059,14 @@ def _mcp_runtime_status_by_name(servers=None) -> dict[str, dict]:
         row = health.get(name) or {}
         state = row.get("health") or "unknown"
         # A live registry connection settles the transports the probe
-        # deliberately does not spawn (stdio). It only ever upgrades "unknown":
-        # ``connected`` can be stale, so it must never overrule a probe that
-        # just saw the server fail or reject our credentials.
-        if state == "unknown" and entry.get("connected"):
+        # deliberately does not spawn (stdio). It only ever upgrades a
+        # *settled* "unknown": ``connected`` can be stale, so it must never
+        # overrule a probe that saw the server fail or reject our credentials —
+        # and on a cold cache it must not pre-empt one either, or the row
+        # reads "healthy" with nothing pending and the re-read that would have
+        # surfaced the expired token never fires.
+        if (state == "unknown" and row.get("checked_at") is not None
+                and entry.get("connected")):
             state = "healthy"
         entry["health"] = state
         entry["health_detail"] = row.get("detail") or ""
