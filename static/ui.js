@@ -1693,9 +1693,15 @@ function _rememberUserRowIntrinsicHeight(sessionMsgIdx, height){
   if(!Number.isFinite(key)||!(height>0)) return;
   _userRowIntrinsicHeightBySessionIdx[key]=Math.round(height);
 }
-function _estimateUserRowIntrinsicHeight(rawText){
+function _estimateUserRowIntrinsicHeight(rawText, expanded){
   const t=String(rawText||'');
   if(!t) return 96;
+  // HWEB-66: a long message the reader has NOT opened renders clipped to the
+  // USER_MSG_COLLAPSE_LINES preview plus its disclosure button, so its real height
+  // is the flat collapsed-row size whatever the text length. Estimating from the
+  // full text there over-reserves by thousands of px for a never-painted row, and
+  // that space collapses on paint — the other half of the #5637/#5638 jump.
+  if(!expanded&&_userMessageNeedsCollapse(t)) return USER_MSG_COLLAPSED_ROW_PX;
   // ~48 half-width chars/line at the mobile user-bubble width (≈90% of a phone viewport),
   // ~22px per line + ~24px row chrome; floored at the stylesheet's 96px so a short row never
   // reserves LESS than today (estimate can only add reserved height for tall rows, never
@@ -1723,7 +1729,7 @@ function _applyUserRowIntrinsicHeight(row, rawText){
   if(!row||!row.style||!row.dataset) return;
   const key=Number(row.dataset.sessionMsgIdx);
   const remembered=Number.isFinite(key)?Number(_userRowIntrinsicHeightBySessionIdx[key])||0:0;
-  const estimate=_estimateUserRowIntrinsicHeight(rawText!=null?rawText:row.dataset.rawText);
+  const estimate=_estimateUserRowIntrinsicHeight(rawText!=null?rawText:row.dataset.rawText, row.dataset.msgExpanded==='1');
   // Reserve the LARGER of the remembered measurement and the content estimate. A remembered
   // height can be a PARTIAL paint: a user row taller than the viewport that only ever had its
   // top slice scrolled through content-visibility:auto reports just the painted portion, not
@@ -1845,7 +1851,7 @@ function _rememberRenderedUserRowIntrinsicHeights(){
     const inView=(r.bottom>=cRect.top-margin)&&(r.top<=cRect.bottom+margin);
     if(!inView) continue;
     const estimate=(typeof _estimateUserRowIntrinsicHeight==='function')
-      ? _estimateUserRowIntrinsicHeight(row.dataset.rawText) : 0;
+      ? _estimateUserRowIntrinsicHeight(row.dataset.rawText, row.dataset.msgExpanded==='1') : 0;
     const h=Math.max(measured, estimate);
     if(!(h>0)) continue;
     const key=Number(row.dataset.sessionMsgIdx);
@@ -9641,6 +9647,15 @@ function copyStatusSessionId(btn){
 // --msg-collapse-lines in style.css — change both together.
 const USER_MSG_COLLAPSE_CHARS=600;
 const USER_MSG_COLLAPSE_LINES=8;
+// Rendered height of a collapsed user row on a coarse-pointer layout, for the
+// contain-intrinsic-size reserve (HWEB-66). Measured in Chromium at 390px/700px:
+// 241px (small font) → 266 (normal) → 290 (large) → 315 (xlarge); 8 clipped
+// lines + the 44px touch-target disclosure + row chrome. Sized to the largest so
+// no font setting under-reserves (under-reserving is the #5638 jump-back); the
+// ~50px over-reserve at the default size is replaced by the real measurement
+// once the row paints. Re-measure when --msg-collapse-lines or the button
+// sizing changes.
+const USER_MSG_COLLAPSED_ROW_PX=320;
 function _userMessageNeedsCollapse(text){
   const s=String(text==null?'':text);
   if(s.length>USER_MSG_COLLAPSE_CHARS) return true;
@@ -9674,6 +9689,14 @@ function toggleMessageExpand(btn){
   btn.setAttribute('aria-expanded',expanded?'false':'true');
   btn.setAttribute('data-i18n',key);
   btn.textContent=t(key);
+  // HWEB-66: the row's real height just changed, so the height remembered in the
+  // other disclosure state is stale — an expanded-state measurement would keep a
+  // now-collapsed row reserving thousands of px on the next rebuild (max() never
+  // lets the smaller state-aware estimate win). Forget it and re-reserve from the
+  // estimate; the next pre-wipe measure pass re-remembers the real size.
+  const sessionIdx=Number(row.dataset.sessionMsgIdx);
+  if(Number.isFinite(sessionIdx)) delete _userRowIntrinsicHeightBySessionIdx[sessionIdx];
+  _applyUserRowIntrinsicHeight(row);
   // Drop this session's cached transcript HTML: it was serialized with the old
   // disclosure state, and the cache fast path in renderMessages reinstalls it
   // verbatim when the reader navigates away and back — reopening a message they

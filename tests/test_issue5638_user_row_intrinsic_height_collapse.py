@@ -103,7 +103,14 @@ function extractFunc(name) {
     i++;
   }
   return src.slice(start, i);
-}"""
+}
+// HWEB-66: the estimator caps a collapsed row, so it needs the shipped collapse
+// threshold beside it. Read the constants out of the source (a direct eval of a
+// `const` would not leak into this scope) so a drift in ui.js is exercised here.
+var USER_MSG_COLLAPSE_CHARS = Number(src.match(/const USER_MSG_COLLAPSE_CHARS=(\d+);/)[1]);
+var USER_MSG_COLLAPSE_LINES = Number(src.match(/const USER_MSG_COLLAPSE_LINES=(\d+);/)[1]);
+var USER_MSG_COLLAPSED_ROW_PX = Number(src.match(/const USER_MSG_COLLAPSED_ROW_PX=(\d+);/)[1]);
+eval(extractFunc('_userMessageNeedsCollapse'));"""
     return prelude + body
 
 
@@ -125,9 +132,17 @@ function makeRow(role, sessionMsgIdx, measuredHeight){
 
 
 def test_estimate_reserves_more_than_96px_for_a_tall_user_message():
-    """A long user message must estimate an intrinsic height well above the flat
-    96px stylesheet fallback, so a rebuilt off-screen row reserves close to its
-    real height and scrollHeight does not collapse."""
+    """A long user message the reader has OPENED must estimate an intrinsic height
+    well above the flat 96px stylesheet fallback, so a rebuilt off-screen row
+    reserves close to its real height and scrollHeight does not collapse.
+
+    HWEB-66: a 2000-char message renders collapsed by default (HWEB-3 clips
+    anything past 600 chars / 8 lines), so its real height is the flat collapsed
+    row size — ~266px at the default font on a phone — not the ~948px the full
+    text would wrap to. The full-text estimate is only right for an expanded row;
+    a collapsed row must estimate the collapsed size instead, or it over-reserves
+    by the difference and that space collapses on paint (the mobile jump-back's
+    other half)."""
     js = UI_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + r"""
 eval(extractFunc('_estimateUserRowIntrinsicHeight'));
@@ -135,16 +150,28 @@ eval(extractFunc('_estimateUserRowIntrinsicHeight'));
 const longText = 'x'.repeat(2000);
 const shortText = 'hi';
 console.log(JSON.stringify({
-  tall: _estimateUserRowIntrinsicHeight(longText),
+  tall: _estimateUserRowIntrinsicHeight(longText, true),
+  collapsed: _estimateUserRowIntrinsicHeight(longText, false),
+  collapsedDefault: _estimateUserRowIntrinsicHeight(longText),
   short: _estimateUserRowIntrinsicHeight(shortText),
+  cap: USER_MSG_COLLAPSED_ROW_PX,
 }));
 """
     m = json.loads(_run_node(source))
-    # A 2000-char row wraps to ~42 lines -> ~948px, far above 96.
+    # An EXPANDED 2000-char row wraps to ~42 lines -> ~948px, far above 96.
     assert m["tall"] > 800, (
-        "a long user message must reserve far more than the flat 96px estimate; "
-        f"got {m['tall']}"
+        "an opened long user message must reserve far more than the flat 96px "
+        f"estimate; got {m['tall']}"
     )
+    # The same text collapsed reserves the flat collapsed-row size (HWEB-66) — and
+    # collapsed is the default, matching how renderMessages builds a row the
+    # reader has not opened.
+    assert m["collapsed"] == m["cap"] == m["collapsedDefault"], (
+        "a collapsed long user message must reserve the collapsed-row height, "
+        f"not its full-text estimate; got {m['collapsed']} / {m['collapsedDefault']} "
+        f"(cap {m['cap']})"
+    )
+    assert m["collapsed"] < m["tall"], "the collapsed reserve must be below the full estimate"
     # A short row must never reserve LESS than today's 96px floor (no regression).
     assert m["short"] == 96, f"short row must floor at 96px, got {m['short']}"
 
@@ -184,18 +211,29 @@ def test_apply_falls_back_to_estimate_before_first_measure():
 eval(extractFunc('_rememberUserRowIntrinsicHeight'));
 eval(extractFunc('_estimateUserRowIntrinsicHeight'));
 eval(extractFunc('_applyUserRowIntrinsicHeight'));
-// sessionIdx 99 was never measured/remembered.
+// sessionIdx 99 was never measured/remembered. The reader opened it (HWEB-3
+// disclosure), so it renders at full height — the row attribute renderMessages
+// stamps from the expand store is what the reserve reads.
 const fresh = makeRow('user', 99, 0);
+fresh.dataset.msgExpanded = '1';
 const longText = 'y'.repeat(1500);
 _applyUserRowIntrinsicHeight(fresh, longText);
 const val = fresh.style.containIntrinsicSize; // 'auto <N>px'
 const px = parseInt(String(val).replace(/[^0-9]/g,''), 10);
-console.log(JSON.stringify({ intrinsic: val, px }));
+// The same never-measured text NOT opened renders collapsed (HWEB-66).
+const collapsed = makeRow('user', 98, 0);
+_applyUserRowIntrinsicHeight(collapsed, longText);
+console.log(JSON.stringify({ intrinsic: val, px, collapsed: collapsed.style.containIntrinsicSize, cap: USER_MSG_COLLAPSED_ROW_PX }));
 """
     m = json.loads(_run_node(source))
+    # 1500 chars / 48 per line -> ~32 lines -> ~728px for the opened row.
     assert m["px"] > 600, (
-        "a never-measured tall row must reserve an estimate well above 96px at "
-        f"build time; got {m['intrinsic']!r}"
+        "a never-measured opened tall row must reserve an estimate well above 96px "
+        f"at build time; got {m['intrinsic']!r}"
+    )
+    assert m["collapsed"] == f"auto {m['cap']}px", (
+        "a never-measured COLLAPSED long row must reserve the collapsed-row height "
+        f"(HWEB-66), not the full-text estimate; got {m['collapsed']!r}"
     )
 
 
@@ -320,3 +358,143 @@ console.log(JSON.stringify({
     )
     assert m["afterClear"] != "auto 5000px", "stale height must not survive the clear"
 
+
+
+# ── HWEB-66: the reserve follows the disclosure state ──
+
+
+def test_collapsed_row_keeps_a_taller_remembered_measurement():
+    """The #5638 invariant survives the cap: a row must never reserve LESS than a
+    real measurement. If a collapsed row measured taller than the flat cap (an
+    attachment strip above the clipped text, say), the remembered value still wins
+    over the collapsed estimate, so scrollHeight cannot collapse on a rebuild.
+
+    Mutation: replace `Math.max(remembered, estimate)` with the collapsed cap for
+    a collapsed row and this fails."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + _fake_row_prelude() + r"""
+eval(extractFunc('_rememberUserRowIntrinsicHeight'));
+eval(extractFunc('_estimateUserRowIntrinsicHeight'));
+eval(extractFunc('_applyUserRowIntrinsicHeight'));
+_rememberUserRowIntrinsicHeight(7, 640);
+const row = makeRow('user', 7, 0);              // collapsed: no msgExpanded flag
+_applyUserRowIntrinsicHeight(row, 'z'.repeat(10000));
+console.log(JSON.stringify({ reserved: row.style.containIntrinsicSize }));
+"""
+    m = json.loads(_run_node(source))
+    assert m["reserved"] == "auto 640px", (
+        "a collapsed row measured taller than the cap must keep its real height; "
+        f"got {m['reserved']!r}"
+    )
+
+
+def _toggle_prelude() -> str:
+    """Fake row + disclosure button for toggleMessageExpand, plus stubs for the
+    collaborators it touches that this test does not exercise (the expand store,
+    i18n, the session HTML cache)."""
+    return r"""
+function _setUserMessageExpanded(){}
+function t(k){ return k; }
+function makeToggleRow(sessionMsgIdx, rawText, expanded){
+  const row = makeRow('user', sessionMsgIdx, 0);
+  row.dataset.rawText = rawText;
+  if(expanded) row.dataset.msgExpanded = '1';
+  const btn = {
+    attrs: {},
+    textContent: '',
+    setAttribute(k, v){ this.attrs[k] = v; },
+    closest(sel){ return sel === '.msg-row' ? row : null; },
+  };
+  return { row, btn };
+}
+"""
+
+
+def test_toggling_the_disclosure_refreshes_the_reserve():
+    """Toggling the disclosure changes the row's real height at that moment, so the
+    reserve must follow: collapsing drops to the collapsed cap even though the
+    expanded measurement was remembered (max() would otherwise pin the row at the
+    stale expanded height on the next rebuild), and expanding again reserves the
+    full-text estimate.
+
+    Mutation: remove the forget + re-apply from toggleMessageExpand and the
+    collapsed row keeps reserving the remembered 5000px."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + _fake_row_prelude() + _toggle_prelude() + r"""
+eval(extractFunc('_rememberUserRowIntrinsicHeight'));
+eval(extractFunc('_estimateUserRowIntrinsicHeight'));
+eval(extractFunc('_applyUserRowIntrinsicHeight'));
+eval(extractFunc('toggleMessageExpand'));
+const text = 'q'.repeat(10000);
+// The row was measured while open (its real expanded height), then rebuilt open.
+_rememberUserRowIntrinsicHeight(7, 5000);
+const { row, btn } = makeToggleRow(7, text, true);
+_applyUserRowIntrinsicHeight(row, text);
+const open = row.style.containIntrinsicSize;
+toggleMessageExpand(btn);                       // -> collapsed
+const collapsed = row.style.containIntrinsicSize;
+const collapsedRemembered = 7 in _userRowIntrinsicHeightBySessionIdx;
+toggleMessageExpand(btn);                       // -> expanded again
+const reopened = row.style.containIntrinsicSize;
+console.log(JSON.stringify({
+  open, collapsed, collapsedRemembered, reopened,
+  expandedFlag: row.dataset.msgExpanded || '',
+  full: _estimateUserRowIntrinsicHeight(text, true),
+  cap: USER_MSG_COLLAPSED_ROW_PX,
+}));
+"""
+    m = json.loads(_run_node(source))
+    assert m["open"] == "auto 5000px", f"sanity: open row reserves the measurement; got {m['open']!r}"
+    assert m["collapsed"] == f"auto {m['cap']}px", (
+        "collapsing must drop the reserve to the collapsed-row height; "
+        f"got {m['collapsed']!r} (stale expanded measurement kept?)"
+    )
+    assert not m["collapsedRemembered"], "the expanded-state measurement must be forgotten on toggle"
+    assert m["reopened"] == f"auto {m['full']}px", (
+        f"re-expanding must reserve the full-text estimate; got {m['reopened']!r}"
+    )
+    assert m["expandedFlag"] == "1", "sanity: the row attribute flipped back to expanded"
+
+
+def test_collapsed_row_cap_covers_the_rendered_collapsed_height():
+    """Re-justifies USER_MSG_COLLAPSED_ROW_PX against the shipped stylesheet in a
+    real browser: a collapsed long user row at the mobile width must render no
+    taller than the cap at every font-size setting (under-reserving is the #5638
+    jump-back), and the cap must stay close to the tallest real height so it does
+    not drift into a loose over-reserve. Measured at the time of writing:
+    241 / 266 / 290 / 315px for small / normal / large / xlarge."""
+    from tests.test_hweb3_user_message_collapse import _page
+
+    playwright, browser, page = _page(390)
+    try:
+        m = page.evaluate(
+            """
+            (sizes) => {
+              const inner = document.getElementById('msgInner');
+              const out = { cap: USER_MSG_COLLAPSED_ROW_PX, heights: {} };
+              sizes.forEach((sz, i) => {
+                document.documentElement.setAttribute('data-font-size', sz);
+                inner.innerHTML = '';
+                const row = window.__hweb3Row('y'.repeat(10000), 9300 + i);
+                inner.appendChild(row);
+                out.heights[sz] = row.getBoundingClientRect().height;
+              });
+              document.documentElement.removeAttribute('data-font-size');
+              return out;
+            }
+            """,
+            ["small", "normal", "large", "xlarge"],
+        )
+    finally:
+        browser.close()
+        playwright.stop()
+    tallest = max(m["heights"].values())
+    for size, h in m["heights"].items():
+        assert h <= m["cap"], (
+            f"collapsed row at font-size={size} renders {h}px, above the "
+            f"{m['cap']}px reserve — raise USER_MSG_COLLAPSED_ROW_PX"
+        )
+    assert m["cap"] <= tallest + 40, (
+        f"USER_MSG_COLLAPSED_ROW_PX={m['cap']} is loose against the tallest real "
+        f"collapsed row ({tallest}px); re-measure and tighten it"
+    )
