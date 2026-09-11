@@ -9656,14 +9656,17 @@ function _userMessageNeedsCollapse(text){
 // re-translates an already rendered control when the reader changes Language,
 // instead of it keeping the previous language until the transcript rerenders.
 // HWEB-67: the clip is CSS-only, so the complete text is always in the
-// accessibility tree. The control is therefore a toggle button (aria-pressed)
-// describing the *visual* state — not a disclosure (aria-expanded/aria-controls),
-// which would claim AT receives a collapsed region it does not.
+// accessibility tree. The control is therefore a plain action button whose
+// name says what the *visual* change will be — not a disclosure
+// (aria-expanded/aria-controls), which would claim AT receives a collapsed
+// region it does not, and not an aria-pressed toggle, whose name must stay
+// constant across states (the visible "Show less" text has to stay inside
+// the accessible name for WCAG 2.5.3 Label in Name).
 function _userMessageBodyHtml(bodyHtml, rawText, expanded){
   if(!_userMessageNeedsCollapse(rawText)) return `<div class="msg-body">${bodyHtml}</div>`;
   const key=expanded?'show_less_message':'show_full_message';
   return `<div class="msg-body"><div class="msg-clip">${bodyHtml}</div></div>`
-    +`<button type="button" class="msg-expand-btn" aria-pressed="${expanded?'true':'false'}"`
+    +`<button type="button" class="msg-expand-btn"`
     +` data-i18n="${key}" data-i18n-aria-label="${key}_visually"`
     +` aria-label="${esc(t(key+'_visually'))}"`
     +` onclick="toggleMessageExpand(this)">${esc(t(key))}</button>`;
@@ -9675,7 +9678,6 @@ function toggleMessageExpand(btn){
   const key=expanded?'show_full_message':'show_less_message';
   if(expanded) delete row.dataset.msgExpanded; else row.dataset.msgExpanded='1';
   _setUserMessageExpanded(row.dataset.msgExpandKey, !expanded);
-  btn.setAttribute('aria-pressed',expanded?'false':'true');
   btn.setAttribute('data-i18n',key);
   btn.setAttribute('data-i18n-aria-label',key+'_visually');
   btn.setAttribute('aria-label',t(key+'_visually'));
@@ -9697,8 +9699,8 @@ function toggleMessageExpand(btn){
 // Clipping is visual only: a link or button below the eighth line stays in the
 // tab order, so a keyboard reader could focus a control inside the hidden
 // overflow. Open the message when focus actually lands past the visible
-// preview, which keeps the focused control on screen and the announced
-// aria-pressed honest. Focus inside the visible preview changes nothing.
+// preview, which keeps the focused control on screen and the button's
+// accessible name honest. Focus inside the visible preview changes nothing.
 if(typeof document!=='undefined'){
   document.addEventListener('focusin',(e)=>{
     const target=e.target;

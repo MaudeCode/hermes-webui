@@ -260,12 +260,13 @@ bubble: a user message longer than 600 characters or 8 lines renders clipped to
 8 lines behind a quiet fade with a **Show full message** / **Show less** button.
 The clip is visual-only (`max-height` + `overflow: hidden` on `.msg-clip`): the
 complete text stays in the accessibility tree at all times, so the button is a
-toggle button — `aria-pressed` reflects the visual state, its accessible name is
-"Show full message visually" / "Show less of message visually", and it carries
-no `aria-expanded` / `aria-controls`, which would falsely claim a collapsed
-region. Keyboard focus landing on a control below the visible boundary opens
-the clip through the same `toggleMessageExpand` path, so the pressed state and
-label stay truthful. The thresholds live in two places that must move
+plain action button whose accessible name states the visual change — "Show full
+message visually" / "Show less of message visually" — and it carries no
+`aria-expanded` / `aria-controls` (which would falsely claim a collapsed
+region) and no `aria-pressed` (a toggle's name must not change with its state,
+and the visible "Show less" text has to stay inside the accessible name).
+Keyboard focus landing on a control below the visible boundary opens the clip
+through the same `toggleMessageExpand` path, so the name stays truthful. The thresholds live in two places that must move
 together — `USER_MSG_COLLAPSE_CHARS` / `USER_MSG_COLLAPSE_LINES` in
 `static/ui.js` and `--msg-collapse-lines` in `static/style.css`. The fade sits
 on the `.msg-clip` wrapper, not on `.msg-body`, so skins that repaint the bubble
