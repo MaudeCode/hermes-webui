@@ -448,6 +448,29 @@ def _start_background_workers_step() -> None:
     except Exception as e:
         print(f'[!!] WARNING: SessionChannel reaper failed to start: {e}', flush=True)
 
+    # HWEB-94: warm the Claude Code transcript parse cache off the request
+    # path so the first /api/sessions after boot does not pay the full
+    # ~/.claude/projects scan. Never gates STARTUP_READY.
+    threading.Thread(
+        target=_prewarm_claude_code_parse_cache,
+        name="webui-claude-code-prewarm",
+        daemon=True,
+    ).start()
+
+
+def _prewarm_claude_code_parse_cache() -> None:
+    """Parse every visible Claude Code JSONL once, mirroring the route's gate."""
+    try:
+        from api.config import load_settings
+        from api.models import get_claude_code_sessions
+
+        settings = load_settings()
+        if not (settings.get('show_cli_sessions') and settings.get('show_claude_code_sessions')):
+            return
+        get_claude_code_sessions()
+    except Exception as e:
+        print(f'[!!] WARNING: Claude Code parse cache prewarm failed: {e}', flush=True)
+
 
 def _load_plugins_step() -> None:
     try:
