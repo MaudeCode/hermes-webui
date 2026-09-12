@@ -21,6 +21,9 @@ vs 9 lines) because an off-by-one there is the whole contract.
 
 from __future__ import annotations
 
+import pathlib
+import re
+
 import pytest
 
 from tests._pytest_port import BASE
@@ -149,6 +152,22 @@ _TOGGLE_JS = """
   return { before, expanded, collapsed };
 }
 """
+
+
+def test_every_locale_keeps_the_visible_label_inside_the_accessible_name():
+    """WCAG 2.5.3 Label in Name: aria-label replaces the button's name, so each
+    locale's *_visually string must contain its visible show_*_message text
+    verbatim or voice-control users cannot target the control by what they see."""
+    src = (pathlib.Path(__file__).resolve().parent.parent / "static" / "i18n.js").read_text(encoding="utf-8")
+    blocks = [(m.start(), m.group(1)) for m in re.finditer(r"^  '?([a-zA-Z-]+)'?: \{$", src, re.M)]
+    assert len(blocks) >= 15, [b[1] for b in blocks]
+    for i, (start, name) in enumerate(blocks):
+        block = src[start:blocks[i + 1][0] if i + 1 < len(blocks) else len(src)]
+        for key in ("show_full_message", "show_less_message"):
+            visible = re.search(rf"^    {key}: '(.*)',$", block, re.M)
+            accessible = re.search(rf"^    {key}_visually: '(.*)',$", block, re.M)
+            assert visible and accessible, (name, key)
+            assert visible.group(1) in accessible.group(1), (name, key, visible.group(1), accessible.group(1))
 
 
 def _page(viewport_width: int):
