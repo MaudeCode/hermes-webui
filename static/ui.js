@@ -1688,9 +1688,20 @@ function _setUserMessageExpanded(identity, expanded){
   const keys=Object.keys(_userMsgExpandedByKey);
   for(let i=0;i<keys.length-USER_MSG_EXPANDED_MAX;i++) delete _userMsgExpandedByKey[keys[i]];
 }
-function _rememberUserRowIntrinsicHeight(sessionMsgIdx, height){
+// HWEB-66: a measurement is only valid for the disclosure state it was taken
+// in — a folded row is ~370px whatever its text, an opened one thousands — so
+// the map is keyed by session index AND state (`7` folded, `7:x` opened). A
+// collapsed rebuild then never reads an expanded measurement through the
+// max() floor, including for duplicate prompts that share one expand identity
+// and fold together when either is collapsed, whether or not the twin is in
+// the DOM at that moment.
+function _userRowIntrinsicHeightKey(sessionMsgIdx, expanded){
   const key=Number(sessionMsgIdx);
-  if(!Number.isFinite(key)||!(height>0)) return;
+  return Number.isFinite(key)?(expanded?key+':x':String(key)):'';
+}
+function _rememberUserRowIntrinsicHeight(sessionMsgIdx, height, expanded){
+  const key=_userRowIntrinsicHeightKey(sessionMsgIdx, expanded);
+  if(!key||!(height>0)) return;
   _userRowIntrinsicHeightBySessionIdx[key]=Math.round(height);
 }
 // HWEB-66: reserve for the .msg-files strip above a user message's text, by
@@ -1705,7 +1716,12 @@ function _rememberUserRowIntrinsicHeight(sessionMsgIdx, height){
 // column; fail closed to 1 per row when the width is unknown. Badges and
 // players are counted one per row so a wrapped long file name never
 // under-reserves (under-reserving is the #5638 jump-back).
-const USER_MSG_FILES_PX={image:102, audio:156, video:272, badge:36, strip:10};
+// A video player is width:100% with a metadata-driven height capped by the
+// stylesheet's 320px max-height (+2px border) on .msg-media-video, so a square or
+// portrait clip stands ~436px tall against the 266px a landscape or not-yet-loaded
+// one measures; reserve the ceiling (322 + 114px editor chrome + 6 gap) so no
+// aspect ratio under-reserves once metadata arrives.
+const USER_MSG_FILES_PX={image:102, audio:156, video:442, badge:36, strip:10};
 function _estimateUserRowFilesHeight(kinds, columnWidth){
   const list=String(kinds||'').split(',').filter(Boolean);
   if(!list.length) return 0;
@@ -1756,10 +1772,11 @@ function _estimateUserRowIntrinsicHeight(rawText, expanded, filesPx){
 }
 function _applyUserRowIntrinsicHeight(row, rawText){
   if(!row||!row.style||!row.dataset) return;
-  const key=Number(row.dataset.sessionMsgIdx);
-  const remembered=Number.isFinite(key)?Number(_userRowIntrinsicHeightBySessionIdx[key])||0:0;
+  const expanded=row.dataset.msgExpanded==='1';
+  const key=_userRowIntrinsicHeightKey(row.dataset.sessionMsgIdx, expanded);
+  const remembered=key?Number(_userRowIntrinsicHeightBySessionIdx[key])||0:0;
   const estimate=_estimateUserRowIntrinsicHeight(rawText!=null?rawText:row.dataset.rawText,
-    row.dataset.msgExpanded==='1', _userRowFilesReserve(row));
+    expanded, _userRowFilesReserve(row));
   // Reserve the LARGER of the remembered measurement and the content estimate. A remembered
   // height can be a PARTIAL paint: a user row taller than the viewport that only ever had its
   // top slice scrolled through content-visibility:auto reports just the painted portion, not
@@ -1791,7 +1808,7 @@ function _measureMessageVirtualRow(inner, entry){
   // extract it without this helper (they stub every collaborator by name).
   if(totalHeight>0 && primary.dataset && primary.dataset.role==='user'
      && typeof _rememberUserRowIntrinsicHeight==='function'){
-    _rememberUserRowIntrinsicHeight(primary.dataset.sessionMsgIdx, totalHeight);
+    _rememberUserRowIntrinsicHeight(primary.dataset.sessionMsgIdx, totalHeight, primary.dataset.msgExpanded==='1');
     primary.style.containIntrinsicSize='auto '+Math.round(totalHeight)+'px';
   }
   return totalHeight;
@@ -1880,16 +1897,17 @@ function _rememberRenderedUserRowIntrinsicHeights(){
     // paint (short row) still wins when it exceeds the estimate.
     const inView=(r.bottom>=cRect.top-margin)&&(r.top<=cRect.bottom+margin);
     if(!inView) continue;
+    const expanded=row.dataset.msgExpanded==='1';
     const estimate=(typeof _estimateUserRowIntrinsicHeight==='function')
-      ? _estimateUserRowIntrinsicHeight(row.dataset.rawText, row.dataset.msgExpanded==='1', _userRowFilesReserve(row)) : 0;
+      ? _estimateUserRowIntrinsicHeight(row.dataset.rawText, expanded, _userRowFilesReserve(row)) : 0;
     const h=Math.max(measured, estimate);
     if(!(h>0)) continue;
-    const key=Number(row.dataset.sessionMsgIdx);
-    const remembered=Number.isFinite(key)?Number(_userRowIntrinsicHeightBySessionIdx[key])||0:0;
+    const key=_userRowIntrinsicHeightKey(row.dataset.sessionMsgIdx, expanded);
+    const remembered=key?Number(_userRowIntrinsicHeightBySessionIdx[key])||0:0;
     // Keep the tallest reserve seen — a row mid-collapse (rebuild transient) can report a
     // shrunken size; never let that overwrite a good taller remembered value.
     if(h>=remembered && typeof _rememberUserRowIntrinsicHeight==='function'){
-      _rememberUserRowIntrinsicHeight(row.dataset.sessionMsgIdx, h);
+      _rememberUserRowIntrinsicHeight(row.dataset.sessionMsgIdx, h, expanded);
       row.style.containIntrinsicSize='auto '+Math.round(h)+'px';
     }
   }
@@ -9720,13 +9738,11 @@ function toggleMessageExpand(btn){
   btn.setAttribute('aria-expanded',expanded?'false':'true');
   btn.setAttribute('data-i18n',key);
   btn.textContent=t(key);
-  // HWEB-66: the row's real height just changed, so the height remembered in the
-  // other disclosure state is stale — an expanded-state measurement would keep a
-  // now-collapsed row reserving thousands of px on the next rebuild (max() never
-  // lets the smaller state-aware estimate win). Forget it and re-reserve from the
-  // estimate; the next pre-wipe measure pass re-remembers the real size.
-  const sessionIdx=Number(row.dataset.sessionMsgIdx);
-  if(Number.isFinite(sessionIdx)) delete _userRowIntrinsicHeightBySessionIdx[sessionIdx];
+  // HWEB-66: the row's real height just changed, so re-reserve for the new
+  // state (remembered heights are keyed by state, so this reads the matching
+  // measurement or falls back to the state-aware estimate). A duplicate prompt
+  // sharing this expand identity folds on its next render and reads its own
+  // state-keyed entry there.
   _applyUserRowIntrinsicHeight(row);
   // Drop this session's cached transcript HTML: it was serialized with the old
   // disclosure state, and the cache fast path in renderMessages reinstalls it

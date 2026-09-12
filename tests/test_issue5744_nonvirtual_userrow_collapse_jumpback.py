@@ -123,6 +123,7 @@ var USER_MSG_COLLAPSED_ROW_PX = Number(src.match(/const USER_MSG_COLLAPSED_ROW_P
 eval(src.match(/const USER_MSG_FILES_PX=\{[^}]*\};/)[0].replace('const', 'var'));
 eval(extractFunc('_estimateUserRowFilesHeight'));
 eval(extractFunc('_userRowFilesReserve'));
+eval(extractFunc('_userRowIntrinsicHeightKey'));
 eval(extractFunc('_userMessageNeedsCollapse'));"""
     return prelude + body
 
@@ -326,8 +327,9 @@ const estimate = _estimateUserRowIntrinsicHeight(longCjk, true);
 const partial = makeRow('user', 3, 0, 500, longCjk, true);
 __rows = [partial];
 _rememberRenderedUserRowIntrinsicHeights();
+// HWEB-66: an opened row's measurement is stored under its state key (`3:x`).
 console.log(JSON.stringify({
-  remembered: _userRowIntrinsicHeightBySessionIdx[3] || 0,
+  remembered: _userRowIntrinsicHeightBySessionIdx['3:x'] || 0,
   estimate: estimate,
 }));
 """

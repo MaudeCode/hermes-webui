@@ -113,6 +113,7 @@ var USER_MSG_COLLAPSED_ROW_PX = Number(src.match(/const USER_MSG_COLLAPSED_ROW_P
 eval(src.match(/const USER_MSG_FILES_PX=\{[^}]*\};/)[0].replace('const', 'var'));
 eval(extractFunc('_estimateUserRowFilesHeight'));
 eval(extractFunc('_userRowFilesReserve'));
+eval(extractFunc('_userRowIntrinsicHeightKey'));
 eval(extractFunc('_userMessageNeedsCollapse'));"""
     return prelude + body
 
@@ -222,8 +223,9 @@ console.log(JSON.stringify({
     assert m["media"] == px["strip"] + px["audio"] + px["video"], m
     assert m["unknownKind"] == px["strip"] + px["badge"], "an unknown kind counts as a badge"
     assert m["viaRow"] == px["strip"] + px["image"] + px["badge"], m
-    # Each figure covers its measured row (96 / 150 / 266 / 29 + the 6px gap).
-    assert px["image"] >= 102 and px["audio"] >= 156 and px["video"] >= 272 and px["badge"] >= 35, px
+    # Each figure covers its measured row (96 / 150 / 29 + the 6px gap); the video
+    # figure covers the stylesheet ceiling (320px max-height + border + 114px chrome).
+    assert px["image"] >= 102 and px["audio"] >= 156 and px["video"] >= 442 and px["badge"] >= 35, px
 
 
 def test_apply_uses_remembered_measured_height_over_estimate():
@@ -465,10 +467,12 @@ def test_toggling_the_disclosure_refreshes_the_reserve():
     reserve must follow: collapsing drops to the collapsed cap even though the
     expanded measurement was remembered (max() would otherwise pin the row at the
     stale expanded height on the next rebuild), and expanding again reserves the
-    full-text estimate.
+    expanded-state measurement. Remembered heights are keyed by disclosure state,
+    so the expanded measurement is neither read by the folded row nor lost.
 
-    Mutation: remove the forget + re-apply from toggleMessageExpand and the
-    collapsed row keeps reserving the remembered 5000px."""
+    Mutation: remove the re-apply from toggleMessageExpand and the collapsed row
+    keeps the 5000px inline reserve; key the map by index alone and the collapsed
+    row reserves the remembered 5000px."""
     js = UI_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + _fake_row_prelude() + _toggle_prelude() + r"""
 eval(extractFunc('_rememberUserRowIntrinsicHeight'));
@@ -477,19 +481,25 @@ eval(extractFunc('_applyUserRowIntrinsicHeight'));
 eval(extractFunc('toggleMessageExpand'));
 const text = 'q'.repeat(10000);
 // The row was measured while open (its real expanded height), then rebuilt open.
-_rememberUserRowIntrinsicHeight(7, 5000);
+_rememberUserRowIntrinsicHeight(7, 5000, true);
 const { row, btn } = makeToggleRow(7, text, true);
 _applyUserRowIntrinsicHeight(row, text);
 const open = row.style.containIntrinsicSize;
 toggleMessageExpand(btn);                       // -> collapsed
 const collapsed = row.style.containIntrinsicSize;
-const collapsedRemembered = 7 in _userRowIntrinsicHeightBySessionIdx;
 toggleMessageExpand(btn);                       // -> expanded again
 const reopened = row.style.containIntrinsicSize;
+// A duplicate prompt sharing the expand identity folds on its next render and
+// reads its own folded-state entry: the twin's expanded measurement is not it.
+_rememberUserRowIntrinsicHeight(9, 5000, true);
+const twin = makeRow('user', 9, 0);
+twin.dataset.rawText = text;                     // folded: no msgExpanded flag
+_applyUserRowIntrinsicHeight(twin);
 console.log(JSON.stringify({
-  open, collapsed, collapsedRemembered, reopened,
+  open, collapsed, reopened,
+  twin: twin.style.containIntrinsicSize,
+  keys: Object.keys(_userRowIntrinsicHeightBySessionIdx),
   expandedFlag: row.dataset.msgExpanded || '',
-  full: _estimateUserRowIntrinsicHeight(text, true),
   cap: USER_MSG_COLLAPSED_ROW_PX,
 }));
 """
@@ -499,10 +509,13 @@ console.log(JSON.stringify({
         "collapsing must drop the reserve to the collapsed-row height; "
         f"got {m['collapsed']!r} (stale expanded measurement kept?)"
     )
-    assert not m["collapsedRemembered"], "the expanded-state measurement must be forgotten on toggle"
-    assert m["reopened"] == f"auto {m['full']}px", (
-        f"re-expanding must reserve the full-text estimate; got {m['reopened']!r}"
+    assert m["reopened"] == "auto 5000px", (
+        f"re-expanding must reserve the expanded-state measurement again; got {m['reopened']!r}"
     )
+    assert m["twin"] == f"auto {m['cap']}px", (
+        f"a folded duplicate must not read its twin's expanded measurement; got {m['twin']!r}"
+    )
+    assert sorted(m["keys"]) == ["7:x", "9:x"], f"expanded measurements are keyed by state; got {m['keys']}"
     assert m["expandedFlag"] == "1", "sanity: the row attribute flipped back to expanded"
 
 
@@ -600,6 +613,7 @@ def test_collapsed_row_reserve_covers_the_rendered_production_row(viewport_width
         slack = m["cap"] - m["rows"][key.split("/")[0] + "/plain"]["real"]
         slack += 102 if variant.startswith("img") else 0          # one fail-closed thumbnail row
         slack += 36 * r["files"] if variant in ("file3", "media") else 0  # badges sharing a row / gap
+        slack += 170 if variant == "media" else 0                  # video ceiling vs landscape/unloaded
         assert r["reserve"] <= r["real"] + slack + 40, (
             f"{key}: reserve {r['reserve']}px is loose against the rendered {r['real']}px "
             f"(allowed slack {slack + 40}px) — tighten USER_MSG_FILES_PX"
