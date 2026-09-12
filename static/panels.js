@@ -7781,6 +7781,10 @@ async function switchToProfile(name) {
     if (_switchGen === _profileSwitchGeneration && typeof _setProfileSwitchListEmbargo === 'function') {
       _setProfileSwitchListEmbargo(false);
     }
+    // End the presence suspension reset() opened for this switch (the latest
+    // switch owns cleanup, matching the embargo guard above). renew() in the
+    // catch already resumed on failure; this covers success and superseding.
+    if (_switchGen === _profileSwitchGeneration && typeof window !== 'undefined' && window.HermesPresence && typeof window.HermesPresence.resume === 'function') window.HermesPresence.resume();
   }
 }
 
@@ -13577,6 +13581,9 @@ async function signOut(){
     const response=await api('/api/auth/logout',{method:'POST',body:'{}'});
     window.location.href=response.trusted_logout_url||'login';
   }catch(e){
+    // Logout did not navigate away; resume renewals so the still-authenticated
+    // tab is not left permanently suspended (#HWEB-97).
+    if(typeof window!=='undefined'&&window.HermesPresence&&typeof window.HermesPresence.resume==='function') window.HermesPresence.resume();
     showToast(t('sign_out_failed')+e.message);
   }
 }

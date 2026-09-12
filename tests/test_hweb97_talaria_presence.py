@@ -439,6 +439,22 @@ def test_sign_out_revokes_presence_before_logout():
     assert "await window.HermesPresence.reset()" in sign_out
 
 
+def test_scope_change_suspends_and_resumes_renewals():
+    panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    sessions = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    presence = (ROOT / "static" / "presence.js").read_text(encoding="utf-8")
+    # reset() suspends; onInput() bails while suspended; resume()/renew() clear it.
+    assert "suspended=true" in presence
+    assert "if(suspended) return;" in presence
+    assert "resume:function(){ suspended=false; }" in presence
+    # Both switch paths resume on every exit, and logout resumes on failure.
+    assert "window.HermesPresence.resume()" in panels
+    assert "window.HermesPresence.resume()" in sessions
+    sign_out = panels[panels.index("async function signOut()"):]
+    sign_out = sign_out[: sign_out.index("async function", 1)]
+    assert "window.HermesPresence.resume()" in sign_out
+
+
 def test_failed_profile_switch_restores_presence():
     panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
     sessions = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
@@ -453,6 +469,63 @@ def test_presence_module_bounds_settlement_without_abortsignal_timeout():
     assert "setTimeout(" in src
     assert "controller.abort()" in src
     assert "AbortSignal.timeout" not in src
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_browser_module_suspends_renewals_during_a_scope_change():
+    harness = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const calls = [];
+let now = 100000;
+Date.now = () => now;
+const docListeners = {}, winListeners = {};
+const document = {
+  visibilityState: 'visible', focused: true, baseURI: 'http://x/',
+  hasFocus(){ return this.focused; },
+  addEventListener(t, fn){ (docListeners[t]=docListeners[t]||[]).push(fn); },
+};
+const pending = [];
+global.location = { href: 'http://x/' };
+global.AbortController = class { constructor(){ this.signal = {}; } abort(){} };
+global.setTimeout = () => 0; global.clearTimeout = () => {};
+global.fetch = (url, opts) => { calls.push(JSON.parse(opts.body)); return new Promise((r)=>pending.push(r)); };
+global.window = { crypto:{ randomUUID:()=>'aaaaaaaabbbbccccddddeeeeeeeeeeee' }, AbortController: global.AbortController, addEventListener(t,fn){ (winListeners[t]=winListeners[t]||[]).push(fn); } };
+global.document = document;
+new Function('document','window','fetch','AbortController','setTimeout','clearTimeout',src)(document,window,global.fetch,global.AbortController,global.setTimeout,global.clearTimeout);
+const fire = (t) => (docListeners[t]||[]).forEach((fn)=>fn({type:t,isTrusted:true}));
+const tick = () => new Promise((r)=>setImmediate(r));
+const flush = async () => { do { while(pending.length) pending.shift()({ok:true}); await tick(); } while(pending.length); };
+(async () => {
+  fire('keydown'); await flush(); const afterFirst = calls.length;      // 1 renewal
+  window.HermesPresence.reset(); await flush(); const afterReset = calls.length; // + 1 revoke
+  now += 60000; fire('keydown'); await flush(); const duringSuspend = calls.length; // no renewal
+  window.HermesPresence.resume();
+  now += 60000; fire('keydown'); await flush(); const afterResume = calls.length;   // + 1 renewal
+  process.stdout.write(JSON.stringify({
+    afterFirst, afterReset, duringSuspend, afterResume,
+    lastActive: calls.length ? calls[calls.length-1].active : null,
+    revokeActive: calls[afterReset-1].active,
+  }));
+})();
+"""
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".cjs", encoding="utf-8", dir=ROOT, delete=False) as script:
+        script.write(harness)
+        script_path = Path(script.name)
+    try:
+        result = subprocess.run(
+            [NODE, str(script_path), str(ROOT / "static" / "presence.js")],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=30,
+        )
+    finally:
+        script_path.unlink(missing_ok=True)
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert out["afterFirst"] == 1
+    assert out["afterReset"] == 2 and out["revokeActive"] is False   # reset revokes
+    assert out["duringSuspend"] == 2, "input during a scope change must not renew"
+    assert out["afterResume"] == 3 and out["lastActive"] is True     # resume re-enables
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")

@@ -22,7 +22,7 @@
     try{ window.crypto.getRandomValues(bytes); }catch(_){ for(var i=0;i<16;i++) bytes[i]=Math.floor(Math.random()*256); }
     return Array.prototype.map.call(bytes,function(b){return ('0'+b.toString(16)).slice(-2);}).join('');
   })();
-  var held=false, lastSent=0, seq=0, inflight=null;
+  var held=false, lastSent=0, seq=0, inflight=null, suspended=false;
 
   function post(active, keepalive){
     seq+=1;
@@ -54,6 +54,10 @@
     return true;
   }
   function onInput(e){
+    // Renewals are suspended for the duration of a scope-changing operation
+    // (profile switch, sign out) so a trusted event mid-flight cannot recreate
+    // a lease under the outgoing profile/session cookie.
+    if(suspended) return;
     if(!qualifies(e)) return;
     var now=Date.now();
     if(held&&now-lastSent<THROTTLE_MS) return;
@@ -87,6 +91,7 @@
     // api() before the switch/logout write — guarantees the revoke reaches the
     // server while the session is still valid and before the cookie flips.
     reset:function(){
+      suspended=true;
       lastSent=0;
       if(!held) return Promise.resolve();
       held=false;
@@ -94,10 +99,16 @@
       inflight=request.then(function(){ if(inflight===request) inflight=null; });
       return inflight;
     },
+    // End the suspension started by reset() once the scope-changing operation
+    // has settled, so the destination profile can renew normally again.
+    resume:function(){ suspended=false; },
     // Re-establish the lease when a profile switch fails and the tab stays on
     // the original profile: the switch click was genuine input, so a visible,
     // focused tab should not be left without a lease after reset() revoked it.
+    // Always ends the suspension, even when it declines to renew, so a failure
+    // while hidden can never strand renewals off.
     renew:function(){
+      suspended=false;
       if(document.visibilityState!=='visible') return Promise.resolve();
       if(typeof document.hasFocus==='function'&&!document.hasFocus()) return Promise.resolve();
       held=true; lastSent=Date.now();

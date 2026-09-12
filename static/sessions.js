@@ -1886,6 +1886,9 @@ async function _switchProfileForSessionLoad(profile){
     // stayed on it, so re-establish presence (#HWEB-97).
     if(typeof window!=='undefined'&&window.HermesPresence&&typeof window.HermesPresence.renew==='function') window.HermesPresence.renew();
     throw switchErr;
+  }finally{
+    // End the presence suspension reset() opened, on both success and failure.
+    if(typeof window!=='undefined'&&window.HermesPresence&&typeof window.HermesPresence.resume==='function') window.HermesPresence.resume();
   }
 }
 
