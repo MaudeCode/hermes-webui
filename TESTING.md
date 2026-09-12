@@ -103,6 +103,61 @@ environment before launching the server, needs no secrets, and does not drive a
 real model (it verifies the app *loads and initializes* cleanly — the brick class
 that breaks the page for everyone).
 
+## Synthetic OIDC login gate (HWEB-72)
+
+`tests/test_hweb72_oidc_synthetic_provider.py` logs in through the real OIDC
+routes over real HTTPS, with nothing production-shaped involved. The module
+fixture owns everything it starts and tears it all down on success, failure and
+interruption:
+
+- a private CA plus leaf certificates generated with `cryptography` under the
+  pytest basetemp;
+- a stdlib `ThreadingHTTPServer` OpenID provider on loopback TLS as
+  `https://idp.localhost:<port>` (discovery, `/authorize`, `/token`, `/jwks`,
+  ES256 ID tokens). It validates the client id, registered redirect URI, S256
+  PKCE and single-use codes, so a malformed WebUI exchange fails at the
+  provider. Scenario knobs (identity, provider error, claim overrides, rogue
+  signer, raw token/JWKS replies, key rotation) live on the fixture object only;
+- a real `server.py` child on loopback TLS (`HERMES_WEBUI_TLS_CERT/KEY`) with an
+  isolated `HERMES_HOME` / `HERMES_WEBUI_STATE_DIR`, inherited OIDC, password
+  and trusted-header credentials stripped, the temporary CA trusted through
+  `SSL_CERT_FILE`, and the issuer host opted in through
+  `webui_oidc.trusted_private_hosts` (the bare `localhost` name is deliberately
+  never trustable, so the issuer uses `idp.localhost`);
+- headless Chromium. The browser context ignores certificate errors for the
+  generated leaf; that is the only certificate exception and it says nothing
+  about browser trust-store behaviour.
+
+Scenarios: browser SSO click-through with `HttpOnly; Secure; SameSite=Lax`
+cookie and no token or cookie in any URL; two identities bound to distinct
+profiles, forged/foreign profile cookies and profile switching, no owner
+exemption for the `default` mapping; denied, claim-less, unmapped and
+provider-declined logins followed by a valid one; tampered state, nonce,
+issuer, audience, signature, expiry and reused code at the callback; the native
+handoff through the browser with the `talaria://` callback captured before
+dispatch and exchanged by a separate client, plus wrong verifier/state/origin,
+cancel and replay; JWKS refresh on key rotation, unknown key, invalid JWKS and
+token-endpoint faults that do not poison the next login; logout, a WebUI
+restart with persisted sessions, and a profile-policy change rejecting an
+existing session; cross-wired browser/native flows.
+
+```bash
+./scripts/test.sh tests/test_hweb72_oidc_synthetic_provider.py -v
+```
+
+Playwright and Chromium come from the same install as the browser smoke
+(`pip install playwright && python -m playwright install chromium`). Without
+them the module skips locally; in CI (`GITHUB_ACTIONS`) or with
+`HERMES_WEBUI_OIDC_E2E_REQUIRED=1` a missing prerequisite, a WebUI that does
+not answer `/health` over TLS, or missing provider traffic fails the run. The
+module runs once per code PR inside the sharded `test` job of `tests.yml`.
+
+Diagnostics: the fixture prints `HWEB-72 artifacts: <dir>` at setup. That
+directory (kept by pytest's basetemp rotation) holds `webui.log`, the
+certificates, `provider-requests.log` (every provider request, written at
+teardown) and `<scenario>.png` screenshots for failed browser steps. Nothing in
+it is reusable: keys, tokens and sessions are minted per run.
+
 ## Public conversation lifecycle gate
 
 Focused reasoning-title contract coverage runs through the repository test
