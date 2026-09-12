@@ -482,11 +482,123 @@ def test_failed_profile_switch_restores_presence():
 
 def test_presence_module_bounds_settlement_without_abortsignal_timeout():
     src = (ROOT / "static" / "presence.js").read_text(encoding="utf-8")
-    # settle() must be bounded even where AbortSignal.timeout is unavailable.
+    # settle() must be bounded even where AbortSignal.timeout is unavailable, and
+    # even where AbortController itself is absent (a plain timer resolves it).
     assert "AbortController" in src
     assert "setTimeout(" in src
     assert "controller.abort()" in src
     assert "AbortSignal.timeout" not in src
+    # response.ok is checked so a failed revoke is not treated as success.
+    assert "response.ok" in src
+    assert "revokeWithRetry" in src
+
+
+def _run_presence_harness(harness: str) -> dict:
+    with tempfile.NamedTemporaryFile("w", suffix=".cjs", encoding="utf-8", dir=ROOT, delete=False) as script:
+        script.write(harness)
+        script_path = Path(script.name)
+    try:
+        result = subprocess.run(
+            [NODE, str(script_path), str(ROOT / "static" / "presence.js")],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=30,
+        )
+    finally:
+        script_path.unlink(missing_ok=True)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+_TIMER_BOOT = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const calls = [];
+let now = 100000;
+Date.now = () => now;
+const docListeners = {}, winListeners = {};
+const document = {
+  visibilityState: 'visible', focused: true, baseURI: 'http://x/',
+  hasFocus(){ return this.focused; },
+  addEventListener(t, fn){ (docListeners[t]=docListeners[t]||[]).push(fn); },
+};
+let nextTimer = 1;
+const timers = new Map();
+global.setTimeout = (cb, ms) => { const id = nextTimer++; timers.set(id, cb); return id; };
+global.clearTimeout = (id) => { timers.delete(id); };
+const runTimers = async () => {
+  let guard = 0;
+  while (timers.size && guard++ < 50) {
+    const [id, cb] = timers.entries().next().value;
+    timers.delete(id);
+    cb();
+    await new Promise((r)=>setImmediate(r));
+  }
+};
+const tick = () => new Promise((r)=>setImmediate(r));
+const fire = (t) => (docListeners[t]||[]).forEach((fn)=>fn({type:t,isTrusted:true}));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_settle_is_bounded_when_abortcontroller_is_absent():
+    harness = _TIMER_BOOT + r"""
+global.AbortController = undefined;
+global.location = { href: 'http://x/' };
+global.fetch = () => new Promise(() => {});  // never resolves
+global.window = { crypto:{ randomUUID:()=>'aaaaaaaabbbbccccddddeeeeeeeeeeee' }, addEventListener(){} };
+global.document = document;
+new Function('document','window','fetch','setTimeout','clearTimeout',src)(
+  document, window, global.fetch, global.setTimeout, global.clearTimeout
+);
+(async () => {
+  fire('keydown'); await tick();          // renewal issued, fetch never resolves
+  let settled = false;
+  window.HermesPresence.settle().then(() => { settled = true; });
+  await tick();
+  const before = settled;
+  await runTimers();                        // the timeout fires and resolves it
+  await tick();
+  process.stdout.write(JSON.stringify({ before, after: settled, hadController: false }));
+})();
+"""
+    out = _run_presence_harness(harness)
+    assert out["before"] is False
+    assert out["after"] is True, "settle() must resolve via the timer with no AbortController"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_reset_retries_a_failed_revoke_before_the_scope_change():
+    harness = _TIMER_BOOT + r"""
+global.AbortController = class { constructor(){ this.signal = {}; } abort(){} };
+global.location = { href: 'http://x/' };
+let call = 0;
+global.fetch = (url, opts) => {
+  call += 1;
+  calls.push(JSON.parse(opts.body));
+  // renewal ok; first revoke fails (not ok); retry revoke ok.
+  const ok = !(calls[calls.length-1].active === false && call === 2);
+  return Promise.resolve({ ok });
+};
+global.window = { crypto:{ randomUUID:()=>'aaaaaaaabbbbccccddddeeeeeeeeeeee' }, AbortController: global.AbortController, addEventListener(){} };
+global.document = document;
+new Function('document','window','fetch','AbortController','setTimeout','clearTimeout',src)(
+  document, window, global.fetch, global.AbortController, global.setTimeout, global.clearTimeout
+);
+(async () => {
+  fire('keydown'); await runTimers(); await tick();   // renewal (ok)
+  let settled = false;
+  window.HermesPresence.reset().then(() => { settled = true; });
+  await runTimers(); await tick();                     // revoke fails, retry succeeds
+  const revokes = calls.filter((c)=>c.active === false);
+  process.stdout.write(JSON.stringify({
+    settled, revokeCount: revokes.length,
+    revokeSeqsIncrease: revokes.length === 2 && revokes[1].seq > revokes[0].seq,
+  }));
+})();
+"""
+    out = _run_presence_harness(harness)
+    assert out["settled"] is True
+    assert out["revokeCount"] == 2, "a failed revoke must be retried before the scope change proceeds"
+    assert out["revokeSeqsIncrease"] is True
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")

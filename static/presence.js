@@ -33,19 +33,39 @@
       body:JSON.stringify({tab_id:tabId, active:active, seq:seq}),
       keepalive:!!keepalive
     };
-    // Bound the request so a stalled renewal never leaves settle() (and the
-    // write awaiting it) pending forever. AbortController + a timer works even
-    // even where the one-shot timeout-signal helper is unavailable.
-    var controller=null, timer=null;
+    var controller=null;
     try{ controller=(typeof AbortController!=='undefined')?new AbortController():null; }catch(_){ controller=null; }
-    if(controller){
-      opts.signal=controller.signal;
-      timer=setTimeout(function(){ try{controller.abort();}catch(_){} }, TIMEOUT_MS);
-    }
+    if(controller) opts.signal=controller.signal;
     var url;
     try{ url=new URL('api/talaria/presence',document.baseURI||location.href).href; }catch(_){ url='api/talaria/presence'; }
-    var settleDone=function(){ if(timer){ clearTimeout(timer); timer=null; } };
-    return fetch(url,opts).then(settleDone,settleDone);
+    // Always bound the request with a timer so settle() (awaited by api() before
+    // every write) can never hang — including where fetch exists but
+    // AbortController does not, in which case there is no signal to abort but the
+    // timer still resolves the promise. Resolves to whether the server accepted
+    // the update, so a failed revocation can be retried before a scope change.
+    return new Promise(function(resolve){
+      var settled=false;
+      var done=function(ok){
+        if(settled) return;
+        settled=true;
+        if(timer){ clearTimeout(timer); timer=null; }
+        resolve(ok);
+      };
+      var timer=setTimeout(function(){ if(controller){ try{controller.abort();}catch(_){} } done(false); }, TIMEOUT_MS);
+      fetch(url,opts).then(
+        function(response){ done(!!(response&&response.ok)); },
+        function(){ done(false); }
+      );
+    });
+  }
+  // Best-effort revoke that retries once on failure. Used only when the tab
+  // stays alive (profile switch, logout rollback); a lost revoke still self-heals
+  // via the server's 90s expiry, which remains the final fallback.
+  function revokeWithRetry(){
+    return post(false,true).then(function(ok){
+      if(ok) return true;
+      return new Promise(function(r){ setTimeout(r, 300); }).then(function(){ return post(false,true); });
+    });
   }
   function qualifies(e){
     if(!e||e.isTrusted!==true) return false;
@@ -95,7 +115,7 @@
       lastSent=0;
       if(!held) return Promise.resolve();
       held=false;
-      var request=post(false,true);
+      var request=revokeWithRetry();
       inflight=request.then(function(){ if(inflight===request) inflight=null; });
       return inflight;
     },
