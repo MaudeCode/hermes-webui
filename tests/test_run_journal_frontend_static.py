@@ -11,7 +11,18 @@ UI_SRC = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 
 def _function_body(src: str, signature: str) -> str:
     start = src.index(signature)
-    brace = src.index("{", start)
+    # Skip the parameter list so a `{}` default value is not taken as the body.
+    paren = src.index("(", start)
+    depth = 0
+    for idx in range(paren, len(src)):
+        if src[idx] == "(":
+            depth += 1
+        elif src[idx] == ")":
+            depth -= 1
+            if depth == 0:
+                paren = idx
+                break
+    brace = src.index("{", paren)
     depth = 0
     for idx in range(brace, len(src)):
         char = src[idx]
@@ -729,3 +740,156 @@ def test_rendered_live_compression_rows_without_pass_stay_folded():
     ])
 
     assert rendered == [["lifecycle", "compressed", "completed", "Context auto-compressed"]]
+
+
+def test_rendered_compression_rows_keep_server_projected_orphan_pass_in_place(monkeypatch):
+    """HWEB-68: server rows for `compressed -> token -> compressing` render as three rows.
+
+    Drives the real snapshot projection into the browser dedupe seam so the
+    pass identities the server emits are proven distinct where it matters.
+    """
+    from tests.test_run_journal_routes import _compression_journal_snapshot
+
+    snapshot = _compression_journal_snapshot(
+        monkeypatch,
+        [
+            ("compressed", {"message": "Compression finished"}),
+            ("token", {"text": "a"}),
+            ("compressing", {"message": "Compressing context"}),
+        ],
+    )
+
+    rendered = _run_compression_row_render_probe(
+        snapshot["anchor_activity_scene"]["activity_rows"]
+    )
+
+    assert rendered == [
+        ["lifecycle", "compressed", "completed", "Context auto-compressed"],
+        ["prose", "token", "completed", "a"],
+        ["lifecycle", "compressing", "running", "Compressing context"],
+    ]
+
+
+def test_hydrated_registry_scene_keeps_two_compression_passes():
+    """HWEB-68: `compression_pass` survives snapshot hydration into the registry.
+
+    After a refresh, any later SSE event rebuilds the scene from the anchor
+    registry. If hydration drops the per-pass identity, every rebuilt row keys
+    as bare `lifecycle:compression` and a two-pass turn collapses to one card.
+    """
+    rows = [
+        _prose_row("a", 0),
+        _compression_row(2, "compressed", "Context auto-compressed", 1),
+        _prose_row("b", 2),
+        _compression_row(5, "compressing", "Compressing context", 3),
+    ]
+    for row in rows:
+        row["payload"] = {"text": row["text"]}
+        row["event_id"] = f"run-1:{row['order_index'] + 1}"
+        row["seq"] = row["order_index"] + 1
+    helpers = "\n".join(
+        [
+            _function_body(MESSAGES_SRC, "function _sourceEventTypeForSnapshotAnchorRow"),
+            _function_body(MESSAGES_SRC, "function _hydrateAnchorRegistryFromActivityScene"),
+            _function_body(UI_SRC, "function _anchorSceneToolRowLogicalKey"),
+            _function_body(UI_SRC, "function _anchorSceneMergeToolRows"),
+            _function_body(UI_SRC, "function _anchorSceneIsSettledSuccessfulCompression"),
+            _function_body(UI_SRC, "function _anchorSceneRowsForRendering"),
+        ]
+    )
+    script = f"""
+const vm=require('vm');
+const fs=require('fs');
+vm.runInThisContext(fs.readFileSync({json.dumps(str(ROOT / 'static' / 'assistant_turn_anchors.js'))},'utf8'));
+const _anchorApi=globalThis.HermesAssistantTurnAnchors;
+const activeSid='session-1';
+const streamId='stream-1';
+let _anchorShadowWarned=false;
+const _anchorRegistry=_anchorApi.createAssistantTurnAnchorRegistry({{session_id:activeSid,stream_id:streamId,run_id:'run-1'}});
+{helpers}
+const scene={{version:'activity_scene_v1',identity:{{stream_id:streamId,run_id:'run-1'}},activity_rows:{json.dumps(rows)}}};
+const hydrated=_hydrateAnchorRegistryFromActivityScene(scene);
+const rebuilt=_anchorApi.projectAssistantTurnAnchorActivityScene(_anchorRegistry,{{mode:'compact_worklog'}});
+process.stdout.write(JSON.stringify({{
+  hydrated,
+  passes:rebuilt.activity_rows.filter(row=>row.role==='lifecycle').map(row=>row.compression_pass),
+  rendered:_anchorSceneRowsForRendering(rebuilt,{{settled:false}}).map(
+    row=>[row.role,row.source_event_type,row.status,row.text]
+  ),
+}}));
+"""
+    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    result = json.loads(proc.stdout)
+
+    assert result["hydrated"] is True
+    assert result["rendered"] == [
+        ["prose", "token", "completed", "a"],
+        ["lifecycle", "compressed", "completed", "Context auto-compressed"],
+        ["prose", "token", "completed", "b"],
+        ["lifecycle", "compressing", "running", "Compressing context"],
+    ]
+    assert result["passes"] == [2, 5]
+
+
+def test_live_compressed_completion_replaces_hydrated_running_pass():
+    """HWEB-68 review: the live completion inherits the hydrated open pass identity.
+
+    A reload mid-compaction hydrates a running `compressing` row keyed by its
+    server pass. The following live `compressed` SSE payload carries no pass;
+    unless it inherits the open one, the completion renders beside the running
+    card instead of replacing it, leaving a permanent "Compressing context".
+    """
+    running = _compression_row(7, "compressing", "Compressing context", 1)
+    running["payload"] = {"message": "Compressing context"}
+    running["event_id"] = "run-1:7"
+    running["seq"] = 7
+    rows = [_prose_row("a", 0), running]
+    for row in rows[:1]:
+        row["payload"] = {"text": row["text"]}
+        row["event_id"] = "run-1:1"
+        row["seq"] = 1
+    helpers = "\n".join(
+        [
+            _function_body(MESSAGES_SRC, "function _sourceEventTypeForSnapshotAnchorRow"),
+            _function_body(MESSAGES_SRC, "function _hydrateAnchorRegistryFromActivityScene"),
+            _function_body(MESSAGES_SRC, "function _anchorActivityEvents"),
+            _function_body(MESSAGES_SRC, "function _latestAnchorCompressionEventIndex"),
+            _function_body(MESSAGES_SRC, "function _anchorCompressionCompletedAfter"),
+            _function_body(MESSAGES_SRC, "function _applyToAnchor"),
+            _function_body(UI_SRC, "function _anchorSceneToolRowLogicalKey"),
+            _function_body(UI_SRC, "function _anchorSceneMergeToolRows"),
+            _function_body(UI_SRC, "function _anchorSceneIsSettledSuccessfulCompression"),
+            _function_body(UI_SRC, "function _anchorSceneRowsForRendering"),
+        ]
+    )
+    script = f"""
+const vm=require('vm');
+const fs=require('fs');
+vm.runInThisContext(fs.readFileSync({json.dumps(str(ROOT / 'static' / 'assistant_turn_anchors.js'))},'utf8'));
+const _anchorApi=globalThis.HermesAssistantTurnAnchors;
+const activeSid='session-1';
+const streamId='stream-1';
+let _anchorShadowWarned=false;
+let _assistantSegmentSeq=1;
+let _currentActivityBurstId=1;
+const _renderAnchorLiveScene=()=>false;
+const _anchorRegistry=_anchorApi.createAssistantTurnAnchorRegistry({{session_id:activeSid,stream_id:streamId,run_id:'run-1'}});
+{helpers}
+const scene={{version:'activity_scene_v1',identity:{{stream_id:streamId,run_id:'run-1'}},activity_rows:{json.dumps(rows)}}};
+_hydrateAnchorRegistryFromActivityScene(scene);
+_applyToAnchor('compressed',{{session_id:activeSid,message:'Compression finished'}},{{lastEventId:'run-1:9'}});
+const rebuilt=_anchorApi.projectAssistantTurnAnchorActivityScene(_anchorRegistry,{{mode:'compact_worklog'}});
+process.stdout.write(JSON.stringify({{
+  passes:rebuilt.activity_rows.filter(row=>row.role==='lifecycle').map(row=>row.compression_pass),
+  rendered:_anchorSceneRowsForRendering(rebuilt,{{settled:false}}).map(
+    row=>[row.role,row.source_event_type]
+  ),
+}}));
+"""
+    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    result = json.loads(proc.stdout)
+
+    # The live row's text/status are the existing live-card projection; only the
+    # fold onto the hydrated running slot is under test here.
+    assert result["rendered"] == [["prose", "token"], ["lifecycle", "compressed"]]
+    assert result["passes"] == [7, 7]

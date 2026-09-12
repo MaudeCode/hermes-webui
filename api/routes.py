@@ -3715,7 +3715,7 @@ def _run_journal_live_snapshot(
     tool_calls: list[dict] = []
     steer_controls: list[dict] = []
     compression_lifecycles: list[dict] = []
-    compression_pass = 0
+    open_compression_pass: int | None = None
     activity_burst_anchors: list[dict] = []
     current_activity_burst_id = 0
     fresh_segment = True
@@ -3897,14 +3897,22 @@ def _run_journal_live_snapshot(
             # generic "Working" row. Project it from the durable journal so a
             # hard refresh mid-compaction restores the same compression row the
             # live stream showed instead of falling back to the generic shell.
+            # One pass owns its start and its completion, identified by the
+            # journal seq of its `compressing` event. Without this the single
+            # shared "lifecycle:compression" dedupe key folds every pass of a
+            # multi-compaction turn into one row. A running counter collided
+            # when the opening event fell outside the bounded tail window: the
+            # orphan `compressed` and the next `compressing` both became pass 1.
+            own_identity = event.get("seq") or event_order
             if event_name == "compressing":
-                compression_pass += 1
+                open_compression_pass = own_identity
+                pass_identity = own_identity
+            else:
+                pass_identity = own_identity if open_compression_pass is None else open_compression_pass
+                open_compression_pass = None
             compression_lifecycles.append({
                 "event_name": event_name,
-                # One pass owns its start and its completion. Without this the
-                # single shared "lifecycle:compression" dedupe key folds every
-                # pass of a multi-compaction turn into one row.
-                "compression_pass": max(compression_pass, 1),
+                "compression_pass": pass_identity,
                 "message": str(payload.get("message") or ""),
                 "created_at": event.get("created_at"),
                 "event_id": event.get("event_id"),
@@ -4274,6 +4282,11 @@ def _run_journal_live_snapshot(
         default=-1,
     )
     pre_text_compression_rows: list[tuple[int, dict]] = []
+    first_ungrouped_order = min(
+        [event_order for event_order, _order, _row in ungrouped_tool_rows]
+        + [event_order for event_order, _row in ungrouped_control_rows],
+        default=None,
+    )
     for lifecycle in compression_lifecycles:
         if (
             lifecycle["event_name"] == "compressing"
@@ -4284,11 +4297,16 @@ def _run_journal_live_snapshot(
         item = (int(lifecycle.get("_journal_order") or 0), scene_compression_row(lifecycle))
         if burst_id:
             control_rows_by_burst.setdefault(burst_id, []).append(item)
-        else:
+        elif first_ungrouped_order is None or item[0] < first_ungrouped_order:
             # Burst 0 means no assistant text had arrived yet, so this pass
             # precedes every anchor's prose in journal order. Appending it with
             # the other ungrouped rows would sort it after that prose instead.
             pre_text_compression_rows.append(item)
+        else:
+            # A burst-0 tool or steer ran before this pass. Those rows render
+            # in the ungrouped pool, so the pass joins them there and sorts by
+            # journal order against them instead of jumping ahead of them.
+            ungrouped_control_rows.append(item)
 
     consumed_tools: set[int] = set()
     text_start = 0
