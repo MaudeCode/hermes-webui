@@ -335,7 +335,7 @@
   // hard cap; a load-event timer would expire before the session resolves and
   // let the empty-state hero shift animate.
   const started = Date.now();
-  const release = () => document.documentElement.classList.remove('booting');
+  const release = () => { document.documentElement.classList.remove('booting'); document.documentElement.classList.remove('boot-session'); };
   const poll = () => {
     const ready = !!(window.S && S._bootReady);
     if (ready || Date.now() - started > 12000) { setTimeout(release, 120); return; }

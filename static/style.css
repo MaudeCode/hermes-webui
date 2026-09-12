@@ -8171,4 +8171,20 @@ html.booting #mainChat::after{transition:none!important;}
    the header menu, so the in-panel copy never shows. */
 #panelChat .session-source-tabs:not(.source-menu .session-source-tabs){display:none;}
 .chat-header .app-titlebar-profile{margin-left:auto;}
+
+/* ── Boot: no flashes while the app resolves state ───────────────────────── */
+html.booting *,html.booting *::before,html.booting *::after{animation:none!important;}
+/* A saved session that is still resolving never shows the welcome state, even
+   if an intermediate render asks for it; it appears only once boot settles. */
+html.booting.boot-session .empty-state{display:none!important;}
+html.booting.boot-session #mainChat.composer-hero::after{flex-grow:0!important;}
+/* Context line and workspace toggle wait for their real values */
+html.booting .chat-context{visibility:hidden;}
+html.booting .workspace-panel-edge-toggle{opacity:0!important;pointer-events:none;}
+/* Skeleton rows keep their sheen even while other animation is suppressed */
+html.booting .skeleton-bar{animation:skeletonSheen 1.4s linear infinite!important;}
+/* The mic button is present from first paint when the browser supports it */
+html:not(.no-speech) #btnMic[style*="display:none"],html:not(.no-speech) #btnMic[style*="display: none"]{display:inline-flex!important;visibility:hidden;}
+html:not(.no-speech) #btnMic{visibility:visible;}
+html:not(.no-speech):not(.booting) #btnMic[style*="display:none"],html:not(.no-speech):not(.booting) #btnMic[style*="display: none"]{display:none!important;}
 /* REDESIGN-LAYER-END */
