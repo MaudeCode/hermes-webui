@@ -526,6 +526,37 @@ def test_retry_settles_instead_of_crossing_a_newer_user_turn():
     assert models._session_has_pending_journal_retry(session) is False
 
 
+def test_cursorless_multi_window_pass_keeps_repeated_activity(monkeypatch):
+    """Dedupe against the sidecar, never against rows this pass just appended.
+
+    A legacy armed marker has no cursor, so its retry replays with content
+    dedupe. Paging through several windows, a tool or progress line that
+    legitimately repeats in a later window must not be mistaken for the copy an
+    earlier window of the same pass materialized.
+    """
+    session_id = "hweb13_repeat_windows"
+    stream_id = "hweb13_stream_repeat_windows"
+    session = _dead_session(session_id, stream_id)
+    marker = models._interrupted_recovery_marker(pending_retry=True, stream_id=stream_id)
+    models._arm_journal_retry(marker, stream_id)
+    session.messages.append(marker)
+    for _ in range(3):
+        append_run_event(session_id, stream_id, "interim_assistant", {"text": "Checking the branch again."})
+        append_run_event(
+            session_id, stream_id, "tool",
+            {"name": "terminal", "preview": "git status", "args": {"command": "git status"}},
+        )
+        append_run_event(session_id, stream_id, "tool_complete", {"name": "terminal", "duration": 0.1})
+    append_run_event(session_id, stream_id, "done", {})
+    # One iteration per window, so the repeats land in later windows.
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_BYTES", 700)
+
+    assert models._retry_journal_recovery_in_place(session) is True
+    assert _visible(session) == ["Checking the branch again."] * 3
+    assert [t["name"] for t in session.tool_calls] == ["terminal"] * 3
+    assert all(t["done"] for t in session.tool_calls)
+
+
 def test_tool_completion_in_a_later_wave_settles_the_earlier_card():
     session_id = "hweb13_wave_tool"
     stream_id = "hweb13_stream_wave_tool"

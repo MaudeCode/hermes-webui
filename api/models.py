@@ -2687,6 +2687,7 @@ def _journal_tool_already_present(
     preview: str,
     *,
     stream_id: str | None = None,
+    tool_calls: list | None = None,
 ) -> bool:
     """Return True when an equivalent tool card already exists.
 
@@ -2708,7 +2709,7 @@ def _journal_tool_already_present(
     candidate_name = str(name or '')
     candidate_preview = _normalize_journal_recovery_text(preview)
     candidate_stream = str(stream_id) if stream_id else None
-    for tool_call in session.tool_calls or []:
+    for tool_call in (tool_calls if tool_calls is not None else session.tool_calls) or []:
         if not isinstance(tool_call, dict):
             continue
         if str(tool_call.get('name') or '') != candidate_name:
@@ -2886,6 +2887,9 @@ def _replay_run_journal_windows(
         'truncated': False,
     }
     terminal_events: list[dict] = []
+    # One dedupe baseline for the whole pass: later windows must not treat the
+    # rows earlier windows appended as pre-existing sidecar content.
+    dedupe_state = _journal_dedupe_state(session)
     for _ in range(_RECOVERY_JOURNAL_MAX_WINDOWS):
         journal = _read_run_journal_window(
             session.session_id, stream_id, cursor=result['cursor'],
@@ -2897,6 +2901,7 @@ def _replay_run_journal_windows(
         recovered_output, terminal_error_recovered = (
             _recover_journaled_output_and_terminal_error(
                 session, stream_id, dedupe_existing=dedupe_existing, journal=journal,
+                dedupe_state=dedupe_state,
             )
         )
         result['recovered_output'] = result['recovered_output'] or recovered_output
@@ -2930,6 +2935,7 @@ def _existing_recovered_tool_card(
     preview: str,
     *,
     stream_id: str | None = None,
+    tool_calls: list | None = None,
 ) -> dict | None:
     """Return the persisted tool card `_journal_tool_already_present` matched.
 
@@ -2941,7 +2947,7 @@ def _existing_recovered_tool_card(
     candidate_name = str(name or '')
     candidate_preview = _normalize_journal_recovery_text(preview)
     candidate_stream = str(stream_id) if stream_id else None
-    for tool_call in reversed(session.tool_calls or []):
+    for tool_call in reversed((tool_calls if tool_calls is not None else session.tool_calls) or []):
         if not isinstance(tool_call, dict) or tool_call.get('done'):
             continue
         if str(tool_call.get('name') or '') != candidate_name:
@@ -3199,6 +3205,7 @@ def _recover_journaled_output_and_terminal_error(
     dedupe_existing: bool = False,
     terminal_recovery: dict | None = None,
     journal: dict | None = None,
+    dedupe_state: dict | None = None,
 ) -> tuple[bool, bool]:
     """Recover readable activity first, then append its authoritative terminal error."""
     recovered_output = _append_journaled_partial_output(
@@ -3206,6 +3213,7 @@ def _recover_journaled_output_and_terminal_error(
         stream_id,
         dedupe_existing=dedupe_existing,
         journal=journal,
+        dedupe_state=dedupe_state,
     )
     terminal_error_recovered = _materialize_unsaved_gateway_terminal_error(
         session,
@@ -3249,14 +3257,29 @@ def _journal_is_still_arriving(session, stream_id: str | None) -> bool:
         return False
 
 
+def _journal_dedupe_state(session) -> dict:
+    """Dedupe baseline for one replay pass: what existed before it appended anything."""
+    return {
+        'message_count': len(session.messages or []),
+        'tool_count': len(session.tool_calls or []),
+        'claimed': set(),
+    }
+
+
 def _append_journaled_partial_output(
     session,
     stream_id: str | None,
     *,
     dedupe_existing: bool = False,
     journal: dict | None = None,
+    dedupe_state: dict | None = None,
 ) -> bool:
     """Recover already-emitted visible output from a dead stream journal.
+
+    ``dedupe_state`` (see `_journal_dedupe_state`) pins the dedupe baseline to
+    the start of a multi-window pass: rows and cards this pass already
+    appended from earlier windows are never dedupe candidates, so activity that
+    legitimately repeats within one run is not mistaken for sidecar content.
 
     This repair path is intentionally conservative: it restores user-visible
     assistant text, display-only reasoning, and tool-card metadata that had
@@ -3292,8 +3315,11 @@ def _append_journaled_partial_output(
     # Cards this pass may still settle: the newly recovered ones plus any
     # already-persisted card a `tool_complete` in this journal wave owns.
     completable_tool_calls: list[dict] = []
-    initial_message_count = len(session.messages or [])
-    claimed_existing_assistant_indexes: set[int] = set()
+    if dedupe_state is None:
+        dedupe_state = _journal_dedupe_state(session)
+    initial_message_count = dedupe_state['message_count']
+    claimed_existing_assistant_indexes: set[int] = dedupe_state['claimed']
+    baseline_tool_calls = (session.tool_calls or [])[:dedupe_state['tool_count']]
 
     def content_match_can_receive_reasoning(existing_idx: int) -> bool:
         messages = session.messages or []
@@ -3506,6 +3532,7 @@ def _append_journaled_partial_output(
             preview = str(payload.get('preview') or '')
             if dedupe_existing and _journal_tool_already_present(
                 session, name, preview, stream_id=stream_id,
+                tool_calls=baseline_tool_calls,
             ):
                 # A previous pass already materialized this card. Track the
                 # persisted dict so a `tool_complete` arriving in a later journal
@@ -3515,6 +3542,7 @@ def _append_journaled_partial_output(
                 # session.tool_calls below — only `recovered_tool_calls` is.
                 existing_card = _existing_recovered_tool_card(
                     session, name, preview, stream_id=stream_id,
+                    tool_calls=baseline_tool_calls,
                 )
                 if existing_card is not None:
                     completable_tool_calls.append(existing_card)
