@@ -3769,7 +3769,23 @@ def _build_recovery_marker_with_retry_hook(
             pending_started_at=pending_started_at,
         ),
         stream_id,
+        cursor=cursor,
     )
+
+
+def _replay_retry_cursor(replay: dict | None, *, include_unavailable: bool = False) -> dict | None:
+    """The cursor a marker must keep after a pass, or None when the pass is done.
+
+    Rows remaining beyond the pass cap always keep it. An unavailable read
+    keeps it only where the caller asks: a completed run whose forward read
+    failed is inconclusive, while an absent journal behind a synced core
+    transcript is the documented no-marker case.
+    """
+    if not replay:
+        return None
+    if replay.get('truncated') or (include_unavailable and replay.get('unavailable')):
+        return replay.get('cursor') or {'seq': 0, 'offset': 0}
+    return None
 
 
 def _session_has_pending_journal_retry(session) -> bool:
@@ -4061,7 +4077,7 @@ def _retry_journal_recovery_in_place(
                 session,
                 stream_id,
                 cursor=cursor,
-                dedupe_existing=cursor is None,
+                dedupe_existing=not cursor or not cursor.get('seq'),
             )
             recovered_output = replay['recovered_output']
             terminal_error_recovered = replay['terminal_error_recovered']
@@ -4404,7 +4420,7 @@ def _apply_core_sync_or_error_marker(
             if not (_already_checkpointed or _latest_user_matches_pending_text(session.messages, session.pending_user_message)):
                 _append_recovered_pending_turn(session, timestamp=_recovered_ts)
             _replay = {}
-            _recover_journaled_output_and_terminal_error(
+            recovered_output, _ = _recover_journaled_output_and_terminal_error(
                 session,
                 _stream_id,
                 dedupe_existing=True,
@@ -4415,16 +4431,18 @@ def _apply_core_sync_or_error_marker(
             session.pending_attachments = []
             session.pending_started_at = None
             session.pending_user_source = None
-            if _replay.get('truncated'):
-                # The walk did not reach the run's `done` in one pass. Arm the
-                # hook with the cursor; the retry removes this marker once it
-                # reaches the terminal row.
+            _keep = _replay_retry_cursor(_replay, include_unavailable=True)
+            if _keep is not None:
+                # The walk did not reach the run's `done` in one pass, or could
+                # not read the journal at all after the tail said it completed.
+                # Arm the hook with the cursor; the retry removes this marker
+                # once it reaches the terminal row.
                 session.messages.append(
                     _build_recovery_marker_with_retry_hook(
-                        recovered_output=True,
+                        recovered_output=recovered_output,
                         stream_id=_stream_id,
                         pending_started_at=_pending_started_at,
-                        cursor=_replay.get('cursor'),
+                        cursor=_keep,
                     )
                 )
             session.save(touch_updated_at=touch_updated_at)
@@ -4469,7 +4487,7 @@ def _apply_core_sync_or_error_marker(
                     recovered_output=recovered_output,
                     stream_id=_stream_id,
                     pending_started_at=_pending_started_at,
-                    cursor=_replay.get('cursor') if _replay.get('truncated') else None,
+                    cursor=_replay_retry_cursor(_replay),
                 )
             )
         session.save(touch_updated_at=touch_updated_at)
@@ -4531,13 +4549,16 @@ def _apply_core_sync_or_error_marker(
             session.pending_attachments = []
             session.pending_started_at = None
             session.pending_user_source = None
-            if recovered_output and not terminal_error_recovered:
+            _keep = _replay_retry_cursor(_replay)
+            if (recovered_output or _keep is not None) and not terminal_error_recovered:
+                # Rows remaining beyond the pass cap keep the cursor even when
+                # this pass placed nothing yet (metadata rows, open text).
                 session.messages.append(
                     _build_recovery_marker_with_retry_hook(
-                        recovered_output=True,
+                        recovered_output=recovered_output,
                         stream_id=_stream_id,
                         pending_started_at=_pending_started_at,
-                        cursor=_replay.get('cursor') if _replay.get('truncated') else None,
+                        cursor=_keep,
                     )
                 )
             # NOTE: when the core transcript was synced in but the run journal
@@ -4590,7 +4611,7 @@ def _apply_core_sync_or_error_marker(
                 recovered_output=recovered_output,
                 stream_id=_stream_id,
                 pending_started_at=_pending_started_at,
-                cursor=_replay.get('cursor') if _replay.get('truncated') else None,
+                cursor=_replay_retry_cursor(_replay),
             )
         )
     session.save(touch_updated_at=touch_updated_at)

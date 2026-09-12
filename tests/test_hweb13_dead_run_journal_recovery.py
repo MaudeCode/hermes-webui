@@ -7,6 +7,7 @@ worker bookkeeping has already had its pending state cleared, so
 key into the run journal — without ever reading it.
 """
 
+import json
 import time
 
 import pytest
@@ -821,6 +822,81 @@ def test_oversized_carry_is_flushed_instead_of_growing(monkeypatch):
     visible = _visible(session)
     assert len(visible) > 1, "the cap should have forced at least one split"
     assert "".join(v.replace(" ", "") for v in visible) == "".join(words).replace(" ", "")
+    assert not [m for m in session.messages if m.get("type") == "interrupted"]
+
+
+def test_completed_pending_turn_keeps_a_hook_when_the_forward_read_fails(monkeypatch):
+    """Tail says completed, forward read fails: inconclusive, not settled."""
+    session_id = "hweb13_pending_unavailable"
+    stream_id = "hweb13_stream_pending_unavailable"
+    session = _dead_session(session_id, stream_id)
+    session.pending_user_message = "Trace the regression again"
+    session.pending_started_at = time.time() - 300
+    session.save()
+    append_run_event(session_id, stream_id, "interim_assistant", {"text": "The whole answer."})
+    append_run_event(session_id, stream_id, "done", {})
+
+    real_window = models._read_run_journal_window
+    failures = {"n": 1}
+
+    def _flaky(sid, rid, **kwargs):
+        if failures["n"]:
+            failures["n"] -= 1
+            return {"events": [], "truncated": False, "unavailable": True,
+                    "cursor": kwargs.get("cursor") or {"seq": 0, "offset": 0}}
+        return real_window(sid, rid, **kwargs)
+
+    monkeypatch.setattr(models, "_read_run_journal_window", _flaky)
+    assert models._apply_core_sync_or_error_marker(
+        session,
+        models.SESSION_DIR / "missing-core.json",
+        stream_id_for_recheck=stream_id,
+    ) is True
+    assert session.pending_user_message is None
+    assert _visible(session) == []
+    marker = session.messages[-1]
+    assert marker["_pending_journal_recovery"] is True
+
+    assert models._retry_journal_recovery_in_place(session) is True
+    assert _visible(session) == ["The whole answer."]
+    assert not [m for m in session.messages if m.get("type") == "interrupted"]
+
+
+def test_core_sync_repair_keeps_the_cursor_when_rows_remain(monkeypatch):
+    """A synced core transcript plus a capped metadata-only pass must not drop the run."""
+    session_id = "hweb13_core_sync_capped"
+    stream_id = "hweb13_stream_core_sync_capped"
+    session = Session(session_id=session_id, title="Core sync", messages=[], active_stream_id=stream_id)
+    session.pending_user_message = "Trace the regression again"
+    session.pending_started_at = time.time() - 300
+    session.save()
+    core_path = models.SESSION_DIR / "core.json"
+    core_path.write_text(json.dumps({
+        "messages": [
+            {"role": "user", "content": "Earlier question", "timestamp": 1},
+            {"role": "assistant", "content": "Earlier answer", "timestamp": 2},
+        ],
+    }))
+    for i in range(6):
+        append_run_event(session_id, stream_id, "metering", {"turn": i, "tokens": 10 * i})
+    append_run_event(session_id, stream_id, "interim_assistant", {"text": "After the metadata."})
+    append_run_event(session_id, stream_id, "done", {})
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_BYTES", 600)
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_WINDOWS", 1)
+
+    assert models._apply_core_sync_or_error_marker(
+        session, core_path, stream_id_for_recheck=stream_id,
+    ) is True
+    assert session.active_stream_id is None
+    marker = session.messages[-1]
+    assert marker["_pending_journal_recovery"] is True
+    assert marker["_journal_retry_after_seq"] >= 1
+
+    for _ in range(8):
+        if not models._session_has_pending_journal_retry(session):
+            break
+        models._retry_journal_recovery_in_place(session)
+    assert _visible(session) == ["After the metadata."]
     assert not [m for m in session.messages if m.get("type") == "interrupted"]
 
 
