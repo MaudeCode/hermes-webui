@@ -5365,7 +5365,7 @@ main.main > #mainPlugin{display:none;}
 .mcp-server-name{font-weight:600;color:var(--text);}
 .mcp-server-detail{color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;}
 .mcp-server-meta{display:flex;gap:10px;color:var(--muted);font-size:11px;}
-.mcp-transport-badge,.mcp-status-badge{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding:2px 6px;border-radius:999px;flex-shrink:0;}
+.mcp-transport-badge,.mcp-status-badge,.mcp-health-badge{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding:2px 6px;border-radius:999px;flex-shrink:0;}
 .mcp-stdio{background:rgba(99,102,241,.12);color:#818cf8;}
 .mcp-unknown{background:rgba(161,161,170,.12);color:#a1a1aa;}
 .mcp-http{background:rgba(34,197,94,.12);color:#4ade80;}
@@ -5373,6 +5373,8 @@ main.main > #mainPlugin{display:none;}
 .mcp-status-configured{background:rgba(245,158,11,.12);color:#f59e0b;}
 .mcp-status-disabled{background:rgba(161,161,170,.12);color:#a1a1aa;}
 .mcp-status-invalid_config,.mcp-status-unknown{background:rgba(239,68,68,.12);color:#f87171;}
+.mcp-health-unhealthy{background:rgba(239,68,68,.12);color:#f87171;}
+.mcp-health-needs_auth{background:rgba(245,158,11,.16);color:#f59e0b;}
 .mcp-tool-count{color:var(--text);}
 .mcp-toggle-btn{font-size:10px;font-weight:600;padding:2px 8px;border-radius:999px;border:1px solid transparent;cursor:pointer;transition:opacity .15s;}
 .mcp-toggle-btn:hover{opacity:.8;}
