@@ -18,7 +18,9 @@ Design constraints, in order:
   server config, so an edited server or a profile whose same-named server points
   elsewhere never inherits the previous server's health.
 - **Bounded and non-accumulating.** A server already in flight is never
-  scheduled again, so a slow server cannot pile up overlapping probes.
+  scheduled again, so a slow server cannot pile up overlapping probes, and at
+  most ``MAX_CONCURRENT_PROBES`` run process-wide; the rest wait for the next
+  read and report pending meanwhile.
 - **Contained failures.** One server's probe raising or timing out leaves that
   server in a known state and never touches another server's entry.
 
@@ -47,6 +49,9 @@ logger = logging.getLogger(__name__)
 # must be fresh while the MCP panel is closed, hook this into a periodic ticker.
 HEALTH_INTERVAL_S: float = 120.0
 PROBE_TIMEOUT_S: float = 8.0
+# Process-wide cap on probes in flight: one thread and one socket each. A large
+# imported config must not be able to exhaust threads or file descriptors.
+MAX_CONCURRENT_PROBES: int = 4
 _MAX_PROBE_BODY_BYTES = 64 * 1024
 
 HEALTHY = "healthy"
@@ -62,6 +67,9 @@ _AUTH_STATUSES = frozenset({401, 403, 407})
 # nothing about its health, so it stays UNKNOWN rather than being called down.
 _PROTOCOL_MISMATCH_STATUSES = frozenset({404, 405, 406, 415})
 
+# MCP protocol versions are dated revisions ("2025-06-18"). A version that is
+# not even that shape did not come out of a real negotiation.
+_PROTOCOL_VERSION = re.compile(r"\d{4}-\d{2}-\d{2}")
 # SSE permits CR, LF or CRLF line endings; an event ends at a blank line.
 _SSE_EVENT_BOUNDARY = re.compile(r"(?:\r\n|\r|\n){2}")
 
@@ -82,9 +90,10 @@ _LOCK = threading.Lock()
 # their own interval slot.
 # (name, fingerprint) -> {"health": str, "detail": str, "checked_at": float}
 _STATE: dict[tuple[str, str], dict] = {}
-# Names, not identities: at most one probe per name at a time is the bound that
-# stops a slow server from accumulating overlapping checks.
-_IN_FLIGHT: set[str] = set()
+# (name, fingerprint) currently being probed. One probe per identity at a time
+# stops a slow server from accumulating overlapping checks; a sibling profile's
+# same-named server is a different identity and is not held up behind it.
+_IN_FLIGHT: set[tuple[str, str]] = set()
 # (name, fingerprint) -> monotonic timestamp of the last *started* probe.
 # Started, not finished, so a slow probe still holds its slot in the budget.
 _STARTED_AT: dict[tuple[str, str], float] = {}
@@ -203,11 +212,15 @@ def _initialize_result(payload: dict | None) -> dict | None:
     result = (payload or {}).get("result")
     if not isinstance(result, dict):
         return None
-    if not isinstance(result.get("protocolVersion"), str):
+    version = result.get("protocolVersion")
+    if not isinstance(version, str) or not _PROTOCOL_VERSION.fullmatch(version):
         return None
     if not isinstance(result.get("capabilities"), dict):
         return None
-    if not isinstance(result.get("serverInfo"), dict):
+    server_info = result.get("serverInfo")
+    if not isinstance(server_info, dict) or not isinstance(server_info.get("name"), str):
+        return None
+    if not server_info["name"].strip():
         return None
     return result
 
@@ -326,8 +339,13 @@ def _end_session(url: str, headers: dict, session_id: str, protocol_version: str
         logger.debug("MCP health probe could not end session for %r", url, exc_info=True)
 
 
-def _probe_stdio(command: str) -> tuple[str, str]:
-    if shutil.which(command):
+def _probe_stdio(command: str, env) -> tuple[str, str]:
+    # The agent spawns with the server's configured env merged over its own,
+    # so a PATH set there is where the executable may actually live.
+    path = os.environ.get("PATH")
+    if isinstance(env, dict) and isinstance(env.get("PATH"), str):
+        path = env["PATH"]
+    if shutil.which(command, path=path):
         # Spawning the server to speak MCP at it would be a side effect, not a
         # check. ``connected`` from the agent registry is the real liveness
         # signal for stdio; the caller folds that in.
@@ -344,7 +362,7 @@ def probe_server(name: str, cfg: dict) -> tuple[str, str]:
         return _probe_http(url.strip(), cfg)
     command = cfg.get("command")
     if isinstance(command, str) and command.strip():
-        return _probe_stdio(command.strip())
+        return _probe_stdio(command.strip(), cfg.get("env"))
     return UNHEALTHY, "invalid config"
 
 
@@ -377,7 +395,7 @@ def _run_check(name: str, cfg: dict, fingerprint: str) -> None:
             }
     finally:
         with _LOCK:
-            _IN_FLIGHT.discard(name)
+            _IN_FLIGHT.discard((name, fingerprint))
 
 
 def refresh_and_read(servers: dict) -> dict[str, dict]:
@@ -419,22 +437,34 @@ def refresh_and_read(servers: dict) -> dict[str, dict]:
                 _STATE.pop(key, None)
         for name, fingerprint in current.items():
             key = (name, fingerprint)
-            if name in _IN_FLIGHT:
+            if key in _IN_FLIGHT:
                 continue
             started = _STARTED_AT.get(key)
             if started is not None and (now - started) < HEALTH_INTERVAL_S:
                 continue
-            _IN_FLIGHT.add(name)
+            if len(_IN_FLIGHT) >= MAX_CONCURRENT_PROBES:
+                # Process-wide cap on threads and sockets. A deferred server
+                # keeps its stale/absent slot, so it reads as pending below and
+                # the panel's next read schedules it once a slot frees up.
+                continue
+            _IN_FLIGHT.add(key)
             _STARTED_AT[key] = now
             due.append((name, configs[name], fingerprint))
         # Read and in-flight state come out of the same lock hold, so a row
         # can never say "settled" while its refresh is actually running: an
         # expired verdict stays visible (no flicker to unknown every interval)
-        # but is flagged pending until the new one is published.
+        # but is flagged pending until the new one is published. A server that
+        # is due but was deferred by the cap is pending for the same reason.
         readable = {}
         for name, fingerprint in current.items():
-            row = dict(_STATE.get((name, fingerprint)) or {})
-            row["pending"] = name in _IN_FLIGHT
+            key = (name, fingerprint)
+            row = dict(_STATE.get(key) or {})
+            started = _STARTED_AT.get(key)
+            row["pending"] = (
+                key in _IN_FLIGHT
+                or started is None
+                or (now - started) >= HEALTH_INTERVAL_S
+            )
             readable[name] = row
     for name, cfg, fingerprint in due:
         try:
@@ -447,7 +477,7 @@ def refresh_and_read(servers: dict) -> dict[str, dict]:
         except Exception:
             logger.debug("could not start MCP health thread for %r", name, exc_info=True)
             with _LOCK:
-                _IN_FLIGHT.discard(name)
+                _IN_FLIGHT.discard((name, fingerprint))
                 # Release the interval slot too, or the unstarted probe looks
                 # "recently scheduled" for 120s and the panel's bounded
                 # re-reads exhaust themselves waiting on a verdict that never
@@ -463,8 +493,9 @@ def snapshot() -> dict[str, dict]:
 
 
 def in_flight() -> set[str]:
+    """Names with a probe currently running (any identity)."""
     with _LOCK:
-        return set(_IN_FLIGHT)
+        return {name for name, _ in _IN_FLIGHT}
 
 
 def reset() -> None:

@@ -97,6 +97,16 @@ class TestProbeVerdicts:
         with patch("api.mcp_health.shutil.which", return_value="/usr/bin/true"):
             assert mcp_health.probe_server("a", {"command": "true"})[0] == "unknown"
 
+    def test_stdio_command_is_resolved_on_the_servers_configured_path(self, tmp_path):
+        """The agent spawns with cfg.env merged in, so a PATH set there is where the binary lives."""
+        binary = tmp_path / "mcp-thing"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        cfg = {"command": "mcp-thing", "env": {"PATH": str(tmp_path)}}
+        with patch.dict("os.environ", {"PATH": "/definitely/not/here"}):
+            assert mcp_health.probe_server("a", cfg) == ("unknown", "stdio server not probed")
+            assert mcp_health.probe_server("a", {"command": "mcp-thing"})[0] == "unhealthy"
+
     def test_a_2xx_that_is_not_an_mcp_initialize_result_is_not_called_healthy(self):
         """An HTML login page or proxy catch-all answers 200 and serves no tools."""
         cases = {
@@ -107,6 +117,13 @@ class TestProbeVerdicts:
                 ("unknown", "HTTP 200, unrecognized initialize result"),
             # One required field is not a negotiated protocol.
             b'{"jsonrpc":"2.0","id":"hermes-webui-health","result":{"capabilities":{}}}':
+                ("unknown", "HTTP 200, unrecognized initialize result"),
+            # Right shape, no substance: not a negotiation that happened.
+            b'{"jsonrpc":"2.0","id":"hermes-webui-health","result":{"protocolVersion":"","capabilities":{},"serverInfo":{}}}':
+                ("unknown", "HTTP 200, unrecognized initialize result"),
+            b'{"jsonrpc":"2.0","id":"hermes-webui-health","result":{"protocolVersion":"latest","capabilities":{},"serverInfo":{"name":"x"}}}':
+                ("unknown", "HTTP 200, unrecognized initialize result"),
+            b'{"jsonrpc":"2.0","id":"hermes-webui-health","result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":" "}}}':
                 ("unknown", "HTTP 200, unrecognized initialize result"),
             # A reply to some other request is not a reply to ours.
             b'{"jsonrpc":"2.0","id":"wrong","result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"x"}}}':
@@ -537,13 +554,16 @@ class TestSchedulingIsBackgroundAndBounded:
             with patch("api.mcp_health.probe_server", side_effect=hang):
                 _runtime(before)
                 assert entered.wait(5)
-                # Config changes while the old probe is still in flight.
-                assert _runtime(after)["web"]["health"] == "unknown"
+                # Config changes while the old probe is still in flight: the new
+                # identity is never shown the old one's verdict, before or after
+                # the old probe publishes ("healthy" never appears for it).
+                seen = {_runtime(after)["web"]["health"]}
                 release.set()
                 _join_health_threads()
-                # The obsolete probe published, but it measured the old server.
-                assert _runtime(after)["web"]["health"] == "unknown"
+                seen.add(_runtime(after)["web"]["health"])
                 _join_health_threads()
+                seen.add(_runtime(after)["web"]["health"])
+                assert "healthy" not in seen, seen
                 assert _runtime(after)["web"]["health"] == "unhealthy"
         finally:
             release.set()
@@ -679,6 +699,76 @@ class TestSchedulingIsBackgroundAndBounded:
                 assert entered.wait(5), "probe never started in the background"
                 assert "slow" in mcp_health.in_flight()
                 assert elapsed < 1.0, f"endpoints blocked for {elapsed:.2f}s on a hung probe"
+        finally:
+            release.set()
+            _join_health_threads()
+
+    def test_probes_in_flight_are_capped_process_wide_and_the_rest_read_pending(self):
+        """A large imported config must not open one thread and socket per server at once."""
+        cap = mcp_health.MAX_CONCURRENT_PROBES
+        servers = {f"s{i}": {"url": f"https://s{i}.example/mcp"} for i in range(cap + 3)}
+        release = threading.Event()
+        started = []
+        lock = threading.Lock()
+
+        def hang(name, cfg):
+            with lock:
+                started.append(name)
+            release.wait(10)
+            return ("healthy", "HTTP 200")
+
+        try:
+            with patch("api.mcp_health.probe_server", side_effect=hang):
+                rows = mcp_health.refresh_and_read(servers)
+                assert len(mcp_health.in_flight()) == cap
+                assert all(row["pending"] for row in rows.values())
+                # A second read while the cap is full starts nothing more.
+                mcp_health.refresh_and_read(servers)
+                assert len(mcp_health.in_flight()) == cap
+                release.set()
+                _join_health_threads()
+                # Slots freed: the deferred servers are picked up on the next read.
+                rows = mcp_health.refresh_and_read(servers)
+                _join_health_threads()
+                rows = mcp_health.refresh_and_read(servers)
+            assert sorted(started) == sorted(servers)
+            assert all(row["health"] == "healthy" and not row["pending"] for row in rows.values())
+        finally:
+            release.set()
+            _join_health_threads()
+
+    def test_a_sibling_identity_is_not_held_up_behind_a_same_named_probe_in_flight(self):
+        """Switching profiles mid-probe must start the new server's probe, not wait 8s for the old one."""
+        profile_a = {"web": {"url": "https://a.example/mcp"}}
+        profile_b = {"web": {"url": "https://b.example/mcp"}}
+        release = threading.Event()
+        started = []
+        lock = threading.Lock()
+
+        def probe(name, cfg):
+            with lock:
+                started.append(cfg["url"])
+            if "a." in cfg["url"]:
+                release.wait(10)
+                return ("healthy", "HTTP 200")
+            return ("needs_auth", "HTTP 401")
+
+        try:
+            with patch("api.mcp_health.probe_server", side_effect=probe):
+                _runtime(profile_a)
+                rows = _runtime(profile_b)
+                assert rows["web"]["health_pending"] is True
+                deadline = time.monotonic() + 5
+                while "https://b.example/mcp" not in started and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert "https://b.example/mcp" in started, "sibling probe never started"
+                for _ in range(200):
+                    rows = _runtime(profile_b)
+                    if rows["web"]["health"] == "needs_auth":
+                        break
+                    time.sleep(0.01)
+                assert rows["web"]["health"] == "needs_auth"
+                assert rows["web"]["health_pending"] is False
         finally:
             release.set()
             _join_health_threads()
