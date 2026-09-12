@@ -975,6 +975,71 @@ def test_paged_retry_settles_an_output_free_terminal(monkeypatch, terminal):
         assert "_journal_retry_after_seq" not in markers[0]
 
 
+def _apperror_payload(session_id):
+    return {
+        "session_id": session_id,
+        "session": {
+            "session_id": session_id,
+            "messages": [
+                {"role": "user", "content": "Trace the regression"},
+                {"role": "assistant", "content": "Provider rejected the request.", "_error": True},
+            ],
+        },
+    }
+
+
+def test_early_error_defers_to_a_later_authoritative_terminal(monkeypatch):
+    """An apperror in an early window must not settle the walk before its tail."""
+    session_id = "hweb13_early_error_done"
+    stream_id = "hweb13_stream_early_error_done"
+    session = _dead_session(session_id, stream_id)
+    append_run_event(session_id, stream_id, "interim_assistant", {"text": "Before the error."})
+    append_run_event(session_id, stream_id, "apperror", _apperror_payload(session_id))
+    lines = [f"Line {i} after a recovered error." for i in range(1, 5)]
+    for line in lines:
+        append_run_event(session_id, stream_id, "interim_assistant", {"text": line})
+    append_run_event(session_id, stream_id, "done", {})
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_BYTES", 600)
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_WINDOWS", 1)
+
+    assert _recover_dead_run_journal(session, stream_id) is True
+    marker = session.messages[-1]
+    assert marker["_pending_journal_recovery"] is True
+    assert not any(m.get("_error") and m.get("content") == "Provider rejected the request." for m in session.messages)
+
+    for _ in range(10):
+        if not models._session_has_pending_journal_retry(session):
+            break
+        models._retry_journal_recovery_in_place(session)
+    assert _visible(session) == ["Before the error."] + lines
+    # The later `done` is authoritative: no error row, no marker.
+    assert not any(m.get("_error") for m in session.messages)
+
+
+def test_early_error_is_materialized_once_the_walk_is_conclusive(monkeypatch):
+    """When no later terminal exists, the carried error lands at the end."""
+    session_id = "hweb13_early_error_only"
+    stream_id = "hweb13_stream_early_error_only"
+    session = _dead_session(session_id, stream_id)
+    append_run_event(session_id, stream_id, "interim_assistant", {"text": "Before the error."})
+    append_run_event(session_id, stream_id, "apperror", _apperror_payload(session_id))
+    lines = [f"Line {i} after the error." for i in range(1, 5)]
+    for line in lines:
+        append_run_event(session_id, stream_id, "interim_assistant", {"text": line})
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_BYTES", 600)
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_WINDOWS", 1)
+
+    assert _recover_dead_run_journal(session, stream_id) is True
+    assert session.messages[-1]["_pending_journal_recovery"] is True
+    for _ in range(10):
+        if not models._session_has_pending_journal_retry(session):
+            break
+        models._retry_journal_recovery_in_place(session)
+    assert _visible(session) == ["Before the error."] + lines + ["Provider rejected the request."]
+    assert session.messages[-1]["_error"] is True
+    assert not [m for m in session.messages if m.get("type") == "interrupted"]
+
+
 def test_tool_completion_in_a_later_wave_settles_the_earlier_card():
     session_id = "hweb13_wave_tool"
     stream_id = "hweb13_stream_wave_tool"

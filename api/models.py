@@ -2811,6 +2811,9 @@ def _marker_journal_cursor(marker: dict | None) -> dict | None:
     carry = marker.get('_journal_retry_carry')
     if isinstance(carry, dict):
         cursor['carry'] = carry
+    terminal = marker.get('_journal_retry_terminal')
+    if isinstance(terminal, dict):
+        cursor['terminal'] = terminal
     return cursor
 
 
@@ -2849,8 +2852,10 @@ def _read_run_journal_window(session_id: str, stream_id: str, *, cursor: dict | 
                 max_rows=_RECOVERY_JOURNAL_MAX_ROWS,
             )
         events = []
+        row_offsets = []
         last_seq = after_seq
-        for event in journal.get('events') or []:
+        raw_offsets = journal.get('row_offsets') or []
+        for index, event in enumerate(journal.get('events') or []):
             if not isinstance(event, dict):
                 continue
             seq = event.get('seq')
@@ -2859,6 +2864,8 @@ def _read_run_journal_window(session_id: str, stream_id: str, *, cursor: dict | 
                 continue
             last_seq = max(last_seq, seq)
             events.append(event)
+            row_offsets.append(raw_offsets[index] if index < len(raw_offsets) else offset)
+        journal['row_offsets'] = row_offsets
         offset = int(journal.get('next_offset') or offset)
         if (
             events
@@ -2903,6 +2910,7 @@ def _replay_run_journal_windows(
         'unavailable': False,
     }
     terminal_events: list[dict] = []
+    latest_terminal = (cursor or {}).get('terminal') if isinstance((cursor or {}).get('terminal'), dict) else None
     # One dedupe baseline for the whole pass: later windows must not treat the
     # rows earlier windows appended as pre-existing sidecar content.
     dedupe_state = _journal_dedupe_state(session)
@@ -2933,23 +2941,26 @@ def _replay_run_journal_windows(
         if not events:
             break
         result['events'] = True
-        recovered_output, terminal_error_recovered = (
-            _recover_journaled_output_and_terminal_error(
-                session, stream_id, dedupe_existing=dedupe_existing, journal=journal,
-                dedupe_state=dedupe_state,
-            )
+        recovered_output = _append_journaled_partial_output(
+            session, stream_id, dedupe_existing=dedupe_existing, journal=journal,
+            dedupe_state=dedupe_state,
         )
         result['recovered_output'] = result['recovered_output'] or recovered_output
-        result['terminal_error_recovered'] = (
-            result['terminal_error_recovered'] or terminal_error_recovered
-        )
         result['visible_output'] = result['visible_output'] or _run_journal_has_visible_output(
             session, stream_id, journal=journal,
         )
-        terminal_events.extend(
-            event for event in events
-            if isinstance(event, dict) and event.get('terminal') is True
-        )
+        # Terminal rows are only classified and materialized once the walk
+        # is conclusive: an early `apperror` may be followed by a later
+        # authoritative terminal, and acting on it now would settle the turn
+        # and drop the cursor before that row is read.
+        row_offsets = journal.get('row_offsets') or []
+        for index, event in enumerate(events):
+            if isinstance(event, dict) and event.get('terminal') is True:
+                terminal_events.append(event)
+                latest_terminal = {
+                    'seq': int(event.get('seq') or 0),
+                    'offset': int(row_offsets[index] if index < len(row_offsets) else 0),
+                }
         run_time = _journal_last_event_time(journal)
         if run_time is not None:
             result['run_time'] = max(run_time, result['run_time'] or run_time)
@@ -2984,9 +2995,35 @@ def _replay_run_journal_windows(
     }
     if keep_carry:
         result['cursor']['carry'] = carry
+    conclusive = not result['truncated'] and not result['unavailable']
+    if not conclusive:
+        if latest_terminal:
+            result['cursor']['terminal'] = latest_terminal
+        return result
+    if not terminal_events and latest_terminal:
+        # The only terminal seen lives in an earlier pass: re-read that one
+        # row now that the tail is known.
+        from api.run_journal import _RUN_JOURNAL_TAIL_MAX_BYTES, read_run_event_window
+
+        try:
+            terminal_events = [
+                event for event in read_run_event_window(
+                    session.session_id, stream_id,
+                    start_offset=int(latest_terminal.get('offset') or 0),
+                    max_bytes=_RUN_JOURNAL_TAIL_MAX_BYTES, max_rows=1,
+                ).get('events') or []
+                if isinstance(event, dict) and event.get('terminal') is True
+                and int(event.get('seq') or 0) == int(latest_terminal.get('seq') or 0)
+            ]
+        except Exception:
+            terminal_events = []
     if terminal_events:
+        terminal_journal = {'events': terminal_events}
         result['terminal_state'] = _run_journal_terminal_state(
-            session, stream_id, journal={'events': terminal_events},
+            session, stream_id, journal=terminal_journal,
+        )
+        result['terminal_error_recovered'] = _materialize_unsaved_gateway_terminal_error(
+            session, stream_id, journal=terminal_journal,
         )
     return result
 
@@ -3828,6 +3865,7 @@ def _arm_journal_retry(marker: dict, stream_id: str, *, cursor: dict | None = No
 
 def _stamp_journal_cursor(marker: dict, cursor: dict | None) -> None:
     marker.pop('_journal_retry_carry', None)
+    marker.pop('_journal_retry_terminal', None)
     if cursor is None:
         marker.pop('_journal_retry_after_seq', None)
         marker.pop('_journal_retry_offset', None)
@@ -3842,6 +3880,15 @@ def _stamp_journal_cursor(marker: dict, cursor: dict | None) -> None:
         # ponytail: the open fragment is unbounded in principle (a run of
         # nothing but tokens); bound it if a marker ever grows large.
         marker['_journal_retry_carry'] = carry
+    terminal = cursor.get('terminal')
+    if isinstance(terminal, dict):
+        # Where the latest terminal row seen so far lives (seq + byte offset),
+        # so a conclusive later pass that finds no newer terminal can re-read
+        # it instead of acting on it before the tail is known.
+        marker['_journal_retry_terminal'] = {
+            'seq': int(terminal.get('seq') or 0),
+            'offset': int(terminal.get('offset') or 0),
+        }
 
 
 def _strip_journal_retry_meta(marker: dict) -> None:
@@ -3852,6 +3899,7 @@ def _strip_journal_retry_meta(marker: dict) -> None:
     marker.pop('_journal_retry_after_seq', None)
     marker.pop('_journal_retry_offset', None)
     marker.pop('_journal_retry_carry', None)
+    marker.pop('_journal_retry_terminal', None)
 
 
 def _flush_journal_carry(session, stream_id: str | None, cursor: dict | None) -> bool:

@@ -829,8 +829,12 @@ def read_run_event_window(
     if unterminated_row is not None and selected and selected[-1] is unterminated_row:
         consumed -= 1
     events: list[dict] = []
+    row_offsets: list[int] = []
     malformed: list[dict] = []
+    row_start = start
     for offset, line in enumerate(selected, start=1):
+        this_row = row_start
+        row_start += len(line) + 1
         if not line.strip():
             continue
         try:
@@ -840,6 +844,7 @@ def read_run_event_window(
             continue
         if isinstance(parsed, dict):
             events.append(parsed)
+            row_offsets.append(this_row)
         else:
             malformed.append({"window_line": offset})
     next_offset = start + consumed
@@ -847,6 +852,8 @@ def read_run_event_window(
         "session_id": sid,
         "run_id": rid,
         "events": events,
+        # Byte offset of each returned event's row, parallel to ``events``.
+        "row_offsets": row_offsets,
         "malformed": malformed,
         "truncated": bool(rows_truncated or next_offset < size),
         # Distinguishes "one row is larger than the window" (full window, no
