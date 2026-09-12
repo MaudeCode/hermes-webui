@@ -840,6 +840,7 @@ def test_native_flow_completes_through_browser_and_separate_client(stack: Stack)
         assert callback["status"] == 302 and callback["location"].startswith(NATIVE_CALLBACK + "?"), callback
         assert not [c for c in page.context.cookies(base) if c["name"] == SESSION_COOKIE]
     app_callback = {k: v[0] for k, v in urllib.parse.parse_qs(urllib.parse.urlsplit(callback["location"]).query).items()}
+    assert set(app_callback) == {"code", "state", "flow_id", "server_id"}, app_callback  # nothing else rides along
     assert app_callback["state"] == flow["state"] and app_callback["flow_id"] == flow["flow_id"]
     assert app_callback["server_id"] == flow["server_id"] and "id_token" not in callback["location"]
     assert not any(token in callback["location"] for token in stack.provider.issued_tokens)
