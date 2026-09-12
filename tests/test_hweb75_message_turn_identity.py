@@ -43,6 +43,8 @@ _UI_HELPERS = [
     "_worklogDetailHashKey",
     "_userMessageExpandIdentity",
     "_userMessageExpandKeys",
+    "_userMessageRawText",
+    "_syncUserMessageIdentityRow",
     "_userMessageExpandKey",
     "_userMessageExpandKeyList",
     "_clearUserMessageExpandState",
@@ -56,8 +58,9 @@ _UI_HELPERS = [
 
 STREAM_ID = "stream-hweb75"
 STARTED_AT = 1757600000.123456  # what /api/chat/start returns as pending_started_at
-DISPLAY = "/moa " + "explain this deploy log line by line\n" * 40
-TRANSFORMED = "explain this deploy log line by line\n" * 40  # /moa strips the prefix
+# Trimmed, like the `data-raw-text` renderMessages keys a user row on.
+DISPLAY = ("/moa " + "explain this deploy log line by line\n" * 40).strip()
+TRANSFORMED = ("explain this deploy log line by line\n" * 40).strip()  # /moa strips the prefix
 
 
 def _run(body: str, **inputs) -> dict:
@@ -70,6 +73,9 @@ const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayR
 const USER_MSG_EXPANDED_MAX=200;
 const _userMsgExpandedByKey=Object.create(null);
 function msgContent(m){{ return typeof m.content==='string'?m.content:''; }}
+function _stripWorkspaceDisplayPrefix(t){{ return t; }}
+function _stripAttachedFilesMarkerForDisplay(t){{ return t; }}
+function _userMessageDomId(i){{ return 'msg-user-'+i; }}
 const S={{session:{{session_id:'hweb75-session'}},messages:[]}};
 {helpers}
 const IN={json.dumps(inputs)};
@@ -214,6 +220,65 @@ def test_disclosure_state_follows_the_turn_from_optimistic_to_settled_to_reload(
     assert r["storeSize"] == 0, r
 
 
+def test_background_stamp_migrates_disclosure_state_under_the_owning_session():
+    """The reader can switch sessions while /api/chat/start is pending. The
+    accepted turn is still stamped, and state opened before the switch moves
+    onto the turn key under the owning session, not the one now on screen."""
+    r = _run(
+        """
+  const optimistic={role:'user',content:IN.display,_ts:1757599990.5,_pending:true};
+  S.messages=[optimistic];
+  _setUserMessageExpanded(_userMessageExpandKeys(optimistic, IN.display, 0), true);
+  // Navigate away: another session owns the pane and S.messages.
+  S.session={session_id:'elsewhere'};
+  S.messages=[{role:'user',content:'unrelated'}];
+  _adoptServerTurnIdentity(optimistic, IN.streamId, {pending_started_at:IN.startedAt}, 'hweb75-session');
+  const turnKey='u|turn:'+IN.startedAt;
+  const underOwner=_userMessageIsExpanded(turnKey, 'hweb75-session');
+  const underScreen=_userMessageIsExpanded(turnKey);
+  // Back on the owning session, the settled server row reads it.
+  S.session={session_id:'hweb75-session'};
+  const settled={role:'user',content:IN.transformed,timestamp:IN.startedAt,id:7};
+  return {
+    token: optimistic._active_turn_token,
+    underOwner, underScreen,
+    afterReturn: _userMessageIsExpanded(_userMessageExpandKeys(settled, IN.transformed, 0)),
+  };
+""",
+        display=DISPLAY, transformed=TRANSFORMED, streamId=STREAM_ID, startedAt=STARTED_AT,
+    )
+    assert r["token"] == f"{STREAM_ID}:{STARTED_AT:.17g}", r
+    assert r["underOwner"] is True, r
+    assert r["underScreen"] is False, r
+    assert r["afterReturn"] is True, r
+
+
+def test_persisted_ids_are_encoded_so_a_comma_or_bar_cannot_split_or_collide():
+    r = _run(
+        """
+  const withComma={role:'user',content:IN.display,id:'part,one',timestamp:1757500000};
+  const prefixOnly={role:'user',content:IN.display,id:'part',timestamp:1757500000};
+  const keysComma=_userMessageExpandKeys(withComma, IN.display, 0);
+  _setUserMessageExpanded(keysComma, true);
+  return {
+    stable: _messageStableIdentities(withComma),
+    barId: _messageStableIdentities({role:'user',content:'x',id:'a|b'}),
+    keyCount: _userMessageExpandKeyList(keysComma).length,
+    prefixInherits: _userMessageIsExpanded(_userMessageExpandKeys(prefixOnly, IN.display, 0)),
+    rejected: [_messagePersistedId({id:true}), _messagePersistedId({id:{}}), _messagePersistedId({id:''}), _messagePersistedId({message_id:'m1'})],
+  };
+""",
+        display=DISPLAY,
+    )
+    assert r["stable"] == ["id:part%2Cone"], r
+    assert r["barId"] == ["id:a%7Cb"], r
+    assert r["keyCount"] == 2, r  # id + content, no stray split
+    # Both rows share the content key, so the prefix-id row does read the shared
+    # content entry — the existing "identical prompts open together" semantics —
+    # but only after the comma id is proven intact above, never by truncation.
+    assert r["rejected"] == [None, None, None, "m1"], r
+
+
 def test_viewport_anchor_matches_the_settled_row_and_keeps_fuzzy_legacy_matching():
     r = _run(
         _rows_js()
@@ -245,10 +310,11 @@ def test_viewport_anchor_matches_the_settled_row_and_keeps_fuzzy_legacy_matching
 def test_send_stamps_the_optimistic_row_once_chat_start_is_accepted():
     start = MESSAGES_JS.index("async function send(")
     body = MESSAGES_JS[start:MESSAGES_JS.index("async function startRegeneration(", start)]
-    assign = body.index("S.activeStreamId = streamId;")
-    stamp = body.index("_adoptServerTurnIdentity(userMsg, streamId, startData);", assign)
-    attach = body.index("attachLiveStream(activeSid, streamId, uploadedNames);", stamp)
-    assert assign < stamp < attach
+    start = body.index("const startData=await api('/api/chat/start'")
+    stamp = body.index("_adoptServerTurnIdentity(userMsg, startData&&startData.stream_id, startData, activeSid);", start)
+    # Before the ownership branch: a turn preserved for a background session is stamped too.
+    background = body.index("if(!_sendPreprocessStillOwnsSession(activeSid)){", start)
+    assert start < stamp < background
 
 
 if __name__ == "__main__":  # pragma: no cover

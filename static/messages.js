@@ -2115,6 +2115,12 @@ async function send(){
       attachments:uploaded.length?uploaded:undefined,
       moa_config:moaConfigForPostStart?true:undefined
     })});
+    // HWEB-75: the optimistic row adopts the server-owned turn identity as soon
+    // as the start is accepted — before the ownership branch below, so a turn
+    // preserved for a background session is stamped too and stays the same
+    // message (disclosure state, viewport anchor, ephemeral turn fields) when
+    // the settled transcript replaces it with transformed text.
+    _adoptServerTurnIdentity(userMsg, startData&&startData.stream_id, startData, activeSid);
     // /api/chat/start can outlive a sidebar navigation. The accepted run still
     // belongs to activeSid, but no destination-pane state or live DOM owner may
     // be changed after the await. Preserve it for journal reattach instead.
@@ -2211,10 +2217,6 @@ async function send(){
   const startData = postStartData || {};
   streamId = postStartData ? postStartData.stream_id : null;
   S.activeStreamId = streamId;
-  // HWEB-75: the optimistic row adopts the server-owned turn identity so it
-  // stays the same message (disclosure state, viewport anchor, ephemeral turn
-  // fields) when the settled transcript replaces it with transformed text.
-  _adoptServerTurnIdentity(userMsg, streamId, startData);
   // setBusy(true) already ran with activeStreamId=null; refresh now that we
   // have a stream id so the primary button can switch to Stop (see
   // getComposerPrimaryAction).
@@ -2614,9 +2616,14 @@ function _messageIdentityKey(m){
   }
   return `${m.role}|${ts}|${body.slice(0,160)}`;
 }
+// Only a number or non-empty string counts as an id; anything else (bool,
+// object, empty) is "no id" so a stray value can never mint a shared identity.
 function _messagePersistedId(m){
-  const id=(m&&m.id!=null&&m.id!=='')?m.id:(m&&m.message_id!=null&&m.message_id!=='')?m.message_id:null;
-  return (id==null||typeof id==='boolean')?null:id;
+  for(const id of [m&&m.id, m&&m.message_id]){
+    if(typeof id==='number'&&Number.isFinite(id)) return id;
+    if(typeof id==='string'&&id!=='') return id;
+  }
+  return null;
 }
 function _messageTurnStartedAt(m){
   if(!m||!m.role) return NaN;
@@ -2634,10 +2641,13 @@ function _messageTurnIdentity(m){
   return (Number.isFinite(started)&&started>0&&started%1!==0)?String(started):'';
 }
 // Strong identities only (no legacy fallback), strongest first: 'id:N', 'turn:T'.
+// The id is the one caller-supplied component, so it is URI-encoded: the
+// identities are joined with '|' and ',' by their consumers, and an imported
+// id containing either must not truncate or collide.
 function _messageStableIdentities(m){
   const out=[];
   const id=_messagePersistedId(m);
-  if(id!=null) out.push(`id:${id}`);
+  if(id!=null) out.push(`id:${encodeURIComponent(String(id))}`);
   const turn=_messageTurnIdentity(m);
   if(turn) out.push(`turn:${turn}`);
   return out;
@@ -2666,14 +2676,16 @@ function _formatTurnStartedAt(startedAt){
 // in the server's exact `build_active_turn_token` format. `_ts` becomes the
 // server's pending_started_at so the legacy key converges too. The row object
 // is shared by S.messages, INFLIGHT and the persisted in-flight snapshot, so
-// stamping it once covers every holder.
-function _adoptServerTurnIdentity(message, streamId, startData){
+// stamping it once covers every holder. `sid` is the session that owns the
+// turn: the reader may have navigated away while the start was pending, so
+// disclosure state migrates under that session, not the one on screen.
+function _adoptServerTurnIdentity(message, streamId, startData, sid){
   if(!message||!streamId||!startData) return false;
   const startedAt=Number(startData.pending_started_at);
   if(!Number.isFinite(startedAt)||startedAt<=0) return false;
   message._ts=startedAt;
   message._active_turn_token=`${String(streamId).trim()}:${_formatTurnStartedAt(startedAt)}`;
-  if(typeof _syncUserMessageIdentityRow==='function') _syncUserMessageIdentityRow(message);
+  if(typeof _syncUserMessageIdentityRow==='function') _syncUserMessageIdentityRow(message, sid);
   return true;
 }
 

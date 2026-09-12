@@ -1676,8 +1676,10 @@ function _userMessageExpandIdentity(rawText, attachmentCount){
 }
 // HWEB-75: every identity one row answers to, strongest first, as one
 // comma-joined string (stamped on the row as data-msg-expand-key): the
-// persisted id, the server turn start, then the content identity. None of the
-// parts can contain a comma.
+// persisted id, the server turn start, then the content identity. The id is
+// URI-encoded at its source (`_messageStableIdentities`); the turn is a
+// number and the content identity is `u|count|length|hex`, so no part can
+// contain a comma.
 function _userMessageExpandKeys(m, rawText, attachmentCount){
   const keys=(m&&typeof _messageStableIdentities==='function')
     ? _messageStableIdentities(m).map(k=>'u|'+k) : [];
@@ -1685,25 +1687,36 @@ function _userMessageExpandKeys(m, rawText, attachmentCount){
   if(content) keys.push(content);
   return keys.join(',');
 }
+// The same text renderMessages keys a user row on (its `data-raw-text`).
+function _userMessageRawText(m){
+  let text='';
+  try{ text=String(msgContent(m)||''); }catch(_){ text=String(m&&m.content||''); }
+  return String(_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(text))).trim();
+}
 // HWEB-75: runs once /api/chat/start has stamped the optimistic row with its
 // turn identity. Moves disclosure state opened before the reply (content key)
-// onto the turn key and refreshes the rendered row's identity attributes, so no
-// full re-render is needed for the toggle and viewport anchor to use it.
-function _syncUserMessageIdentityRow(m){
+// onto the turn key under the OWNING session `sid` — the reader may already be
+// looking at another session — and, when the row is on screen, refreshes its
+// identity attributes so no full re-render is needed for the toggle and the
+// viewport anchor to use the new key.
+function _syncUserMessageIdentityRow(m, sid){
+  if(!m) return;
+  const keys=_userMessageExpandKeys(m, _userMessageRawText(m), Array.isArray(m.attachments)?m.attachments.length:0);
+  _userMessageIsExpanded(keys, sid);
   const rawIdx=(typeof S!=='undefined'&&Array.isArray(S.messages))?S.messages.indexOf(m):-1;
   if(rawIdx<0) return;
   const row=typeof document!=='undefined'?document.getElementById(_userMessageDomId(rawIdx)):null;
   if(!row||!row.dataset) return;
-  const keys=_userMessageExpandKeys(m, row.dataset.rawText||'', (m.attachments&&m.attachments.length)||0);
-  _userMessageIsExpanded(keys);
   row.dataset.msgExpandKey=keys;
   row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
 }
-function _userMessageExpandKey(identity){
+// `sid` defaults to the session on screen; pass it explicitly when acting on
+// a session that is not (HWEB-75 background stamp).
+function _userMessageExpandKey(identity, sid){
   const id=String(identity||'');
   if(!id) return '';
-  const sid=String((typeof S!=='undefined'&&S.session&&S.session.session_id)||'');
-  return sid?sid+':'+id:'';
+  const scope=String(sid||(typeof S!=='undefined'&&S.session&&S.session.session_id)||'');
+  return scope?scope+':'+id:'';
 }
 function _userMessageExpandKeyList(identities){
   return String(identities||'').split(',').filter(Boolean);
@@ -1711,26 +1724,26 @@ function _userMessageExpandKeyList(identities){
 function _clearUserMessageExpandState(){
   for(const k in _userMsgExpandedByKey) delete _userMsgExpandedByKey[k];
 }
-function _userMessageIsExpanded(identities){
+function _userMessageIsExpanded(identities, sid){
   const list=_userMessageExpandKeyList(identities);
   for(let i=0;i<list.length;i++){
-    const k=_userMessageExpandKey(list[i]);
+    const k=_userMessageExpandKey(list[i], sid);
     if(!k||_userMsgExpandedByKey[k]!==true) continue;
     // Found under a weaker identity: move it onto the strongest one so the
     // state survives the next representation of this row (settle, reload)
     // and no later row can inherit the weaker key.
-    if(i>0){ delete _userMsgExpandedByKey[k]; _setUserMessageExpanded(list[0], true); }
+    if(i>0){ delete _userMsgExpandedByKey[k]; _setUserMessageExpanded(list[0], true, sid); }
     return true;
   }
   return false;
 }
-function _setUserMessageExpanded(identities, expanded){
+function _setUserMessageExpanded(identities, expanded, sid){
   const list=_userMessageExpandKeyList(identities);
   if(!expanded){
-    for(const id of list){ const k=_userMessageExpandKey(id); if(k) delete _userMsgExpandedByKey[k]; }
+    for(const id of list){ const k=_userMessageExpandKey(id, sid); if(k) delete _userMsgExpandedByKey[k]; }
     return;
   }
-  const k=_userMessageExpandKey(list[0]);
+  const k=_userMessageExpandKey(list[0], sid);
   if(!k) return;
   // Re-insert so the key moves to the back of the eviction order on re-open.
   delete _userMsgExpandedByKey[k];
