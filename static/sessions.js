@@ -1857,6 +1857,9 @@ async function _switchProfileForSessionLoad(profile){
     const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name}),timeoutToast:false});
     S.activeProfile=data.active||name;
     S.activeProfileIsDefault=!!data.is_default;
+    // New-profile cookie is set; end the suspension now so input during the
+    // trailing renders renews the destination profile (#HWEB-97).
+    if(typeof window!=='undefined'&&window.HermesPresence&&typeof window.HermesPresence.resume==='function') window.HermesPresence.resume();
     if(typeof _resetCronUnreadForProfileSwitch==='function'){
       _resetCronUnreadForProfileSwitch();
     }

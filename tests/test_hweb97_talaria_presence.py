@@ -439,6 +439,24 @@ def test_sign_out_revokes_presence_before_logout():
     assert "await window.HermesPresence.reset()" in sign_out
 
 
+def test_successful_switch_resumes_before_trailing_work_and_logout_rolls_back_with_renew():
+    panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    sessions = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    # Resume fires right after the switch response sets the new cookie, before the
+    # trailing session/list/workspace work — not only in the finally.
+    for src, marker in ((panels, "S.activeProfileIsDefault = !!data.is_default;"),
+                        (sessions, "S.activeProfileIsDefault=!!data.is_default;")):
+        after = src[src.index(marker) + len(marker):]
+        resume_at = after.index("window.HermesPresence.resume()")
+        # The very next presence call after the cookie is set is a resume().
+        assert "_resetCronUnreadForProfileSwitch" not in after[:resume_at] or resume_at < 400
+    # Logout rollback restores the click's lease via renew(), like a failed switch.
+    sign_out = panels[panels.index("async function signOut()"):]
+    sign_out = sign_out[: sign_out.index("async function", 1)]
+    assert "window.HermesPresence.renew()" in sign_out
+    assert "window.HermesPresence.resume()" not in sign_out
+
+
 def test_scope_change_suspends_and_resumes_renewals():
     panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
     sessions = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
@@ -447,12 +465,12 @@ def test_scope_change_suspends_and_resumes_renewals():
     assert "suspended=true" in presence
     assert "if(suspended) return;" in presence
     assert "resume:function(){ suspended=false; }" in presence
-    # Both switch paths resume on every exit, and logout resumes on failure.
+    # Both switch paths resume on every exit; logout rolls back with renew().
     assert "window.HermesPresence.resume()" in panels
     assert "window.HermesPresence.resume()" in sessions
     sign_out = panels[panels.index("async function signOut()"):]
     sign_out = sign_out[: sign_out.index("async function", 1)]
-    assert "window.HermesPresence.resume()" in sign_out
+    assert "window.HermesPresence.renew()" in sign_out
 
 
 def test_failed_profile_switch_restores_presence():

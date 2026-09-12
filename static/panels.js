@@ -7557,6 +7557,11 @@ async function switchToProfile(name) {
     if (_switchGen !== _profileSwitchGeneration) return false;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    // The new-profile cookie is now set; end the presence suspension immediately
+    // so trusted input during the trailing session/list/workspace loads renews the
+    // destination profile instead of being ignored (#HWEB-97). The finally still
+    // resumes on early-return/throw paths that never reach here.
+    if (typeof window !== 'undefined' && window.HermesPresence && typeof window.HermesPresence.resume === 'function') window.HermesPresence.resume();
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
@@ -13581,9 +13586,10 @@ async function signOut(){
     const response=await api('/api/auth/logout',{method:'POST',body:'{}'});
     window.location.href=response.trusted_logout_url||'login';
   }catch(e){
-    // Logout did not navigate away; resume renewals so the still-authenticated
-    // tab is not left permanently suspended (#HWEB-97).
-    if(typeof window!=='undefined'&&window.HermesPresence&&typeof window.HermesPresence.resume==='function') window.HermesPresence.resume();
+    // Logout did not navigate away; restore the lease represented by the genuine
+    // Sign Out click (renew() also ends the suspension) so the still-authenticated,
+    // focused tab is not left without presence until the next input (#HWEB-97).
+    if(typeof window!=='undefined'&&window.HermesPresence&&typeof window.HermesPresence.renew==='function') window.HermesPresence.renew();
     showToast(t('sign_out_failed')+e.message);
   }
 }
