@@ -380,7 +380,12 @@
     const heroEl = document.getElementById('emptyHeroTitle');
     const hero = (heroEl && heroEl.classList.contains('ready')) ? heroEl.textContent : '';
     const html = rows ? inner.innerHTML : '';
-    const snap = { sid, rows, title, hero, ctx, html: html.length < LIMIT ? html : '', ts: Date.now() };
+    // Context ring (usage %) so it shows on reload instead of appearing later.
+    let ring = null;
+    const wrap = document.getElementById('ctxIndicatorWrap'), ind = document.getElementById('ctxIndicator');
+    const val = document.getElementById('ctxRingValue'), pct = document.getElementById('ctxPercent');
+    if (wrap && ind && val && wrap.style.display !== 'none') ring = { cls: ind.className, dasharray: val.style.strokeDasharray, dashoffset: val.style.strokeDashoffset, pct: pct ? pct.textContent : '' };
+    const snap = { sid, rows, title, hero, ctx, ring, html: html.length < LIMIT ? html : '', ts: Date.now() };
     try { localStorage.setItem(TRANSCRIPT_KEY, JSON.stringify(snap)); } catch (e) { /* quota */ }
   }
   let sbTimer = null, trTimer = null;

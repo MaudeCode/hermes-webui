@@ -8199,4 +8199,5 @@ html.booting.title-pending .chat-header-title{visibility:hidden;}
 @media (min-width:769px){ #composerMobileConfigBtn{display:inline-flex!important;} }
 /* Context ring keeps its slot from first paint; it becomes visible when usage is known */
 #ctxIndicatorWrap[style*="display:none"],#ctxIndicatorWrap[style*="display: none"]{display:flex!important;visibility:hidden;}
+html.booting.has-ring-cache #ctxIndicatorWrap{display:flex!important;visibility:visible!important;}
 /* REDESIGN-LAYER-END */

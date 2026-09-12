@@ -102,3 +102,8 @@ def test_global_caches_paint_context_and_headline_without_a_session_snapshot():
 def test_context_cache_keys_are_the_four_values_not_the_item_class():
     assert "chat-context-(profile|model|effort|workspace)" in HUB
     assert "chat-context-(\\w+)" not in HUB
+
+
+def test_context_ring_is_snapshotted_and_restored():
+    assert "ring = { cls: ind.className" in HUB
+    assert "snap.ring" in INDEX and "has-ring-cache" in INDEX
