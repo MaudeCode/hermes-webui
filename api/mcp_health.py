@@ -62,6 +62,9 @@ _AUTH_STATUSES = frozenset({401, 403, 407})
 # nothing about its health, so it stays UNKNOWN rather than being called down.
 _PROTOCOL_MISMATCH_STATUSES = frozenset({404, 405, 406, 415})
 
+# SSE permits CR, LF or CRLF line endings; an event ends at a blank line.
+_SSE_EVENT_BOUNDARY = re.compile(r"(?:\r\n|\r|\n){2}")
+
 _INITIALIZE_REQUEST = {
     "jsonrpc": "2.0",
     "id": "hermes-webui-health",
@@ -124,7 +127,7 @@ def _jsonrpc_from_body(raw: bytes) -> dict | None:
     # SSE: an event is the block up to a blank line, and its payload is every
     # ``data:`` line in that block joined with newlines — a pretty-printed
     # reply legitimately spans several of them.
-    for event in re.split(r"\r?\n\r?\n", text):
+    for event in _SSE_EVENT_BOUNDARY.split(text):
         data_lines = [
             line[5:].removeprefix(" ")
             for line in event.splitlines()
@@ -159,14 +162,16 @@ def _socket_of(response):
 
 
 def _read_jsonrpc_reply(response) -> dict | None:
-    """Read the body line by line and stop as soon as our reply has arrived.
+    """Read the body as it arrives and stop as soon as our reply has.
 
     A streamable-HTTP server that answers over ``text/event-stream`` commonly
     leaves the stream open after the initialize event, so a single
     ``read(n)`` would block until the socket timeout and call a working server
-    unhealthy. Framing on SSE event boundaries (a blank line) lets us return
-    the moment the reply is complete; a plain JSON body simply reads to EOF.
-    The byte cap and the deadline both still hold.
+    unhealthy. ``read1`` returns whatever bytes are available after one
+    underlying read, and the buffer is re-parsed after each — that returns the
+    moment the reply is complete regardless of whether the server frames
+    events with CR, LF or CRLF, and a plain JSON body simply reads to EOF. The
+    byte cap and the deadline both still hold.
     """
     buf = bytearray()
     deadline = time.monotonic() + PROBE_TIMEOUT_S
@@ -180,14 +185,13 @@ def _read_jsonrpc_reply(response) -> dict | None:
             # each inheriting the full socket timeout — a server that stalls
             # right before the deadline would otherwise double the probe time.
             sock.settimeout(remaining)
-        line = response.readline(_MAX_PROBE_BODY_BYTES - len(buf))
-        if not line:
+        chunk = response.read1(_MAX_PROBE_BODY_BYTES - len(buf))
+        if not chunk:
             break
-        buf += line
-        if line in (b"\n", b"\r\n"):
-            payload = _jsonrpc_from_body(bytes(buf))
-            if payload is not None:
-                return payload
+        buf += chunk
+        payload = _jsonrpc_from_body(bytes(buf))
+        if payload is not None:
+            return payload
     return _jsonrpc_from_body(bytes(buf))
 
 
@@ -427,6 +431,11 @@ def refresh_and_read(servers: dict) -> dict[str, dict]:
             logger.debug("could not start MCP health thread for %r", name, exc_info=True)
             with _LOCK:
                 _IN_FLIGHT.discard(name)
+                # Release the interval slot too, or the unstarted probe looks
+                # "recently scheduled" for 120s and the panel's bounded
+                # re-reads exhaust themselves waiting on a verdict that never
+                # comes. The next read retries instead.
+                _STARTED_AT.pop((name, fingerprint), None)
     return readable
 
 

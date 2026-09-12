@@ -130,7 +130,7 @@ class TestProbeVerdicts:
     @staticmethod
     def _response(body: bytes, code: int = 200, headers: dict | None = None, *,
                   stays_open: bool = False):
-        """A response whose body is served line by line, like an HTTP socket.
+        """A response whose body arrives in chunks, like an HTTP socket.
 
         ``stays_open`` models an SSE stream the server never closes: after the
         last line, the next read blocks until the socket times out.
@@ -138,9 +138,9 @@ class TestProbeVerdicts:
         response = MagicMock()
         response.status = code
         response.headers = headers or {}
-        lines = body.splitlines(keepends=True)
+        chunks = body.splitlines(keepends=True)
         tail = [TimeoutError("socket timed out")] if stays_open else [b""]
-        response.readline.side_effect = lines + tail
+        response.read1.side_effect = chunks + tail
         response.__enter__ = lambda self: self
         response.__exit__ = lambda *a: False
         return response
@@ -150,10 +150,15 @@ class TestProbeVerdicts:
         response = cls._response(body, code, stays_open=stays_open)
         with patch("api.mcp_health._urlopen", return_value=response):
             verdict = mcp_health.probe_server("a", {"url": "https://x/mcp"})
-        # Bounded read: every line request is capped by what is left of the budget.
-        for call in response.readline.call_args_list:
+        # Bounded read: every chunk request is capped by what is left of the budget.
+        for call in response.read1.call_args_list:
             assert call.args[0] <= mcp_health._MAX_PROBE_BODY_BYTES
         return verdict
+
+    def test_sse_events_are_framed_with_cr_lf_or_crlf(self):
+        for eol in (b"\r", b"\n", b"\r\n"):
+            sse = b"event: message" + eol + b"data: " + self._INIT_OK + eol + eol
+            assert self._probe_body(sse, stays_open=True) == ("healthy", "HTTP 200"), eol
 
     def test_a_pretty_printed_reply_split_across_data_lines_is_one_event(self):
         """SSE joins an event's data: lines with newlines; each line alone is not JSON."""
@@ -286,7 +291,9 @@ class TestRuntimeStatusMapFold:
         assert runtime["boom"]["health_detail"] == "health check failed"
         assert runtime["fine"]["health"] == "healthy"
 
-    def test_connected_stdio_server_is_healthy_but_expired_credentials_still_win(self):
+    def test_a_connected_flag_from_the_process_global_registry_never_promotes_health(self):
+        """The agent registry is keyed by name only, so under another profile ``connected``
+        can describe a different server with the same name. Unknown stays unknown."""
         servers = {
             "local": {"command": "mcp-local"},
             "remote": {"url": "https://remote.example/mcp"},
@@ -303,7 +310,9 @@ class TestRuntimeStatusMapFold:
             _runtime(servers, agent_statuses=agent)
             _join_health_threads()
             runtime = _runtime(servers, agent_statuses=agent)
-        assert runtime["local"]["health"] == "healthy"
+        assert runtime["local"]["connected"] is True
+        assert runtime["local"]["health"] == "unknown"
+        assert runtime["local"]["health_detail"] == "stdio server not probed"
         assert runtime["remote"]["health"] == "needs_auth"
 
     def test_a_cold_connected_row_stays_pending_until_its_probe_settles(self):
@@ -642,6 +651,22 @@ class TestSchedulingIsBackgroundAndBounded:
         finally:
             release.set()
             _join_health_threads()
+
+    def test_a_probe_thread_that_fails_to_start_releases_its_interval_slot(self):
+        """Otherwise the unstarted probe looks recently scheduled for 120s and the panel
+        exhausts its re-reads waiting on a verdict that never comes."""
+        servers = {"web": {"url": "https://web.example/mcp"}}
+        with patch("api.mcp_health.threading.Thread") as thread_cls:
+            thread_cls.return_value.start.side_effect = RuntimeError("can't start new thread")
+            assert mcp_health.refresh_and_read(servers) == {}
+        assert mcp_health.in_flight() == set()
+        with mcp_health._LOCK:
+            assert mcp_health._STARTED_AT == {}
+        # The very next read retries rather than waiting out the interval.
+        with patch("api.mcp_health.probe_server", return_value=("healthy", "HTTP 200")):
+            mcp_health.refresh_and_read(servers)
+            _join_health_threads()
+            assert mcp_health.refresh_and_read(servers)["web"]["health"] == "healthy"
 
     def test_the_check_interval_is_bounded_so_polling_does_not_reprobe_every_request(self):
         servers = {"web": {"url": "https://web.example/mcp"}}

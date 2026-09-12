@@ -31057,18 +31057,13 @@ def _mcp_runtime_status_by_name(servers=None) -> dict[str, dict]:
             entry["health_checked_at"] = None
             continue
         row = health.get(name) or {}
-        state = row.get("health") or "unknown"
-        # A live registry connection settles the transports the probe
-        # deliberately does not spawn (stdio). It only ever upgrades a
-        # *settled* "unknown": ``connected`` can be stale, so it must never
-        # overrule a probe that saw the server fail or reject our credentials —
-        # and on a cold cache it must not pre-empt one either, or the row
-        # reads "healthy" with nothing pending and the re-read that would have
-        # surfaced the expired token never fires.
-        if (state == "unknown" and row.get("checked_at") is not None
-                and entry.get("connected")):
-            state = "healthy"
-        entry["health"] = state
+        # ``connected`` is deliberately *not* folded into health. The agent's
+        # MCP registry is process-global and keyed by name (see the note in
+        # api/streaming.py's MCP discovery), so under a second profile it can
+        # describe a different server with the same name. Unknown stays
+        # unknown; nothing here claims healthy on the strength of a flag that
+        # may belong to someone else's server.
+        entry["health"] = row.get("health") or "unknown"
         entry["health_detail"] = row.get("detail") or ""
         entry["health_checked_at"] = row.get("checked_at")
     return by_name
