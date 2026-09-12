@@ -739,6 +739,91 @@ def test_open_text_is_flushed_when_the_marker_settles_behind_a_newer_turn(monkey
     assert session.context_messages[-1]["content"] == "Next question"
 
 
+def _carry_armed_session(monkeypatch, session_id, stream_id, words):
+    session = _dead_session(session_id, stream_id)
+    for word in words:
+        append_run_event(session_id, stream_id, "token", {"text": word})
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_BYTES", 420)
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_WINDOWS", 1)
+    assert _recover_dead_run_journal(session, stream_id) is True
+    assert _visible(session) == []
+    assert session.messages[-1]["_journal_retry_carry"]["assistant_text"]
+    return session
+
+
+def test_flushed_carry_never_rides_the_cursor_again(monkeypatch):
+    """Text flushed at the journal end must not be replayed by the next read."""
+    session_id = "hweb13_carry_once"
+    stream_id = "hweb13_stream_carry_once"
+    words = ["Partial", " answer", " that", " just", " stops"]
+    session = _carry_armed_session(monkeypatch, session_id, stream_id, words)
+
+    # The writer is dead: reads reach the end of file with text still open,
+    # which flushes it once. Later reads must not flush it again.
+    for _ in range(len(words) + 4):
+        if not models._session_has_pending_journal_retry(session):
+            break
+        models._retry_journal_recovery_in_place(session)
+    assert _visible(session) == ["".join(words)]
+    marker = session.messages[-1]
+    assert "_journal_retry_carry" not in marker
+    for _ in range(3):
+        models._retry_journal_recovery_in_place(session)
+    assert _visible(session) == ["".join(words)]
+
+
+def test_unreadable_journal_keeps_the_carry(monkeypatch):
+    """A read failure is not the end of the run; carried text stays put."""
+    from api.run_journal import _run_path
+
+    session_id = "hweb13_carry_unreadable"
+    stream_id = "hweb13_stream_carry_unreadable"
+    words = ["Hello", " world", " this", " is", " one", " row."]
+    session = _carry_armed_session(monkeypatch, session_id, stream_id, words)
+    carried = session.messages[-1]["_journal_retry_carry"]["assistant_text"]
+
+    path = _run_path(session_id, stream_id)
+    hidden = path.with_name(path.name + ".hidden")
+    path.rename(hidden)
+    assert models._retry_journal_recovery_in_place(session) is False
+    assert _visible(session) == []
+    assert session.messages[-1]["_journal_retry_carry"]["assistant_text"] == carried
+
+    hidden.rename(path)
+    append_run_event(session_id, stream_id, "done", {})
+    for _ in range(len(words) + 2):
+        if not models._session_has_pending_journal_retry(session):
+            break
+        models._retry_journal_recovery_in_place(session)
+    assert _visible(session) == ["Hello world this is one row."]
+
+
+def test_oversized_carry_is_flushed_instead_of_growing(monkeypatch):
+    """A carry past its cap becomes a row so the marker stays bounded."""
+    session_id = "hweb13_carry_cap"
+    stream_id = "hweb13_stream_carry_cap"
+    words = ["Hello", " world", " this", " is", " one", " row."]
+    monkeypatch.setattr(models, "_RECOVERY_CARRY_MAX_CHARS", 8)
+    session = _dead_session(session_id, stream_id)
+    for word in words:
+        append_run_event(session_id, stream_id, "token", {"text": word})
+    append_run_event(session_id, stream_id, "done", {})
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_BYTES", 420)
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_WINDOWS", 1)
+
+    assert _recover_dead_run_journal(session, stream_id) is True
+    for _ in range(len(words) + 2):
+        if not models._session_has_pending_journal_retry(session):
+            break
+        marker = session.messages[-1]
+        assert len(marker.get("_journal_retry_carry", {}).get("assistant_text", "")) <= 8
+        models._retry_journal_recovery_in_place(session)
+    visible = _visible(session)
+    assert len(visible) > 1, "the cap should have forced at least one split"
+    assert "".join(v.replace(" ", "") for v in visible) == "".join(words).replace(" ", "")
+    assert not [m for m in session.messages if m.get("type") == "interrupted"]
+
+
 def test_tool_completion_in_a_later_wave_settles_the_earlier_card():
     session_id = "hweb13_wave_tool"
     stream_id = "hweb13_stream_wave_tool"

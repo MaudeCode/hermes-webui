@@ -2791,6 +2791,10 @@ def _read_run_journal_for_recovery(session_id: str, stream_id: str) -> dict:
 # cursor, so the next read continues where this one stopped rather than
 # clipping the oldest events.
 _RECOVERY_JOURNAL_MAX_WINDOWS = 8
+# Text still open at a pass cap rides on the marker until a semantic boundary.
+# Past this size it is flushed as a row instead, so the marker stays bounded
+# even for a run that streams nothing but tokens.
+_RECOVERY_CARRY_MAX_CHARS = 256 * 1024
 
 
 def _marker_journal_cursor(marker: dict | None) -> dict | None:
@@ -2856,7 +2860,12 @@ def _read_run_journal_window(session_id: str, stream_id: str, *, cursor: dict | 
             last_seq = max(last_seq, seq)
             events.append(event)
         offset = int(journal.get('next_offset') or offset)
-        if events or not journal.get('truncated') or not journal.get('events'):
+        if (
+            events
+            or journal.get('unavailable')
+            or not journal.get('truncated')
+            or not journal.get('events')
+        ):
             break
     journal['events'] = events
     journal['cursor'] = {'seq': last_seq, 'offset': offset}
@@ -2891,6 +2900,7 @@ def _replay_run_journal_windows(
         'run_time': None,
         'truncated': False,
         'advanced': False,
+        'unavailable': False,
     }
     terminal_events: list[dict] = []
     # One dedupe baseline for the whole pass: later windows must not treat the
@@ -2907,6 +2917,11 @@ def _replay_run_journal_windows(
             session.session_id, stream_id, cursor=result['cursor'],
         )
         events = journal.get('events') or []
+        if journal.get('unavailable'):
+            # A read failure is not the end of the run. Leave the cursor and
+            # any carried text exactly as they were for a later read.
+            result['unavailable'] = True
+            break
         window_cursor = journal.get('cursor') or {}
         if int(window_cursor.get('offset') or 0) != int((result['cursor'] or {}).get('offset') or 0):
             # The offset moved even when every scanned row was already covered
@@ -2942,13 +2957,18 @@ def _replay_run_journal_windows(
         result['truncated'] = bool(journal.get('truncated'))
         if not result['truncated']:
             break
-    if dedupe_state.get('carry'):
-        if result['truncated']:
+    carry = dedupe_state.get('carry')
+    keep_carry = False
+    if carry:
+        carry_size = len(carry.get('assistant_text') or '') + len(carry.get('reasoning_text') or '')
+        if result['unavailable'] or (
+            result['truncated'] and carry_size <= _RECOVERY_CARRY_MAX_CHARS
+        ):
             # The pass cap is as artificial as a window boundary: keep the
             # open text on the cursor for the next pass instead of flushing
-            # a row that would split the turn and strip its whitespace.
-            result['cursor'] = dict(result['cursor'] or cursor or {'seq': 0, 'offset': 0})
-            result['cursor']['carry'] = dedupe_state['carry']
+            # a row that would split the turn and strip its whitespace. A
+            # carry past its size cap is flushed instead, accepting the split.
+            keep_carry = True
         else:
             dedupe_state['defer_flush'] = False
             flushed = _append_journaled_partial_output(
@@ -2956,6 +2976,14 @@ def _replay_run_journal_windows(
                 journal={'events': []}, dedupe_state=dedupe_state,
             )
             result['recovered_output'] = result['recovered_output'] or flushed
+    # The cursor carries open text only while it is deliberately kept; text
+    # that was flushed must never ride on it into the next read.
+    result['cursor'] = {
+        k: v for k, v in (result['cursor'] or cursor or {'seq': 0, 'offset': 0}).items()
+        if k != 'carry'
+    }
+    if keep_carry:
+        result['cursor']['carry'] = carry
     if terminal_events:
         result['terminal_state'] = _run_journal_terminal_state(
             session, stream_id, journal={'events': terminal_events},

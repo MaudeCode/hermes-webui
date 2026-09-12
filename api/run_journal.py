@@ -794,12 +794,15 @@ def read_run_event_window(
                     fh.seek(0)
             raw = fh.read(byte_limit)
     except (FileNotFoundError, OSError):
+        # Not end of file: the journal could not be read at all. Callers that
+        # keep state across reads must not treat this as the run's end.
         return {
             "session_id": sid,
             "run_id": rid,
             "events": [],
             "malformed": [],
             "truncated": False,
+            "unavailable": True,
             "window_full": False,
             "next_offset": start,
         }
@@ -849,6 +852,7 @@ def read_run_event_window(
         # Distinguishes "one row is larger than the window" (full window, no
         # newline) from "the last row is still being written" (short read).
         "window_full": len(raw) >= byte_limit,
+        "unavailable": False,
         "next_offset": next_offset,
     }
 
