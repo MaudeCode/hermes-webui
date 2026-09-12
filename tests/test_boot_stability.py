@@ -97,3 +97,8 @@ def test_global_caches_paint_context_and_headline_without_a_session_snapshot():
     assert "hermes-boot:ctx" in INDEX and "hermes-boot:hero" in INDEX
     assert "function saveGlobalCaches" in HUB
     assert "html.booting .workspace-panel-edge-toggle{opacity:0" not in CSS
+
+
+def test_context_cache_keys_are_the_four_values_not_the_item_class():
+    assert "chat-context-(profile|model|effort|workspace)" in HUB
+    assert "chat-context-(\\w+)" not in HUB

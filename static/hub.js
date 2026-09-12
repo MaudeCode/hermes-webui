@@ -375,7 +375,7 @@
     const emptyShown = empty && getComputedStyle(empty).display !== 'none';
     if (!rows && !emptyShown) return;
     const ctx = {};
-    document.querySelectorAll('.chat-context-item').forEach(b => { const k = b.className.match(/chat-context-(\w+)/); if (k && !b.hidden && b.textContent) ctx[k[1]] = b.textContent; });
+    document.querySelectorAll('.chat-context-item').forEach(b => { const k = b.className.match(/chat-context-(profile|model|effort|workspace)\b/); if (k && !b.hidden && b.textContent) ctx[k[1]] = b.textContent; });
     const title = (document.getElementById('topbarTitle') || {}).textContent || '';
     const heroEl = document.getElementById('emptyHeroTitle');
     const hero = (heroEl && heroEl.classList.contains('ready')) ? heroEl.textContent : '';
@@ -435,7 +435,7 @@
   function saveGlobalCaches() {
     try {
       const ctx = {};
-      document.querySelectorAll('.chat-context-item').forEach(b => { const k = b.className.match(/chat-context-(\w+)/); if (k && !b.hidden && b.textContent) ctx[k[1]] = b.textContent; });
+      document.querySelectorAll('.chat-context-item').forEach(b => { const k = b.className.match(/chat-context-(profile|model|effort|workspace)\b/); if (k && !b.hidden && b.textContent) ctx[k[1]] = b.textContent; });
       if (Object.keys(ctx).length) localStorage.setItem('hermes-boot:ctx', JSON.stringify(ctx));
       const hero = document.getElementById('emptyHeroTitle');
       if (hero && hero.classList.contains('ready') && hero.textContent) localStorage.setItem('hermes-boot:hero', hero.textContent);
