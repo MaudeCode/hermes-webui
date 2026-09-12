@@ -2616,14 +2616,22 @@ function _messageIdentityKey(m){
   }
   return `${m.role}|${ts}|${body.slice(0,160)}`;
 }
-// Only a number or non-empty string counts as an id; anything else (bool,
-// object, empty) is "no id" so a stray value can never mint a shared identity.
+// Mirrors the server's _stable_message_identity_details: each alias (`id`,
+// `message_id`) normalizes to a trimmed string; a malformed alias (bool,
+// object, blank) or two aliases that disagree fail closed to "no id", so a
+// stray or conflicting value can never mint a shared identity.
 function _messagePersistedId(m){
+  let found=null;
   for(const id of [m&&m.id, m&&m.message_id]){
-    if(typeof id==='number'&&Number.isFinite(id)) return id;
-    if(typeof id==='string'&&id!=='') return id;
+    if(id==null||id==='') continue;
+    let norm='';
+    if(typeof id==='number'&&Number.isFinite(id)) norm=String(id);
+    else if(typeof id==='string') norm=id.trim();
+    if(!norm) return null;
+    if(found!=null&&found!==norm) return null;
+    found=norm;
   }
-  return null;
+  return found;
 }
 function _messageTurnStartedAt(m){
   if(!m||!m.role) return NaN;
@@ -2644,13 +2652,16 @@ function _messageTurnIdentity(m){
 // The id is the one caller-supplied component, so it is URI-encoded: the
 // identities are joined with '|' and ',' by their consumers, and an imported
 // id containing either must not truncate or collide.
-// Never throws: an imported id can hold a lone UTF-16 surrogate, which makes
-// encodeURIComponent raise and would abort transcript rendering. Such a value
-// is encoded with its surrogates replaced, still deterministic per row.
+// Never throws and never merges two ids: an imported id can hold a lone UTF-16
+// surrogate, which makes encodeURIComponent raise and would abort transcript
+// rendering. Lone surrogates become a `\uXXXX` escape (backslashes are
+// escaped first, so the mapping is injective) while valid pairs pass through,
+// then the whole value is URI-encoded.
 function _encodeIdentityComponent(value){
-  const s=String(value);
-  try{ return encodeURIComponent(s); }
-  catch(_){ return encodeURIComponent(s.replace(/[\uD800-\uDFFF]/g,'�')); }
+  const s=String(value)
+    .replace(/\\/g,'\\\\')
+    .replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]|[\uD800-\uDFFF]/g, m=>m.length===2?m:'\\u'+m.charCodeAt(0).toString(16));
+  return encodeURIComponent(s);
 }
 function _messageStableIdentities(m){
   const out=[];

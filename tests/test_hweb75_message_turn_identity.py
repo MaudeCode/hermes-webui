@@ -274,15 +274,23 @@ def test_persisted_ids_are_encoded_so_a_comma_or_bar_cannot_split_or_collide():
   const prefixOnly={role:'user',content:IN.display,id:'part',timestamp:1757500000};
   const keysComma=_userMessageExpandKeys(withComma, IN.display, 0);
   _setUserMessageExpanded(keysComma, true);
-  // A lone surrogate (valid JSON, preserved by /api/session/import) must not throw.
+  // A lone surrogate (valid JSON, preserved by /api/session/import) must not
+  // throw, and distinct malformed ids must stay distinct.
   const lone={role:'user',content:'x',id:'\\ud800x'};
   let loneThrew=false, loneStable=null;
   try{ loneStable=_messageStableIdentities(lone); }catch(_){ loneThrew=true; }
+  const enc=(id)=>_messageStableIdentities({role:'user',content:'x',id})[0];
   return {
     stable: _messageStableIdentities(withComma),
     barId: _messageStableIdentities({role:'user',content:'x',id:'a|b'}),
     loneThrew, loneStable,
     loneDeterministic: JSON.stringify(_messageStableIdentities(lone))===JSON.stringify(loneStable),
+    loneDistinct: enc('\\ud800x')!==enc('\\ud801x'),
+    pairKept: enc('\\ud83d\\ude00'),
+    escapeInjective: enc('\\\\ud800x')!==enc('\\ud800x'),
+    numericAliasesAgree: _messagePersistedId({id:1, message_id:'1'}),
+    conflictingAliases: _messagePersistedId({id:1, message_id:2}),
+    boolAliasPoisons: _messagePersistedId({id:1, message_id:true}),
     keyCount: _userMessageExpandKeyList(keysComma).length,
     prefixInherits: _userMessageIsExpanded(_userMessageExpandKeys(prefixOnly, IN.display, 0)),
     rejected: [_messagePersistedId({id:true}), _messagePersistedId({id:{}}), _messagePersistedId({id:''}), _messagePersistedId({message_id:'m1'})],
@@ -293,8 +301,15 @@ def test_persisted_ids_are_encoded_so_a_comma_or_bar_cannot_split_or_collide():
     assert r["stable"] == ["id:part%2Cone"], r
     assert r["barId"] == ["id:a%7Cb"], r
     assert r["loneThrew"] is False, r
-    assert r["loneStable"] == ["id:%EF%BF%BDx"], r
+    assert r["loneStable"] == ["id:%5Cud800x"], r
     assert r["loneDeterministic"] is True, r
+    assert r["loneDistinct"] is True, r
+    assert r["pairKept"] == "id:%F0%9F%98%80", r  # a valid pair encodes as UTF-8, untouched
+    assert r["escapeInjective"] is True, r  # a literal backslash cannot impersonate an escape
+    # Aliases mirror the backend: normalized agreement is one id, conflict fails closed.
+    assert r["numericAliasesAgree"] == "1", r
+    assert r["conflictingAliases"] is None, r
+    assert r["boolAliasPoisons"] is None, r
     assert r["keyCount"] == 2, r  # id + content, no stray split
     # Both rows share the content key, so the prefix-id row does read the shared
     # content entry — the existing "identical prompts open together" semantics —
@@ -353,9 +368,14 @@ def test_recovered_terminal_rows_keep_the_exact_start_time_and_get_an_id():
     from api.streaming import _materialize_pending_user_turn_before_error
 
     def session():
+        # An imported numeric-string id ("9") normalizes like the integer 9 on
+        # both sides, so the minted id must skip past it, not collide with it.
         return SimpleNamespace(
             session_id="hweb75-recover",
-            messages=[{"role": "assistant", "content": "previous answer", "id": 3}],
+            messages=[
+                {"role": "assistant", "content": "previous answer", "id": 3},
+                {"role": "user", "content": "imported row", "id": "9", "timestamp": 1757500000},
+            ],
             context_messages=[],
             pending_user_message=TRANSFORMED,
             pending_started_at=STARTED_AT,
@@ -370,14 +390,14 @@ def test_recovered_terminal_rows_keep_the_exact_start_time_and_get_an_id():
     row = s.messages[-1]
     assert row["role"] == "user" and row["content"] == TRANSFORMED
     assert row["timestamp"] == STARTED_AT and isinstance(row["timestamp"], float)
-    assert row["id"] == 4
+    assert row["id"] == 10
     # The exact-checkpoint guard still recognises the float row: no duplicate.
     assert _materialize_pending_user_turn_before_error(s) is False
-    assert [m["role"] for m in s.messages].count("user") == 1
+    assert [m["role"] for m in s.messages].count("user") == 2
 
     s2 = session()
     recovered = models._append_recovered_pending_turn(s2, timestamp=STARTED_AT)
-    assert recovered["timestamp"] == STARTED_AT and recovered["id"] == 4
+    assert recovered["timestamp"] == STARTED_AT and recovered["id"] == 10
     assert s2.messages[-1] is recovered
 
     # And the client matches the optimistic row to that recovered row.

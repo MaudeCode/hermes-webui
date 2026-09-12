@@ -5990,6 +5990,11 @@ def _assign_stable_message_ids(result_messages, *existing_arrays):
         for m in arr:
             if isinstance(m, dict):
                 mid = m.get('id')
+                # An imported numeric-string id ("1") normalizes to the same
+                # stable identity as the integer 1 on both sides, so it must
+                # reserve its number too (HWEB-75).
+                if isinstance(mid, str) and mid.isascii() and mid.isdigit():
+                    mid = int(mid)
                 # bool is an int subclass; exclude it so a stray True/False id
                 # can never seed the counter.
                 if isinstance(mid, int) and not isinstance(mid, bool) and mid > seed:
