@@ -5986,6 +5986,7 @@ def _assign_stable_message_ids(result_messages, *existing_arrays):
     if not result_messages:
         return 0
     seed = 0
+    used: set[int] = set()
     for arr in (result_messages, *existing_arrays):
         # Recovery callers pass whatever the session holds; a missing or
         # non-list array (Mock sessions in tests, unmaterialized context)
@@ -6011,14 +6012,24 @@ def _assign_stable_message_ids(result_messages, *existing_arrays):
                 if (
                     isinstance(mid, int)
                     and not isinstance(mid, bool)
-                    and seed < mid <= _MAX_SAFE_MESSAGE_ID
+                    and 0 < mid <= _MAX_SAFE_MESSAGE_ID
                 ):
-                    seed = mid
+                    used.add(mid)
+                    seed = max(seed, mid)
     stamped = 0
     for m in result_messages:
         if isinstance(m, dict) and m.get('id') is None:
-            seed += 1
-            m['id'] = seed
+            if seed < _MAX_SAFE_MESSAGE_ID:
+                seed += 1
+                minted = seed
+            else:
+                # An import already reserved the top of the safe range: take
+                # the smallest unused safe id instead of leaving the range.
+                minted = 1
+                while minted in used:
+                    minted += 1
+            used.add(minted)
+            m['id'] = minted
             stamped += 1
     return stamped
 

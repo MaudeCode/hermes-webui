@@ -422,6 +422,16 @@ def test_recovered_terminal_rows_keep_the_exact_start_time_and_get_an_id():
         [{"id": 1000000000000000}, {"id": "1000000000000001"}, {"id": "9007199254740993"}],
     )
     assert fresh["id"] == 1000000000000002
+
+    # The top of the safe range already reserved: mint the smallest unused
+    # safe id rather than leaving the range the client accepts.
+    capped_a = {"role": "user", "content": "a"}
+    capped_b = {"role": "user", "content": "b"}
+    _assign_stable_message_ids(
+        [capped_a, capped_b],
+        [{"id": "9007199254740991"}, {"id": 1}, {"message_id": 2}],
+    )
+    assert (capped_a["id"], capped_b["id"]) == (3, 4)
     assert s2.messages[-1] is recovered
 
     # And the client matches the optimistic row to that recovered row.
