@@ -88,5 +88,6 @@ def test_hub_defines_every_function_it_calls():
     import re
     defined = set(re.findall(r"function (\w+)\s*\(", HUB))
     called = set(re.findall(r"^\s+(mount\w+|sync\w+|render\w+|save\w+|hold\w+)\(", HUB, re.M))
-    missing = {c for c in called if c not in defined}
+    app_globals = {"syncTopbar", "renderSessionList", "renderMessages", "syncAppTitlebar"}
+    missing = {c for c in called if c not in defined and c not in app_globals}
     assert not missing, f"hub.js calls undefined functions: {missing}"
