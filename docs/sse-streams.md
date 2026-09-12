@@ -23,6 +23,26 @@ The authoritative `event:` names on `/api/chat/stream` are listed in the
 **Authoritative emitted events** table of
 [`docs/rfcs/session-sse-contract-v1.md`](rfcs/session-sse-contract-v1.md).
 
+## Approval and clarify prompts
+
+`/api/chat/stream` pushes `approval` and `clarify` frames during a turn. The
+browser frontend does not open the dedicated `/api/approval/stream` and
+`/api/clarify/stream` endpoints (that would spend two more sockets); it polls
+`/api/approval/pending` and `/api/clarify/pending` instead, gated on the chat
+stream's health:
+
+- While the turn's chat stream is attached and has received its `open` with no
+  error since, the polls drop to a 15 s safety cadence — the subscriber queue is
+  bounded, so a frame dropped for a slow consumer still surfaces within one
+  interval.
+- On every (re)attach and on the stream's `error` handler the client polls each
+  endpoint once immediately, then polls at 1500 ms / 3000 ms until the stream
+  reports `open` again. This closes the gap between the last poll and the
+  subscribe.
+- A hidden tab issues no polls at all; one catch-up poll runs when it is shown.
+
+Non-browser clients that hold the chat stream open can follow the same rule.
+
 ## Merged sidebar stream
 
 A browser allows six concurrent HTTP/1.1 connections per origin, and every SSE
