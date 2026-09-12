@@ -330,9 +330,17 @@
     } catch (e) { /* storage unavailable */ }
   }
   function mountEmptyMemo() {
-    const empty = document.getElementById('emptyState');
+    // Hook the app's own empty-state switches: top-level function declarations
+    // are window properties, so wrapping them catches every caller, including
+    // the case where the state was already visible and no DOM attribute changes.
+    ['showConversationEmptyState', 'hideConversationEmptyState'].forEach(name => {
+      const orig = window[name];
+      if (typeof orig !== 'function' || orig._hubWrapped) return;
+      const wrapped = function () { const r = orig.apply(this, arguments); setTimeout(syncEmptyMemo, 0); return r; };
+      wrapped._hubWrapped = true;
+      window[name] = wrapped;
+    });
     const inner = document.getElementById('msgInner');
-    if (empty) new MutationObserver(syncEmptyMemo).observe(empty, { attributes: true, attributeFilter: ['style', 'class'] });
     if (inner) new MutationObserver(syncEmptyMemo).observe(inner, { childList: true });
     window.addEventListener('popstate', syncEmptyMemo);
   }
@@ -369,7 +377,7 @@
     // S is a top-level `let` in boot.js: reachable by name, not via window.
     let ready = false;
     try { ready = (typeof S !== 'undefined') && !!S && !!S._bootReady; } catch (e) { ready = false; }
-    if (ready || Date.now() - started > 12000) { setTimeout(release, 120); return; }
+    if (ready || Date.now() - started > 12000) { setTimeout(release, 450); return; }
     setTimeout(poll, 60);
   };
   poll();

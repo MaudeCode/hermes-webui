@@ -54,3 +54,8 @@ def test_empty_session_memo_drives_first_paint():
     assert "hermes-webui-session-empty" in INDEX
     assert INDEX.index("hermes-webui-session-empty") < INDEX.index("classList.add('booting')")
     assert "EMPTY_KEY = 'hermes-webui-session-empty'" in HUB
+
+
+def test_empty_memo_hooks_the_app_empty_state_switches():
+    assert "'showConversationEmptyState', 'hideConversationEmptyState'" in HUB
+    assert "_hubWrapped" in HUB
