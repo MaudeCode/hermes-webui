@@ -5982,7 +5982,12 @@ def _assign_stable_message_ids(result_messages, *existing_arrays):
         return 0
     seed = 0
     for arr in (result_messages, *existing_arrays):
-        for m in arr or []:
+        # Recovery callers pass whatever the session holds; a missing or
+        # non-list array (Mock sessions in tests, unmaterialized context)
+        # contributes nothing to the seed rather than raising.
+        if not isinstance(arr, list):
+            continue
+        for m in arr:
             if isinstance(m, dict):
                 mid = m.get('id')
                 # bool is an int subclass; exclude it so a stray True/False id
