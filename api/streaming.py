@@ -88,6 +88,7 @@ from api.models import (
 from api.session_ops import mark_session_title_generated, session_has_manual_title
 from api.process_event_utils import (
     build_active_turn_token,
+    recovered_pending_turn_timestamp,
     claim_async_delegation_delivery,
     complete_async_delegation_delivery,
     completion_delivery_id,
@@ -8169,10 +8170,8 @@ def _materialize_pending_user_turn_before_error(
     pending_text = str(getattr(session, 'pending_user_message', None) or '')
     if not pending_text:
         return False
-    recovered_ts = int(time.time())
     pending_started_at = getattr(session, 'pending_started_at', None)
-    if isinstance(pending_started_at, (int, float)) and pending_started_at > 0:
-        recovered_ts = int(pending_started_at)
+    recovered_ts = recovered_pending_turn_timestamp(pending_started_at)
     pending_source = getattr(session, 'pending_user_source', None) or 'webui'
     pending_attachments = list(getattr(session, 'pending_attachments', None) or [])
 
@@ -8226,7 +8225,7 @@ def _materialize_pending_user_turn_before_error(
             return False
         return (
             _normalize_user_text(_message_text(existing.get('content'))) == _normalize_user_text(pending_text)
-            and existing_ts == recovered_ts
+            and existing_ts == int(recovered_ts)
             and existing_source == pending_source
             and list(existing.get('attachments') or []) == pending_attachments
         )
@@ -8244,6 +8243,9 @@ def _materialize_pending_user_turn_before_error(
     stamp_message_source(recovered, pending_source)
     if pending_attachments:
         recovered['attachments'] = pending_attachments
+    # HWEB-75: a recovered row is a settled row; give it the persisted id the
+    # client keys its identity on (the public projection strips the turn token).
+    _assign_stable_message_ids([recovered], session.messages, getattr(session, 'context_messages', None))
     session.messages.append(recovered)
     # Mirror to context_messages so the _recovered flag survives the state.db
     # round-trip (#4283).  state.db has no _recovered column, so without this
@@ -14791,9 +14793,7 @@ def cancel_stream(stream_id: str) -> bool:
                                 if _pending_user == _last_content or _pending_user in _last_content:
                                     _already_persisted = True
                         if not _already_persisted:
-                            _recovered_ts = int(time.time())
-                            if isinstance(_pending_started, (int, float)) and _pending_started > 0:
-                                _recovered_ts = int(_pending_started)
+                            _recovered_ts = recovered_pending_turn_timestamp(_pending_started)
                             _user_turn: dict = {
                                 'role': 'user',
                                 'content': _pending_user,
@@ -14802,6 +14802,11 @@ def cancel_stream(stream_id: str) -> bool:
                             stamp_message_source(_user_turn, _pending_source)
                             if _pending_atts:
                                 _user_turn['attachments'] = _pending_atts
+                            # HWEB-75: settled row → persisted id (see
+                            # _materialize_pending_user_turn_before_error).
+                            _assign_stable_message_ids(
+                                [_user_turn], _msgs_for_recovery, getattr(_cs, 'context_messages', None)
+                            )
                             _msgs_for_recovery.append(_user_turn)
                 except Exception:
                     logger.debug(

@@ -1204,9 +1204,10 @@ function _messageViewportAnchorKeyForMessage(m){
   if(typeof _compressionMessageAnchorKey!=='function') return '';
   const key=_compressionMessageAnchorKey(m);
   if(!key) return '';
-  // HWEB-75: a row with a turn identity keys on it alone, so the key survives
-  // the optimistic -> settled swap (different ts, possibly transformed text).
-  if(key.turn) return [key.role||'','turn:'+key.turn].map(v=>_safeEncodeURIComponent(v)).join('|');
+  // HWEB-75: a row with a stable identity keys on it alone — the persisted id
+  // first (two imported rows can share a timestamp but never an id), else the
+  // turn start, which the optimistic row and its settled copy share.
+  if(key.id||key.turn) return [key.role||'',key.id||key.turn].map(v=>_safeEncodeURIComponent(v)).join('|');
   return [key.role||'',key.ts??'',key.attachments??0,key.text||''].map(v=>_safeEncodeURIComponent(v)).join('|');
 }
 function _messageVisibleIndexForAnchorKey(anchorKey, visWithIdx){
@@ -17064,21 +17065,30 @@ function _compressionMessageAnchorKey(m){
   const norm=content.replace(/\s+/g,' ').trim().slice(0,160);
   const ts=m._ts||m.timestamp||null;
   const attachments=Array.isArray(m.attachments)?m.attachments.length:0;
-  // HWEB-75: the server-owned turn start, when the row has one, outranks the
-  // ts/text pair — it is what an optimistic row and its settled copy share.
-  const turn=typeof _messageTurnIdentity==='function'?_messageTurnIdentity(m):'';
-  if(!norm && !attachments && !ts && !turn) return null;
-  return {role:String(m.role||''), ts, text:norm, attachments, turn};
+  // HWEB-75: the row's stable identities ('id:N', 'turn:T'), when it has any,
+  // outrank the ts/text pair — the turn start is what an optimistic row and
+  // its settled copy share; the persisted id is what two imported rows with
+  // one timestamp do not.
+  const stable=typeof _messageStableIdentities==='function'?_messageStableIdentities(m):[];
+  const id=stable.find(k=>k.indexOf('id:')===0)||'';
+  const turn=stable.find(k=>k.indexOf('turn:')===0)||'';
+  if(!norm && !attachments && !ts && !id && !turn) return null;
+  return {role:String(m.role||''), ts, text:norm, attachments, id, turn};
 }
 function _compressionAnchorIndex(visWithIdx, anchorKey, fallbackIdx=null){
   if(anchorKey&&Array.isArray(visWithIdx)){
     for(let i=visWithIdx.length-1;i>=0;i--){
       const candidate=_compressionMessageAnchorKey(visWithIdx[i].m);
       if(!candidate) continue;
-      // Two rows that both carry a turn identity are the same message iff it
-      // matches; the fuzzy ts/text comparison below stays for legacy rows.
+      // First identity both rows carry decides: persisted id, then turn start.
+      // The fuzzy ts/text comparison below stays for legacy rows.
+      const sameRole=candidate.role===String(anchorKey.role||'');
+      if(anchorKey.id&&candidate.id){
+        if(sameRole&&candidate.id===anchorKey.id) return i;
+        continue;
+      }
       if(anchorKey.turn&&candidate.turn){
-        if(candidate.role===String(anchorKey.role||'')&&candidate.turn===anchorKey.turn) return i;
+        if(sameRole&&candidate.turn===anchorKey.turn) return i;
         continue;
       }
       const anchorTs=String(anchorKey.ts??'');

@@ -290,21 +290,87 @@ def test_viewport_anchor_matches_the_settled_row_and_keeps_fuzzy_legacy_matching
   const legacyAnchor=_compressionMessageAnchorKey({role:'user',content:'plain prompt'});
   const legacyVis=[{m:{role:'user',content:'plain prompt',timestamp:1757500000.25}}];
   const legacyIdx=_compressionAnchorIndex(legacyVis, legacyAnchor, -1);
+  // Imported twins: distinct ids, one fractional timestamp. The id decides.
+  const twinA={role:'user',content:'a',id:41,timestamp:1757400000.5};
+  const twinB={role:'user',content:'b',id:42,timestamp:1757400000.5};
+  const twinIdx=_compressionAnchorIndex([{m:twinA},{m:twinB}], _compressionMessageAnchorKey(twinA), -1);
+  const reloaded={role:'user',content:IN.transformed,timestamp:IN.startedAt,id:7};
   return {
-    idx, legacyIdx,
+    idx, legacyIdx, twinIdx,
     optimisticKey: _messageViewportAnchorKeyForMessage(optimistic),
     settledKey: _messageViewportAnchorKeyForMessage(settledUser),
+    reloadedKey: _messageViewportAnchorKeyForMessage(reloaded),
     laterKey: _messageViewportAnchorKeyForMessage(laterTurn),
+    twinKeysDistinct: _messageViewportAnchorKeyForMessage(twinA)!==_messageViewportAnchorKeyForMessage(twinB),
     legacyKey: _messageViewportAnchorKeyForMessage(legacyVis[0].m),
   };
 """,
         display=DISPLAY, transformed=TRANSFORMED, streamId=STREAM_ID, startedAt=STARTED_AT,
     )
+    # The optimistic anchor (turn only) finds its settled row (id + turn) by the turn.
     assert r["idx"] == 0, r
     assert r["legacyIdx"] == 0, r
-    assert r["optimisticKey"] == r["settledKey"], r
+    # Two persisted rows sharing a timestamp are told apart by id (never the twin).
+    assert r["twinIdx"] == 0, r
+    assert r["twinKeysDistinct"] is True, r
+    assert r["optimisticKey"] == f"user|turn%3A{STARTED_AT!r}", r
+    # Persisted rows key on their id, stable across reloads and never shared.
+    assert r["settledKey"] == "user|id%3A7" == r["reloadedKey"], r
     assert r["settledKey"] != r["laterKey"], r
     assert r["legacyKey"].count("|") == 3, r  # legacy rows keep role|ts|attachments|text
+
+
+def test_recovered_terminal_rows_keep_the_exact_start_time_and_get_an_id():
+    """Cancel / provider-error / stale-pending recovery used to store the user
+    row with an int-second timestamp and no id, so a transformed turn that ended
+    on an error had no identity the optimistic row could share."""
+    from types import SimpleNamespace
+
+    from api import models
+    from api.streaming import _materialize_pending_user_turn_before_error
+
+    def session():
+        return SimpleNamespace(
+            session_id="hweb75-recover",
+            messages=[{"role": "assistant", "content": "previous answer", "id": 3}],
+            context_messages=[],
+            pending_user_message=TRANSFORMED,
+            pending_started_at=STARTED_AT,
+            pending_user_source=None,
+            pending_attachments=[],
+            active_stream_id=STREAM_ID,
+            truncation_watermark=None,
+        )
+
+    s = session()
+    assert _materialize_pending_user_turn_before_error(s) is True
+    row = s.messages[-1]
+    assert row["role"] == "user" and row["content"] == TRANSFORMED
+    assert row["timestamp"] == STARTED_AT and isinstance(row["timestamp"], float)
+    assert row["id"] == 4
+    # The exact-checkpoint guard still recognises the float row: no duplicate.
+    assert _materialize_pending_user_turn_before_error(s) is False
+    assert [m["role"] for m in s.messages].count("user") == 1
+
+    s2 = session()
+    recovered = models._append_recovered_pending_turn(s2, timestamp=STARTED_AT)
+    assert recovered["timestamp"] == STARTED_AT and recovered["id"] == 4
+    assert s2.messages[-1] is recovered
+
+    # And the client matches the optimistic row to that recovered row.
+    r = _run(
+        """
+  const optimistic={role:'user',content:IN.display,_ts:1757599990.5,_pending:true,_statusCard:{kind:'x'}};
+  _adoptServerTurnIdentity(optimistic, IN.streamId, {pending_started_at:IN.startedAt});
+  const recovered=IN.recovered;
+  _carryForwardEphemeralTurnFields([optimistic],[recovered]);
+  return {shared:_messagesShareIdentity(optimistic, recovered), carried: recovered._statusCard||null};
+""",
+        display=DISPLAY, streamId=STREAM_ID, startedAt=STARTED_AT,
+        recovered={k: v for k, v in row.items() if not k.startswith("_")},
+    )
+    assert r["shared"] is True, r
+    assert r["carried"] == {"kind": "x"}, r
 
 
 def test_send_stamps_the_optimistic_row_once_chat_start_is_accepted():

@@ -154,6 +154,25 @@ def build_active_turn_token(stream_id: Any, started_at: Any) -> str | None:
     return f"{str(stream_id).strip()}:{started:.17g}"
 
 
+def recovered_pending_turn_timestamp(pending_started_at: Any) -> float:
+    """Exact start time for a recovered pending user turn, else now.
+
+    HWEB-75: the client identifies a WebUI turn by the float ``pending_started_at``
+    that ``/api/chat/start`` returned (the ``started_at`` half of
+    ``build_active_turn_token``). Every terminal-recovery path (cancel, provider
+    error, stale-pending repair) used to truncate it to whole seconds, which
+    severed that identity for exactly the turns whose settled text differs from
+    the displayed prompt. One helper so no recovery site can truncate again.
+    """
+    try:
+        started = float(pending_started_at)
+    except (TypeError, ValueError):
+        started = 0.0
+    if math.isfinite(started) and started > 0:
+        return started
+    return time.time()
+
+
 def stamp_message_source(
     msg: Any,
     source: Any,
