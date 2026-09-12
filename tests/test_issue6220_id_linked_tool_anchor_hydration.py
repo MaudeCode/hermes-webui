@@ -202,6 +202,7 @@ for(const name of [
 }}
 for(const name of [
   '_messageIdentityKey',
+  '_messageIdAliasDetails',
   '_messagePersistedId',
   '_messageTurnStartedAt',
   '_messageTurnIdentity',

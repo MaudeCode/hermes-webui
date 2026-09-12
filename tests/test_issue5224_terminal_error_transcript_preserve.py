@@ -61,6 +61,7 @@ function installRuntimeHelpers() {
     "_filterRecoveryControlMessages",
     "_replaceMarkerOnlyAssistantWithStreamError",
     "_messageIdentityKey",
+    "_messageIdAliasDetails",
     "_messagePersistedId",
     "_messageTurnStartedAt",
     "_messageTurnIdentity",

@@ -6007,8 +6007,12 @@ def _assign_stable_message_ids(result_messages, *existing_arrays):
             # never seed the counter.
             for key in ('id', 'message_id'):
                 mid = m.get(key)
-                if isinstance(mid, str) and mid.isascii() and mid.isdigit() and len(mid) <= 16:
-                    mid = int(mid)
+                if isinstance(mid, str):
+                    # Same normalization as _stable_message_identity_details:
+                    # a padded " 1 " is the id 1 on both sides.
+                    mid = mid.strip()
+                    if mid.isascii() and mid.isdigit() and len(mid) <= 16:
+                        mid = int(mid)
                 if (
                     isinstance(mid, int)
                     and not isinstance(mid, bool)

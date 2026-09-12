@@ -2622,18 +2622,25 @@ function _messageIdentityKey(m){
 // stray or conflicting value can never mint a shared identity. A numeric id
 // counts only as a safe integer: JSON parsing has already rounded anything
 // larger, and the WebUI never mints one (`_MAX_SAFE_MESSAGE_ID`).
-function _messagePersistedId(m){
+// `{id, valid}`: `valid:false` means the row carries an alias that is
+// malformed or disputed — distinct from "no alias at all" — and such a row
+// must not match anything, not even by a weaker key.
+function _messageIdAliasDetails(m){
   let found=null;
   for(const id of [m&&m.id, m&&m.message_id]){
     if(id==null||id==='') continue;
     let norm='';
     if(typeof id==='number'&&Number.isSafeInteger(id)) norm=String(id);
     else if(typeof id==='string') norm=id.trim();
-    if(!norm) return null;
-    if(found!=null&&found!==norm) return null;
+    if(!norm) return {id:null, valid:false};
+    if(found!=null&&found!==norm) return {id:null, valid:false};
     found=norm;
   }
-  return found;
+  return {id:found, valid:true};
+}
+function _messagePersistedId(m){
+  const d=_messageIdAliasDetails(m);
+  return d.valid?d.id:null;
 }
 function _messageTurnStartedAt(m){
   if(!m||!m.role) return NaN;
@@ -2687,8 +2694,12 @@ function _messageIdentityCandidates(m){
 // through to the legacy key.
 function _messagesShareIdentity(a, b){
   if(!a||!b||!a.role||a.role!==b.role) return false;
-  const ia=_messagePersistedId(a), ib=_messagePersistedId(b);
-  if(ia!=null&&ib!=null) return String(ia)===String(ib);
+  const da=_messageIdAliasDetails(a), db=_messageIdAliasDetails(b);
+  // A malformed or disputed alias is not "absent": like the server's
+  // _message_private_identity_compatible, such a row matches nothing.
+  if(!da.valid||!db.valid) return false;
+  const ia=da.id, ib=db.id;
+  if(ia!=null&&ib!=null) return ia===ib;
   const ta=_messageTurnIdentity(a), tb=_messageTurnIdentity(b);
   if(ta&&tb) return ta===tb;
   const la=_messageIdentityKey(a);

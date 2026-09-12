@@ -28,6 +28,7 @@ UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 
 _MESSAGES_HELPERS = [
     "_messageIdentityKey",
+    "_messageIdAliasDetails",
     "_messagePersistedId",
     "_messageTurnStartedAt",
     "_messageTurnIdentity",
@@ -294,6 +295,17 @@ def test_persisted_ids_are_encoded_so_a_comma_or_bar_cannot_split_or_collide():
     unsafeIntRejected: _messagePersistedId({id:9007199254740993}),
     fractionRejected: _messagePersistedId({id:1.5}),
     messageIdOnly: _messagePersistedId({message_id:12}),
+    // A disputed alias is not "absent": the row matches nothing, not even by
+    // the legacy key a well-formed twin would share.
+    invalidNeverMatches: _messagesShareIdentity(
+      {role:'user',id:1,message_id:2,timestamp:100.5,content:'same'},
+      {role:'user',id:3,timestamp:100.5,content:'same'}),
+    invalidNotEvenItself: _messagesShareIdentity(
+      {role:'user',id:1,message_id:2,timestamp:100.5,content:'same'},
+      {role:'user',id:1,message_id:2,timestamp:100.5,content:'same'}),
+    absentStillLegacy: _messagesShareIdentity(
+      {role:'user',timestamp:100.5,content:'same'},
+      {role:'user',timestamp:100.5,content:'same'}),
     keyCount: _userMessageExpandKeyList(keysComma).length,
     prefixInherits: _userMessageIsExpanded(_userMessageExpandKeys(prefixOnly, IN.display, 0)),
     rejected: [_messagePersistedId({id:true}), _messagePersistedId({id:{}}), _messagePersistedId({id:''}), _messagePersistedId({message_id:'m1'})],
@@ -317,6 +329,9 @@ def test_persisted_ids_are_encoded_so_a_comma_or_bar_cannot_split_or_collide():
     assert r["unsafeIntRejected"] is None, r
     assert r["fractionRejected"] is None, r
     assert r["messageIdOnly"] == "12", r
+    assert r["invalidNeverMatches"] is False, r
+    assert r["invalidNotEvenItself"] is False, r
+    assert r["absentStillLegacy"] is True, r
     assert r["keyCount"] == 2, r  # id + content, no stray split
     # Both rows share the content key, so the prefix-id row does read the shared
     # content entry — the existing "identical prompts open together" semantics —
@@ -432,6 +447,12 @@ def test_recovered_terminal_rows_keep_the_exact_start_time_and_get_an_id():
         [{"id": "9007199254740991"}, {"id": 1}, {"message_id": 2}],
     )
     assert (capped_a["id"], capped_b["id"]) == (3, 4)
+
+    # A padded numeric string normalizes to its number on both sides, so it
+    # reserves that number too.
+    padded = {"role": "user", "content": "p"}
+    _assign_stable_message_ids([padded], [{"id": " 7 "}])
+    assert padded["id"] == 8
     assert s2.messages[-1] is recovered
 
     # And the client matches the optimistic row to that recovered row.
