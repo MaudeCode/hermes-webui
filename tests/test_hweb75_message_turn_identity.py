@@ -411,6 +411,17 @@ def test_recovered_terminal_rows_keep_the_exact_start_time_and_get_an_id():
     s2 = session()
     recovered = models._append_recovered_pending_turn(s2, timestamp=STARTED_AT)
     assert recovered["timestamp"] == STARTED_AT and recovered["id"] == 13
+
+    # Every JS-safe integer has at most 16 digits; a 16-digit string id is
+    # reserved like its integer twin, while anything past the safe range is not.
+    from api.streaming import _assign_stable_message_ids
+
+    fresh = {"role": "user", "content": "new"}
+    _assign_stable_message_ids(
+        [fresh],
+        [{"id": 1000000000000000}, {"id": "1000000000000001"}, {"id": "9007199254740993"}],
+    )
+    assert fresh["id"] == 1000000000000002
     assert s2.messages[-1] is recovered
 
     # And the client matches the optimistic row to that recovered row.

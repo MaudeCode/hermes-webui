@@ -5997,14 +5997,16 @@ def _assign_stable_message_ids(result_messages, *existing_arrays):
                 continue
             # Both aliases reserve their number (HWEB-75): an imported numeric
             # string ("1", or a message_id-only row) normalizes to the same
-            # stable identity as the integer 1 on both sides. Digit strings are
-            # bounded to the JS safe-integer range so an absurd import can
-            # neither raise (int() conversion limit) nor push minted ids past
-            # what the client can represent; bool is an int subclass and is
-            # excluded so a stray True/False can never seed the counter.
+            # stable identity as the integer 1 on both sides. Digit strings up
+            # to 16 digits (every JS-safe integer has at most 16) are parsed,
+            # then the safe-range check below applies to strings and ints
+            # alike, so an absurd import can neither raise (int() conversion
+            # limit) nor push minted ids past what the client can represent;
+            # bool is an int subclass and is excluded so a stray True/False can
+            # never seed the counter.
             for key in ('id', 'message_id'):
                 mid = m.get(key)
-                if isinstance(mid, str) and mid.isascii() and mid.isdigit() and len(mid) <= 15:
+                if isinstance(mid, str) and mid.isascii() and mid.isdigit() and len(mid) <= 16:
                     mid = int(mid)
                 if (
                     isinstance(mid, int)
