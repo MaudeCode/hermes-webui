@@ -600,12 +600,12 @@ def test_lost_response_recovered_on_second_read(hermes_home):
     assert s.tool_calls[-1]["name"] == "terminal"
     assert s.tool_calls[-1]["done"] is True
 
-    # Flag and meta cleaned up after promotion.
+    # The journal is still nonterminal, so the hook stays armed with the replay
+    # cursor (HWEB-76): a later wave appends only the events after it.
     promoted = s.messages[marker_idx]
-    assert "_pending_journal_recovery" not in promoted
-    assert "_journal_retry_stream_id" not in promoted
-    assert "_journal_retry_attempts" not in promoted
-    assert "_journal_retry_first_seen_ts" not in promoted
+    assert promoted["_pending_journal_recovery"] is True
+    assert promoted["_journal_retry_stream_id"] == stream_id
+    assert promoted["_journal_retry_after_seq"] >= 1
 
 
 def test_concurrent_get_session_serializes_lazy_journal_retry(hermes_home, monkeypatch):

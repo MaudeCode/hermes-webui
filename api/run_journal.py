@@ -750,6 +750,120 @@ def read_run_event_tail(
     }
 
 
+def read_run_event_window(
+    session_id: str,
+    run_id: str,
+    *,
+    start_offset: int = 0,
+    session_dir: Path | None = None,
+    max_bytes: int = _LIVE_SNAPSHOT_MAX_BYTES,
+    max_rows: int = _LIVE_SNAPSHOT_MAX_ROWS,
+) -> dict:
+    """Read a bounded window of complete rows forward from a byte offset.
+
+    The inverse of ``read_run_event_tail``: recovery that keeps a cursor walks
+    the journal from where it left off instead of taking one clipped tail.
+    ``next_offset`` is the byte just past the last row returned, so the caller
+    can persist it and continue. ``truncated`` means rows remain past this
+    window (or a single row is larger than it); an offset that no longer sits
+    on a row boundary falls back to the start of the file.
+    """
+    sid = _validate_id(session_id, "session_id")
+    rid = _validate_id(run_id, "run_id")
+    path = _run_path(sid, rid, session_dir=session_dir)
+    byte_limit = max(1, int(max_bytes))
+    row_limit = max(1, int(max_rows))
+    start = max(0, int(start_offset or 0))
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            if start > size:
+                start = 0
+            if start:
+                fh.seek(start - 1)
+                boundary = fh.read(2)
+                if boundary[:1] == b"\n":
+                    fh.seek(start)
+                elif boundary[1:2] == b"\n":
+                    # The previous window consumed an unterminated final row
+                    # whose newline has since been written: step over it.
+                    start += 1
+                    fh.seek(start)
+                else:
+                    start = 0
+                    fh.seek(0)
+            raw = fh.read(byte_limit)
+    except (FileNotFoundError, OSError):
+        # Not end of file: the journal could not be read at all. Callers that
+        # keep state across reads must not treat this as the run's end.
+        return {
+            "session_id": sid,
+            "run_id": rid,
+            "events": [],
+            "malformed": [],
+            "truncated": False,
+            "unavailable": True,
+            "window_full": False,
+            "next_offset": start,
+        }
+
+    end = raw.rfind(b"\n")
+    lines = raw[: end + 1].split(b"\n")[:-1] if end >= 0 else []
+    suffix = raw[end + 1 :]
+    unterminated_row = None
+    if suffix.strip() and start + len(raw) >= size:
+        # The file ends without a newline. A writer that crashed after its
+        # final row was written but before the newline leaves exactly this
+        # shape, and the tail reader accepts it; a row still being written is
+        # not valid JSON yet and stays unconsumed.
+        try:
+            candidate = json.loads(suffix.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            candidate = None
+        if isinstance(candidate, dict):
+            unterminated_row = suffix
+            lines.append(suffix)
+    rows_truncated = len(lines) > row_limit
+    selected = lines[:row_limit]
+    consumed = sum(len(line) + 1 for line in selected)
+    if unterminated_row is not None and selected and selected[-1] is unterminated_row:
+        consumed -= 1
+    events: list[dict] = []
+    row_offsets: list[int] = []
+    malformed: list[dict] = []
+    row_start = start
+    for offset, line in enumerate(selected, start=1):
+        this_row = row_start
+        row_start += len(line) + 1
+        if not line.strip():
+            continue
+        try:
+            parsed = json.loads(line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            malformed.append({"window_line": offset})
+            continue
+        if isinstance(parsed, dict):
+            events.append(parsed)
+            row_offsets.append(this_row)
+        else:
+            malformed.append({"window_line": offset})
+    next_offset = start + consumed
+    return {
+        "session_id": sid,
+        "run_id": rid,
+        "events": events,
+        # Byte offset of each returned event's row, parallel to ``events``.
+        "row_offsets": row_offsets,
+        "malformed": malformed,
+        "truncated": bool(rows_truncated or next_offset < size),
+        # Distinguishes "one row is larger than the window" (full window, no
+        # newline) from "the last row is still being written" (short read).
+        "window_full": len(raw) >= byte_limit,
+        "unavailable": False,
+        "next_offset": next_offset,
+    }
+
+
 def select_authoritative_terminal_event(events: Iterable[dict]) -> dict | None:
     """Return the terminal event that owns the run's settled outcome.
 
