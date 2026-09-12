@@ -484,9 +484,9 @@ def test_reasoning_effort_options_match_the_canonical_levels():
     # The cron path validates through the AGENT's
     # hermes_constants.VALID_REASONING_EFFORTS (imported by cron/jobs.py's
     # _normalize_reasoning_effort), whose grammar is
-    # none|minimal|low|medium|high|xhigh|max|ultra. That is deliberately wider
-    # than the WebUI's own api/config.py mirror, which is the chat surface's
-    # copy and does not gate cron.
+    # none|minimal|low|medium|high|xhigh|max|ultra. The WebUI's own
+    # api/config.py mirror (the chat surface's copy) carries the same grammar
+    # but does not gate cron; test_reasoning_show_hide pins the copies together.
     assert (
         "const CRON_REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', "
         "'high', 'xhigh', 'max', 'ultra'];" in PANELS_JS

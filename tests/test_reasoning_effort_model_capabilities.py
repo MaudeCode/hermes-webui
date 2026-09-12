@@ -412,6 +412,33 @@ def test_get_reasoning_status_for_reasoning_capable_model_has_no_max():
     assert status["supported_efforts"] == ["minimal", "low", "medium", "high", "xhigh"]
     assert status["supports_reasoning_effort"] is True
     assert "max" not in status["supported_efforts"]
+    assert "ultra" not in status["supported_efforts"]
+
+
+def test_get_reasoning_status_offers_ultra_only_above_the_max_ceiling():
+    # 'ultra' sits above 'max' on the ladder, so the selector offers it exactly
+    # where 'max' survives the provider ceiling: GPT-5.6 on openai-codex yes,
+    # gpt-5.5 on openai-codex (capped at xhigh) and Gemini no.
+    offered = cfg.get_reasoning_status(model_id="gpt-5.6", provider_id="openai-codex")
+    assert offered["supported_efforts"][-2:] == ["max", "ultra"]
+    for model, provider in (("gpt-5.5", "openai-codex"), ("google/gemini-2.5-pro", "gemini")):
+        status = cfg.get_reasoning_status(model_id=model, provider_id=provider)
+        assert status["supports_reasoning_effort"] is True
+        assert "ultra" not in status["supported_efforts"], f"{model} on {provider}"
+        assert "max" not in status["supported_efforts"], f"{model} on {provider}"
+
+
+def test_ultra_round_trips_through_set_and_status_where_supported(monkeypatch):
+    # /reasoning ultra → set_reasoning_effort persists 'ultra'; get_reasoning_status
+    # reads it back un-coerced for a model whose ladder reaches it.
+    saved = {}
+    monkeypatch.setattr(cfg, "_save_yaml_config_file", lambda path, data: saved.update(data))
+    monkeypatch.setattr(cfg, "reload_config", lambda *a, **k: None)
+    monkeypatch.setattr(cfg, "_load_yaml_config_file", lambda *a, **k: dict(saved))
+    cfg.set_reasoning_effort("ultra", model_id="gpt-5.6", provider_id="openai-codex")
+    assert saved["agent"]["reasoning_effort"] == "ultra"
+    status = cfg.get_reasoning_status(model_id="gpt-5.6", provider_id="openai-codex")
+    assert status["reasoning_effort"] == "ultra"
 
 
 def test_get_reasoning_status_coerces_stale_max_to_xhigh(monkeypatch):
@@ -453,6 +480,34 @@ def test_max_effort_degrades_to_xhigh_for_pre_adaptive_anthropic():
         assert cfg.coerce_reasoning_effort_for_model(
             "max", model_id=model, provider_id="anthropic"
         ) == "xhigh", f"{model} max must degrade to xhigh"
+
+
+def test_ultra_degrades_like_max_where_the_ceiling_strips_it():
+    # 'ultra' is one rung above 'max'; wherever a hard ceiling drops 'max' it
+    # drops 'ultra' too, and coercion walks down to the highest surviving rung.
+    for model, provider, expected in (
+        ("gemini-3-pro", "gemini", "xhigh"),
+        ("claude-sonnet-4-5", "anthropic", "xhigh"),
+        ("gpt-5.5", "openai-codex", "xhigh"),
+        ("o3-mini", "openai-codex", "high"),
+    ):
+        assert cfg.coerce_reasoning_effort_for_model(
+            "ultra", model_id=model, provider_id=provider
+        ) == expected, f"{model} on {provider} ultra must degrade to {expected}"
+    # Unknown/custom provider with no capability answer: same conservative
+    # default-deny as 'max' — degrade to the universally-safe 'xhigh'.
+    assert cfg.coerce_reasoning_effort_for_model(
+        "ultra", "brand-new-model-2099", provider_id="some-custom-provider"
+    ) == "xhigh"
+    # Where 'max' is preserved, 'ultra' is preserved (the agent clamps it on the wire).
+    for model, provider in (
+        ("gpt-5.6", "openai-codex"),
+        ("claude-opus-4.7", "anthropic"),
+        ("deepseek-reasoner", "deepseek"),
+    ):
+        assert cfg.coerce_reasoning_effort_for_model(
+            "ultra", model_id=model, provider_id=provider
+        ) == "ultra", f"{model} on {provider} must preserve ultra"
 
 
 def test_max_effort_preserved_for_adaptive_anthropic_and_deepseek():

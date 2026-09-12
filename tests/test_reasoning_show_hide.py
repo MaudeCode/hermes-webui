@@ -312,7 +312,7 @@ class TestReasoningCommand:
         m = re.search(r'function cmdReasoning\(.*?\n\}', src, re.DOTALL)
         assert m
         fn = m.group(0)
-        for level in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'):
+        for level in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'):
             assert f"'{level}'" in fn, (
                 f"cmdReasoning must accept '{level}' (CLI parity with "
                 f"hermes_constants.parse_reasoning_effort)"
@@ -325,7 +325,7 @@ class TestReasoningCommand:
         assert m, "reasoning COMMANDS entry not found"
         entry = m.group(0)
         for suggestion in (
-            'show', 'hide', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'
+            'show', 'hide', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'
         ):
             assert f"'{suggestion}'" in entry, (
                 f"reasoning subArgs must include '{suggestion}' for CLI parity"
@@ -359,8 +359,32 @@ class TestReasoningConfigHelpers:
         # Snapshot-style assertion: if hermes_constants adds a level, this
         # test will fail fast so we know to update WebUI too.
         assert VALID_REASONING_EFFORTS == (
-            'minimal', 'low', 'medium', 'high', 'xhigh', 'max'
+            'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'
         )
+
+    def test_webui_effort_ladder_copies_agree(self):
+        """The WebUI carries several copies of the agent's effort grammar. They
+        must all agree, so the next agent-side addition fails HERE (one obvious
+        test) instead of drifting the chat command, the cron form, the composer
+        dropdown, and the Python mirror three or four different ways."""
+        from api.config import VALID_REASONING_EFFORTS
+        expected = ['none', *VALID_REASONING_EFFORTS]
+
+        def js_array(src, name):
+            m = re.search(r"const %s\s*=\s*\[([^\]]*)\]" % name, src)
+            assert m, f"{name} array not found"
+            return re.findall(r"'([^']+)'", m.group(1))
+
+        assert js_array(read('static/commands.js'), 'EFFORTS') == expected
+        assert js_array(read('static/panels.js'), 'CRON_REASONING_EFFORTS') == expected
+        # The /reasoning command's help string and autocomplete are pipe-joined.
+        entry = re.search(r"\{name:'reasoning'[^}]*\}", read('static/commands.js')).group(0)
+        arg = re.search(r"arg:'([^']*)'", entry).group(1).split('|')
+        assert arg == ['show', 'hide', *expected]
+        # The composer dropdown is static HTML: '' (Default) + none + the ladder.
+        html_opts = re.findall(r'class="reasoning-option" data-effort="([^"]*)"',
+                               read('static/index.html'))
+        assert html_opts == ['', *expected]
 
     def test_set_reasoning_effort_persists_to_config_yaml(self, tmp_path, monkeypatch):
         """set_reasoning_effort writes agent.reasoning_effort to the active
