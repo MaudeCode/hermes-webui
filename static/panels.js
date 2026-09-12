@@ -7466,6 +7466,10 @@ async function switchToProfile(name) {
   // doesn't pre-check) can't flash a skeleton→restore for a click that changes
   // nothing. (#4662 Opus gate)
   if (name && name === S.activeProfile) return true;
+  // HWEB-97: revoke this tab's OLD-profile presence lease and clear the
+  // throttle before the switch cookie flips, so the destination profile is
+  // not silently muted and its first input renews immediately.
+  if (window.HermesPresence && typeof window.HermesPresence.reset === 'function') window.HermesPresence.reset();
   S._pendingSessionToolsets=null;
   // Profile switches are per-client cookie/TLS scoped, so a running stream in
   // the current session can safely continue while this tab moves to another

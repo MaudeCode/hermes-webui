@@ -645,7 +645,10 @@ Chat/session durability invariants:
     Alert eligibility is decided from genuine activity: `static/presence.js` renews a per-tab
     lease through `POST /api/talaria/presence` only on trusted keyboard, pointer, or wheel input
     in a visible, focused tab (throttled to one renewal per 15s) and revokes it on hide, blur, or
-    pagehide. The server keeps a bounded in-memory registry keyed by canonical profile and tab,
+    pagehide; a profile switch revokes the old-profile lease before the cookie flips. Each update
+    carries a strictly increasing per-tab sequence so the server can dispatch a revocation
+    immediately during pagehide yet reject a late lower-seq renewal that would otherwise resurrect
+    the lease. The server keeps a bounded in-memory registry keyed by canonical profile and tab,
     expires each lease 90s after the last renewal it received, and stamps `alertEligible: false`
     on every state in a snapshot built while that profile holds a fresh lease. Restart, eviction,
     malformed heartbeats, lookup failures, and a relay that rejects the field all fall back to

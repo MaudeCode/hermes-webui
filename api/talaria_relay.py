@@ -44,37 +44,48 @@ PRESENCE_LEASE_SECONDS = 90
 _PRESENCE_MAX_LEASES = 256
 _PRESENCE_TAB_RE = re.compile(r"[A-Za-z0-9_-]{8,64}")
 _presence_lock = threading.Lock()
-_presence: dict[tuple[str, str], float] = {}
+# Each entry is [expires_monotonic, last_seq, active]. A revoked lease is kept as
+# an inactive tombstone (not deleted) until it would have expired, so a late
+# lower-seq renewal that arrives after the revoke is rejected instead of
+# resurrecting the lease. Client seq is strictly increasing per tab.
+_presence: dict[tuple[str, str], list] = {}
 _presence_clock = time.monotonic
 
 
 def _prune_presence_locked(now: float) -> None:
-    for key in [key for key, expires in _presence.items() if expires <= now]:
+    for key in [key for key, entry in _presence.items() if entry[0] <= now]:
         del _presence[key]
 
 
-def renew_presence(profile: str, tab_id: str) -> None:
+def _apply_presence_locked(key: tuple[str, str], seq: int, active: bool, now: float) -> None:
+    _prune_presence_locked(now)
+    current = _presence.get(key)
+    if current is not None and seq <= current[1]:
+        return  # stale or replayed update; a newer one already won
+    _presence.pop(key, None)
+    if key not in _presence and len(_presence) >= _PRESENCE_MAX_LEASES:
+        # Insertion order is update recency, so evict the least-recent entry.
+        del _presence[next(iter(_presence))]
+    _presence[key] = [now + PRESENCE_LEASE_SECONDS, seq, active]
+
+
+def renew_presence(profile: str, tab_id: str, seq: int = 1) -> None:
     now = _presence_clock()
-    key = (profile, tab_id)
     with _presence_lock:
-        _presence.pop(key, None)
-        _prune_presence_locked(now)
-        # Insertion order is renewal order, so the oldest renewal is evicted first.
-        while len(_presence) >= _PRESENCE_MAX_LEASES:
-            del _presence[next(iter(_presence))]
-        _presence[key] = now + PRESENCE_LEASE_SECONDS
+        _apply_presence_locked((profile, tab_id), seq, True, now)
 
 
-def revoke_presence(profile: str, tab_id: str) -> None:
+def revoke_presence(profile: str, tab_id: str, seq: int = 1) -> None:
+    now = _presence_clock()
     with _presence_lock:
-        _presence.pop((profile, tab_id), None)
+        _apply_presence_locked((profile, tab_id), seq, False, now)
 
 
 def profile_has_presence(profile: str) -> bool:
     now = _presence_clock()
     with _presence_lock:
         _prune_presence_locked(now)
-        return any(key[0] == profile for key in _presence)
+        return any(key[0] == profile and entry[2] for key, entry in _presence.items())
 
 
 def update_presence(body: object, *, profile: str) -> dict[str, bool | int]:
@@ -83,7 +94,15 @@ def update_presence(body: object, *, profile: str) -> dict[str, bool | int]:
         raise RelayPairingError("Invalid presence request", status=400)
     tab_id = body.get("tab_id")
     active = body.get("active")
-    if not isinstance(tab_id, str) or not _PRESENCE_TAB_RE.fullmatch(tab_id) or not isinstance(active, bool):
+    seq = body.get("seq")
+    if (
+        not isinstance(tab_id, str)
+        or not _PRESENCE_TAB_RE.fullmatch(tab_id)
+        or not isinstance(active, bool)
+        or not isinstance(seq, int)
+        or isinstance(seq, bool)
+        or not 0 <= seq <= 2 ** 53
+    ):
         raise RelayPairingError("Invalid presence request", status=400)
     profile = str(profile or "").strip()
     if not profile:
@@ -93,9 +112,9 @@ def update_presence(body: object, *, profile: str) -> dict[str, bool | int]:
     except Exception as exc:
         raise RelayPairingError("Hermes profile is unavailable", status=403) from exc
     if active:
-        renew_presence(profile, tab_id)
+        renew_presence(profile, tab_id, seq)
     else:
-        revoke_presence(profile, tab_id)
+        revoke_presence(profile, tab_id, seq)
     return {"ok": True, "lease_seconds": PRESENCE_LEASE_SECONDS if active else 0}
 
 

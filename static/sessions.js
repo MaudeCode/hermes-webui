@@ -1848,6 +1848,8 @@ async function _switchProfileForSessionLoad(profile){
   const name=String(profile||'').trim();
   if(!name) throw new Error('missing profile');
   if(name===S.activeProfile) return;
+  // HWEB-97: revoke the old-profile lease before the switch cookie flips.
+  if(window.HermesPresence&&typeof window.HermesPresence.reset==='function') window.HermesPresence.reset();
   if(typeof _invalidateSessionListRenders==='function') _invalidateSessionListRenders();
   if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(true);
   if(typeof showSessionListSkeleton==='function') showSessionListSkeleton(name);

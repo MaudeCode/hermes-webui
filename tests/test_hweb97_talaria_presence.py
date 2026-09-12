@@ -43,6 +43,14 @@ def presence_registry(monkeypatch):
     talaria_relay._presence.clear()
 
 
+def _renew(tab, profile, seq=1):
+    return update_presence({"tab_id": tab, "active": True, "seq": seq}, profile=profile)
+
+
+def _revoke(tab, profile, seq):
+    return update_presence({"tab_id": tab, "active": False, "seq": seq}, profile=profile)
+
+
 @contextmanager
 def _active_runs(monkeypatch, sessions: dict[str, str]):
     """Register one running stream per session id, tagged with its profile."""
@@ -102,10 +110,7 @@ def test_fresh_tab_without_input_leaves_alerts_eligible(tmp_path, monkeypatch):
 def test_qualifying_input_mutes_profile_for_ninety_seconds(tmp_path, monkeypatch, presence_registry):
     publisher = _publisher(tmp_path)
     with _active_runs(monkeypatch, {"s1": "default", "s2": "default"}):
-        assert update_presence({"tab_id": "tab-aaaaaaaa", "active": True}, profile="default") == {
-            "ok": True,
-            "lease_seconds": PRESENCE_LEASE_SECONDS,
-        }
+        assert _renew("tab-aaaaaaaa", "default") == {"ok": True, "lease_seconds": PRESENCE_LEASE_SECONDS}
         assert _eligibility(publisher, "default") == [False, False]
         presence_registry["now"] += PRESENCE_LEASE_SECONDS - 1
         assert _eligibility(publisher, "default") == [False, False]
@@ -117,36 +122,58 @@ def test_qualifying_input_mutes_profile_for_ninety_seconds(tmp_path, monkeypatch
 
 def test_server_ignores_client_supplied_expiry(presence_registry):
     update_presence(
-        {"tab_id": "tab-aaaaaaaa", "active": True, "expires_at": 10**12, "duration": 10**6, "ts": 0},
+        {"tab_id": "tab-aaaaaaaa", "active": True, "seq": 1, "expires_at": 10**12, "duration": 10**6, "ts": 0},
         profile="default",
     )
-    assert talaria_relay._presence[("default", "tab-aaaaaaaa")] == presence_registry["now"] + PRESENCE_LEASE_SECONDS
+    entry = talaria_relay._presence[("default", "tab-aaaaaaaa")]
+    assert entry[0] == presence_registry["now"] + PRESENCE_LEASE_SECONDS
+    assert entry[2] is True
 
 
 def test_revocation_clears_only_that_tab(tmp_path, monkeypatch, presence_registry):
     publisher = _publisher(tmp_path)
     with _active_runs(monkeypatch, {"s1": "default"}):
-        update_presence({"tab_id": "tab-aaaaaaaa", "active": True}, profile="default")
-        update_presence({"tab_id": "tab-bbbbbbbb", "active": True}, profile="default")
-        assert update_presence({"tab_id": "tab-aaaaaaaa", "active": False}, profile="default") == {
-            "ok": True,
-            "lease_seconds": 0,
-        }
+        _renew("tab-aaaaaaaa", "default", seq=1)
+        _renew("tab-bbbbbbbb", "default", seq=1)
+        assert _revoke("tab-aaaaaaaa", "default", seq=2) == {"ok": True, "lease_seconds": 0}
         assert _eligibility(publisher, "default") == [False]
-        update_presence({"tab_id": "tab-bbbbbbbb", "active": False}, profile="default")
+        _revoke("tab-bbbbbbbb", "default", seq=2)
         assert _eligibility(publisher, "default") == ["omitted"]
 
 
 def test_one_tab_expiring_cannot_clear_another_fresh_tab(tmp_path, monkeypatch, presence_registry):
     publisher = _publisher(tmp_path)
     with _active_runs(monkeypatch, {"s1": "default"}):
-        update_presence({"tab_id": "tab-aaaaaaaa", "active": True}, profile="default")
+        _renew("tab-aaaaaaaa", "default")
         presence_registry["now"] += 50
-        update_presence({"tab_id": "tab-bbbbbbbb", "active": True}, profile="default")
+        _renew("tab-bbbbbbbb", "default")
         presence_registry["now"] += 45  # tab a expired, tab b has 45s left
         assert _eligibility(publisher, "default") == [False]
         assert set(talaria_relay._presence) == {("default", "tab-bbbbbbbb")}
         presence_registry["now"] += 45
+        assert _eligibility(publisher, "default") == ["omitted"]
+
+
+# ── Out-of-order updates decided by seq ─────────────────────────────────────
+
+
+def test_stale_renewal_after_revoke_cannot_resurrect_the_lease(tmp_path, monkeypatch):
+    """A revoke (seq 2) followed by a late lower-seq renewal (seq 1) stays revoked."""
+    publisher = _publisher(tmp_path)
+    with _active_runs(monkeypatch, {"s1": "default"}):
+        _renew("tab-aaaaaaaa", "default", seq=1)
+        _revoke("tab-aaaaaaaa", "default", seq=2)
+        _renew("tab-aaaaaaaa", "default", seq=1)  # replayed/out-of-order renewal
+        assert _eligibility(publisher, "default") == ["omitted"]
+
+
+def test_equal_or_lower_seq_renewal_is_ignored(tmp_path, monkeypatch, presence_registry):
+    publisher = _publisher(tmp_path)
+    with _active_runs(monkeypatch, {"s1": "default"}):
+        _renew("tab-aaaaaaaa", "default", seq=5)
+        presence_registry["now"] += 80
+        _renew("tab-aaaaaaaa", "default", seq=5)  # same seq: does not extend
+        presence_registry["now"] += 11  # original lease (seq 5) has now expired
         assert _eligibility(publisher, "default") == ["omitted"]
 
 
@@ -159,10 +186,10 @@ def test_profiles_do_not_suppress_each_other(tmp_path, monkeypatch):
         },
     )
     with _active_runs(monkeypatch, {"a1": "alice", "b1": "bob"}):
-        update_presence({"tab_id": "tab-alice000", "active": True}, profile="alice")
+        _renew("tab-alice000", "alice")
         assert _eligibility(publisher, "alice") == [False]
         assert _eligibility(publisher, "bob") == ["omitted"]
-        update_presence({"tab_id": "tab-alice000", "active": False}, profile="bob")
+        _revoke("tab-alice000", "bob", seq=99)  # another profile, same tab id
         assert _eligibility(publisher, "alice") == [False], "another profile cannot revoke this lease"
 
 
@@ -172,7 +199,7 @@ def test_renamed_root_profile_shares_the_default_scope(tmp_path, monkeypatch):
     monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name in ("default", "kinni"))
     publisher = _publisher(tmp_path)
     with _active_runs(monkeypatch, {"s1": "default"}):
-        update_presence({"tab_id": "tab-aaaaaaaa", "active": True}, profile="kinni")
+        _renew("tab-aaaaaaaa", "kinni")
         assert _eligibility(publisher, "default") == [False]
 
 
@@ -185,15 +212,20 @@ def test_renamed_root_profile_shares_the_default_scope(tmp_path, monkeypatch):
         None,
         [],
         {},
-        {"tab_id": "tab-aaaaaaaa"},
-        {"active": True},
-        {"tab_id": "tab-aaaaaaaa", "active": "yes"},
-        {"tab_id": "tab-aaaaaaaa", "active": 1},
-        {"tab_id": "short", "active": True},
-        {"tab_id": "x" * 65, "active": True},
-        {"tab_id": "tab aaaaaaaa", "active": True},
-        {"tab_id": "tab/../../a", "active": True},
-        {"tab_id": 12345678, "active": True},
+        {"tab_id": "tab-aaaaaaaa", "active": True},  # missing seq
+        {"tab_id": "tab-aaaaaaaa", "seq": 1},
+        {"active": True, "seq": 1},
+        {"tab_id": "tab-aaaaaaaa", "active": "yes", "seq": 1},
+        {"tab_id": "tab-aaaaaaaa", "active": 1, "seq": 1},
+        {"tab_id": "tab-aaaaaaaa", "active": True, "seq": "1"},
+        {"tab_id": "tab-aaaaaaaa", "active": True, "seq": True},
+        {"tab_id": "tab-aaaaaaaa", "active": True, "seq": -1},
+        {"tab_id": "tab-aaaaaaaa", "active": True, "seq": 2**53 + 1},
+        {"tab_id": "short", "active": True, "seq": 1},
+        {"tab_id": "x" * 65, "active": True, "seq": 1},
+        {"tab_id": "tab aaaaaaaa", "active": True, "seq": 1},
+        {"tab_id": "tab/../../a", "active": True, "seq": 1},
+        {"tab_id": 12345678, "active": True, "seq": 1},
     ],
 )
 def test_malformed_heartbeat_is_rejected_without_a_lease(body):
@@ -206,7 +238,7 @@ def test_malformed_heartbeat_is_rejected_without_a_lease(body):
 @pytest.mark.parametrize("profile", ["", "   ", None])
 def test_missing_profile_scope_is_rejected_without_a_lease(profile):
     with pytest.raises(RelayPairingError) as excinfo:
-        update_presence({"tab_id": "tab-aaaaaaaa", "active": True}, profile=profile)
+        _renew("tab-aaaaaaaa", profile)
     assert excinfo.value.status == 403
     assert talaria_relay._presence == {}
 
@@ -214,9 +246,9 @@ def test_missing_profile_scope_is_rejected_without_a_lease(profile):
 def test_registry_is_bounded_and_eviction_restores_eligibility(tmp_path, monkeypatch):
     publisher = _publisher(tmp_path)
     with _active_runs(monkeypatch, {"s1": "default"}):
-        update_presence({"tab_id": "tab-victim00", "active": True}, profile="default")
+        _renew("tab-victim00", "default")
         for index in range(talaria_relay._PRESENCE_MAX_LEASES):
-            update_presence({"tab_id": f"tab-flood-{index:06d}", "active": True}, profile="flood")
+            _renew(f"tab-flood-{index:06d}", "flood")
         assert len(talaria_relay._presence) == talaria_relay._PRESENCE_MAX_LEASES
         assert ("default", "tab-victim00") not in talaria_relay._presence
         assert _eligibility(publisher, "default") == ["omitted"]
@@ -232,7 +264,7 @@ def test_presence_lookup_failure_defaults_to_eligible(tmp_path, monkeypatch):
 
 
 def test_restart_forgets_every_lease(tmp_path, monkeypatch):
-    update_presence({"tab_id": "tab-aaaaaaaa", "active": True}, profile="default")
+    _renew("tab-aaaaaaaa", "default")
     talaria_relay._presence.clear()  # a new process starts empty
     with _active_runs(monkeypatch, {"s1": "default"}):
         assert _eligibility(_publisher(tmp_path), "default") == ["omitted"]
@@ -253,7 +285,7 @@ def test_incompatible_relay_falls_back_to_eligible_snapshots(tmp_path, monkeypat
 
     publisher = _publisher(tmp_path, opener=opener)
     with _active_runs(monkeypatch, {"s1": "default"}):
-        update_presence({"tab_id": "tab-aaaaaaaa", "active": True}, profile="default")
+        _renew("tab-aaaaaaaa", "default")
         with caplog.at_level("WARNING", logger="api.talaria_relay"):
             publisher.publish_snapshot()
         assert [s.get("alertEligible", "omitted") for body in bodies for s in body["states"]] == [False, "omitted"]
@@ -277,7 +309,7 @@ def test_retryable_relay_failure_does_not_strip_alert_eligibility(tmp_path, monk
 
     publisher = _publisher(tmp_path, opener=opener)
     with _active_runs(monkeypatch, {"s1": "default"}):
-        update_presence({"tab_id": "tab-aaaaaaaa", "active": True}, profile="default")
+        _renew("tab-aaaaaaaa", "default")
         with pytest.raises(talaria_relay._RelayHTTPError):
             publisher.publish_snapshot()
         assert len(bodies) == 1
@@ -329,7 +361,7 @@ def test_route_scopes_lease_to_the_request_profile(monkeypatch):
 
     profiles.set_request_profile("member")
     try:
-        handler = _post_presence({"tab_id": "tab-aaaaaaaa", "active": True})
+        handler = _post_presence({"tab_id": "tab-aaaaaaaa", "active": True, "seq": 1})
     finally:
         profiles.clear_request_profile()
     assert handler.status == 200
@@ -343,7 +375,7 @@ def test_route_prefers_the_bound_auth_profile(monkeypatch):
     monkeypatch.setattr(auth, "ensure_trusted_auth_session", lambda handler: {"bound_profile": "ops"})
     profiles.set_request_profile("member")
     try:
-        handler = _post_presence({"tab_id": "tab-aaaaaaaa", "active": True})
+        handler = _post_presence({"tab_id": "tab-aaaaaaaa", "active": True, "seq": 1})
     finally:
         profiles.clear_request_profile()
     assert handler.status == 200
@@ -351,16 +383,16 @@ def test_route_prefers_the_bound_auth_profile(monkeypatch):
 
 
 def test_route_rejects_malformed_heartbeat():
-    handler = _post_presence({"tab_id": "nope", "active": True})
+    handler = _post_presence({"tab_id": "nope", "active": True, "seq": 1})
     assert handler.status == 400
     assert talaria_relay._presence == {}
 
 
 def test_route_revokes_lease():
-    update_presence({"tab_id": "tab-aaaaaaaa", "active": True}, profile="default")
-    handler = _post_presence({"tab_id": "tab-aaaaaaaa", "active": False})
+    _renew("tab-aaaaaaaa", "default", seq=1)
+    handler = _post_presence({"tab_id": "tab-aaaaaaaa", "active": False, "seq": 2})
     assert handler.status == 200
-    assert talaria_relay._presence == {}
+    assert talaria_relay.profile_has_presence("default") is False
 
 
 def test_presence_route_requires_auth_like_every_api_route():
@@ -381,75 +413,20 @@ def test_shell_loads_and_precaches_presence_module():
     assert "window.HermesPresence) await window.HermesPresence.settle();" in workspace
 
 
-_PRESENCE_HARNESS = r"""
-const fs = require('fs');
-const src = fs.readFileSync(process.argv[2], 'utf8');
-const calls = [];
-const log = [];
-let now = 100000;
-Date.now = () => now;
-const docListeners = {}, winListeners = {};
-const document = {
-  visibilityState: 'visible',
-  focused: true,
-  baseURI: 'http://localhost:8787/hermes/',
-  hasFocus() { return this.focused; },
-  addEventListener(type, fn) { (docListeners[type] = docListeners[type] || []).push(fn); },
-};
-const pending = [];
-global.location = { href: 'http://localhost:8787/hermes/' };
-global.fetch = (url, opts) => {
-  calls.push({ url, method: opts.method, keepalive: opts.keepalive, body: JSON.parse(opts.body) });
-  return new Promise((resolve) => pending.push(resolve));
-};
-global.window = {
-  crypto: { randomUUID: () => 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' },
-  addEventListener(type, fn) { (winListeners[type] = winListeners[type] || []).push(fn); },
-};
-global.document = document;
-global.AbortSignal = undefined;
-new Function('document', 'window', 'fetch', src)(document, window, global.fetch);
-const fire = (type, trusted) => (docListeners[type] || []).forEach((fn) => fn({ type, isTrusted: trusted }));
-const fireWin = (type) => (winListeners[type] || []).forEach((fn) => fn({ type, isTrusted: true }));
-const tick = () => new Promise((resolve) => setImmediate(resolve));
-// Answer every outstanding request and let queued ones start, until quiet.
-const flush = async () => { do { while (pending.length) pending.shift()({ ok: true }); await tick(); } while (pending.length); };
-const count = (label) => log.push([label, calls.length]);
+def test_profile_switch_paths_reset_presence():
+    panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    sessions = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    assert "window.HermesPresence.reset()" in panels
+    assert "window.HermesPresence.reset()" in sessions
 
-(async () => {
-  await tick(); count('load');
-  fire('keydown', false); await flush(); count('untrusted keydown');
-  fire('scroll', true); fire('mousemove', true); fire('focus', true); await flush(); count('scroll/mousemove/focus');
-  document.visibilityState = 'hidden'; fire('keydown', true); await flush(); count('hidden keydown');
-  document.visibilityState = 'visible'; document.focused = false; fire('pointerdown', true); await flush(); count('unfocused pointerdown');
-  document.focused = true;
-  fire('keydown', true); await tick(); count('qualifying keydown');
-  let settled = false;
-  window.HermesPresence.settle().then(() => { settled = true; });
-  await tick();
-  const settledBeforeResponse = settled;
-  await flush();
-  const settledAfterResponse = settled;
-  now += 5000; fire('pointerdown', true); await flush(); count('pointerdown within throttle');
-  now += 10000; fire('wheel', true); await flush(); count('wheel after throttle');
-  document.visibilityState = 'hidden'; fire('visibilitychange', true); await flush(); count('hidden revoke');
-  fire('visibilitychange', true); await flush(); count('hidden again');
-  document.visibilityState = 'visible';
-  now += 1000; fire('keydown', true); await flush(); count('keydown right after revoke');
-  fireWin('blur'); await flush(); count('blur revoke');
-  fire('pointerdown', true); await flush(); count('pointerdown after blur');
-  fireWin('pagehide'); await flush(); count('pagehide revoke');
-  // A revocation must wait for the renewal in flight ahead of it.
-  fire('keydown', true); await tick(); const renewalInFlight = calls.length;
-  document.visibilityState = 'hidden'; fire('visibilitychange', true); await tick(); const revokeWhileRenewing = calls.length;
-  await flush(); count('revoke after renewal answered');
-  process.stdout.write(JSON.stringify({
-    log, calls, settledBeforeResponse, settledAfterResponse, renewalInFlight, revokeWhileRenewing,
-    tabId: window.HermesPresence.tabId,
-    listeners: Object.keys(docListeners).sort(),
-  }));
-})();
-"""
+
+def test_presence_module_bounds_settlement_without_abortsignal_timeout():
+    src = (ROOT / "static" / "presence.js").read_text(encoding="utf-8")
+    # settle() must be bounded even where AbortSignal.timeout is unavailable.
+    assert "AbortController" in src
+    assert "setTimeout(" in src
+    assert "controller.abort()" in src
+    assert "AbortSignal.timeout" not in src
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -485,10 +462,7 @@ def test_browser_module_renews_only_on_trusted_input_in_a_visible_focused_tab():
         "blur revoke": 5,
         "pointerdown after blur": 6,
         "pagehide revoke": 7,
-        "revoke after renewal answered": 9,
     }
-    assert out["renewalInFlight"] == 8
-    assert out["revokeWhileRenewing"] == 8, "revocation must not overtake the in-flight renewal"
     assert out["listeners"] == ["keydown", "pointerdown", "visibilitychange", "wheel"]
     tab_id = out["tabId"]
     assert tab_id == "aaaaaaaabbbbccccddddeeeeeeeeeeee"
@@ -505,6 +479,98 @@ def test_browser_module_renews_only_on_trusted_input_in_a_visible_focused_tab():
         (True, False),
         (False, True),
     ]
-    assert all(set(call["body"]) == {"tab_id", "active"} for call in out["calls"])
+    assert all(set(call["body"]) == {"tab_id", "active", "seq"} for call in out["calls"])
+    # seq is strictly increasing per tab, so the server can reject stale updates.
+    seqs = [call["body"]["seq"] for call in out["calls"]]
+    assert seqs == sorted(set(seqs)) and len(seqs) == len(set(seqs))
+
+    # A revocation fires immediately during pagehide even while a renewal is in
+    # flight; its seq is higher than the pending renewal's, so a late renewal
+    # cannot win at the server.
+    assert out["revokeDispatchedImmediately"] is True
+    assert out["revokeSeqAfterRenewal"] > out["renewalPendingSeq"]
+
     assert out["settledBeforeResponse"] is False
     assert out["settledAfterResponse"] is True
+
+
+_PRESENCE_HARNESS = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const calls = [];
+const log = [];
+let now = 100000;
+Date.now = () => now;
+const docListeners = {}, winListeners = {};
+const document = {
+  visibilityState: 'visible',
+  focused: true,
+  baseURI: 'http://localhost:8787/hermes/',
+  hasFocus() { return this.focused; },
+  addEventListener(type, fn) { (docListeners[type] = docListeners[type] || []).push(fn); },
+};
+const pending = [];
+global.location = { href: 'http://localhost:8787/hermes/' };
+global.AbortController = class { constructor(){ this.signal = {}; } abort(){} };
+global.setTimeout = () => 0;
+global.clearTimeout = () => {};
+global.fetch = (url, opts) => {
+  calls.push({ url, method: opts.method, keepalive: opts.keepalive, body: JSON.parse(opts.body) });
+  return new Promise((resolve) => pending.push(resolve));
+};
+global.window = {
+  crypto: { randomUUID: () => 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' },
+  AbortController: global.AbortController,
+  addEventListener(type, fn) { (winListeners[type] = winListeners[type] || []).push(fn); },
+};
+global.document = document;
+new Function('document', 'window', 'fetch', 'AbortController', 'setTimeout', 'clearTimeout', src)(
+  document, window, global.fetch, global.AbortController, global.setTimeout, global.clearTimeout
+);
+const fire = (type, trusted) => (docListeners[type] || []).forEach((fn) => fn({ type, isTrusted: trusted }));
+const fireWin = (type) => (winListeners[type] || []).forEach((fn) => fn({ type, isTrusted: true }));
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+const flush = async () => { do { while (pending.length) pending.shift()({ ok: true }); await tick(); } while (pending.length); };
+const count = (label) => log.push([label, calls.length]);
+
+(async () => {
+  await tick(); count('load');
+  fire('keydown', false); await flush(); count('untrusted keydown');
+  fire('scroll', true); fire('mousemove', true); fire('focus', true); await flush(); count('scroll/mousemove/focus');
+  document.visibilityState = 'hidden'; fire('keydown', true); await flush(); count('hidden keydown');
+  document.visibilityState = 'visible'; document.focused = false; fire('pointerdown', true); await flush(); count('unfocused pointerdown');
+  document.focused = true;
+  fire('keydown', true); await tick(); count('qualifying keydown');
+  let settled = false;
+  window.HermesPresence.settle().then(() => { settled = true; });
+  await tick();
+  const settledBeforeResponse = settled;
+  await flush();
+  const settledAfterResponse = settled;
+  now += 5000; fire('pointerdown', true); await flush(); count('pointerdown within throttle');
+  now += 10000; fire('wheel', true); await flush(); count('wheel after throttle');
+  document.visibilityState = 'hidden'; fire('visibilitychange', true); await flush(); count('hidden revoke');
+  fire('visibilitychange', true); await flush(); count('hidden again');
+  document.visibilityState = 'visible';
+  now += 1000; fire('keydown', true); await flush(); count('keydown right after revoke');
+  fireWin('blur'); await flush(); count('blur revoke');
+  fire('pointerdown', true); await flush(); count('pointerdown after blur');
+  fireWin('pagehide'); await flush(); count('pagehide revoke');
+
+  // Renewal pending, then pagehide-style revoke must dispatch immediately.
+  now += 20000; fire('keydown', true); await tick();
+  const renewalPendingSeq = calls[calls.length - 1].body.seq;
+  const before = calls.length;
+  document.visibilityState = 'hidden'; fire('visibilitychange', true); await tick();
+  const revokeDispatchedImmediately = calls.length === before + 1;
+  const revokeSeqAfterRenewal = calls[calls.length - 1].body.seq;
+  await flush();
+
+  process.stdout.write(JSON.stringify({
+    log, calls, settledBeforeResponse, settledAfterResponse,
+    renewalPendingSeq, revokeDispatchedImmediately, revokeSeqAfterRenewal,
+    tabId: window.HermesPresence.tabId,
+    listeners: Object.keys(docListeners).sort(),
+  }));
+})();
+"""
