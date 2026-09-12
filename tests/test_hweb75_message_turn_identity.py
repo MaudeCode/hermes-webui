@@ -31,6 +31,7 @@ _MESSAGES_HELPERS = [
     "_messagePersistedId",
     "_messageTurnStartedAt",
     "_messageTurnIdentity",
+    "_encodeIdentityComponent",
     "_messageStableIdentities",
     "_messageIdentityCandidates",
     "_messagesShareIdentity",
@@ -273,9 +274,15 @@ def test_persisted_ids_are_encoded_so_a_comma_or_bar_cannot_split_or_collide():
   const prefixOnly={role:'user',content:IN.display,id:'part',timestamp:1757500000};
   const keysComma=_userMessageExpandKeys(withComma, IN.display, 0);
   _setUserMessageExpanded(keysComma, true);
+  // A lone surrogate (valid JSON, preserved by /api/session/import) must not throw.
+  const lone={role:'user',content:'x',id:'\\ud800x'};
+  let loneThrew=false, loneStable=null;
+  try{ loneStable=_messageStableIdentities(lone); }catch(_){ loneThrew=true; }
   return {
     stable: _messageStableIdentities(withComma),
     barId: _messageStableIdentities({role:'user',content:'x',id:'a|b'}),
+    loneThrew, loneStable,
+    loneDeterministic: JSON.stringify(_messageStableIdentities(lone))===JSON.stringify(loneStable),
     keyCount: _userMessageExpandKeyList(keysComma).length,
     prefixInherits: _userMessageIsExpanded(_userMessageExpandKeys(prefixOnly, IN.display, 0)),
     rejected: [_messagePersistedId({id:true}), _messagePersistedId({id:{}}), _messagePersistedId({id:''}), _messagePersistedId({message_id:'m1'})],
@@ -285,6 +292,9 @@ def test_persisted_ids_are_encoded_so_a_comma_or_bar_cannot_split_or_collide():
     )
     assert r["stable"] == ["id:part%2Cone"], r
     assert r["barId"] == ["id:a%7Cb"], r
+    assert r["loneThrew"] is False, r
+    assert r["loneStable"] == ["id:%EF%BF%BDx"], r
+    assert r["loneDeterministic"] is True, r
     assert r["keyCount"] == 2, r  # id + content, no stray split
     # Both rows share the content key, so the prefix-id row does read the shared
     # content entry — the existing "identical prompts open together" semantics —

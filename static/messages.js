@@ -2644,10 +2644,18 @@ function _messageTurnIdentity(m){
 // The id is the one caller-supplied component, so it is URI-encoded: the
 // identities are joined with '|' and ',' by their consumers, and an imported
 // id containing either must not truncate or collide.
+// Never throws: an imported id can hold a lone UTF-16 surrogate, which makes
+// encodeURIComponent raise and would abort transcript rendering. Such a value
+// is encoded with its surrogates replaced, still deterministic per row.
+function _encodeIdentityComponent(value){
+  const s=String(value);
+  try{ return encodeURIComponent(s); }
+  catch(_){ return encodeURIComponent(s.replace(/[\uD800-\uDFFF]/g,'�')); }
+}
 function _messageStableIdentities(m){
   const out=[];
   const id=_messagePersistedId(m);
-  if(id!=null) out.push(`id:${encodeURIComponent(String(id))}`);
+  if(id!=null) out.push(`id:${_encodeIdentityComponent(id)}`);
   const turn=_messageTurnIdentity(m);
   if(turn) out.push(`turn:${turn}`);
   return out;

@@ -205,6 +205,7 @@ for(const name of [
   '_messagePersistedId',
   '_messageTurnStartedAt',
   '_messageTurnIdentity',
+  '_encodeIdentityComponent',
   '_messageStableIdentities',
   '_messageIdentityCandidates',
   '_messagesShareIdentity',
