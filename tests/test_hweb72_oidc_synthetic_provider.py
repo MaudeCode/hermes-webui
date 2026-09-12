@@ -769,8 +769,13 @@ def _tamper(stack: Stack, case: str) -> None:
 def test_tampered_callback_fails_without_minting_cookie(stack: Stack, case: str):
     client = stack.webui.client()
     if case == "state":
-        real_state = urllib.parse.parse_qs(urllib.parse.urlsplit(start_login(client)).query)["state"][0]
-        resp = client.get("/api/auth/oidc/callback?" + urllib.parse.urlencode({"state": "forged-" + real_state, "code": "any"}))
+        # A real, unused provider code paired with a forged state: only the
+        # state check stands between this request and a minted session.
+        stack.provider.identity = "alice"
+        query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(provider_callback(client, start_login(client))).query))
+        query["state"] = "forged-" + query["state"]
+        resp = client.get("/api/auth/oidc/callback?" + urllib.parse.urlencode(query))
+        assert resp.status == 401, (resp.status, resp.body[:200])
     elif case == "reused_code":
         client, first = http_login(stack, "alice")
         assert first.status == 302
