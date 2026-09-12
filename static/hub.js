@@ -177,7 +177,7 @@
       line.querySelectorAll('.chat-context-item').forEach(b => {
         const srcSel = b.dataset.src, openId = b.dataset.open;
         b.addEventListener('click', (e) => { e.stopPropagation(); document.getElementById(openId)?.click(); });
-        const sync = () => { const src = document.querySelector(srcSel); const v = src ? src.textContent.trim() : ''; b.textContent = v; b.hidden = !v; };
+        const sync = () => { const src = document.querySelector(srcSel); const v = src ? src.textContent.trim() : ''; if (!v && b.textContent && document.documentElement.classList.contains('booting')) return; b.textContent = v; b.hidden = !v; };
         sync();
         const src = document.querySelector(srcSel);
         if (src) new MutationObserver(sync).observe(src, { childList: true, characterData: true, subtree: true });
@@ -202,6 +202,7 @@
       const sync = () => {
         const src = document.querySelector(p.src);
         const v = src ? src.textContent.trim() : '';
+        if (!v && b.textContent && document.documentElement.classList.contains('booting')) return; // keep cached value
         b.textContent = v;
         b.hidden = !v;
       };
