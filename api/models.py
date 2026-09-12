@@ -2892,6 +2892,9 @@ def _replay_run_journal_windows(
     # One dedupe baseline for the whole pass: later windows must not treat the
     # rows earlier windows appended as pre-existing sidecar content.
     dedupe_state = _journal_dedupe_state(session)
+    # Windows are artificial boundaries: text still open at the end of one is
+    # carried into the next and flushed once the pass is over.
+    dedupe_state['defer_flush'] = True
     for _ in range(_RECOVERY_JOURNAL_MAX_WINDOWS):
         journal = _read_run_journal_window(
             session.session_id, stream_id, cursor=result['cursor'],
@@ -2932,6 +2935,13 @@ def _replay_run_journal_windows(
         result['truncated'] = bool(journal.get('truncated'))
         if not result['truncated']:
             break
+    if dedupe_state.get('carry'):
+        dedupe_state['defer_flush'] = False
+        flushed = _append_journaled_partial_output(
+            session, stream_id, dedupe_existing=dedupe_existing,
+            journal={'events': []}, dedupe_state=dedupe_state,
+        )
+        result['recovered_output'] = result['recovered_output'] or flushed
     if terminal_events:
         result['terminal_state'] = _run_journal_terminal_state(
             session, stream_id, journal={'events': terminal_events},
@@ -3216,8 +3226,28 @@ def _recover_journaled_output_and_terminal_error(
     terminal_recovery: dict | None = None,
     journal: dict | None = None,
     dedupe_state: dict | None = None,
+    replay_out: dict | None = None,
 ) -> tuple[bool, bool]:
-    """Recover readable activity first, then append its authoritative terminal error."""
+    """Recover readable activity first, then append its authoritative terminal error.
+
+    Without a ``journal`` snapshot the journal is walked forward in bounded
+    windows from the start (`_replay_run_journal_windows`), never read as one
+    clipped tail; ``replay_out`` receives that walk's result so a caller can
+    arm a cursor when the pass did not reach the end.
+    """
+    if journal is None and stream_id:
+        replay = _replay_run_journal_windows(
+            session, stream_id, dedupe_existing=dedupe_existing,
+        )
+        if replay_out is not None:
+            replay_out.update(replay)
+        terminal_error_recovered = (
+            replay['terminal_error_recovered']
+            or _materialize_unsaved_gateway_terminal_error(
+                session, stream_id, terminal_recovery,
+            )
+        )
+        return replay['recovered_output'], terminal_error_recovered
     recovered_output = _append_journaled_partial_output(
         session,
         stream_id,
@@ -3300,33 +3330,30 @@ def _append_journaled_partial_output(
     if not stream_id:
         return False
 
-    try:
-        if journal is None:
-            journal = _read_run_journal_for_recovery(session.session_id, stream_id)
-    except Exception:
-        logger.debug(
-            "Session %s: failed to read run journal for stream %s",
-            getattr(session, 'session_id', '?'),
-            stream_id,
-            exc_info=True,
-        )
-        return False
+    if journal is None:
+        return _replay_run_journal_windows(
+            session, stream_id, dedupe_existing=dedupe_existing,
+        )['recovered_output']
 
+    if dedupe_state is None:
+        dedupe_state = _journal_dedupe_state(session)
+    # Text still open at an artificial window boundary of the same pass. It is
+    # carried into the next window rather than flushed, so a token stream that
+    # crosses the boundary keeps its whitespace and stays one row.
+    carry = dedupe_state.pop('carry', None) or {}
     events = [event for event in journal.get('events') or [] if isinstance(event, dict)]
-    if not events:
+    if not events and not carry:
         return False
 
     appended_any = False
-    assistant_parts: list[str] = []
-    reasoning_parts: list[str] = []
-    assistant_started_at: float | None = None
+    assistant_parts: list[str] = list(carry.get('assistant_parts') or [])
+    reasoning_parts: list[str] = list(carry.get('reasoning_parts') or [])
+    assistant_started_at: float | None = carry.get('assistant_started_at')
     current_assistant_idx: int | None = None
     recovered_tool_calls: list[dict] = []
     # Cards this pass may still settle: the newly recovered ones plus any
     # already-persisted card a `tool_complete` in this journal wave owns.
     completable_tool_calls: list[dict] = []
-    if dedupe_state is None:
-        dedupe_state = _journal_dedupe_state(session)
     initial_message_count = dedupe_state['message_count']
     claimed_existing_assistant_indexes: set[int] = dedupe_state['claimed']
     baseline_tool_calls = (session.tool_calls or [])[:dedupe_state['tool_count']]
@@ -3606,7 +3633,14 @@ def _append_journaled_partial_output(
         if event_name in {'done', 'stream_end', 'cancel', 'apperror', 'error'}:
             flush_assistant()
 
-    flush_assistant()
+    if dedupe_state.get('defer_flush') and (assistant_parts or reasoning_parts):
+        dedupe_state['carry'] = {
+            'assistant_parts': assistant_parts,
+            'reasoning_parts': reasoning_parts,
+            'assistant_started_at': assistant_started_at,
+        }
+    else:
+        flush_assistant()
     if recovered_tool_calls:
         session.tool_calls = list(session.tool_calls or []) + recovered_tool_calls
         appended_any = True
@@ -3665,15 +3699,22 @@ def _journal_retry_lock_for_sid(sid: str) -> threading.Lock:
 
 def _build_recovery_marker_with_retry_hook(
     *, recovered_output: bool, stream_id: str | None, pending_started_at=None,
+    cursor: dict | None = None,
 ) -> dict:
     """Build an interrupted-turn marker, arming the lazy-retry hook when
-    visible output was not recovered yet but a stream id is available."""
+    visible output was not recovered yet but a stream id is available.
+
+    ``cursor`` arms the hook even after recovered output: the replay pass did
+    not reach the end of the journal, and the retry continues from there."""
     if recovered_output:
-        return _interrupted_recovery_marker(
+        marker = _interrupted_recovery_marker(
             recovered_output=True,
             stream_id=stream_id,
             pending_started_at=pending_started_at,
         )
+        if cursor is not None and stream_id:
+            _arm_journal_retry(marker, stream_id, cursor=cursor)
+        return marker
     if not stream_id:
         return _interrupted_recovery_marker(
             recovered_output=False,
@@ -4245,16 +4286,30 @@ def _apply_core_sync_or_error_marker(
         if _run_journal_terminal_state(session, _stream_id) == 'completed':
             if not (_already_checkpointed or _latest_user_matches_pending_text(session.messages, session.pending_user_message)):
                 _append_recovered_pending_turn(session, timestamp=_recovered_ts)
-            _append_journaled_partial_output(
+            _replay = {}
+            _recover_journaled_output_and_terminal_error(
                 session,
                 _stream_id,
                 dedupe_existing=True,
+                replay_out=_replay,
             )
             session.active_stream_id = None
             session.pending_user_message = None
             session.pending_attachments = []
             session.pending_started_at = None
             session.pending_user_source = None
+            if _replay.get('truncated'):
+                # The walk did not reach the run's `done` in one pass. Arm the
+                # hook with the cursor; the retry removes this marker once it
+                # reaches the terminal row.
+                session.messages.append(
+                    _build_recovery_marker_with_retry_hook(
+                        recovered_output=True,
+                        stream_id=_stream_id,
+                        pending_started_at=_pending_started_at,
+                        cursor=_replay.get('cursor'),
+                    )
+                )
             session.save(touch_updated_at=touch_updated_at)
             logger.info(
                 "Session %s: cleared stale pending state for completed stream %s without error marker",
@@ -4277,11 +4332,13 @@ def _apply_core_sync_or_error_marker(
             if session.pending_attachments:
                 recovered['attachments'] = list(session.pending_attachments)
             _append_recovered_turn_to_context(session, recovered)
+        _replay = {}
         recovered_output, terminal_error_recovered = (
             _recover_journaled_output_and_terminal_error(
                 session,
                 _stream_id,
                 terminal_recovery=_terminal_recovery,
+                replay_out=_replay,
             )
         )
         session.active_stream_id = None
@@ -4295,6 +4352,7 @@ def _apply_core_sync_or_error_marker(
                     recovered_output=recovered_output,
                     stream_id=_stream_id,
                     pending_started_at=_pending_started_at,
+                    cursor=_replay.get('cursor') if _replay.get('truncated') else None,
                 )
             )
         session.save(touch_updated_at=touch_updated_at)
@@ -4340,12 +4398,14 @@ def _apply_core_sync_or_error_marker(
                 )
             ):
                 _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+            _replay = {}
             recovered_output, terminal_error_recovered = (
                 _recover_journaled_output_and_terminal_error(
                     session,
                     _stream_id,
                     dedupe_existing=True,
                     terminal_recovery=_terminal_recovery,
+                    replay_out=_replay,
                 )
             )
             _pending_started_at = session.pending_started_at
@@ -4356,10 +4416,11 @@ def _apply_core_sync_or_error_marker(
             session.pending_user_source = None
             if recovered_output and not terminal_error_recovered:
                 session.messages.append(
-                    _interrupted_recovery_marker(
+                    _build_recovery_marker_with_retry_hook(
                         recovered_output=True,
                         stream_id=_stream_id,
                         pending_started_at=_pending_started_at,
+                        cursor=_replay.get('cursor') if _replay.get('truncated') else None,
                     )
                 )
             # NOTE: when the core transcript was synced in but the run journal
@@ -4391,11 +4452,13 @@ def _apply_core_sync_or_error_marker(
         if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
             _recovered_ts = int(session.pending_started_at)
         _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+    _replay = {}
     recovered_output, terminal_error_recovered = (
         _recover_journaled_output_and_terminal_error(
             session,
             _stream_id,
             terminal_recovery=_terminal_recovery,
+            replay_out=_replay,
         )
     )
     _pending_started_at = session.pending_started_at
@@ -4410,6 +4473,7 @@ def _apply_core_sync_or_error_marker(
                 recovered_output=recovered_output,
                 stream_id=_stream_id,
                 pending_started_at=_pending_started_at,
+                cursor=_replay.get('cursor') if _replay.get('truncated') else None,
             )
         )
     session.save(touch_updated_at=touch_updated_at)

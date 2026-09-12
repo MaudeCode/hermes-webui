@@ -625,6 +625,54 @@ def test_final_row_without_its_newline_is_still_recovered():
     assert not [m for m in session.messages if m.get("type") == "interrupted"]
 
 
+def test_token_stream_keeps_its_whitespace_across_window_boundaries(monkeypatch):
+    """Windows are artificial; a token stream crossing one stays one row.
+
+    Flushing at every boundary would strip the boundary whitespace and split
+    "Hello" / " world" into two rows, altering transcript and model context.
+    """
+    session_id = "hweb13_window_whitespace"
+    stream_id = "hweb13_stream_window_whitespace"
+    session = _dead_session(session_id, stream_id)
+    words = ["Hello", " world", " this", " is", " one", " row."]
+    for word in words:
+        append_run_event(session_id, stream_id, "token", {"text": word})
+    append_run_event(session_id, stream_id, "done", {})
+    # Roughly two token rows per window.
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_BYTES", 420)
+
+    assert _recover_dead_run_journal(session, stream_id) is True
+    assert _visible(session) == ["Hello world this is one row."]
+    assistant_context = [
+        m["content"] for m in session.context_messages if m.get("role") == "assistant"
+    ]
+    assert assistant_context == ["Hello world this is one row."]
+
+
+def test_pending_turn_repair_walks_an_oversized_journal_too(monkeypatch):
+    """The pending-turn sibling must not clip a completed run to its tail."""
+    session_id = "hweb13_pending_oversized"
+    stream_id = "hweb13_stream_pending_oversized"
+    session = _dead_session(session_id, stream_id)
+    session.pending_user_message = "Trace the regression again"
+    session.pending_started_at = time.time() - 300
+    session.save()
+    lines = [f"Line {i} of a long answer." for i in range(1, 7)]
+    for line in lines:
+        append_run_event(session_id, stream_id, "interim_assistant", {"text": line})
+    append_run_event(session_id, stream_id, "done", {})
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_BYTES", 600)
+
+    assert models._apply_core_sync_or_error_marker(
+        session,
+        models.SESSION_DIR / "missing-core.json",
+        stream_id_for_recheck=stream_id,
+    ) is True
+    assert _visible(session) == lines
+    assert session.pending_user_message is None
+    assert not [m for m in session.messages if m.get("type") == "interrupted"]
+
+
 def test_tool_completion_in_a_later_wave_settles_the_earlier_card():
     session_id = "hweb13_wave_tool"
     stream_id = "hweb13_stream_wave_tool"
