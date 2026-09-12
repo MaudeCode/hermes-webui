@@ -8201,4 +8201,44 @@ html.booting.title-pending .chat-header-title{visibility:hidden;}
 #ctxIndicatorWrap[style*="display:none"],#ctxIndicatorWrap[style*="display: none"]{display:flex!important;visibility:hidden;}
 html.booting.has-ring-cache #ctxIndicatorWrap{display:flex!important;visibility:visible!important;}
 .rail-brand .rail-brandmark{width:30px;height:30px;color:var(--accent);}
+
+/* ── Detail headers ─────────────────────────────────────────────────────── */
+.main-view-header{min-height:56px;padding:12px 32px;gap:12px;justify-content:flex-start;}
+.main-view-title{flex:1;font-size:20px;font-weight:600;letter-spacing:-.015em;text-align:left;}
+.main-view-title-row{flex:1;display:flex;align-items:center;gap:12px;min-width:0;}
+.main-view-actions{margin-left:auto;gap:6px;}
+.main-view-actions .panel-head-btn{width:32px;height:32px;border-radius:var(--r-md);border:1px solid var(--border);background:var(--surface);}
+.main-view-actions .panel-head-btn:hover{background:var(--hover-bg);}
+.main-view-actions .panel-head-btn.primary{background:var(--accent);border-color:var(--accent);color:#1A1406;}
+:root:not(.dark) .main-view-actions .panel-head-btn.primary{color:#fff;}
+.main-view-body{padding:24px 32px 48px;}
+/* ── Forms: 560px column, labels above, quiet hints, whitespace not lines ── */
+.detail-form{max-width:560px;gap:18px;}
+.detail-form-row{gap:6px;}
+.detail-form-row > label{font-size:13px;font-weight:500;color:var(--text);letter-spacing:0;}
+.detail-form-hint{font-size:12px;line-height:1.5;color:var(--muted);}
+.detail-form-row input[type="text"],.detail-form-row input[type="password"],.detail-form-row input[type="number"],.detail-form-row input[type="time"],.detail-form-row input:not([type]),.detail-form-row select{height:34px;padding:0 10px;font-size:13.5px;border-radius:var(--r-md);}
+.detail-form-row textarea{min-height:120px;padding:10px;font-size:13.5px;line-height:1.5;border-radius:var(--r-md);font-family:var(--font-mono);}
+.detail-form-row label.detail-form-check{font-size:13.5px;padding:2px 0;}
+.detail-form-error{border-radius:var(--r-md);}
+.detail-form details{border-top:1px solid var(--border);padding-top:12px;margin-top:4px;}
+.detail-form details > summary{font-size:13px;font-weight:500;color:var(--muted);cursor:pointer;list-style:none;display:flex;align-items:center;gap:6px;}
+.detail-form details > summary::-webkit-details-marker{display:none;}
+.detail-form details > summary::before{content:'';width:0;height:0;border-left:5px solid currentColor;border-top:4px solid transparent;border-bottom:4px solid transparent;transition:transform var(--dur) var(--ease);}
+.detail-form details[open] > summary::before{transform:rotate(90deg);}
+.detail-form details > summary:hover{color:var(--text);}
+/* ── Detail cards and rows: fewer lines, normal-case titles ─────────────── */
+.detail-card{max-width:760px;border:1px solid var(--border);border-radius:10px;background:var(--surface);padding:14px 16px;margin-bottom:14px;}
+.detail-card-title{font-size:13px;font-weight:600;letter-spacing:0;text-transform:none;color:var(--text);margin-bottom:8px;}
+.detail-row{padding:7px 0;border-bottom:1px solid var(--border-subtle);font-size:13.5px;}
+.detail-row:last-child{border-bottom:0;}
+.detail-row-label{flex:0 0 150px;font-size:12.5px;}
+.detail-badge{border-radius:6px;padding:2px 7px;font-size:11.5px;font-weight:500;}
+.detail-badge.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--accent-text);}
+@media (max-width:768px){
+  .main-view-header{padding:10px 14px;min-height:48px;}
+  .main-view-title{font-size:17px;}
+  .main-view-body{padding:16px 14px 32px;}
+  .detail-row-label{flex-basis:110px;}
+}
 /* REDESIGN-LAYER-END */
