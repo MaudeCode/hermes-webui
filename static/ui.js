@@ -1688,14 +1688,78 @@ function _setUserMessageExpanded(identity, expanded){
   const keys=Object.keys(_userMsgExpandedByKey);
   for(let i=0;i<keys.length-USER_MSG_EXPANDED_MAX;i++) delete _userMsgExpandedByKey[keys[i]];
 }
-function _rememberUserRowIntrinsicHeight(sessionMsgIdx, height){
+// HWEB-66: a measurement is only valid for the disclosure state it was taken
+// in — a folded row is ~370px whatever its text, an opened one thousands — so
+// the map is keyed by session index AND state (`7` folded, `7:x` opened). A
+// collapsed rebuild then never reads an expanded measurement through the
+// max() floor, including for duplicate prompts that share one expand identity
+// and fold together when either is collapsed, whether or not the twin is in
+// the DOM at that moment.
+function _userRowIntrinsicHeightKey(sessionMsgIdx, expanded){
   const key=Number(sessionMsgIdx);
-  if(!Number.isFinite(key)||!(height>0)) return;
+  return Number.isFinite(key)?(expanded?key+':x':String(key)):'';
+}
+function _rememberUserRowIntrinsicHeight(sessionMsgIdx, height, expanded){
+  const key=_userRowIntrinsicHeightKey(sessionMsgIdx, expanded);
+  if(!key||!(height>0)) return;
   _userRowIntrinsicHeightBySessionIdx[key]=Math.round(height);
 }
-function _estimateUserRowIntrinsicHeight(rawText){
+// HWEB-66: reserve for the .msg-files strip above a user message's text, by
+// attachment kind, since rawText knows nothing about it. `kinds` is the
+// comma-separated data-attachment-kinds renderMessages stamps on the row and
+// `columnWidth` the transcript column (#msgInner) width. Measured through
+// renderMessages at 320/390/430/700px: a 120x90 thumbnail row is 96px, an audio
+// player 150, a video player 266, a file badge 29, each followed by the strip's
+// 6px flex gap, and the strip ends in a 10px margin. Thumbnails (120px + 4px
+// margin + 6px gap) share a row inside a bubble that is at most ~80% of the
+// column — 2 per row on a phone, 1 at 700px where the sidebar narrows the
+// column; fail closed to 1 per row when the width is unknown. Badges and
+// players are counted one per row so a wrapped long file name never
+// under-reserves (under-reserving is the #5638 jump-back).
+// A video player is width:100% with a metadata-driven height capped by the
+// stylesheet's 320px max-height (+2px border) on .msg-media-video, so a square or
+// portrait clip stands ~436px tall against the 266px a landscape or not-yet-loaded
+// one measures; reserve the ceiling (322 + 114px editor chrome + 6 gap) so no
+// aspect ratio under-reserves once metadata arrives.
+const USER_MSG_FILES_PX={image:102, audio:156, video:442, badge:36, strip:10};
+// A file badge is `badge:<name length>`: badges pack several to a row, and at
+// the fixed 12px badge font one measures 32px of chrome + ~6px per character
+// (62px for "a.txt", 276px for a 41-char name) at every font-size setting —
+// estimated a little wider so a row never holds more than it really does.
+// Anything else unknown counts as a full-row badge.
+function _estimateUserRowFilesHeight(kinds, columnWidth){
+  const list=String(kinds||'').split(',').filter(Boolean);
+  if(!list.length) return 0;
+  const px=USER_MSG_FILES_PX;
+  const rowWidth=(Number.isFinite(columnWidth)&&columnWidth>0)?columnWidth*0.8:0;
+  let images=0, badgeRows=0, badgeUsed=Infinity, height=px.strip;
+  for(const k of list){
+    if(k==='image'){ images++; continue; }
+    if(k==='audio'||k==='video'){ height+=px[k]; continue; }
+    const len=Number(k.split(':')[1]);
+    const w=Number.isFinite(len)?Math.min(rowWidth||Infinity, 36+6.5*len):Infinity;
+    if(rowWidth&&badgeUsed+6+w<=rowWidth) badgeUsed+=6+w;
+    else{ badgeRows++; badgeUsed=w; }
+  }
+  const perRow=rowWidth?Math.max(1, Math.floor((rowWidth+6)/130)):1;
+  return height+Math.ceil(images/perRow)*px.image+badgeRows*px.badge;
+}
+function _userRowFilesReserve(row){
+  const inner=(typeof $==='function')?$('msgInner'):null;
+  return _estimateUserRowFilesHeight(row.dataset.attachmentKinds, inner?inner.clientWidth:0);
+}
+function _estimateUserRowIntrinsicHeight(rawText, expanded, filesPx){
+  // HWEB-66: the attachment strip (see _estimateUserRowFilesHeight) sits above
+  // the text in either disclosure state, so it is added to every text estimate.
+  const files=Number(filesPx)||0;
   const t=String(rawText||'');
-  if(!t) return 96;
+  if(!t) return 96+files;
+  // HWEB-66: a long message the reader has NOT opened renders clipped to the
+  // USER_MSG_COLLAPSE_LINES preview plus its disclosure button, so its real height
+  // is the flat collapsed-row size whatever the text length. Estimating from the
+  // full text there over-reserves by thousands of px for a never-painted row, and
+  // that space collapses on paint — the other half of the #5637/#5638 jump.
+  if(!expanded&&_userMessageNeedsCollapse(t)) return USER_MSG_COLLAPSED_ROW_PX+files;
   // ~48 half-width chars/line at the mobile user-bubble width (≈90% of a phone viewport),
   // ~22px per line + ~24px row chrome; floored at the stylesheet's 96px so a short row never
   // reserves LESS than today (estimate can only add reserved height for tall rows, never
@@ -1717,13 +1781,15 @@ function _estimateUserRowIntrinsicHeight(rawText){
   }
   const wrapLines=Math.ceil(columns/48);
   const lines=Math.max(explicitLines, wrapLines);
-  return Math.max(96, Math.round(lines*22+24));
+  return Math.max(96, Math.round(lines*22+24))+files;
 }
 function _applyUserRowIntrinsicHeight(row, rawText){
   if(!row||!row.style||!row.dataset) return;
-  const key=Number(row.dataset.sessionMsgIdx);
-  const remembered=Number.isFinite(key)?Number(_userRowIntrinsicHeightBySessionIdx[key])||0:0;
-  const estimate=_estimateUserRowIntrinsicHeight(rawText!=null?rawText:row.dataset.rawText);
+  const expanded=row.dataset.msgExpanded==='1';
+  const key=_userRowIntrinsicHeightKey(row.dataset.sessionMsgIdx, expanded);
+  const remembered=key?Number(_userRowIntrinsicHeightBySessionIdx[key])||0:0;
+  const estimate=_estimateUserRowIntrinsicHeight(rawText!=null?rawText:row.dataset.rawText,
+    expanded, _userRowFilesReserve(row));
   // Reserve the LARGER of the remembered measurement and the content estimate. A remembered
   // height can be a PARTIAL paint: a user row taller than the viewport that only ever had its
   // top slice scrolled through content-visibility:auto reports just the painted portion, not
@@ -1755,7 +1821,7 @@ function _measureMessageVirtualRow(inner, entry){
   // extract it without this helper (they stub every collaborator by name).
   if(totalHeight>0 && primary.dataset && primary.dataset.role==='user'
      && typeof _rememberUserRowIntrinsicHeight==='function'){
-    _rememberUserRowIntrinsicHeight(primary.dataset.sessionMsgIdx, totalHeight);
+    _rememberUserRowIntrinsicHeight(primary.dataset.sessionMsgIdx, totalHeight, primary.dataset.msgExpanded==='1');
     primary.style.containIntrinsicSize='auto '+Math.round(totalHeight)+'px';
   }
   return totalHeight;
@@ -1844,19 +1910,41 @@ function _rememberRenderedUserRowIntrinsicHeights(){
     // paint (short row) still wins when it exceeds the estimate.
     const inView=(r.bottom>=cRect.top-margin)&&(r.top<=cRect.bottom+margin);
     if(!inView) continue;
+    const expanded=row.dataset.msgExpanded==='1';
     const estimate=(typeof _estimateUserRowIntrinsicHeight==='function')
-      ? _estimateUserRowIntrinsicHeight(row.dataset.rawText) : 0;
+      ? _estimateUserRowIntrinsicHeight(row.dataset.rawText, expanded, _userRowFilesReserve(row)) : 0;
     const h=Math.max(measured, estimate);
     if(!(h>0)) continue;
-    const key=Number(row.dataset.sessionMsgIdx);
-    const remembered=Number.isFinite(key)?Number(_userRowIntrinsicHeightBySessionIdx[key])||0:0;
+    const key=_userRowIntrinsicHeightKey(row.dataset.sessionMsgIdx, expanded);
+    const remembered=key?Number(_userRowIntrinsicHeightBySessionIdx[key])||0:0;
     // Keep the tallest reserve seen — a row mid-collapse (rebuild transient) can report a
     // shrunken size; never let that overwrite a good taller remembered value.
     if(h>=remembered && typeof _rememberUserRowIntrinsicHeight==='function'){
-      _rememberUserRowIntrinsicHeight(row.dataset.sessionMsgIdx, h);
+      _rememberUserRowIntrinsicHeight(row.dataset.sessionMsgIdx, h, expanded);
       row.style.containIntrinsicSize='auto '+Math.round(h)+'px';
     }
   }
+}
+// HWEB-66: the attachment-strip reserve depends on the transcript column width
+// (thumbnails and badges per row), which changes on rotation and when the
+// sidebar, workspace panel or resizer move — none of which re-render. Re-apply
+// every user row's reserve when #msgInner resizes so an unseen row does not keep
+// a wider column's estimate until it paints; one pass per frame.
+function _initUserRowReserveResizeObserver(){
+  const inner=$('msgInner');
+  if(!inner||typeof ResizeObserver!=='function') return;
+  let raf=0;
+  new ResizeObserver(()=>{
+    if(raf) return;
+    raf=requestAnimationFrame(()=>{
+      raf=0;
+      inner.querySelectorAll('.msg-row[data-role="user"]').forEach(row=>_applyUserRowIntrinsicHeight(row));
+    });
+  }).observe(inner);
+}
+if(typeof document!=='undefined'){
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',_initUserRowReserveResizeObserver,{once:true});
+  else _initUserRowReserveResizeObserver();
 }
 function _scheduleMessageVirtualizedRender(force){
   const container=$('messages');
@@ -9641,6 +9729,16 @@ function copyStatusSessionId(btn){
 // --msg-collapse-lines in style.css — change both together.
 const USER_MSG_COLLAPSE_CHARS=600;
 const USER_MSG_COLLAPSE_LINES=8;
+// Rendered height of a collapsed user row on a coarse-pointer layout, for the
+// contain-intrinsic-size reserve (HWEB-66). Measured through renderMessages in
+// Chromium at 390px: 285px (small font) → 310 (normal) → 334 (large) → 359
+// (xlarge); 8 clipped lines + the 44px touch-target disclosure + the 40px
+// action footer + row chrome. Sized to the largest so no font setting
+// under-reserves (under-reserving is the #5638 jump-back); the ~60px
+// over-reserve at the default size is replaced by the real measurement once
+// the row paints. Re-measure when --msg-collapse-lines, the button or the
+// footer sizing changes; test_issue5638 pins it against the stylesheet.
+const USER_MSG_COLLAPSED_ROW_PX=370;
 function _userMessageNeedsCollapse(text){
   const s=String(text==null?'':text);
   if(s.length>USER_MSG_COLLAPSE_CHARS) return true;
@@ -9682,6 +9780,12 @@ function toggleMessageExpand(btn){
   btn.setAttribute('data-i18n-aria-label',key+'_visually');
   btn.setAttribute('aria-label',t(key+'_visually'));
   btn.textContent=t(key);
+  // HWEB-66: the row's real height just changed, so re-reserve for the new
+  // state (remembered heights are keyed by state, so this reads the matching
+  // measurement or falls back to the state-aware estimate). A duplicate prompt
+  // sharing this expand identity folds on its next render and reads its own
+  // state-keyed entry there.
+  _applyUserRowIntrinsicHeight(row);
   // Drop this session's cached transcript HTML: it was serialized with the old
   // disclosure state, and the cache fast path in renderMessages reinstalls it
   // verbatim when the reader navigates away and back — reopening a message they
@@ -18862,12 +18966,16 @@ function renderMessages(options){
     const nextRendered=renderVisWithIdx[vi+1];
     const isTurnFinalAssistant=!isUser&&(!nextRendered||!nextRendered.m||nextRendered.m.role!=='assistant');
     let filesHtml='';
+    // HWEB-66: attachment kinds, stamped on user rows so the off-screen reserve
+    // can size the strip (_estimateUserRowFilesHeight) without parsing markup.
+    const attachmentKinds=[];
     if(m.attachments&&m.attachments.length){
       // Static regression tests intentionally look for msg-media-img/msg-file-badge near this branch.
       const _attachSid=(S.session&&S.session.session_id)||'';
       filesHtml=`<div class="msg-files">${m.attachments.map(f=>{
         const fLabel=typeof f==='string'?f:(f&&(f.name||f.filename||f.path))||'';
         const fname=String(fLabel).split('/').pop()||String(fLabel);
+        attachmentKinds.push((typeof _mediaKindForName==='function'&&_mediaKindForName(fname))||('badge:'+fname.length));
         // Use api/file/raw which resolves filename relative to the session workspace.
         const fileUrl='api/file/raw?session_id='+encodeURIComponent(_attachSid)+'&path='+encodeURIComponent(fname);
         return _renderAttachmentHtml(fname,fileUrl);
@@ -19033,6 +19141,7 @@ function renderMessages(options){
         row.dataset.sessionMsgIdx=sessionMsgIdx;
         row.dataset.messageAnchorKey=messageAnchorKey;
         row.dataset.msgExpandKey=expandIdentity;
+        row.dataset.attachmentKinds=attachmentKinds.join(',');
         row.dataset.role='user';
         delete row.dataset.editing;
         if(row.dataset.rawText!==newRawText||row.innerHTML!==nextRowHtml){
@@ -19047,6 +19156,7 @@ function renderMessages(options){
         row.dataset.sessionMsgIdx=sessionMsgIdx;
         row.dataset.messageAnchorKey=messageAnchorKey;
         row.dataset.msgExpandKey=expandIdentity;
+        row.dataset.attachmentKinds=attachmentKinds.join(',');
         row.dataset.role='user';
         row.dataset.rawText=newRawText;
         row.innerHTML=nextRowHtml;

@@ -113,7 +113,18 @@ function extractFunc(name) {
     i++;
   }
   return src.slice(start, i);
-}"""
+}
+// HWEB-66: the estimator caps a collapsed row, so it needs the shipped collapse
+// threshold beside it. Read the constants out of the source (a direct eval of a
+// `const` would not leak into this scope) so a drift in ui.js is exercised here.
+var USER_MSG_COLLAPSE_CHARS = Number(src.match(/const USER_MSG_COLLAPSE_CHARS=(\d+);/)[1]);
+var USER_MSG_COLLAPSE_LINES = Number(src.match(/const USER_MSG_COLLAPSE_LINES=(\d+);/)[1]);
+var USER_MSG_COLLAPSED_ROW_PX = Number(src.match(/const USER_MSG_COLLAPSED_ROW_PX=(\d+);/)[1]);
+eval(src.match(/const USER_MSG_FILES_PX=\{[^}]*\};/)[0].replace('const', 'var'));
+eval(extractFunc('_estimateUserRowFilesHeight'));
+eval(extractFunc('_userRowFilesReserve'));
+eval(extractFunc('_userRowIntrinsicHeightKey'));
+eval(extractFunc('_userMessageNeedsCollapse'));"""
     return prelude + body
 
 
@@ -128,12 +139,15 @@ def _dom_prelude() -> str:
     """
     return r"""
 var _userRowIntrinsicHeightBySessionIdx = Object.create(null);
-function makeRow(role, sessionMsgIdx, rectTop, rectHeight, rawText){
+function makeRow(role, sessionMsgIdx, rectTop, rectHeight, rawText, expanded){
   return {
     _top: rectTop, _height: rectHeight,
     style: { containIntrinsicSize: '' },
-    dataset: { role: role, sessionMsgIdx: String(sessionMsgIdx),
+    // HWEB-66: the full-text estimate only applies to a row the reader opened;
+    // these cases model that (the collapsed cap is covered by the #5638 suite).
+    dataset: Object.assign({ role: role, sessionMsgIdx: String(sessionMsgIdx),
                rawText: rawText || '', msgIdx: String(sessionMsgIdx) },
+               expanded ? { msgExpanded: '1' } : {}),
     classList: { contains(){ return false; } },
     getAttribute(){ return null; },
     getBoundingClientRect(){ return { top: this._top, bottom: this._top + this._height, height: this._height }; },
@@ -158,12 +172,14 @@ def test_estimate_weights_cjk_as_double_width():
     js = UI_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + r"""
 eval(extractFunc('_estimateUserRowIntrinsicHeight'));
-// Equal CHARACTER counts; the CJK one has ~2x the visual columns.
+// Equal CHARACTER counts; the CJK one has ~2x the visual columns. Both are
+// past the HWEB-3 collapse threshold, so estimate them as OPENED rows — a
+// collapsed row reserves the flat collapsed size regardless of text (HWEB-66).
 const latin = 'a'.repeat(1200);
 const cjk = '\u4e2d'.repeat(1200);   // 1200 CJK ideographs
 console.log(JSON.stringify({
-  latin: _estimateUserRowIntrinsicHeight(latin),
-  cjk: _estimateUserRowIntrinsicHeight(cjk),
+  latin: _estimateUserRowIntrinsicHeight(latin, true),
+  cjk: _estimateUserRowIntrinsicHeight(cjk, true),
 }));
 """
     m = json.loads(_run_node(source))
@@ -208,10 +224,10 @@ eval(extractFunc('_estimateUserRowIntrinsicHeight'));
 eval(extractFunc('_applyUserRowIntrinsicHeight'));
 // A big CJK paste whose real height >> a stale partial-paint remembered value.
 const longCjk = '\u4e2d'.repeat(1500);
-const estimate = _estimateUserRowIntrinsicHeight(longCjk);
+const estimate = _estimateUserRowIntrinsicHeight(longCjk, true);
 // Remember a PARTIAL paint far below the estimate (the viewport-slice trap).
 _rememberUserRowIntrinsicHeight(4, 900);
-const row = makeRow('user', 4, 0, 0, longCjk);
+const row = makeRow('user', 4, 0, 0, longCjk, true);
 _applyUserRowIntrinsicHeight(row, longCjk);
 console.log(JSON.stringify({ reserved: row.style.containIntrinsicSize, estimate: estimate }));
 """
@@ -306,13 +322,14 @@ eval(extractFunc('_rememberUserRowIntrinsicHeight'));
 eval(extractFunc('_estimateUserRowIntrinsicHeight'));
 eval(extractFunc('_rememberRenderedUserRowIntrinsicHeights'));
 const longCjk = '\u4e2d'.repeat(1500);
-const estimate = _estimateUserRowIntrinsicHeight(longCjk);
+const estimate = _estimateUserRowIntrinsicHeight(longCjk, true);
 // In-view but only a 500px slice painted (row is taller than the 600px viewport).
-const partial = makeRow('user', 3, 0, 500, longCjk);
+const partial = makeRow('user', 3, 0, 500, longCjk, true);
 __rows = [partial];
 _rememberRenderedUserRowIntrinsicHeights();
+// HWEB-66: an opened row's measurement is stored under its state key (`3:x`).
 console.log(JSON.stringify({
-  remembered: _userRowIntrinsicHeightBySessionIdx[3] || 0,
+  remembered: _userRowIntrinsicHeightBySessionIdx['3:x'] || 0,
   estimate: estimate,
 }));
 """

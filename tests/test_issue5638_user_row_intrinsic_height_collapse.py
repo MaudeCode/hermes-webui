@@ -103,7 +103,18 @@ function extractFunc(name) {
     i++;
   }
   return src.slice(start, i);
-}"""
+}
+// HWEB-66: the estimator caps a collapsed row, so it needs the shipped collapse
+// threshold beside it. Read the constants out of the source (a direct eval of a
+// `const` would not leak into this scope) so a drift in ui.js is exercised here.
+var USER_MSG_COLLAPSE_CHARS = Number(src.match(/const USER_MSG_COLLAPSE_CHARS=(\d+);/)[1]);
+var USER_MSG_COLLAPSE_LINES = Number(src.match(/const USER_MSG_COLLAPSE_LINES=(\d+);/)[1]);
+var USER_MSG_COLLAPSED_ROW_PX = Number(src.match(/const USER_MSG_COLLAPSED_ROW_PX=(\d+);/)[1]);
+eval(src.match(/const USER_MSG_FILES_PX=\{[^}]*\};/)[0].replace('const', 'var'));
+eval(extractFunc('_estimateUserRowFilesHeight'));
+eval(extractFunc('_userRowFilesReserve'));
+eval(extractFunc('_userRowIntrinsicHeightKey'));
+eval(extractFunc('_userMessageNeedsCollapse'));"""
     return prelude + body
 
 
@@ -125,9 +136,17 @@ function makeRow(role, sessionMsgIdx, measuredHeight){
 
 
 def test_estimate_reserves_more_than_96px_for_a_tall_user_message():
-    """A long user message must estimate an intrinsic height well above the flat
-    96px stylesheet fallback, so a rebuilt off-screen row reserves close to its
-    real height and scrollHeight does not collapse."""
+    """A long user message the reader has OPENED must estimate an intrinsic height
+    well above the flat 96px stylesheet fallback, so a rebuilt off-screen row
+    reserves close to its real height and scrollHeight does not collapse.
+
+    HWEB-66: a 2000-char message renders collapsed by default (HWEB-3 clips
+    anything past 600 chars / 8 lines), so its real height is the flat collapsed
+    row size — ~266px at the default font on a phone — not the ~948px the full
+    text would wrap to. The full-text estimate is only right for an expanded row;
+    a collapsed row must estimate the collapsed size instead, or it over-reserves
+    by the difference and that space collapses on paint (the mobile jump-back's
+    other half)."""
     js = UI_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + r"""
 eval(extractFunc('_estimateUserRowIntrinsicHeight'));
@@ -135,18 +154,91 @@ eval(extractFunc('_estimateUserRowIntrinsicHeight'));
 const longText = 'x'.repeat(2000);
 const shortText = 'hi';
 console.log(JSON.stringify({
-  tall: _estimateUserRowIntrinsicHeight(longText),
+  tall: _estimateUserRowIntrinsicHeight(longText, true),
+  collapsed: _estimateUserRowIntrinsicHeight(longText, false),
+  collapsedDefault: _estimateUserRowIntrinsicHeight(longText),
   short: _estimateUserRowIntrinsicHeight(shortText),
+  cap: USER_MSG_COLLAPSED_ROW_PX,
+  // The attachment strip sits above the text in both states.
+  collapsedFiles: _estimateUserRowIntrinsicHeight(longText, false, 200),
+  tallFiles: _estimateUserRowIntrinsicHeight(longText, true, '200'),
 }));
 """
     m = json.loads(_run_node(source))
-    # A 2000-char row wraps to ~42 lines -> ~948px, far above 96.
+    # An EXPANDED 2000-char row wraps to ~42 lines -> ~948px, far above 96.
     assert m["tall"] > 800, (
-        "a long user message must reserve far more than the flat 96px estimate; "
-        f"got {m['tall']}"
+        "an opened long user message must reserve far more than the flat 96px "
+        f"estimate; got {m['tall']}"
     )
+    # The same text collapsed reserves the flat collapsed-row size (HWEB-66) — and
+    # collapsed is the default, matching how renderMessages builds a row the
+    # reader has not opened.
+    assert m["collapsed"] == m["cap"] == m["collapsedDefault"], (
+        "a collapsed long user message must reserve the collapsed-row height, "
+        f"not its full-text estimate; got {m['collapsed']} / {m['collapsedDefault']} "
+        f"(cap {m['cap']})"
+    )
+    assert m["collapsed"] < m["tall"], "the collapsed reserve must be below the full estimate"
     # A short row must never reserve LESS than today's 96px floor (no regression).
     assert m["short"] == 96, f"short row must floor at 96px, got {m['short']}"
+    # The attachment strip is not in rawText, so it is added per attachment on top
+    # of either state's text estimate (a string count, as read from a dataset).
+    assert m["collapsedFiles"] == m["cap"] + 200, m
+    assert m["tallFiles"] == m["tall"] + 200, m
+
+
+def test_files_strip_estimate_by_kind_and_column_width():
+    """HWEB-66: the strip reserve is sized per attachment kind and by how many
+    thumbnails share a row at the current transcript column width — a flat
+    per-attachment figure over-reserved three file badges by ~270px (Codex
+    round-2 finding). Rows from the browser fixture, normal font: 3 images =
+    198px strip at 390px (2 per row) and 300px at 700px (1 per row, the sidebar
+    narrows the column); 3 wrapped long badges = 100px; an audio player 150px;
+    a video player 266px; every strip ends in a 10px margin.
+
+    Badges pack several to a row by their name width (`badge:<name length>`,
+    32px chrome + ~6px per character): three 21-char names wrap to three rows at
+    a 370px column, twelve 6-char names fit three per row, and an unknown width
+    or an unknown kind is charged one row each (Codex round-4 finding: a flat
+    per-badge charge over-reserved many short names by hundreds of px)."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + _fake_row_prelude() + r"""
+const px = USER_MSG_FILES_PX;
+const row = makeRow('user', 1, 0);
+row.dataset.attachmentKinds = 'image,badge:5';
+const short12 = Array.from({length: 12}, () => 'badge:6').join(',');
+console.log(JSON.stringify({
+  none: _estimateUserRowFilesHeight('', 370),
+  img3phone: _estimateUserRowFilesHeight('image,image,image', 370),   // 2 per row -> 2 rows
+  img3narrow: _estimateUserRowFilesHeight('image,image,image', 312),  // 1 per row -> 3 rows
+  img3unknown: _estimateUserRowFilesHeight('image,image,image', NaN), // fail closed: 1 per row
+  long3: _estimateUserRowFilesHeight('badge:21,badge:21,badge:21', 370),  // 172px each -> 3 rows
+  short3: _estimateUserRowFilesHeight('badge:5,badge:5,badge:5', 370),    // 68px each -> 1 row
+  short12: _estimateUserRowFilesHeight(short12, 370),                      // 75px each, 3 per row -> 4 rows
+  short12unknown: _estimateUserRowFilesHeight(short12, NaN),               // fail closed: 12 rows
+  media: _estimateUserRowFilesHeight('audio,video', 370),
+  unknownKind: _estimateUserRowFilesHeight('zip,zip', 370),
+  // The row helper reads the stamped kinds; with no $() it fails closed to 1 per row.
+  viaRow: _userRowFilesReserve(row),
+  px,
+}));
+"""
+    m = json.loads(_run_node(source))
+    px = m["px"]
+    assert m["none"] == 0
+    assert m["img3phone"] == px["strip"] + 2 * px["image"], m
+    assert m["img3narrow"] == px["strip"] + 3 * px["image"], m
+    assert m["img3unknown"] == m["img3narrow"], "unknown width must fail closed to one thumbnail per row"
+    assert m["long3"] == px["strip"] + 3 * px["badge"], m
+    assert m["short3"] == px["strip"] + 1 * px["badge"], m
+    assert m["short12"] == px["strip"] + 4 * px["badge"], m
+    assert m["short12unknown"] == px["strip"] + 12 * px["badge"], "unknown width must fail closed to one badge per row"
+    assert m["media"] == px["strip"] + px["audio"] + px["video"], m
+    assert m["unknownKind"] == px["strip"] + 2 * px["badge"], "an unknown kind is charged a full row each"
+    assert m["viaRow"] == px["strip"] + px["image"] + px["badge"], m
+    # Each figure covers its measured row (96 / 150 / 29 + the 6px gap); the video
+    # figure covers the stylesheet ceiling (320px max-height + border + 114px chrome).
+    assert px["image"] >= 102 and px["audio"] >= 156 and px["video"] >= 442 and px["badge"] >= 35, px
 
 
 def test_apply_uses_remembered_measured_height_over_estimate():
@@ -184,18 +276,29 @@ def test_apply_falls_back_to_estimate_before_first_measure():
 eval(extractFunc('_rememberUserRowIntrinsicHeight'));
 eval(extractFunc('_estimateUserRowIntrinsicHeight'));
 eval(extractFunc('_applyUserRowIntrinsicHeight'));
-// sessionIdx 99 was never measured/remembered.
+// sessionIdx 99 was never measured/remembered. The reader opened it (HWEB-3
+// disclosure), so it renders at full height — the row attribute renderMessages
+// stamps from the expand store is what the reserve reads.
 const fresh = makeRow('user', 99, 0);
+fresh.dataset.msgExpanded = '1';
 const longText = 'y'.repeat(1500);
 _applyUserRowIntrinsicHeight(fresh, longText);
 const val = fresh.style.containIntrinsicSize; // 'auto <N>px'
 const px = parseInt(String(val).replace(/[^0-9]/g,''), 10);
-console.log(JSON.stringify({ intrinsic: val, px }));
+// The same never-measured text NOT opened renders collapsed (HWEB-66).
+const collapsed = makeRow('user', 98, 0);
+_applyUserRowIntrinsicHeight(collapsed, longText);
+console.log(JSON.stringify({ intrinsic: val, px, collapsed: collapsed.style.containIntrinsicSize, cap: USER_MSG_COLLAPSED_ROW_PX }));
 """
     m = json.loads(_run_node(source))
+    # 1500 chars / 48 per line -> ~32 lines -> ~728px for the opened row.
     assert m["px"] > 600, (
-        "a never-measured tall row must reserve an estimate well above 96px at "
-        f"build time; got {m['intrinsic']!r}"
+        "a never-measured opened tall row must reserve an estimate well above 96px "
+        f"at build time; got {m['intrinsic']!r}"
+    )
+    assert m["collapsed"] == f"auto {m['cap']}px", (
+        "a never-measured COLLAPSED long row must reserve the collapsed-row height "
+        f"(HWEB-66), not the full-text estimate; got {m['collapsed']!r}"
     )
 
 
@@ -320,3 +423,257 @@ console.log(JSON.stringify({
     )
     assert m["afterClear"] != "auto 5000px", "stale height must not survive the clear"
 
+
+
+# ── HWEB-66: the reserve follows the disclosure state ──
+
+
+def test_collapsed_row_keeps_a_taller_remembered_measurement():
+    """The #5638 invariant survives the cap: a row must never reserve LESS than a
+    real measurement. If a collapsed row measured taller than the flat cap (an
+    attachment strip above the clipped text, say), the remembered value still wins
+    over the collapsed estimate, so scrollHeight cannot collapse on a rebuild.
+
+    Mutation: replace `Math.max(remembered, estimate)` with the collapsed cap for
+    a collapsed row and this fails."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + _fake_row_prelude() + r"""
+eval(extractFunc('_rememberUserRowIntrinsicHeight'));
+eval(extractFunc('_estimateUserRowIntrinsicHeight'));
+eval(extractFunc('_applyUserRowIntrinsicHeight'));
+_rememberUserRowIntrinsicHeight(7, 640);
+const row = makeRow('user', 7, 0);              // collapsed: no msgExpanded flag
+_applyUserRowIntrinsicHeight(row, 'z'.repeat(10000));
+console.log(JSON.stringify({ reserved: row.style.containIntrinsicSize }));
+"""
+    m = json.loads(_run_node(source))
+    assert m["reserved"] == "auto 640px", (
+        "a collapsed row measured taller than the cap must keep its real height; "
+        f"got {m['reserved']!r}"
+    )
+
+
+def _toggle_prelude() -> str:
+    """Fake row + disclosure button for toggleMessageExpand, plus stubs for the
+    collaborators it touches that this test does not exercise (the expand store,
+    i18n, the session HTML cache)."""
+    return r"""
+function _setUserMessageExpanded(){}
+function t(k){ return k; }
+function makeToggleRow(sessionMsgIdx, rawText, expanded){
+  const row = makeRow('user', sessionMsgIdx, 0);
+  row.dataset.rawText = rawText;
+  if(expanded) row.dataset.msgExpanded = '1';
+  const btn = {
+    attrs: {},
+    textContent: '',
+    setAttribute(k, v){ this.attrs[k] = v; },
+    closest(sel){ return sel === '.msg-row' ? row : null; },
+  };
+  return { row, btn };
+}
+"""
+
+
+def test_toggling_the_disclosure_refreshes_the_reserve():
+    """Toggling the disclosure changes the row's real height at that moment, so the
+    reserve must follow: collapsing drops to the collapsed cap even though the
+    expanded measurement was remembered (max() would otherwise pin the row at the
+    stale expanded height on the next rebuild), and expanding again reserves the
+    expanded-state measurement. Remembered heights are keyed by disclosure state,
+    so the expanded measurement is neither read by the folded row nor lost.
+
+    Mutation: remove the re-apply from toggleMessageExpand and the collapsed row
+    keeps the 5000px inline reserve; key the map by index alone and the collapsed
+    row reserves the remembered 5000px."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + _fake_row_prelude() + _toggle_prelude() + r"""
+eval(extractFunc('_rememberUserRowIntrinsicHeight'));
+eval(extractFunc('_estimateUserRowIntrinsicHeight'));
+eval(extractFunc('_applyUserRowIntrinsicHeight'));
+eval(extractFunc('toggleMessageExpand'));
+const text = 'q'.repeat(10000);
+// The row was measured while open (its real expanded height), then rebuilt open.
+_rememberUserRowIntrinsicHeight(7, 5000, true);
+const { row, btn } = makeToggleRow(7, text, true);
+_applyUserRowIntrinsicHeight(row, text);
+const open = row.style.containIntrinsicSize;
+toggleMessageExpand(btn);                       // -> collapsed
+const collapsed = row.style.containIntrinsicSize;
+toggleMessageExpand(btn);                       // -> expanded again
+const reopened = row.style.containIntrinsicSize;
+// A duplicate prompt sharing the expand identity folds on its next render and
+// reads its own folded-state entry: the twin's expanded measurement is not it.
+_rememberUserRowIntrinsicHeight(9, 5000, true);
+const twin = makeRow('user', 9, 0);
+twin.dataset.rawText = text;                     // folded: no msgExpanded flag
+_applyUserRowIntrinsicHeight(twin);
+console.log(JSON.stringify({
+  open, collapsed, reopened,
+  twin: twin.style.containIntrinsicSize,
+  keys: Object.keys(_userRowIntrinsicHeightBySessionIdx),
+  expandedFlag: row.dataset.msgExpanded || '',
+  cap: USER_MSG_COLLAPSED_ROW_PX,
+}));
+"""
+    m = json.loads(_run_node(source))
+    assert m["open"] == "auto 5000px", f"sanity: open row reserves the measurement; got {m['open']!r}"
+    assert m["collapsed"] == f"auto {m['cap']}px", (
+        "collapsing must drop the reserve to the collapsed-row height; "
+        f"got {m['collapsed']!r} (stale expanded measurement kept?)"
+    )
+    assert m["reopened"] == "auto 5000px", (
+        f"re-expanding must reserve the expanded-state measurement again; got {m['reopened']!r}"
+    )
+    assert m["twin"] == f"auto {m['cap']}px", (
+        f"a folded duplicate must not read its twin's expanded measurement; got {m['twin']!r}"
+    )
+    assert sorted(m["keys"]) == ["7:x", "9:x"], f"expanded measurements are keyed by state; got {m['keys']}"
+    assert m["expandedFlag"] == "1", "sanity: the row attribute flipped back to expanded"
+
+
+@pytest.mark.parametrize("viewport_width", [320, 390, 700])
+def test_collapsed_row_reserve_covers_the_rendered_production_row(viewport_width):
+    """Re-justifies USER_MSG_COLLAPSED_ROW_PX and USER_MSG_ATTACHMENT_PX against the
+    shipped stylesheet in a real browser, through renderMessages so the row carries
+    everything production does: the attachment strip, the clipped body, the
+    disclosure button and the action footer (opacity 0 on user rows, but still
+    laid out — 40px touch targets under 640px). For a never-painted folded row
+    the inline reserve is all content-visibility:auto has, so at the mobile width
+    and every font-size setting the reserve must be at least the rendered height
+    (under-reserving is the #5638 jump-back), and the plain-text cap must stay
+    within 40px of the tallest real row so it does not drift loose. Measured at
+    the time of writing at 390px (plain / 1 image / 3 images / 3 file badges):
+    small 285/391/493/394, normal 310/416/518/419, large 334/440/542/444,
+    xlarge 359/465/567/469; at 700px the sidebar narrows the column so
+    thumbnails stack one per row (3 images = 300px strip); twelve short badges
+    pack four to a row at 390px (3 rows, 99px strip).
+
+    Both bounds matter (Codex round 2): every variant must also reserve no more
+    than its rendered height plus the slack the constants deliberately carry —
+    the collapsed cap's font-size headroom (60px at the default size) plus, for
+    attachment rows, one thumbnail row for the fail-closed per-row count at
+    320px and one badge/gap allowance per attachment for badges that share a
+    row. Over-reserving by more than that recreates the paint-time shrink this
+    change removes."""
+    from tests.test_hweb3_user_message_collapse import _page
+
+    playwright, browser, page = _page(viewport_width)
+    try:
+        m = page.evaluate(
+            """
+            (sizes) => {
+              const long = 'y'.repeat(10000);
+              const variants = {
+                plain: [],
+                img1: ['a.png'],
+                img3: ['a.png', 'b.png', 'c.png'],
+                file3: ['notes-long-name-1.txt', 'notes-long-name-2.txt', 'notes-long-name-3.txt'],
+                short12: Array.from({length: 12}, (_, i) => 'f' + (i + 1) + '.txt'),
+                media: ['voice.mp3', 'clip.mp4'],
+              };
+              const out = { cap: USER_MSG_COLLAPSED_ROW_PX, rows: {} };
+              const px = (v) => parseInt(String(v).replace(/[^0-9]/g, ''), 10) || 0;
+              sizes.forEach((sz) => {
+                document.documentElement.setAttribute('data-font-size', sz);
+                for (const [name, attachments] of Object.entries(variants)) {
+                  // Start from an empty transcript and cleared caches so the row is
+                  // built FRESH (no remembered measurement): the reserve read below
+                  // is exactly what a never-painted off-screen row would carry.
+                  S.messages = [];
+                  renderMessages();
+                  window._clearUserMessageExpandState();
+                  window._clearMessageVirtualHeightCache();
+                  S.messages = [{ role: 'user', content: name + sz + long, attachments },
+                                { role: 'assistant', content: 'ok' }];
+                  renderMessages();
+                  const row = document.querySelector('#msgInner .msg-row[data-role="user"]');
+                  out.rows[sz + '/' + name] = {
+                    real: row.getBoundingClientRect().height,
+                    reserve: px(row.style.containIntrinsicSize),
+                    folded: !!row.querySelector('.msg-expand-btn') && row.dataset.msgExpanded !== '1',
+                    hasFoot: !!row.querySelector('.msg-foot'),
+                    files: row.querySelectorAll('.msg-files > *').length,
+                    kinds: row.dataset.attachmentKinds || '',
+                  };
+                }
+              });
+              document.documentElement.removeAttribute('data-font-size');
+              S.messages = [];
+              renderMessages();
+              return out;
+            }
+            """,
+            ["small", "normal", "large", "xlarge"],
+        )
+    finally:
+        browser.close()
+        playwright.stop()
+    tallest_plain = max(r["real"] for k, r in m["rows"].items() if k.endswith("/plain"))
+    assert m["cap"] <= tallest_plain + 40, (
+        f"USER_MSG_COLLAPSED_ROW_PX={m['cap']} is loose against the tallest real "
+        f"folded row ({tallest_plain}px); re-measure and tighten it"
+    )
+    for key, r in m["rows"].items():
+        variant = key.split("/")[1]
+        assert r["folded"] and r["hasFoot"], f"{key}: sanity — production folded row with a footer; got {r}"
+        assert r["files"] == len(r["kinds"].split(",")) if r["kinds"] else r["files"] == 0, (
+            f"{key}: stamped kinds must mirror the rendered strip; got {r}"
+        )
+        assert r["reserve"] >= r["real"], (
+            f"{key}: fresh folded row renders {r['real']}px but reserves only "
+            f"{r['reserve']}px — raise USER_MSG_COLLAPSED_ROW_PX / USER_MSG_FILES_PX"
+        )
+        # The cap's font-size headroom at this size, then the per-kind allowances.
+        slack = m["cap"] - m["rows"][key.split("/")[0] + "/plain"]["real"]
+        slack += 102 if variant.startswith("img") else 0          # one fail-closed thumbnail row
+        slack += 36 * 2 if variant in ("file3", "short12") else 0  # badge width / 80%-column rounding: two rows
+        slack += 170 + 72 if variant == "media" else 0             # video ceiling vs landscape/unloaded + player chrome font variance
+        assert r["reserve"] <= r["real"] + slack + 40, (
+            f"{key}: reserve {r['reserve']}px is loose against the rendered {r['real']}px "
+            f"(allowed slack {slack + 40}px) — tighten USER_MSG_FILES_PX"
+        )
+
+
+def test_reserve_follows_the_transcript_column_width():
+    """HWEB-66 (Codex round-4): the thumbnails-per-row figure is read from the
+    transcript column at render time, but rotation and panel changes resize the
+    column without a re-render. A ResizeObserver on #msgInner re-applies every
+    user row's reserve, so an unseen three-image row rendered in a wide column
+    (one thumbnail per row at 700px, where the sidebar narrows the column) drops
+    to the two-per-row figure when the column widens to a phone layout, and
+    grows back when it narrows again — the direction that would otherwise
+    under-reserve and shift scrollHeight on first paint."""
+    from tests.test_hweb3_user_message_collapse import _page
+
+    render = """
+    () => {
+      S.messages = [];
+      renderMessages();
+      window._clearUserMessageExpandState();
+      window._clearMessageVirtualHeightCache();
+      S.messages = [{ role: 'user', content: 'resize' + 'y'.repeat(10000), attachments: ['a.png', 'b.png', 'c.png'] },
+                    { role: 'assistant', content: 'ok' }];
+      renderMessages();
+      return document.querySelector('#msgInner .msg-row[data-role="user"]').style.containIntrinsicSize;
+    }
+    """
+    read = "() => document.querySelector('#msgInner .msg-row[data-role=\"user\"]').style.containIntrinsicSize"
+    px = lambda v: int("".join(ch for ch in str(v) if ch.isdigit()))
+
+    playwright, browser, page = _page(700)
+    try:
+        wide = px(page.evaluate(render))
+        page.set_viewport_size({"width": 390, "height": 700})
+        page.wait_for_function(f"() => {read.split('=> ')[1]} !== 'auto {wide}px'", timeout=5000)
+        phone = px(page.evaluate(read))
+        page.set_viewport_size({"width": 700, "height": 700})
+        page.wait_for_function(f"() => {read.split('=> ')[1]} !== 'auto {phone}px'", timeout=5000)
+        back = px(page.evaluate(read))
+    finally:
+        browser.close()
+        playwright.stop()
+    assert wide - phone == 102, (
+        f"widening the column to two thumbnails per row must drop one image row; got {wide} -> {phone}"
+    )
+    assert back == wide, f"narrowing again must restore the one-per-row reserve; got {back} (was {wide})"
