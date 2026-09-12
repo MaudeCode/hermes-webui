@@ -62,7 +62,7 @@ class TestProbeVerdicts:
         from urllib import error as urllib_error
 
         def raising(code):
-            def _open(request):
+            def _open(request, timeout=None):
                 raise urllib_error.HTTPError(request.full_url, code, "no", {}, None)
             return _open
 
@@ -167,13 +167,25 @@ class TestProbeVerdicts:
         sse = b"event: message\n" + b"".join(b"data: " + line + b"\n" for line in pretty.splitlines()) + b"\n"
         assert self._probe_body(sse, stays_open=True) == ("healthy", "HTTP 200")
 
+    def test_the_whole_probe_shares_one_deadline_across_connect_body_and_delete(self):
+        """Slow headers must not grant the body a fresh budget, nor the DELETE a third."""
+        initialize = self._response(self._INIT_OK, headers={"Mcp-Session-Id": "s"}, stays_open=True)
+        clock = iter([0.0, 7.0, 7.5, 7.9, 8.5, 9.0, 9.5, 10.0])
+        with patch("api.mcp_health._urlopen", return_value=initialize) as opener, \
+             patch("api.mcp_health.time.monotonic", side_effect=lambda: next(clock)):
+            mcp_health.probe_server("a", {"url": "https://x/mcp"})
+        timeouts = [c.kwargs.get("timeout") for c in opener.call_args_list]
+        assert timeouts[0] == mcp_health.PROBE_TIMEOUT_S
+        # Every later phase runs on what is left, never on a fresh budget.
+        assert all(t is not None and t < mcp_health.PROBE_TIMEOUT_S for t in timeouts[1:]), timeouts
+
     def test_every_blocking_read_obeys_the_one_probe_deadline(self):
         """A server that stalls just before the deadline must not double the probe time."""
         sock = MagicMock()
         response = self._response(b": keepalive\n\n" * 3, stays_open=True)
         response.fp.raw._sock = sock
         with patch("api.mcp_health._urlopen", return_value=response), \
-             patch("api.mcp_health.time.monotonic", side_effect=[0.0, 0.0, 3.0, 6.0, 7.5, 7.9, 8.5, 9.0]):
+             patch("api.mcp_health.time.monotonic", side_effect=[0.0, 0.0, 3.0, 6.0, 7.5, 7.9, 8.5, 9.0, 9.5, 10.0]):
             mcp_health.probe_server("a", {"url": "https://x/mcp"})
         timeouts = [call.args[0] for call in sock.settimeout.call_args_list]
         assert timeouts, "socket timeout was never narrowed to the remaining deadline"
@@ -540,10 +552,10 @@ class TestSchedulingIsBackgroundAndBounded:
     def test_pending_is_derived_from_the_rows_not_from_a_separate_in_flight_check(self):
         """A probe that finishes between reading the rows and checking in-flight must still re-read."""
         servers = {"web": {"url": "https://web.example/mcp"}}
-        # The rows say "no verdict yet" while nothing is in flight any more:
+        # The rows say "probe running" while nothing is in flight any more:
         # exactly the window a fast 401 lands in.
         no_verdict = {"web": {"name": "web", "health": "unknown", "health_detail": "",
-                              "health_checked_at": None}}
+                              "health_checked_at": None, "health_pending": True}}
         assert mcp_health.in_flight() == set()
         h = _make_handler()
         with patch("api.routes.get_active_hermes_home", return_value=object()), \
@@ -554,7 +566,7 @@ class TestSchedulingIsBackgroundAndBounded:
 
         # A *settled* unknown (stdio not probed, protocol mismatch) is not pending.
         settled = {"web": {"name": "web", "health": "unknown", "health_detail": "HTTP 405",
-                           "health_checked_at": 1234.0}}
+                           "health_checked_at": 1234.0, "health_pending": False}}
         h = _make_handler()
         with patch("api.routes.get_active_hermes_home", return_value=object()), \
              patch("api.routes.get_config_for_profile_home", return_value={"mcp_servers": servers}), \
@@ -570,6 +582,51 @@ class TestSchedulingIsBackgroundAndBounded:
              patch("api.routes._mcp_runtime_status_by_name", return_value={}):
             _handle_mcp_servers_list(h)
         assert _payload(h)["health_pending"] is False
+
+    def test_an_expired_verdict_being_refreshed_stays_visible_but_pending(self):
+        """Otherwise a token that just expired keeps looking fine until a manual reload."""
+        servers = {"web": {"url": "https://web.example/mcp"}}
+        release = threading.Event()
+        entered = threading.Event()
+        verdicts = iter([("healthy", "HTTP 200"), ("needs_auth", "HTTP 401")])
+
+        def probe(name, cfg):
+            verdict = next(verdicts)
+            if verdict[0] == "needs_auth":
+                entered.set()
+                release.wait(10)
+            return verdict
+
+        try:
+            with patch("api.mcp_health.probe_server", side_effect=probe), \
+                 patch("api.routes.get_active_hermes_home", return_value=object()), \
+                 patch("api.routes.get_config_for_profile_home",
+                       return_value={"mcp_servers": servers}):
+                _handle_mcp_servers_list(_make_handler())
+                _join_health_threads()
+                h = _make_handler()
+                _handle_mcp_servers_list(h)
+                assert _payload(h)["servers"][0]["health"] == "healthy"
+                assert _payload(h)["health_pending"] is False
+
+                with mcp_health._LOCK:
+                    key = ("web", mcp_health._fingerprint(servers["web"]))
+                    mcp_health._STARTED_AT[key] -= mcp_health.HEALTH_INTERVAL_S + 1
+                h = _make_handler()
+                _handle_mcp_servers_list(h)          # schedules the refresh
+                assert entered.wait(5)
+                row = _payload(h)["servers"][0]
+                assert row["health"] == "healthy"     # old verdict still shown...
+                assert _payload(h)["health_pending"] is True  # ...but flagged as refreshing
+                release.set()
+                _join_health_threads()
+                h = _make_handler()
+                _handle_mcp_servers_list(h)
+                assert _payload(h)["servers"][0]["health"] == "needs_auth"
+                assert _payload(h)["health_pending"] is False
+        finally:
+            release.set()
+            _join_health_threads()
 
     def test_the_endpoint_tells_the_panel_to_read_back_while_a_probe_is_in_flight(self):
         servers = {"slow": {"url": "https://slow.example/mcp"}}
@@ -658,7 +715,8 @@ class TestSchedulingIsBackgroundAndBounded:
         servers = {"web": {"url": "https://web.example/mcp"}}
         with patch("api.mcp_health.threading.Thread") as thread_cls:
             thread_cls.return_value.start.side_effect = RuntimeError("can't start new thread")
-            assert mcp_health.refresh_and_read(servers) == {}
+            # Still reported pending: the panel re-reads, and that read retries.
+            assert mcp_health.refresh_and_read(servers) == {"web": {"pending": True}}
         assert mcp_health.in_flight() == set()
         with mcp_health._LOCK:
             assert mcp_health._STARTED_AT == {}

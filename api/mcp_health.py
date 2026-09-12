@@ -107,8 +107,8 @@ class _NoRedirect(urllib_request.HTTPRedirectHandler):
 _OPENER = urllib_request.build_opener(_NoRedirect())
 
 
-def _urlopen(request):
-    return _OPENER.open(request, timeout=PROBE_TIMEOUT_S)
+def _urlopen(request, timeout: float = PROBE_TIMEOUT_S):
+    return _OPENER.open(request, timeout=max(0.001, timeout))
 
 
 def _jsonrpc_from_body(raw: bytes) -> dict | None:
@@ -161,7 +161,7 @@ def _socket_of(response):
     return sock if callable(getattr(sock, "settimeout", None)) else None
 
 
-def _read_jsonrpc_reply(response) -> dict | None:
+def _read_jsonrpc_reply(response, deadline: float) -> dict | None:
     """Read the body as it arrives and stop as soon as our reply has.
 
     A streamable-HTTP server that answers over ``text/event-stream`` commonly
@@ -174,7 +174,6 @@ def _read_jsonrpc_reply(response) -> dict | None:
     byte cap and the deadline both still hold.
     """
     buf = bytearray()
-    deadline = time.monotonic() + PROBE_TIMEOUT_S
     sock = _socket_of(response)
     while len(buf) < _MAX_PROBE_BODY_BYTES:
         remaining = deadline - time.monotonic()
@@ -272,11 +271,14 @@ def _probe_http(url: str, cfg: dict) -> tuple[str, str]:
     )
     session_id = None
     protocol_version = None
+    # One absolute budget for the whole probe — connect, headers, body and the
+    # session-ending DELETE — so no phase can add its own full timeout on top.
+    deadline = time.monotonic() + PROBE_TIMEOUT_S
     try:
-        with _urlopen(request) as response:
+        with _urlopen(request, timeout=PROBE_TIMEOUT_S) as response:
             code = int(getattr(response, "status", None) or response.getcode())
             session_id = response.headers.get("Mcp-Session-Id")
-            payload = _read_jsonrpc_reply(response)
+            payload = _read_jsonrpc_reply(response, deadline)
             result = _initialize_result(payload)
             if result is not None:
                 protocol_version = result["protocolVersion"]
@@ -287,10 +289,11 @@ def _probe_http(url: str, cfg: dict) -> tuple[str, str]:
         return UNHEALTHY, _transport_detail(exc)
     finally:
         if session_id:
-            _end_session(url, headers, session_id, protocol_version)
+            _end_session(url, headers, session_id, protocol_version, deadline)
 
 
-def _end_session(url: str, headers: dict, session_id: str, protocol_version: str | None) -> None:
+def _end_session(url: str, headers: dict, session_id: str, protocol_version: str | None,
+                 deadline: float) -> None:
     """Terminate the session our ``initialize`` just opened.
 
     A stateful streamable-HTTP server allocates a session per ``initialize``
@@ -310,8 +313,14 @@ def _end_session(url: str, headers: dict, session_id: str, protocol_version: str
         headers=terminate_headers,
         method="DELETE",
     )
+    # Best effort inside what is left of the probe's budget; a session the
+    # server keeps is the lesser harm next to a probe that overruns the panel.
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        logger.debug("MCP health probe out of time to end session for %r", url)
+        return
     try:
-        with _urlopen(request):
+        with _urlopen(request, timeout=remaining):
             pass
     except Exception:
         logger.debug("MCP health probe could not end session for %r", url, exc_info=True)
@@ -374,6 +383,10 @@ def _run_check(name: str, cfg: dict, fingerprint: str) -> None:
 def refresh_and_read(servers: dict) -> dict[str, dict]:
     """Schedule due probes and return the verdicts that match ``servers`` *now*.
 
+    Every configured name gets a row. ``pending`` is true while a probe for
+    that name is in flight; ``health``/``detail``/``checked_at`` are present
+    once a verdict for this exact config exists.
+
     ``servers`` is the set of servers that *should* be checked — the caller has
     already dropped disabled ones. Nothing outside that set is scheduled or
     read back, so toggling a server off both stops checking it and hides its
@@ -414,11 +427,15 @@ def refresh_and_read(servers: dict) -> dict[str, dict]:
             _IN_FLIGHT.add(name)
             _STARTED_AT[key] = now
             due.append((name, configs[name], fingerprint))
-        readable = {
-            name: dict(_STATE[(name, fingerprint)])
-            for name, fingerprint in current.items()
-            if (name, fingerprint) in _STATE
-        }
+        # Read and in-flight state come out of the same lock hold, so a row
+        # can never say "settled" while its refresh is actually running: an
+        # expired verdict stays visible (no flicker to unknown every interval)
+        # but is flagged pending until the new one is published.
+        readable = {}
+        for name, fingerprint in current.items():
+            row = dict(_STATE.get((name, fingerprint)) or {})
+            row["pending"] = name in _IN_FLIGHT
+            readable[name] = row
     for name, cfg, fingerprint in due:
         try:
             threading.Thread(

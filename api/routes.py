@@ -31055,6 +31055,7 @@ def _mcp_runtime_status_by_name(servers=None) -> dict[str, dict]:
             entry["health"] = "not_checked"
             entry["health_detail"] = ""
             entry["health_checked_at"] = None
+            entry["health_pending"] = False
             continue
         row = health.get(name) or {}
         # ``connected`` is deliberately *not* folded into health. The agent's
@@ -31066,6 +31067,7 @@ def _mcp_runtime_status_by_name(servers=None) -> dict[str, dict]:
         entry["health"] = row.get("health") or "unknown"
         entry["health_detail"] = row.get("detail") or ""
         entry["health_checked_at"] = row.get("checked_at")
+        entry["health_pending"] = bool(row.get("pending"))
     return by_name
 
 
@@ -31085,6 +31087,7 @@ def _server_summary(name, cfg, runtime_status=None):
             "health": "not_checked",
             "health_detail": "",
             "health_checked_at": None,
+            "health_pending": False,
         })
         return out
 
@@ -31127,10 +31130,12 @@ def _server_summary(name, cfg, runtime_status=None):
         out["health"] = "not_checked"
         out["health_detail"] = ""
         out["health_checked_at"] = None
+        out["health_pending"] = False
     else:
         out["health"] = runtime_status.get("health") or "unknown"
         out["health_detail"] = runtime_status.get("health_detail") or ""
         out["health_checked_at"] = runtime_status.get("health_checked_at")
+        out["health_pending"] = bool(runtime_status.get("health_pending"))
     return out
 
 
@@ -31799,12 +31804,12 @@ def _handle_notes_item(handler, parsed):
 
 
 def _mcp_health_verdict_pending(row: dict) -> bool:
-    """A checkable server with no verdict yet: probed, but not answered."""
-    return bool(
-        row.get("enabled")
-        and row.get("health") == "unknown"
-        and row.get("health_checked_at") is None
-    )
+    """A checkable server whose probe is in flight — first answer or a refresh.
+
+    Comes from the same lock hold as the verdict itself, so an expired verdict
+    that is being refreshed still reads as pending rather than settled.
+    """
+    return bool(row.get("enabled") and row.get("health_pending"))
 
 
 def _handle_mcp_servers_list(handler):
@@ -31822,12 +31827,11 @@ def _handle_mcp_servers_list(handler):
         "servers": result,
         "toggle_supported": True,
         "reload_required": True,
-        # A cold cache answers "unknown" while the first probe is still running.
-        # Tell the panel to read back rather than sit on a stale view until the
-        # user reopens the section (HWEB-62). Derived from the same rows we are
-        # returning — not from a separate in-flight check, which could observe a
-        # probe that finished *after* the rows were read and report nothing
-        # pending while the rows still say "unknown".
+        # A probe is running for at least one row — the first answer on a cold
+        # cache, or a refresh of a verdict that just expired. Tell the panel to
+        # read back rather than sit on a stale view until the user reopens the
+        # section (HWEB-62). Carried on the rows themselves, from the same lock
+        # hold as their verdicts, so it cannot disagree with them.
         "health_pending": any(_mcp_health_verdict_pending(row) for row in result),
     })
 
