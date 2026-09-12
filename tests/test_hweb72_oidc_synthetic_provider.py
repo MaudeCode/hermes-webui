@@ -580,6 +580,11 @@ def _scenario(stack):
 def browser_page(stack: Stack, name: str):
     """Fresh context per scenario; screenshot on failure; always closed."""
     context = stack.browser.new_context(ignore_https_errors=True)
+    # Only the two fixture origins exist for this browser: anything else (CDN
+    # assets on the app shell, telemetry, a misrouted provider) is aborted, so
+    # the gate never waits on the network it does not own.
+    fixture_origins = (stack.webui.base + "/", stack.provider.issuer + "/")
+    context.route(lambda url: not url.startswith(fixture_origins), lambda route: route.abort())
     page = context.new_page()
     try:
         yield page
@@ -680,7 +685,7 @@ def test_browser_sso_login_sets_secure_cookie_and_authenticates(stack: Stack):
         link = page.locator("#oidc-login")
         assert link.get_attribute("href") == "/api/auth/oidc/start?next=/session/hweb72"
         link.click()
-        page.wait_for_url(base + "/session/hweb72", timeout=15000)
+        page.wait_for_url(base + "/session/hweb72", wait_until="commit", timeout=15000)
 
         cookies = {c["name"]: c for c in page.context.cookies(base)}
         session = cookies[SESSION_COOKIE]
