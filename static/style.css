@@ -8192,6 +8192,7 @@ html:not(.no-speech):not(.booting) #btnMic[style*="display:none"],html:not(.no-s
    app replaces them; layout decided by the snapshot's message count ────── */
 #sessionList[data-boot-snapshot],#msgInner[data-boot-snapshot]{pointer-events:none;}
 html.booting.has-ctx-cache .chat-context{visibility:visible;}
-html.booting:not(.boot-session) #mainChat.composer-hero::after{flex-grow:1!important;}
+html.booting:not(.boot-session) #mainChat::after{flex-grow:1!important;}
+html.booting:not(.boot-session) #mainChat .composer-wrap{background:transparent!important;}
 html.booting:not(.boot-session) .empty-state{display:flex!important;}
 /* REDESIGN-LAYER-END */
