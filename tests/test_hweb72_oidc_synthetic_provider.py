@@ -190,6 +190,7 @@ class SyntheticProvider:
         self.redirect_uris: set[str] = set()
         self.codes: dict[str, dict] = {}
         self.requests: list[str] = []
+        self.issued_tokens: list[str] = []  # every id_token and access_token value ever minted
         self.reset()
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(certfile, keyfile)
@@ -347,7 +348,10 @@ class _ProviderHandler(http.server.BaseHTTPRequestHandler):
             or _b64u(hashlib.sha256(verifier.encode("ascii")).digest()) != record["challenge"]
         ):
             return self._json(400, {"error": "invalid_grant"})
-        self._json(200, {"id_token": p.mint_id_token(record), "access_token": secrets.token_urlsafe(16), "token_type": "Bearer"})
+        id_token, access_token = p.mint_id_token(record), secrets.token_urlsafe(16)
+        with p.lock:
+            p.issued_tokens += [id_token, access_token]
+        self._json(200, {"id_token": id_token, "access_token": access_token, "token_type": "Bearer"})
 
 
 # ── HTTP client ─────────────────────────────────────────────────────────────
@@ -678,8 +682,10 @@ def test_browser_sso_login_sets_secure_cookie_and_authenticates(stack: Stack):
         callbacks = [u for u in urls if "/api/auth/oidc/callback" in u]
         assert len(callbacks) == 1 and "code=" in callbacks[0], callbacks
         assert any(u.startswith(stack.provider.issuer + "/authorize?") for u in urls), urls
+        assert stack.provider.issued_tokens, "the provider must have minted tokens for this login"
         for url in urls:
             assert "id_token" not in url and SESSION_COOKIE not in url and session["value"] not in url, url
+            assert not any(token in url for token in stack.provider.issued_tokens), url
     for entry in ("GET /.well-known/openid-configuration", "GET /authorize", "POST /token", "GET /jwks"):
         assert stack.provider.count(entry) >= 1, stack.provider.requests
 
@@ -694,17 +700,18 @@ def test_identities_bind_to_distinct_profiles_and_cannot_cross_over(stack: Stack
     assert_logged_in(bob, "bob")
 
     signed_alice_profile = alice.cookies[PROFILE_COOKIE]
-    # A forged or foreign profile cookie is discarded; the session stays pinned
-    # to its bound profile and never reads the other one.
+    # A forged or foreign profile cookie is discarded: the session stays usable,
+    # stays pinned to its bound profile, and the server re-issues the signed
+    # bound-profile cookie (HMAC over the session token, so it is byte-identical).
     for forged in ("bob", "bob." + signed_alice_profile.split(".", 1)[1], bob.cookies[PROFILE_COOKIE]):
         alice.cookies[PROFILE_COOKIE] = forged
         memory = alice.get("/api/memory")
-        assert memory.status in (200, 403), (forged, memory.status, memory.body[:200])
-        assert MARKERS["bob"] not in memory.body.decode(errors="replace"), forged
-        if memory.status == 200:
-            assert MARKERS["alice"] in memory.json()["soul"], forged
+        assert memory.status == 200, (forged, memory.status, memory.body[:200])
+        assert MARKERS["alice"] in memory.json()["soul"] and MARKERS["bob"] not in memory.body.decode(), forged
+        assert memory.set_cookies()[PROFILE_COOKIE].value == signed_alice_profile, forged
+        assert alice.cookies[PROFILE_COOKIE] == signed_alice_profile
         active = alice.get("/api/profile/active")
-        assert active.status == 403 or active.json()["name"] == "alice", (forged, active.body[:200])
+        assert active.status == 200 and active.json()["name"] == "alice", (forged, active.body[:200])
     alice.cookies[PROFILE_COOKIE] = signed_alice_profile
     switch = alice.post("/api/profile/switch", {"name": "bob"})
     assert switch.status == 403, (switch.status, switch.body[:200])
@@ -809,6 +816,7 @@ def test_native_flow_completes_through_browser_and_separate_client(stack: Stack)
     app_callback = {k: v[0] for k, v in urllib.parse.parse_qs(urllib.parse.urlsplit(callback["location"]).query).items()}
     assert app_callback["state"] == flow["state"] and app_callback["flow_id"] == flow["flow_id"]
     assert app_callback["server_id"] == flow["server_id"] and "id_token" not in callback["location"]
+    assert not any(token in callback["location"] for token in stack.provider.issued_tokens)
 
     exchange = native_exchange(app, flow, app_callback)
     assert exchange.status == 200 and exchange.json() == {"ok": True}, (exchange.status, exchange.body[:200])
