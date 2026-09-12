@@ -357,6 +357,7 @@ def run_deferred_startup() -> None:
     isolated here, and each event is set only once its own step has run.
     """
     for step in (
+        _prewarm_claude_code_parse_cache_step,
         _recover_sessions_step,
         _repair_agent_deps_step,
         _start_background_workers_step,
@@ -448,9 +449,15 @@ def _start_background_workers_step() -> None:
     except Exception as e:
         print(f'[!!] WARNING: SessionChannel reaper failed to start: {e}', flush=True)
 
-    # HWEB-94: warm the Claude Code transcript parse cache off the request
-    # path so the first /api/sessions after boot does not pay the full
-    # ~/.claude/projects scan. Never gates STARTUP_READY.
+
+def _prewarm_claude_code_parse_cache_step() -> None:
+    """HWEB-94: warm the Claude Code transcript parse cache off the request path.
+
+    Runs first so the parse overlaps session recovery instead of queueing
+    behind it and the dependency repair (up to 120s), which is when a waiting
+    browser tab is released by STARTUP_READY. It never gates readiness: a
+    request that wins the race parses concurrently and gets the same result.
+    """
     threading.Thread(
         target=_prewarm_claude_code_parse_cache,
         name="webui-claude-code-prewarm",

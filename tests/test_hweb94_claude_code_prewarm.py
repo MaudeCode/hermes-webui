@@ -40,6 +40,16 @@ def test_prewarm_skips_when_rows_are_hidden(monkeypatch, settings):
     assert calls == []
 
 
+def test_prewarm_step_runs_before_session_recovery(monkeypatch):
+    calls = []
+    monkeypatch.setattr(startup, "_prewarm_claude_code_parse_cache_step", lambda: calls.append("prewarm"))
+    monkeypatch.setattr(startup, "_recover_sessions_step", lambda: calls.append("recover"))
+    for name in ("_repair_agent_deps_step", "_start_background_workers_step", "_load_plugins_step", "_start_talaria_relay_step"):
+        monkeypatch.setattr(startup, name, lambda: None)
+    startup.run_deferred_startup()
+    assert calls == ["prewarm", "recover"]
+
+
 def test_prewarm_swallows_parse_errors(monkeypatch, capsys):
     _spy(
         monkeypatch,
