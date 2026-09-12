@@ -74,10 +74,11 @@ def test_boot_snapshots_restore_during_parse_and_loaders_respect_them():
 def test_snapshot_clicks_are_queued_and_replayed():
     assert "window.__hermesPendingSid=sid" in INDEX
     assert "window.__hermesPendingSid" in HUB and "loadSession(pending)" in HUB
-    assert "delete el.dataset.bootSnapshot" in HUB
+    assert "delete el.dataset.bootSnapshot" in HUB or "overlay.remove()" in HUB
 
 
-def test_sidebar_renders_are_deferred_while_snapshot_is_shown():
-    assert "window.renderSessionList = wrapped" in HUB
-    assert "sidebarRenderOrig()" in HUB
+def test_sidebar_snapshot_is_an_overlay_removed_at_release():
+    assert "o.id='sessionListBoot'" in INDEX
+    assert "has-sidebar-snapshot" in INDEX and "html.has-sidebar-snapshot #sessionList{display:none!important;}" in CSS
+    assert "getElementById('sessionListBoot')" in HUB and "overlay.remove()" in HUB
     assert "snap.hero" in INDEX

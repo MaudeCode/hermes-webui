@@ -354,7 +354,7 @@
   const LIMIT = 350000;
   function saveSidebarSnapshot() {
     const list = document.getElementById('sessionList');
-    if (!list || list.dataset.bootSnapshot) return;
+    if (!list || document.getElementById('sessionListBoot')) return;
     if (!list.querySelector('.session-item') || list.querySelector('.skeleton-row')) return;
     // Archived rows are a transient toggle (state resets on reload); don't snapshot them.
     try { if (typeof _showArchived !== 'undefined' && _showArchived) return; } catch (e) { /* fine */ }
@@ -387,7 +387,7 @@
     const list = document.getElementById('sessionList');
     const inner = document.getElementById('msgInner');
     if (list) new MutationObserver(() => {
-      if (list.dataset.bootSnapshot) return; // still boot-held; release clears the flag
+      if (document.getElementById('sessionListBoot')) return; // overlay still shown; release removes it
       clearTimeout(sbTimer); sbTimer = setTimeout(saveSidebarSnapshot, 600);
     }).observe(list, { childList: true, subtree: true, characterData: true });
     if (inner) new MutationObserver(() => {
@@ -404,57 +404,12 @@
     window.addEventListener('pagehide', () => { saveSidebarSnapshot(); saveTranscriptSnapshot(); });
   }
 
-  // During boot the sidebar shows its snapshot; app renders are deferred and
-  // collapsed into one at release, so intermediate lists (server list without
-  // the unsaved current session, counts not yet known) never paint.
-  let sidebarRenderPending = false, sidebarRenderOrig = null;
-  function mountDeferredSidebarRender() {
-    const orig = window.renderSessionList;
-    if (typeof orig !== 'function' || orig._hubDeferred) return;
-    sidebarRenderOrig = orig;
-    const wrapped = function () {
-      if (document.documentElement.classList.contains('booting') && document.getElementById('sessionList')?.dataset.bootSnapshot) {
-        sidebarRenderPending = true;
-        return Promise.resolve();
-      }
-      return orig.apply(this, arguments);
-    };
-    wrapped._hubDeferred = true;
-    window.renderSessionList = wrapped;
-  }
-
-  // Text the snapshot painted (title, headline) is held during boot; the app's
-  // writes are remembered and applied once at release, so nothing flickers
-  // through intermediate values.
-  const holds = [];
-  function holdDuringBoot(el, opts) {
-    if (!el || !el.textContent) return;
-    const kept = { text: el.textContent, cls: el.className };
-    let last = null, guard = false;
-    const obs = new MutationObserver(() => {
-      if (guard || !document.documentElement.classList.contains('booting')) return;
-      if (el.textContent !== kept.text || (opts && opts.keepClass && el.className !== kept.cls)) {
-        last = { text: el.textContent, cls: el.className };
-        guard = true; el.textContent = kept.text; if (opts && opts.keepClass) el.className = kept.cls; guard = false;
-      }
-    });
-    obs.observe(el, { childList: true, characterData: true, subtree: true, attributes: !!(opts && opts.keepClass), attributeFilter: (opts && opts.keepClass) ? ['class'] : undefined });
-    holds.push(() => { obs.disconnect(); if (last && last.text) { el.textContent = last.text; if (opts && opts.keepClass) el.className = last.cls; } });
-  }
-  function mountBootHolds() {
-    const inner = document.getElementById('msgInner');
-    if (!inner || !inner.dataset.bootSnapshot) return; // only when a snapshot painted
-    holdDuringBoot(document.getElementById('topbarTitle'));
-    holdDuringBoot(document.getElementById('emptyHeroTitle'), { keepClass: true });
-  }
-
   function init() {
     mountBootHolds();
-    mountDeferredSidebarRender();
     mountEmptyMemo();
     mountBootSnapshots();
     // Sidebar skeleton from the first frame; the real list replaces it.
-    if (typeof showSessionListSkeleton === 'function' && !document.querySelector('#sessionList .session-item') && !document.getElementById('sessionList')?.dataset.bootSnapshot) {
+    if (typeof showSessionListSkeleton === 'function' && !document.querySelector('#sessionList .session-item') && !document.getElementById('sessionListBoot')) {
       try { showSessionListSkeleton(); } catch (e) { /* cosmetic */ }
     }
     mountSourceMenu();
@@ -483,7 +438,9 @@
     document.documentElement.classList.remove('boot-session');
     // Safety net: snapshots are inert only until the app paints; never leave them inert.
     holds.splice(0).forEach(fn => { try { fn(); } catch (e) { /* cosmetic */ } });
-    if (sidebarRenderPending && sidebarRenderOrig) { sidebarRenderPending = false; try { void sidebarRenderOrig(); } catch (e) { /* app decides */ } }
+    const overlay = document.getElementById('sessionListBoot');
+    if (overlay) overlay.remove();
+    document.documentElement.classList.remove('has-sidebar-snapshot');
     ['sessionList', 'msgInner'].forEach(id => { const el = document.getElementById(id); if (el) delete el.dataset.bootSnapshot; });
     const pending = window.__hermesPendingSid;
     if (pending) { window.__hermesPendingSid = null; if (typeof loadSession === 'function') { try { loadSession(pending); } catch (e) { /* app decides */ } } }

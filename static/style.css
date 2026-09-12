@@ -8188,7 +8188,10 @@ html:not(.no-speech):not(.booting) #btnMic[style*="display:none"],html:not(.no-s
 
 /* ── Boot snapshots: painted from localStorage during parse, inert until the
    app replaces them; layout decided by the snapshot's message count ────── */
-#sessionList[data-boot-snapshot],#msgInner[data-boot-snapshot]{pointer-events:none;}
+#msgInner[data-boot-snapshot]{pointer-events:none;}
+/* Sidebar snapshot lives in an overlay the app never renders into */
+html.has-sidebar-snapshot #sessionList{display:none!important;}
+#sessionListBoot{flex:1;overflow-y:auto;min-height:0;}
 html.booting.has-ctx-cache .chat-context{visibility:visible;}
 html.booting:not(.boot-session) #mainChat::after{flex-grow:1!important;}
 html.booting:not(.boot-session) #mainChat .composer-wrap{background:transparent!important;}
