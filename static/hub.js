@@ -423,13 +423,35 @@
     holds.push(() => { obs.disconnect(); if (last && last.text) { el.textContent = last.text; if (opts && opts.keepClass) el.className = last.cls; } });
   }
   function mountBootHolds() {
-    const inner = document.getElementById('msgInner');
-    if (!inner || !inner.dataset.bootSnapshot) return; // only when a snapshot painted
-    holdDuringBoot(document.getElementById('topbarTitle'));
+    const title = document.getElementById('topbarTitle');
+    if (title && title.textContent) holdDuringBoot(title);
+    else if (title) document.documentElement.classList.add('title-pending'); // blank until final
     holdDuringBoot(document.getElementById('emptyHeroTitle'), { keepClass: true });
   }
 
+  // Global caches (not per session): context values and the welcome headline.
+  // They make the first paint complete even before any session snapshot exists.
+  function saveGlobalCaches() {
+    try {
+      const ctx = {};
+      document.querySelectorAll('.chat-context-item').forEach(b => { const k = b.className.match(/chat-context-(\w+)/); if (k && !b.hidden && b.textContent) ctx[k[1]] = b.textContent; });
+      if (Object.keys(ctx).length) localStorage.setItem('hermes-boot:ctx', JSON.stringify(ctx));
+      const hero = document.getElementById('emptyHeroTitle');
+      if (hero && hero.classList.contains('ready') && hero.textContent) localStorage.setItem('hermes-boot:hero', hero.textContent);
+    } catch (e) { /* storage unavailable */ }
+  }
+  let gcTimer = null;
+  function mountGlobalCaches() {
+    const schedule = () => { clearTimeout(gcTimer); gcTimer = setTimeout(saveGlobalCaches, 500); };
+    const ctx = document.querySelector('.chat-context');
+    if (ctx) new MutationObserver(schedule).observe(ctx, { childList: true, characterData: true, subtree: true, attributes: true });
+    const hero = document.getElementById('emptyHeroTitle');
+    if (hero) new MutationObserver(schedule).observe(hero, { childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ['class'] });
+    window.addEventListener('pagehide', saveGlobalCaches);
+  }
+
   function init() {
+    mountGlobalCaches();
     mountBootHolds();
     mountEmptyMemo();
     mountBootSnapshots();
@@ -461,6 +483,7 @@
   const release = () => {
     document.documentElement.classList.remove('booting');
     document.documentElement.classList.remove('boot-session');
+    document.documentElement.classList.remove('title-pending');
     // Safety net: snapshots are inert only until the app paints; never leave them inert.
     holds.splice(0).forEach(fn => { try { fn(); } catch (e) { /* cosmetic */ } });
     const overlay = document.getElementById('sessionListBoot');

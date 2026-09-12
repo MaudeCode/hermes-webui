@@ -8178,13 +8178,10 @@ html.booting.boot-session .empty-state{display:none!important;}
 html.booting.boot-session #mainChat.composer-hero::after{flex-grow:0!important;}
 /* Context line and workspace toggle wait for their real values */
 html.booting .chat-context{visibility:hidden;}
-html.booting .workspace-panel-edge-toggle{opacity:0!important;pointer-events:none;}
 /* Skeleton rows keep their sheen even while other animation is suppressed */
 html.booting .skeleton-bar{animation:skeletonSheen 1.4s linear infinite!important;}
 /* The mic button is present from first paint when the browser supports it */
-html:not(.no-speech) #btnMic[style*="display:none"],html:not(.no-speech) #btnMic[style*="display: none"]{display:inline-flex!important;visibility:hidden;}
-html:not(.no-speech) #btnMic{visibility:visible;}
-html:not(.no-speech):not(.booting) #btnMic[style*="display:none"],html:not(.no-speech):not(.booting) #btnMic[style*="display: none"]{display:none!important;}
+html.booting:not(.no-speech) #btnMic[style*="display:none"],html.booting:not(.no-speech) #btnMic[style*="display: none"]{display:inline-flex!important;}
 
 /* ── Boot snapshots: painted from localStorage during parse, inert until the
    app replaces them; layout decided by the snapshot's message count ────── */
@@ -8198,4 +8195,6 @@ html.booting:not(.boot-session) #mainChat .composer-wrap{background:transparent!
 html.booting:not(.boot-session) .empty-state{display:flex!important;}
 /* Hero text restored from the snapshot is final: no fade, no rewrite */
 html.booting .empty-hero-title.ready{opacity:1;transition:none;}
+html.booting.title-pending .chat-header-title{visibility:hidden;}
+@media (min-width:769px){ #composerMobileConfigBtn{display:inline-flex!important;} }
 /* REDESIGN-LAYER-END */

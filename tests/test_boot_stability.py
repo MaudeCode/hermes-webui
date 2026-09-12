@@ -91,3 +91,9 @@ def test_hub_defines_every_function_it_calls():
     app_globals = {"syncTopbar", "renderSessionList", "renderMessages", "syncAppTitlebar"}
     missing = {c for c in called if c not in defined and c not in app_globals}
     assert not missing, f"hub.js calls undefined functions: {missing}"
+
+
+def test_global_caches_paint_context_and_headline_without_a_session_snapshot():
+    assert "hermes-boot:ctx" in INDEX and "hermes-boot:hero" in INDEX
+    assert "function saveGlobalCaches" in HUB
+    assert "html.booting .workspace-panel-edge-toggle{opacity:0" not in CSS
