@@ -28,7 +28,7 @@
   ],
   "icons": [
     {
-      "src": "static/favicon.svg",
+      "src": "static/favicon-512.svg",
       "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any maskable"

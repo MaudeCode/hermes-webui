@@ -2795,6 +2795,8 @@ function _setResolvedTheme(isDark){
   _resolvedThemeBaseDark=!!isDark;
   const effectiveDark=_effectiveThemeDark(_resolvedThemeBaseDark);
   document.documentElement.classList.toggle('dark',effectiveDark);
+  const favicon=document.getElementById('hermes-favicon');
+  if(favicon) favicon.setAttribute('href',`static/favicon-${effectiveDark?'dark':'light'}.svg`);
   const link=document.getElementById('prism-theme');
   if(!link){ _syncThemeColorMeta(); return; }
   const want=effectiveDark
