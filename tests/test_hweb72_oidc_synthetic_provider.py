@@ -387,7 +387,9 @@ class HttpClient:
         self.cookies: dict[str, str] = {}
         self.last_callback = ""
         self.opener = urllib.request.build_opener(
-            urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile=cafile)), _NoRedirect()
+            urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile=cafile)),
+            urllib.request.ProxyHandler({}),  # loopback only; ignore ambient *_PROXY
+            _NoRedirect(),
         )
 
     def request(self, method: str, url: str, *, data=None, headers=None) -> Response:
@@ -459,7 +461,7 @@ class WebUI:
         env = {
             k: v for k, v in os.environ.items()
             if not (k.endswith("_API_KEY") or k.startswith("HERMES_WEBUI_OIDC_")
-                    or k.startswith("HERMES_WEBUI_TRUSTED_") or k in dropped)
+                    or k.startswith("HERMES_WEBUI_TRUSTED_") or k.upper().endswith("_PROXY") or k in dropped)
         }
         env.update({
             "HERMES_WEBUI_PORT": str(self.port), "HERMES_WEBUI_HOST": "127.0.0.1",
@@ -471,6 +473,8 @@ class WebUI:
             "HERMES_WEBUI_PLUGINS_DIR": str(self.state / "plugins"),
             "HERMES_WEBUI_AGENT_DIR": str(self.state / "no-agent"),
             "HERMES_WEBUI_PYTHON": sys.executable, "HERMES_WEBUI_SKIP_ONBOARDING": "1",
+            # Belt and braces with the *_PROXY strip above: provider traffic stays on loopback.
+            "NO_PROXY": f"{IDP_HOST},{WEBUI_HOST},127.0.0.1", "no_proxy": f"{IDP_HOST},{WEBUI_HOST},127.0.0.1",
         })
         return env
 
