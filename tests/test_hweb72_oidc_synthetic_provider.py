@@ -393,7 +393,9 @@ class HttpClient:
     def request(self, method: str, url: str, *, data=None, headers=None) -> Response:
         url = url if "://" in url else self.base + url
         hdrs = dict(headers or {})
-        if self.cookies:
+        # Host-only cookies, like a browser: the WebUI jar never travels to the provider.
+        same_origin = url.startswith(self.base + "/") or url == self.base
+        if self.cookies and same_origin:
             hdrs["Cookie"] = "; ".join(f"{k}={v}" for k, v in self.cookies.items())
         body = None
         if data is not None:
@@ -405,7 +407,7 @@ class HttpClient:
         except urllib.error.HTTPError as exc:
             resp = exc
         response = Response(resp.status, resp.headers, resp.read())
-        for name, morsel in response.set_cookies().items():
+        for name, morsel in (response.set_cookies().items() if same_origin else ()):
             if morsel.value and morsel["max-age"] != "0":
                 self.cookies[name] = morsel.value
             else:
@@ -451,7 +453,9 @@ class WebUI:
 
     def _env(self) -> dict[str, str]:
         dropped = {"HERMES_WEBUI_PASSWORD", "HERMES_WEBUI_SECURE", "HERMES_WEBUI_TRUST_FORWARDED_PROTO",
-                   "HERMES_WEBUI_GROUP_PROFILE_MAP", "HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL"}
+                   "HERMES_WEBUI_GROUP_PROFILE_MAP", "HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL",
+                   # The module hard-codes the default cookie names.
+                   "HERMES_WEBUI_COOKIE_NAME", "HERMES_WEBUI_PROFILE_COOKIE_NAME", "WEBUI_PROFILE_COOKIE_NAME"}
         env = {
             k: v for k, v in os.environ.items()
             if not (k.endswith("_API_KEY") or k.startswith("HERMES_WEBUI_OIDC_")
@@ -672,7 +676,7 @@ def test_browser_sso_login_sets_secure_cookie_and_authenticates(stack: Stack):
         cookies = {c["name"]: c for c in page.context.cookies(base)}
         session = cookies[SESSION_COOKIE]
         assert session["httpOnly"] is True and session["secure"] is True and session["sameSite"] == "Lax", session
-        assert PROFILE_COOKIE in cookies
+        profile = cookies[PROFILE_COOKIE]
 
         status = page.request.get(base + "/api/auth/status").json()
         assert status["logged_in"] is True and status["bound_profile"] == "alice", status
@@ -683,9 +687,10 @@ def test_browser_sso_login_sets_secure_cookie_and_authenticates(stack: Stack):
         assert len(callbacks) == 1 and "code=" in callbacks[0], callbacks
         assert any(u.startswith(stack.provider.issuer + "/authorize?") for u in urls), urls
         assert stack.provider.issued_tokens, "the provider must have minted tokens for this login"
+        secrets_never_in_urls = (SESSION_COOKIE, session["value"], PROFILE_COOKIE, profile["value"], "id_token",
+                                 *stack.provider.issued_tokens)
         for url in urls:
-            assert "id_token" not in url and SESSION_COOKIE not in url and session["value"] not in url, url
-            assert not any(token in url for token in stack.provider.issued_tokens), url
+            assert not any(secret in url for secret in secrets_never_in_urls), url
     for entry in ("GET /.well-known/openid-configuration", "GET /authorize", "POST /token", "GET /jwks"):
         assert stack.provider.count(entry) >= 1, stack.provider.requests
 
