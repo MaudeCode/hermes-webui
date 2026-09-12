@@ -945,6 +945,36 @@ def test_pending_turn_defers_a_tail_error_until_the_walk_reaches_it(monkeypatch)
     assert not [m for m in session.messages if m.get("type") == "interrupted"]
 
 
+@pytest.mark.parametrize("terminal", ["done", "cancel"])
+def test_paged_retry_settles_an_output_free_terminal(monkeypatch, terminal):
+    """A continuation pass that reaches the terminal row is conclusive on its own."""
+    session_id = f"hweb13_paged_terminal_{terminal}"
+    stream_id = f"hweb13_stream_paged_terminal_{terminal}"
+    session = _dead_session(session_id, stream_id)
+    for i in range(6):
+        append_run_event(session_id, stream_id, "metering", {"turn": i, "tokens": 10 * i})
+    append_run_event(session_id, stream_id, terminal, {})
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_BYTES", 600)
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_WINDOWS", 1)
+
+    assert _recover_dead_run_journal(session, stream_id) is True
+    assert session.messages[-1]["_pending_journal_recovery"] is True
+
+    for _ in range(10):
+        if not models._session_has_pending_journal_retry(session):
+            break
+        models._retry_journal_recovery_in_place(session)
+    assert _visible(session) == []
+    assert models._session_has_pending_journal_retry(session) is False
+    markers = [m for m in session.messages if m.get("type") == "interrupted"]
+    if terminal == "done":
+        assert not markers, "a completed run leaves no interruption marker"
+    else:
+        assert len(markers) == 1
+        assert markers[0]["content"] == models._INTERRUPTED_NO_OUTPUT_WORDING
+        assert "_journal_retry_after_seq" not in markers[0]
+
+
 def test_tool_completion_in_a_later_wave_settles_the_earlier_card():
     session_id = "hweb13_wave_tool"
     stream_id = "hweb13_stream_wave_tool"

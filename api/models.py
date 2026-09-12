@@ -4089,8 +4089,14 @@ def _retry_journal_recovery_in_place(
             # This pass resolves the marker only with something new: output it
             # placed, a gateway error, or a terminal row that settles output an
             # earlier wave placed. An unchanged journal is not progress.
+            # A pass continuing from a cursor that already applied rows is a
+            # real read of the run, so a terminal row it reaches settles the
+            # marker even when the run produced no visible output. A first
+            # look at a journal (no cursor yet) keeps the budgeted retry, since
+            # an empty terminal journal there may still be a visibility artifact.
+            paged = bool(cursor and cursor.get('seq'))
             settled_by_terminal = terminal_state is not None and (
-                recovered_output or has_recovered_rows
+                recovered_output or has_recovered_rows or paged
             )
             if recovered_output or terminal_error_recovered or settled_by_terminal:
                 # The journaled rows were appended at the end of messages;
@@ -4109,7 +4115,11 @@ def _retry_journal_recovery_in_place(
                         if message is not msg
                     ]
                 elif terminal_state is not None:
-                    msg['content'] = _INTERRUPTED_RECOVERED_WORDING
+                    msg['content'] = (
+                        _INTERRUPTED_RECOVERED_WORDING
+                        if recovered_output or has_recovered_rows
+                        else _INTERRUPTED_NO_OUTPUT_WORDING
+                    )
                     _strip_journal_retry_meta(msg)
                 else:
                     # Still nonterminal: keep the hook armed at the new cursor so
