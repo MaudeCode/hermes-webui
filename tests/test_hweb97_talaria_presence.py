@@ -411,35 +411,44 @@ global.AbortSignal = undefined;
 new Function('document', 'window', 'fetch', src)(document, window, global.fetch);
 const fire = (type, trusted) => (docListeners[type] || []).forEach((fn) => fn({ type, isTrusted: trusted }));
 const fireWin = (type) => (winListeners[type] || []).forEach((fn) => fn({ type, isTrusted: true }));
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+// Answer every outstanding request and let queued ones start, until quiet.
+const flush = async () => { do { while (pending.length) pending.shift()({ ok: true }); await tick(); } while (pending.length); };
 const count = (label) => log.push([label, calls.length]);
 
-count('load');
-fire('keydown', false); count('untrusted keydown');
-fire('scroll', true); fire('mousemove', true); fire('focus', true); count('scroll/mousemove/focus');
-document.visibilityState = 'hidden'; fire('keydown', true); count('hidden keydown');
-document.visibilityState = 'visible'; document.focused = false; fire('pointerdown', true); count('unfocused pointerdown');
-document.focused = true;
-fire('keydown', true); count('qualifying keydown');
-let settled = false;
-window.HermesPresence.settle().then(() => { settled = true; });
-now += 5000; fire('pointerdown', true); count('pointerdown within throttle');
-now += 10000; fire('wheel', true); count('wheel after throttle');
-document.visibilityState = 'hidden'; fire('visibilitychange', true); count('hidden revoke');
-fire('visibilitychange', true); count('hidden again');
-document.visibilityState = 'visible';
-now += 1000; fire('keydown', true); count('keydown right after revoke');
-fireWin('blur'); count('blur revoke');
-fire('pointerdown', true); count('pointerdown after blur');
-fireWin('pagehide'); count('pagehide revoke');
-const settledBeforeResponse = settled;
-pending.forEach((resolve) => resolve({ ok: true }));
-setTimeout(() => {
+(async () => {
+  await tick(); count('load');
+  fire('keydown', false); await flush(); count('untrusted keydown');
+  fire('scroll', true); fire('mousemove', true); fire('focus', true); await flush(); count('scroll/mousemove/focus');
+  document.visibilityState = 'hidden'; fire('keydown', true); await flush(); count('hidden keydown');
+  document.visibilityState = 'visible'; document.focused = false; fire('pointerdown', true); await flush(); count('unfocused pointerdown');
+  document.focused = true;
+  fire('keydown', true); await tick(); count('qualifying keydown');
+  let settled = false;
+  window.HermesPresence.settle().then(() => { settled = true; });
+  await tick();
+  const settledBeforeResponse = settled;
+  await flush();
+  const settledAfterResponse = settled;
+  now += 5000; fire('pointerdown', true); await flush(); count('pointerdown within throttle');
+  now += 10000; fire('wheel', true); await flush(); count('wheel after throttle');
+  document.visibilityState = 'hidden'; fire('visibilitychange', true); await flush(); count('hidden revoke');
+  fire('visibilitychange', true); await flush(); count('hidden again');
+  document.visibilityState = 'visible';
+  now += 1000; fire('keydown', true); await flush(); count('keydown right after revoke');
+  fireWin('blur'); await flush(); count('blur revoke');
+  fire('pointerdown', true); await flush(); count('pointerdown after blur');
+  fireWin('pagehide'); await flush(); count('pagehide revoke');
+  // A revocation must wait for the renewal in flight ahead of it.
+  fire('keydown', true); await tick(); const renewalInFlight = calls.length;
+  document.visibilityState = 'hidden'; fire('visibilitychange', true); await tick(); const revokeWhileRenewing = calls.length;
+  await flush(); count('revoke after renewal answered');
   process.stdout.write(JSON.stringify({
-    log, calls, settledBeforeResponse, settledAfterResponse: settled,
+    log, calls, settledBeforeResponse, settledAfterResponse, renewalInFlight, revokeWhileRenewing,
     tabId: window.HermesPresence.tabId,
     listeners: Object.keys(docListeners).sort(),
   }));
-}, 0);
+})();
 """
 
 
@@ -476,7 +485,10 @@ def test_browser_module_renews_only_on_trusted_input_in_a_visible_focused_tab():
         "blur revoke": 5,
         "pointerdown after blur": 6,
         "pagehide revoke": 7,
+        "revoke after renewal answered": 9,
     }
+    assert out["renewalInFlight"] == 8
+    assert out["revokeWhileRenewing"] == 8, "revocation must not overtake the in-flight renewal"
     assert out["listeners"] == ["keydown", "pointerdown", "visibilitychange", "wheel"]
     tab_id = out["tabId"]
     assert tab_id == "aaaaaaaabbbbccccddddeeeeeeeeeeee"
@@ -484,6 +496,8 @@ def test_browser_module_renews_only_on_trusted_input_in_a_visible_focused_tab():
     assert all(call["method"] == "POST" and call["body"]["tab_id"] == tab_id for call in out["calls"])
     assert [(call["body"]["active"], call["keepalive"]) for call in out["calls"]] == [
         (True, False),
+        (True, False),
+        (False, True),
         (True, False),
         (False, True),
         (True, False),

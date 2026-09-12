@@ -14,7 +14,7 @@
     try{ window.crypto.getRandomValues(bytes); }catch(_){ for(var i=0;i<16;i++) bytes[i]=Math.floor(Math.random()*256); }
     return Array.prototype.map.call(bytes,function(b){return ('0'+b.toString(16)).slice(-2);}).join('');
   })();
-  var held=false, lastSent=0, inflight=null;
+  var held=false, lastSent=0, chain=Promise.resolve();
 
   function post(active, keepalive){
     var opts={
@@ -30,6 +30,13 @@
     try{ url=new URL('api/talaria/presence',document.baseURI||location.href).href; }catch(_){ url='api/talaria/presence'; }
     return fetch(url,opts).then(function(){},function(){});
   }
+  // Per-tab updates are serialized: a revocation is never sent while the
+  // renewal before it is still in flight, so the server cannot apply them out
+  // of order and resurrect a lease the tab just gave up.
+  function send(active, keepalive){
+    chain=chain.then(function(){ return post(active,keepalive); });
+    return chain;
+  }
   function qualifies(e){
     if(!e||e.isTrusted!==true) return false;
     if(document.visibilityState!=='visible') return false;
@@ -41,13 +48,12 @@
     var now=Date.now();
     if(held&&now-lastSent<THROTTLE_MS) return;
     held=true; lastSent=now;
-    var request=post(true,false);
-    inflight=request.then(function(){ if(inflight===request) inflight=null; });
+    send(true,false);
   }
   function release(){
     if(!held) return;
     held=false; lastSent=0;
-    post(false,true);
+    send(false,true);
   }
   var listen={capture:true,passive:true};
   document.addEventListener('keydown',onInput,listen);
@@ -59,7 +65,7 @@
 
   window.HermesPresence={
     tabId:tabId,
-    // Resolves once any in-flight renewal has been answered (or failed).
-    settle:function(){ return inflight||Promise.resolve(); }
+    // Resolves once every queued or in-flight update has been answered (or failed).
+    settle:function(){ return chain; }
   };
 })();
