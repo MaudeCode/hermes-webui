@@ -16510,6 +16510,20 @@ def handle_post(handler, parsed) -> bool:
         except RelayPairingError as exc:
             return bad(handler, str(exc), status=exc.status)
 
+    if parsed.path == "/api/talaria/presence":
+        from api.auth import ensure_trusted_auth_session
+        from api.talaria_relay import RelayPairingError, update_presence
+
+        relay_session = ensure_trusted_auth_session(handler)
+        bound_profile = str((relay_session or {}).get("bound_profile") or "").strip() or None
+        try:
+            return j(
+                handler,
+                update_presence(body, profile=bound_profile or _get_active_profile_name()),
+            )
+        except RelayPairingError as exc:
+            return bad(handler, str(exc), status=exc.status)
+
     if parsed.path == "/api/escape/authorize":
         return _handle_escape_authorize(handler, parsed, body)
 

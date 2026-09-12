@@ -642,6 +642,14 @@ Chat/session durability invariants:
     teardown. The relay grants each Apple-backed account one profile scope per publisher,
     so a profile's session identifiers, titles, phases, counts, and alerts never enter
     another account. Publication is best-effort and never blocks an agent or browser stream.
+    Alert eligibility is decided from genuine activity: `static/presence.js` renews a per-tab
+    lease through `POST /api/talaria/presence` only on trusted keyboard, pointer, or wheel input
+    in a visible, focused tab (throttled to one renewal per 15s) and revokes it on hide, blur, or
+    pagehide. The server keeps a bounded in-memory registry keyed by canonical profile and tab,
+    expires each lease 90s after the last renewal it received, and stamps `alertEligible: false`
+    on every state in a snapshot built while that profile holds a fresh lease. Restart, eviction,
+    malformed heartbeats, lookup failures, and a relay that rejects the field all fall back to
+    eligible; the rejected snapshot is re-sent without the field and stamping stops until restart.
     The publisher registry lock protects only pointer snapshots/swaps. Pairing HTTP,
     initial publication, listener changes, start/stop, and terminal callbacks run after
     releasing it; a separate transition lock preserves configure/start/stop ordering.
