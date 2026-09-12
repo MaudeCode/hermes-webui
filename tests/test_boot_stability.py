@@ -1,0 +1,48 @@
+"""Boot-stability guards for the redesign layer (static/hub.js + index.html).
+
+The first paint must be the final layout, and the `booting` suppression class
+must be released by the app's own boot flag, not a timer. Regression for the
+release check reading `window.S` (S is a top-level `let`, invisible on window),
+which left the context line hidden and the welcome state suppressed for 12s.
+"""
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+HUB = (ROOT / "static" / "hub.js").read_text(encoding="utf-8")
+INDEX = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+
+
+def test_index_sets_boot_classes_before_stylesheet():
+    assert "h.classList.add('booting')" in INDEX
+    assert "h.classList.add('boot-session')" in INDEX
+    assert INDEX.index("classList.add('booting')") > INDEX.index('href="static/style.css')
+
+
+def test_hub_release_reads_S_by_name_not_window():
+    assert "window.S" not in HUB, "S is a top-level let; window.S is always undefined"
+    assert "typeof S !== 'undefined'" in HUB
+    assert "S._bootReady" in HUB
+
+
+def test_hub_release_removes_both_boot_classes():
+    assert "classList.remove('booting')" in HUB
+    assert "classList.remove('boot-session')" in HUB
+
+
+def test_css_boot_suppression_is_scoped_to_booting():
+    for rule in (
+        "html.booting *,html.booting *::before,html.booting *::after{transition:none!important;}",
+        "html.booting.boot-session .empty-state{display:none!important;}",
+        "html.booting .chat-context{visibility:hidden;}",
+    ):
+        assert rule in CSS, rule
+    assert "html .chat-context{visibility:hidden" not in CSS
+
+
+def test_static_markup_provides_first_paint_chrome():
+    assert 'class="rail-brand"' in INDEX
+    assert 'id="topbarTitle"' in INDEX
+    assert 'class="panel-head-btn sidebar-search-toggle"' in INDEX
+    assert 'class="panel-head-btn source-menu-btn"' in INDEX
+    assert 'rel="preload" href="static/vendor/inter/InterVariable.woff2"' in INDEX

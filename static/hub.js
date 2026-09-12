@@ -337,7 +337,9 @@
   const started = Date.now();
   const release = () => { document.documentElement.classList.remove('booting'); document.documentElement.classList.remove('boot-session'); };
   const poll = () => {
-    const ready = !!(window.S && S._bootReady);
+    // S is a top-level `let` in boot.js: reachable by name, not via window.
+    let ready = false;
+    try { ready = (typeof S !== 'undefined') && !!S && !!S._bootReady; } catch (e) { ready = false; }
     if (ready || Date.now() - started > 12000) { setTimeout(release, 120); return; }
     setTimeout(poll, 60);
   };
