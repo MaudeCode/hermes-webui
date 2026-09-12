@@ -69,3 +69,9 @@ def test_boot_snapshots_restore_during_parse_and_loaders_respect_them():
     assert "SIDEBAR_KEY = 'hermes-boot:sidebar'" in HUB and "TRANSCRIPT_KEY = 'hermes-boot:transcript'" in HUB
     sessions = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
     assert sessions.count("dataset.bootSnapshot") >= 2, "both loading-placeholder writes must skip a restored snapshot"
+
+
+def test_snapshot_clicks_are_queued_and_replayed():
+    assert "window.__hermesPendingSid=sid" in INDEX
+    assert "window.__hermesPendingSid" in HUB and "loadSession(pending)" in HUB
+    assert "delete el.dataset.bootSnapshot" in HUB

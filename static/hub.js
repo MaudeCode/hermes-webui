@@ -356,6 +356,8 @@
     const list = document.getElementById('sessionList');
     if (!list || list.dataset.bootSnapshot) return;
     if (!list.querySelector('.session-item') || list.querySelector('.skeleton-row')) return;
+    // Archived rows are a transient toggle (state resets on reload); don't snapshot them.
+    try { if (typeof _showArchived !== 'undefined' && _showArchived) return; } catch (e) { /* fine */ }
     const html = list.innerHTML;
     try { if (html.length < LIMIT) localStorage.setItem(SIDEBAR_KEY, html); } catch (e) { /* quota */ }
   }
@@ -400,7 +402,24 @@
     window.addEventListener('pagehide', () => { saveSidebarSnapshot(); saveTranscriptSnapshot(); });
   }
 
+  // A conversation with no session yet is titled "New conversation", not the
+  // assistant's name; the app writes the name when S.session is null.
+  function mountNewChatTitle() {
+    const title = document.getElementById('topbarTitle');
+    if (!title) return;
+    const label = () => (typeof t === 'function' && t('new_conversation') !== 'new_conversation') ? t('new_conversation') : 'New conversation';
+    const fix = () => {
+      let noSession = false, name = '';
+      try { noSession = (typeof S !== 'undefined' && S) ? !S.session : false; } catch (e) { noSession = false; }
+      try { name = (typeof assistantDisplayName === 'function') ? assistantDisplayName() : ''; } catch (e) { name = ''; }
+      if (noSession && name && title.textContent === name) title.textContent = label();
+    };
+    new MutationObserver(fix).observe(title, { childList: true, characterData: true, subtree: true });
+    fix();
+  }
+
   function init() {
+    mountNewChatTitle();
     mountEmptyMemo();
     mountBootSnapshots();
     // Sidebar skeleton from the first frame; the real list replaces it.
@@ -428,7 +447,15 @@
   // hard cap; a load-event timer would expire before the session resolves and
   // let the empty-state hero shift animate.
   const started = Date.now();
-  const release = () => { document.documentElement.classList.remove('booting'); document.documentElement.classList.remove('boot-session'); syncEmptyMemo(); };
+  const release = () => {
+    document.documentElement.classList.remove('booting');
+    document.documentElement.classList.remove('boot-session');
+    // Safety net: snapshots are inert only until the app paints; never leave them inert.
+    ['sessionList', 'msgInner'].forEach(id => { const el = document.getElementById(id); if (el) delete el.dataset.bootSnapshot; });
+    const pending = window.__hermesPendingSid;
+    if (pending) { window.__hermesPendingSid = null; if (typeof loadSession === 'function') { try { loadSession(pending); } catch (e) { /* app decides */ } } }
+    syncEmptyMemo();
+  };
   const poll = () => {
     // S is a top-level `let` in boot.js: reachable by name, not via window.
     let ready = false;

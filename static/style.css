@@ -7969,7 +7969,7 @@ html[data-session-boot="1"] .chat-header-title:empty::before{content:"";}
 }
 
 /* ── Refinement: type, tonal depth, 8px grid ─────────────────────────────── */
-@font-face{font-family:"Inter";font-style:normal;font-weight:100 900;font-display:swap;src:url("vendor/inter/InterVariable.woff2") format("woff2");}
+@font-face{font-family:"Inter";font-style:normal;font-weight:100 900;font-display:optional;src:url("vendor/inter/InterVariable.woff2") format("woff2");}
 :root{--font-ui:"Inter",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;--font-conversation:var(--font-ui);}
 html,body,button,input,select,textarea{font-family:var(--font-ui);font-feature-settings:"cv11","ss01","cv02";}
 body{font-size:14px;letter-spacing:-.006em;}
