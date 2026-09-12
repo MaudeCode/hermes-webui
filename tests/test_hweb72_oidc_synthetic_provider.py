@@ -535,9 +535,13 @@ def stack(tmp_path_factory):
     try:
         import socket
 
-        socket.getaddrinfo(IDP_HOST, 443, type=socket.SOCK_STREAM)
+        addresses = {info[4][0] for info in socket.getaddrinfo(IDP_HOST, 443, type=socket.SOCK_STREAM)}
     except OSError as exc:
-        _prerequisite_failed(f"{IDP_HOST} does not resolve to loopback on this host: {exc}")
+        _prerequisite_failed(f"{IDP_HOST} does not resolve on this host: {exc}")
+    # Fail closed: a hosts-file or split-DNS override that points the issuer
+    # name anywhere but loopback would send synthetic traffic off-box.
+    if not addresses or not all(ipaddress.ip_address(a.split("%", 1)[0]).is_loopback for a in addresses):
+        _prerequisite_failed(f"{IDP_HOST} must resolve only to loopback, got {sorted(addresses)}")
     root = tmp_path_factory.mktemp("hweb72-oidc")
     print(f"HWEB-72 artifacts: {root}")
     pki = _make_pki(root)
