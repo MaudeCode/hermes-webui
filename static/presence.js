@@ -81,13 +81,29 @@
     tabId:tabId,
     // Resolves once the most recent renewal has been answered (or timed out).
     settle:function(){ return inflight||Promise.resolve(); },
-    // Called by both profile-switch paths before the cookie flips: revoke the
-    // OLD profile's lease and clear the throttle so the first qualifying input
-    // in the destination profile renews immediately instead of being muted for
-    // up to 15 seconds by this tab's profile-agnostic throttle state.
+    // Called before an action that changes or ends the authenticated profile
+    // scope (profile switch, sign out): revoke the current lease and clear the
+    // throttle. The revoke is tracked in `inflight`, so settle() — awaited by
+    // api() before the switch/logout write — guarantees the revoke reaches the
+    // server while the session is still valid and before the cookie flips.
     reset:function(){
-      if(held){ held=false; lastSent=0; post(false,true); }
-      else { lastSent=0; }
+      lastSent=0;
+      if(!held) return Promise.resolve();
+      held=false;
+      var request=post(false,true);
+      inflight=request.then(function(){ if(inflight===request) inflight=null; });
+      return inflight;
+    },
+    // Re-establish the lease when a profile switch fails and the tab stays on
+    // the original profile: the switch click was genuine input, so a visible,
+    // focused tab should not be left without a lease after reset() revoked it.
+    renew:function(){
+      if(document.visibilityState!=='visible') return Promise.resolve();
+      if(typeof document.hasFocus==='function'&&!document.hasFocus()) return Promise.resolve();
+      held=true; lastSent=Date.now();
+      var request=post(true,false);
+      inflight=request.then(function(){ if(inflight===request) inflight=null; });
+      return inflight;
     }
   };
 })();

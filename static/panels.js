@@ -7469,7 +7469,7 @@ async function switchToProfile(name) {
   // HWEB-97: revoke this tab's OLD-profile presence lease and clear the
   // throttle before the switch cookie flips, so the destination profile is
   // not silently muted and its first input renews immediately.
-  if (window.HermesPresence && typeof window.HermesPresence.reset === 'function') window.HermesPresence.reset();
+  if (typeof window !== 'undefined' && window.HermesPresence && typeof window.HermesPresence.reset === 'function') window.HermesPresence.reset();
   S._pendingSessionToolsets=null;
   // Profile switches are per-client cookie/TLS scoped, so a running stream in
   // the current session can safely continue while this tab moves to another
@@ -7756,6 +7756,10 @@ async function switchToProfile(name) {
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       _sessionListSkeletonActive = false;
       if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
+      // The switch failed; reset() revoked the old-profile lease up front, so
+      // re-establish it — the tab is still on the original profile and the
+      // switch click was genuine presence (#HWEB-97).
+      if (typeof window !== 'undefined' && window.HermesPresence && typeof window.HermesPresence.renew === 'function') window.HermesPresence.renew();
       if (_workspaceVisibleAtStart && S.session && S.session.workspace && typeof loadDir === 'function') {
         loadDir('.');
       } else if (_workspaceVisibleAtStart && typeof clearWorkspaceTreeSkeleton === 'function') {
@@ -13562,6 +13566,14 @@ async function saveSettings(andClose){
 
 async function signOut(){
   try{
+    // Revoke this tab's presence lease while the session is still valid. After
+    // logout clears the cookies, the pagehide revoke would arrive unauthenticated
+    // and be rejected, leaving a fresh lease to mute the phone for up to 90s
+    // (#HWEB-97). reset() tracks the revoke in inflight; await it explicitly so
+    // it reaches the server before the session is invalidated.
+    if(typeof window!=='undefined'&&window.HermesPresence&&typeof window.HermesPresence.reset==='function'){
+      try{ await window.HermesPresence.reset(); }catch(_){}
+    }
     const response=await api('/api/auth/logout',{method:'POST',body:'{}'});
     window.location.href=response.trusted_logout_url||'login';
   }catch(e){

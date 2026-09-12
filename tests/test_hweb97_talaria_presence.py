@@ -420,6 +420,32 @@ def test_profile_switch_paths_reset_presence():
     assert "window.HermesPresence.reset()" in sessions
 
 
+def test_switch_reset_calls_are_window_guarded():
+    # test_issue5960 extracts _switchProfileForSessionLoad and runs it under node
+    # with no `window` global, so the reset call must be typeof-guarded.
+    panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    sessions = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    assert "typeof window !== 'undefined' && window.HermesPresence" in panels
+    assert "typeof window!=='undefined'&&window.HermesPresence" in sessions
+
+
+def test_sign_out_revokes_presence_before_logout():
+    panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    sign_out = panels[panels.index("async function signOut()"):]
+    sign_out = sign_out[: sign_out.index("async function", 1)]
+    reset_at = sign_out.index("window.HermesPresence.reset")
+    logout_at = sign_out.index("/api/auth/logout")
+    assert reset_at < logout_at, "presence must be revoked before the logout POST"
+    assert "await window.HermesPresence.reset()" in sign_out
+
+
+def test_failed_profile_switch_restores_presence():
+    panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    sessions = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    assert "window.HermesPresence.renew()" in panels
+    assert "window.HermesPresence.renew()" in sessions
+
+
 def test_presence_module_bounds_settlement_without_abortsignal_timeout():
     src = (ROOT / "static" / "presence.js").read_text(encoding="utf-8")
     # settle() must be bounded even where AbortSignal.timeout is unavailable.

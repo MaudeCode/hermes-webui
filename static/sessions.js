@@ -1849,7 +1849,7 @@ async function _switchProfileForSessionLoad(profile){
   if(!name) throw new Error('missing profile');
   if(name===S.activeProfile) return;
   // HWEB-97: revoke the old-profile lease before the switch cookie flips.
-  if(window.HermesPresence&&typeof window.HermesPresence.reset==='function') window.HermesPresence.reset();
+  if(typeof window!=='undefined'&&window.HermesPresence&&typeof window.HermesPresence.reset==='function') window.HermesPresence.reset();
   if(typeof _invalidateSessionListRenders==='function') _invalidateSessionListRenders();
   if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(true);
   if(typeof showSessionListSkeleton==='function') showSessionListSkeleton(name);
@@ -1882,6 +1882,9 @@ async function _switchProfileForSessionLoad(profile){
     if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);
     _sessionListSkeletonActive=false;
     if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+    // reset() revoked the old-profile lease up front; the switch failed and we
+    // stayed on it, so re-establish presence (#HWEB-97).
+    if(typeof window!=='undefined'&&window.HermesPresence&&typeof window.HermesPresence.renew==='function') window.HermesPresence.renew();
     throw switchErr;
   }
 }
