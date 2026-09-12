@@ -466,6 +466,66 @@ def test_rewound_cursor_offset_never_reapplies_covered_rows():
     assert session.messages[-1]["_journal_retry_after_seq"] == 2
 
 
+def test_capped_pass_of_metadata_rows_keeps_the_cursor_armed(monkeypatch):
+    """Windows holding only invisible rows must not read as conclusively empty.
+
+    The output or terminal row lies beyond the pass cap; returning False would
+    let the caller clear the only stream key and lose the unread tail.
+    """
+    session_id = "hweb13_metadata_cap"
+    stream_id = "hweb13_stream_metadata_cap"
+    session = _dead_session(session_id, stream_id)
+    for i in range(6):
+        append_run_event(session_id, stream_id, "metering", {"turn": i, "tokens": 10 * i})
+    append_run_event(session_id, stream_id, "interim_assistant", {"text": "After the metadata."})
+    append_run_event(session_id, stream_id, "done", {})
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_BYTES", 600)
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_WINDOWS", 1)
+
+    assert _recover_dead_run_journal(session, stream_id) is True
+    assert _visible(session) == []
+    marker = session.messages[-1]
+    assert marker["_pending_journal_recovery"] is True
+    assert marker["_journal_retry_after_seq"] >= 1
+
+    for _ in range(8):
+        if not models._session_has_pending_journal_retry(session):
+            break
+        models._retry_journal_recovery_in_place(session)
+    assert _visible(session) == ["After the metadata."]
+    assert not [m for m in session.messages if m.get("type") == "interrupted"]
+    # Metadata-only passes advanced the cursor without spending retry budget.
+    assert models._JOURNAL_RETRY_MAX_ATTEMPTS > 8
+
+
+def test_retry_settles_instead_of_crossing_a_newer_user_turn():
+    """An old run's late tail must not land behind a newer prompt.
+
+    Once the user has sent another message, appending the tail would put its
+    context projection after the new prompt. The marker settles as it stands.
+    """
+    session_id = "hweb13_turn_boundary"
+    stream_id = "hweb13_stream_turn_boundary"
+    session = _dead_session(session_id, stream_id)
+    append_run_event(session_id, stream_id, "token", {"text": "Hel"})
+    assert _recover_dead_run_journal(session, stream_id) is True
+    assert session.messages[-1]["_pending_journal_recovery"] is True
+
+    newer = {"role": "user", "content": "Never mind, next question", "timestamp": 5}
+    session.messages.append(newer)
+    session.context_messages.append(dict(newer))
+    append_run_event(session_id, stream_id, "token", {"text": "lo world."})
+    append_run_event(session_id, stream_id, "done", {})
+
+    assert models._retry_journal_recovery_in_place(session) is False
+    assert _visible(session) == ["Hel"]
+    assert session.context_messages[-1]["content"] == "Never mind, next question"
+    marker = next(m for m in session.messages if m.get("type") == "interrupted")
+    assert "_pending_journal_recovery" not in marker
+    assert marker["content"] == models._INTERRUPTED_RECOVERED_WORDING
+    assert models._session_has_pending_journal_retry(session) is False
+
+
 def test_tool_completion_in_a_later_wave_settles_the_earlier_card():
     session_id = "hweb13_wave_tool"
     stream_id = "hweb13_stream_wave_tool"

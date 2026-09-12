@@ -2871,8 +2871,9 @@ def _replay_run_journal_windows(
     stays at one window while the pass covers up to
     ``_RECOVERY_JOURNAL_MAX_WINDOWS`` of them. The result carries the cursor to
     persist and the terminal state seen so far (terminal rows are kept across
-    windows so `stream_end` after `done` still classifies as completed). Rows
-    beyond the last window wait for the next pass, which resumes at the cursor.
+    windows so `stream_end` after `done` still classifies as completed).
+    ``truncated`` means rows remain beyond the last window; they wait for the
+    next pass, which resumes at the cursor.
     """
     result = {
         'recovered_output': False,
@@ -2882,6 +2883,7 @@ def _replay_run_journal_windows(
         'events': False,
         'visible_output': False,
         'run_time': None,
+        'truncated': False,
     }
     terminal_events: list[dict] = []
     for _ in range(_RECOVERY_JOURNAL_MAX_WINDOWS):
@@ -2912,7 +2914,8 @@ def _replay_run_journal_windows(
         if run_time is not None:
             result['run_time'] = max(run_time, result['run_time'] or run_time)
         result['cursor'] = journal.get('cursor')
-        if not journal.get('truncated'):
+        result['truncated'] = bool(journal.get('truncated'))
+        if not result['truncated']:
             break
     if terminal_events:
         result['terminal_state'] = _run_journal_terminal_state(
@@ -3773,6 +3776,7 @@ def _retry_journal_recovery_in_place(
     """
     try:
         messages = session.messages or []
+        crossed_user_turn = False
         for idx in range(len(messages) - 1, -1, -1):
             msg = messages[idx]
             if not isinstance(msg, dict):
@@ -3785,6 +3789,8 @@ def _retry_journal_recovery_in_place(
                 msg.get('type') == 'interrupted'
                 and msg.get('_pending_journal_recovery')
             ):
+                if msg.get('role') == 'user':
+                    crossed_user_turn = True
                 continue
             stream_id = msg.get('_journal_retry_stream_id')
             first_seen = msg.get('_journal_retry_first_seen_ts') or 0
@@ -3824,6 +3830,28 @@ def _retry_journal_recovery_in_place(
                 _INTERRUPTED_RECOVERED_WORDING if has_recovered_rows
                 else _INTERRUPTED_NEUTRAL_WORDING
             )
+            if crossed_user_turn:
+                # A newer user turn was accepted after this marker. Recovering
+                # the old run's tail now would place its context projection
+                # after the new prompt, so the turn is settled as it stands.
+                # Chat start loads the full session first, which gives the
+                # hook its last pass before the boundary.
+                logger.info(
+                    "Session %s: settling journal retry for stream %s behind a newer turn",
+                    getattr(session, 'session_id', '?'),
+                    stream_id,
+                )
+                msg['content'] = settled_wording
+                _strip_journal_retry_meta(msg)
+                try:
+                    session.save(touch_updated_at=False)
+                except Exception:
+                    logger.debug(
+                        "save() failed while settling marker for session %s",
+                        getattr(session, 'session_id', '?'),
+                        exc_info=True,
+                    )
+                return False
             if give_up:
                 msg['content'] = settled_wording
                 _strip_journal_retry_meta(msg)
@@ -3897,6 +3925,20 @@ def _retry_journal_recovery_in_place(
                     attempts,
                 )
                 return True
+            if replay['events'] and replay['truncated']:
+                # A capped pass of rows with nothing to place, with more rows
+                # beyond it: real progress, not a failed attempt. Persist the
+                # cursor and let the next read continue.
+                _stamp_journal_cursor(msg, replay['cursor'])
+                try:
+                    session.save(touch_updated_at=False)
+                except Exception:
+                    logger.debug(
+                        "save() failed while advancing journal cursor for session %s",
+                        getattr(session, 'session_id', '?'),
+                        exc_info=True,
+                    )
+                return False
             if (
                 preserve_arriving_budget
                 and _journal_is_still_arriving(session, stream_id)
@@ -4035,13 +4077,18 @@ def _recover_dead_run_journal(session, stream_id: str | None) -> bool:
             # snapshot — dropping the stream id without ever replaying the output
             # that had just appeared. An empty snapshot is inconclusive by
             # definition, so it fails closed and keeps the key.
-            if not replay['events'] or replay['visible_output']:
+            if not replay['events'] or replay['visible_output'] or replay['truncated']:
                 marker = _build_recovery_marker_with_retry_hook(
                     recovered_output=False,
                     stream_id=stream_id,
                     pending_started_at=getattr(session, 'pending_started_at', None),
                 )
                 marker['_recovered_stream_id'] = stream_id
+                if replay['truncated'] and not replay['visible_output']:
+                    # A capped pass that read only metadata rows: the output or
+                    # terminal row lies beyond it. Keep the cursor so the retry
+                    # continues from here instead of re-reading the same rows.
+                    _stamp_journal_cursor(marker, replay['cursor'])
                 _stamp_marker_with_run_time(marker, replay['run_time'])
                 session.messages.append(marker)
                 return True
