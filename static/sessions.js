@@ -1848,6 +1848,19 @@ async function _switchProfileForSessionLoad(profile){
   const name=String(profile||'').trim();
   if(!name) throw new Error('missing profile');
   if(name===S.activeProfile) return;
+  // HWEB-97: revoke the old-profile lease before the switch cookie flips.
+  if(typeof window!=='undefined'&&window.HermesPresence&&typeof window.HermesPresence.reset==='function') window.HermesPresence.reset();
+  // Release the reset() suspension exactly once, so overlapping session-load
+  // switches keep it owned until the last one finishes (#HWEB-97).
+  let _presenceReleased=false;
+  const _releasePresence=(useRenew)=>{
+    if(_presenceReleased) return;
+    _presenceReleased=true;
+    if(typeof window!=='undefined'&&window.HermesPresence){
+      const fn=useRenew?window.HermesPresence.renew:window.HermesPresence.resume;
+      if(typeof fn==='function') fn.call(window.HermesPresence);
+    }
+  };
   if(typeof _invalidateSessionListRenders==='function') _invalidateSessionListRenders();
   if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(true);
   if(typeof showSessionListSkeleton==='function') showSessionListSkeleton(name);
@@ -1855,6 +1868,9 @@ async function _switchProfileForSessionLoad(profile){
     const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name}),timeoutToast:false});
     S.activeProfile=data.active||name;
     S.activeProfileIsDefault=!!data.is_default;
+    // New-profile cookie is set; release this switch's suspension so input during
+    // the trailing renders renews the destination profile (#HWEB-97).
+    _releasePresence(false);
     if(typeof _resetCronUnreadForProfileSwitch==='function'){
       _resetCronUnreadForProfileSwitch();
     }
@@ -1880,7 +1896,14 @@ async function _switchProfileForSessionLoad(profile){
     if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);
     _sessionListSkeletonActive=false;
     if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+    // reset() revoked the old-profile lease up front; the switch failed and we
+    // stayed on it, so re-establish presence (#HWEB-97). No-ops if a newer switch
+    // still owns the suspension.
+    _releasePresence(true);
     throw switchErr;
+  }finally{
+    // Safety net: release on any exit the success/catch paths did not cover.
+    _releasePresence(false);
   }
 }
 

@@ -10,6 +10,7 @@ import logging
 import os
 import queue
 import random
+import re
 import threading
 import time
 import urllib.error
@@ -32,6 +33,89 @@ logger = logging.getLogger(__name__)
 _publisher_lock = threading.RLock()
 _publisher_transition_lock = threading.Lock()
 _pairing_lock = threading.Lock()
+
+# HWEB-97: profile-scoped browser activity leases. A tab that received trusted
+# user input holds a lease for PRESENCE_LEASE_SECONDS after the server saw the
+# renewal; while any lease for a profile is fresh, that profile's published
+# transitions are stamped alertEligible=false so the phone stays quiet for the
+# person already looking at the screen. In-memory and bounded: a restart, an
+# evicted lease, or any lookup failure falls back to eligible.
+PRESENCE_LEASE_SECONDS = 90
+_PRESENCE_MAX_LEASES = 256
+_PRESENCE_TAB_RE = re.compile(r"[A-Za-z0-9_-]{8,64}")
+_presence_lock = threading.Lock()
+# Each entry is [expires_monotonic, last_seq, active]. A revoked lease is kept as
+# an inactive tombstone (not deleted) until it would have expired, so a late
+# lower-seq renewal that arrives after the revoke is rejected instead of
+# resurrecting the lease. Client seq is strictly increasing per tab.
+_presence: dict[tuple[str, str], list] = {}
+_presence_clock = time.monotonic
+
+
+def _prune_presence_locked(now: float) -> None:
+    for key in [key for key, entry in _presence.items() if entry[0] <= now]:
+        del _presence[key]
+
+
+def _apply_presence_locked(key: tuple[str, str], seq: int, active: bool, now: float) -> None:
+    _prune_presence_locked(now)
+    current = _presence.get(key)
+    if current is not None and seq <= current[1]:
+        return  # stale or replayed update; a newer one already won
+    _presence.pop(key, None)
+    if key not in _presence and len(_presence) >= _PRESENCE_MAX_LEASES:
+        # Insertion order is update recency, so evict the least-recent entry.
+        del _presence[next(iter(_presence))]
+    _presence[key] = [now + PRESENCE_LEASE_SECONDS, seq, active]
+
+
+def renew_presence(profile: str, tab_id: str, seq: int = 1) -> None:
+    now = _presence_clock()
+    with _presence_lock:
+        _apply_presence_locked((profile, tab_id), seq, True, now)
+
+
+def revoke_presence(profile: str, tab_id: str, seq: int = 1) -> None:
+    now = _presence_clock()
+    with _presence_lock:
+        _apply_presence_locked((profile, tab_id), seq, False, now)
+
+
+def profile_has_presence(profile: str) -> bool:
+    now = _presence_clock()
+    with _presence_lock:
+        _prune_presence_locked(now)
+        return any(key[0] == profile and entry[2] for key, entry in _presence.items())
+
+
+def update_presence(body: object, *, profile: str) -> dict[str, bool | int]:
+    """Renew or revoke one tab's lease. The server owns every timestamp."""
+    if not isinstance(body, dict):
+        raise RelayPairingError("Invalid presence request", status=400)
+    tab_id = body.get("tab_id")
+    active = body.get("active")
+    seq = body.get("seq")
+    if (
+        not isinstance(tab_id, str)
+        or not _PRESENCE_TAB_RE.fullmatch(tab_id)
+        or not isinstance(active, bool)
+        or not isinstance(seq, int)
+        or isinstance(seq, bool)
+        or not 0 <= seq <= 2 ** 53
+    ):
+        raise RelayPairingError("Invalid presence request", status=400)
+    profile = str(profile or "").strip()
+    if not profile:
+        raise RelayPairingError("Hermes profile is unavailable", status=403)
+    try:
+        profile = _canonical_profile(profile)
+    except Exception as exc:
+        raise RelayPairingError("Hermes profile is unavailable", status=403) from exc
+    if active:
+        renew_presence(profile, tab_id, seq)
+    else:
+        revoke_presence(profile, tab_id, seq)
+    return {"ok": True, "lease_seconds": PRESENCE_LEASE_SECONDS if active else 0}
 
 
 def _b64url(value: bytes) -> str:
@@ -405,6 +489,7 @@ class TalariaRelayPublisher:
         self._terminal_lock = threading.Lock()
         self._terminal: dict[str, dict] = {}
         self._disabled_profiles: set[str] = set()
+        self._alert_eligibility_supported = True
 
     @staticmethod
     def _load_key(path: Path) -> Ed25519PrivateKey:
@@ -526,6 +611,16 @@ class TalariaRelayPublisher:
         for sid, run in terminal.items():
             by_session.setdefault(sid, run)
 
+        # One decision per snapshot: every transition it carries was observed
+        # while the same lease state held.
+        alert_eligible = True
+        if self._alert_eligibility_supported:
+            try:
+                alert_eligible = not profile_has_presence(profile)
+            except Exception:
+                logger.debug("Failed reading presence state for Talaria", exc_info=True)
+                alert_eligible = True
+
         states = []
         for sid, run in by_session.items():
             try:
@@ -555,7 +650,7 @@ class TalariaRelayPublisher:
             if phase == "running" and str(run.get("phase") or "").endswith("starting"):
                 phase = "starting"
             event_id = f"snapshot:{revision}:{sid}"
-            states.append({
+            state = {
                 "sessionId": sid,
                 "streamId": str(run.get("stream_id") or "") or None,
                 "eventId": event_id,
@@ -564,7 +659,10 @@ class TalariaRelayPublisher:
                 "phase": phase,
                 "updatedAt": int(time.time() * 1_000),
                 "deepLink": f"/sessions/{urllib.parse.quote(sid, safe='')}",
-            })
+            }
+            if not alert_eligible:
+                state["alertEligible"] = False
+            states.append(state)
         if states:
             from api.paths import _atomic_write_text
 
@@ -614,6 +712,24 @@ class TalariaRelayPublisher:
 
     def _publish_profile_snapshot(self, profile: str, profile_id: str) -> None:
         states = self.build_states(profile)
+        try:
+            self._put_snapshot(profile_id, states)
+        except _RelayHTTPError as exc:
+            if exc.retryable or not any("alertEligible" in state for state in states):
+                raise
+            # A relay that predates the alertEligible contract rejects unknown
+            # state fields. Re-send the same transitions as eligible so alert
+            # delivery keeps working, and stop stamping until the next restart.
+            for state in states:
+                state.pop("alertEligible", None)
+            self._put_snapshot(profile_id, states)
+            self._alert_eligibility_supported = False
+            logger.warning(
+                "Talaria relay rejected alertEligible (HTTP %s); publishing alert-eligible snapshots only",
+                exc.status,
+            )
+
+    def _put_snapshot(self, profile_id: str, states: list[dict]) -> None:
         body = json.dumps(
             {"snapshotId": f"webui:{uuid.uuid4().hex}", "states": states},
             separators=(",", ":"),

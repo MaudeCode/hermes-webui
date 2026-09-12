@@ -7466,6 +7466,22 @@ async function switchToProfile(name) {
   // doesn't pre-check) can't flash a skeleton→restore for a click that changes
   // nothing. (#4662 Opus gate)
   if (name && name === S.activeProfile) return true;
+  // HWEB-97: revoke this tab's OLD-profile presence lease and clear the
+  // throttle before the switch cookie flips, so the destination profile is
+  // not silently muted and its first input renews immediately.
+  if (typeof window !== 'undefined' && window.HermesPresence && typeof window.HermesPresence.reset === 'function') window.HermesPresence.reset();
+  // Balance the reset() above with exactly one release on whichever exit runs
+  // first (success, failure, or supersession), so the reference-counted
+  // suspension stays owned across overlapping switches (#HWEB-97).
+  let _presenceReleased = false;
+  const _releasePresence = (useRenew) => {
+    if (_presenceReleased) return;
+    _presenceReleased = true;
+    if (typeof window !== 'undefined' && window.HermesPresence) {
+      const fn = useRenew ? window.HermesPresence.renew : window.HermesPresence.resume;
+      if (typeof fn === 'function') fn.call(window.HermesPresence);
+    }
+  };
   S._pendingSessionToolsets=null;
   // Profile switches are per-client cookie/TLS scoped, so a running stream in
   // the current session can safely continue while this tab moves to another
@@ -7553,6 +7569,11 @@ async function switchToProfile(name) {
     if (_switchGen !== _profileSwitchGeneration) return false;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    // The new-profile cookie is now set; release this switch's suspension so
+    // trusted input during the trailing session/list/workspace loads renews the
+    // destination profile instead of being ignored (#HWEB-97). The finally still
+    // releases on early-return/throw paths that never reach here.
+    _releasePresence(false);
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
@@ -7752,6 +7773,11 @@ async function switchToProfile(name) {
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       _sessionListSkeletonActive = false;
       if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
+      // The switch failed; reset() revoked the old-profile lease up front, so
+      // re-establish it — the tab is still on the original profile and the
+      // switch click was genuine presence (#HWEB-97). renew() no-ops if a newer
+      // switch still owns the suspension.
+      _releasePresence(true);
       if (_workspaceVisibleAtStart && S.session && S.session.workspace && typeof loadDir === 'function') {
         loadDir('.');
       } else if (_workspaceVisibleAtStart && typeof clearWorkspaceTreeSkeleton === 'function') {
@@ -7773,6 +7799,11 @@ async function switchToProfile(name) {
     if (_switchGen === _profileSwitchGeneration && typeof _setProfileSwitchListEmbargo === 'function') {
       _setProfileSwitchListEmbargo(false);
     }
+    // Safety net: release this switch's suspension on any exit the success/catch
+    // paths did not cover (early-return on supersession, a throw). NOT guarded by
+    // _switchGen — a superseded switch that called reset() must still release its
+    // own reference or the suspension would leak (#HWEB-97).
+    _releasePresence(false);
   }
 }
 
@@ -13558,9 +13589,21 @@ async function saveSettings(andClose){
 
 async function signOut(){
   try{
+    // Revoke this tab's presence lease while the session is still valid. After
+    // logout clears the cookies, the pagehide revoke would arrive unauthenticated
+    // and be rejected, leaving a fresh lease to mute the phone for up to 90s
+    // (#HWEB-97). reset() tracks the revoke in inflight; await it explicitly so
+    // it reaches the server before the session is invalidated.
+    if(typeof window!=='undefined'&&window.HermesPresence&&typeof window.HermesPresence.reset==='function'){
+      try{ await window.HermesPresence.reset(); }catch(_){}
+    }
     const response=await api('/api/auth/logout',{method:'POST',body:'{}'});
     window.location.href=response.trusted_logout_url||'login';
   }catch(e){
+    // Logout did not navigate away; restore the lease represented by the genuine
+    // Sign Out click (renew() also ends the suspension) so the still-authenticated,
+    // focused tab is not left without presence until the next input (#HWEB-97).
+    if(typeof window!=='undefined'&&window.HermesPresence&&typeof window.HermesPresence.renew==='function') window.HermesPresence.renew();
     showToast(t('sign_out_failed')+e.message);
   }
 }

@@ -55,6 +55,11 @@ async function api(path,opts={}){
     started.then(clear,clear);
     return started;
   }
+  // HWEB-97: the trusted click or keypress that starts a chat or answers an
+  // approval/clarification also renews the presence lease. Let that renewal
+  // land before the write it triggered, so the transition the write causes is
+  // never published as alert-eligible ahead of the lease that should mute it.
+  if(!isIdempotent&&typeof window!=='undefined'&&window.HermesPresence) await window.HermesPresence.settle();
   const conditional=opts.conditional===true;
   const timeoutMs=Object.prototype.hasOwnProperty.call(opts,'timeoutMs')?opts.timeoutMs:30000;
   const timeoutToast=opts.timeoutToast!==false;
