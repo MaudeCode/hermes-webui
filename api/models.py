@@ -2803,7 +2803,11 @@ def _marker_journal_cursor(marker: dict | None) -> dict | None:
         return None
     if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
         return None
-    return {'seq': seq, 'offset': offset}
+    cursor = {'seq': seq, 'offset': offset}
+    carry = marker.get('_journal_retry_carry')
+    if isinstance(carry, dict):
+        cursor['carry'] = carry
+    return cursor
 
 
 def _read_run_journal_window(session_id: str, stream_id: str, *, cursor: dict | None = None) -> dict:
@@ -2893,8 +2897,11 @@ def _replay_run_journal_windows(
     # rows earlier windows appended as pre-existing sidecar content.
     dedupe_state = _journal_dedupe_state(session)
     # Windows are artificial boundaries: text still open at the end of one is
-    # carried into the next and flushed once the pass is over.
+    # carried into the next, and across passes on the cursor, until a semantic
+    # boundary or the journal end flushes it.
     dedupe_state['defer_flush'] = True
+    if isinstance((cursor or {}).get('carry'), dict):
+        dedupe_state['carry'] = dict(cursor['carry'])
     for _ in range(_RECOVERY_JOURNAL_MAX_WINDOWS):
         journal = _read_run_journal_window(
             session.session_id, stream_id, cursor=result['cursor'],
@@ -2936,12 +2943,19 @@ def _replay_run_journal_windows(
         if not result['truncated']:
             break
     if dedupe_state.get('carry'):
-        dedupe_state['defer_flush'] = False
-        flushed = _append_journaled_partial_output(
-            session, stream_id, dedupe_existing=dedupe_existing,
-            journal={'events': []}, dedupe_state=dedupe_state,
-        )
-        result['recovered_output'] = result['recovered_output'] or flushed
+        if result['truncated']:
+            # The pass cap is as artificial as a window boundary: keep the
+            # open text on the cursor for the next pass instead of flushing
+            # a row that would split the turn and strip its whitespace.
+            result['cursor'] = dict(result['cursor'] or cursor or {'seq': 0, 'offset': 0})
+            result['cursor']['carry'] = dedupe_state['carry']
+        else:
+            dedupe_state['defer_flush'] = False
+            flushed = _append_journaled_partial_output(
+                session, stream_id, dedupe_existing=dedupe_existing,
+                journal={'events': []}, dedupe_state=dedupe_state,
+            )
+            result['recovered_output'] = result['recovered_output'] or flushed
     if terminal_events:
         result['terminal_state'] = _run_journal_terminal_state(
             session, stream_id, journal={'events': terminal_events},
@@ -3346,8 +3360,8 @@ def _append_journaled_partial_output(
         return False
 
     appended_any = False
-    assistant_parts: list[str] = list(carry.get('assistant_parts') or [])
-    reasoning_parts: list[str] = list(carry.get('reasoning_parts') or [])
+    assistant_parts: list[str] = [str(carry['assistant_text'])] if carry.get('assistant_text') else []
+    reasoning_parts: list[str] = [str(carry['reasoning_text'])] if carry.get('reasoning_text') else []
     assistant_started_at: float | None = carry.get('assistant_started_at')
     current_assistant_idx: int | None = None
     recovered_tool_calls: list[dict] = []
@@ -3635,8 +3649,8 @@ def _append_journaled_partial_output(
 
     if dedupe_state.get('defer_flush') and (assistant_parts or reasoning_parts):
         dedupe_state['carry'] = {
-            'assistant_parts': assistant_parts,
-            'reasoning_parts': reasoning_parts,
+            'assistant_text': ''.join(assistant_parts),
+            'reasoning_text': ''.join(reasoning_parts),
             'assistant_started_at': assistant_started_at,
         }
     else:
@@ -3765,12 +3779,21 @@ def _arm_journal_retry(marker: dict, stream_id: str, *, cursor: dict | None = No
 
 
 def _stamp_journal_cursor(marker: dict, cursor: dict | None) -> None:
+    marker.pop('_journal_retry_carry', None)
     if cursor is None:
         marker.pop('_journal_retry_after_seq', None)
         marker.pop('_journal_retry_offset', None)
         return
     marker['_journal_retry_after_seq'] = int(cursor.get('seq') or 0)
     marker['_journal_retry_offset'] = int(cursor.get('offset') or 0)
+    carry = cursor.get('carry')
+    if isinstance(carry, dict):
+        # Text still open at the pass cap. It rides on the marker until a
+        # semantic boundary, the journal end, or the marker settling flushes
+        # it, so an artificial boundary never splits a row.
+        # ponytail: the open fragment is unbounded in principle (a run of
+        # nothing but tokens); bound it if a marker ever grows large.
+        marker['_journal_retry_carry'] = carry
 
 
 def _strip_journal_retry_meta(marker: dict) -> None:
@@ -3780,6 +3803,51 @@ def _strip_journal_retry_meta(marker: dict) -> None:
     marker.pop('_journal_retry_first_seen_ts', None)
     marker.pop('_journal_retry_after_seq', None)
     marker.pop('_journal_retry_offset', None)
+    marker.pop('_journal_retry_carry', None)
+
+
+def _flush_journal_carry(session, stream_id: str | None, cursor: dict | None) -> bool:
+    """Materialize text a capped pass left open, when its marker settles."""
+    carry = (cursor or {}).get('carry')
+    if not stream_id or not isinstance(carry, dict):
+        return False
+    state = _journal_dedupe_state(session)
+    state['carry'] = carry
+    return _append_journaled_partial_output(
+        session, stream_id, journal={'events': []}, dedupe_state=state,
+    )
+
+
+def _reorder_context_tail_before_newer_turns(session, marker_idx: int, context_before: int) -> None:
+    """Move context rows appended after ``context_before`` ahead of the newer
+    user turns that follow ``marker_idx`` in ``messages``, so a late flush of an
+    old run never lands behind a prompt the user sent afterwards."""
+    context_messages = getattr(session, 'context_messages', None) or []
+    appended = context_messages[context_before:]
+    if not appended:
+        return
+    newer_users = [
+        m for m in (session.messages or [])[marker_idx + 1:]
+        if isinstance(m, dict) and m.get('role') == 'user'
+    ]
+    if not newer_users:
+        return
+    first_newer = _normalize_journal_recovery_text(newer_users[0].get('content'))
+    insert_at = None
+    for candidate_idx in range(context_before - 1, -1, -1):
+        candidate = context_messages[candidate_idx]
+        if (
+            isinstance(candidate, dict)
+            and candidate.get('role') == 'user'
+            and _normalize_journal_recovery_text(candidate.get('content')) == first_newer
+        ):
+            insert_at = candidate_idx
+            break
+    if insert_at is None:
+        return
+    session.context_messages = (
+        context_messages[:insert_at] + appended + context_messages[insert_at:context_before]
+    )
 
 
 def _reorder_journal_tail_above_marker(session, marker_idx: int) -> None:
@@ -3909,6 +3977,20 @@ def _retry_journal_recovery_in_place(
                 _INTERRUPTED_RECOVERED_WORDING if has_recovered_rows
                 else _INTERRUPTED_NEUTRAL_WORDING
             )
+            if crossed_user_turn or give_up:
+                # Settling without a replay: text a capped pass left open on
+                # the cursor is materialized first, so it is not lost with the
+                # retry meta. Its context projection must land before any
+                # newer user turn, never behind it.
+                context_before = len(getattr(session, 'context_messages', None) or [])
+                if _flush_journal_carry(session, stream_id, _marker_journal_cursor(msg)):
+                    _reorder_journal_tail_above_marker(session, idx)
+                    if crossed_user_turn:
+                        _reorder_context_tail_before_newer_turns(
+                            session, idx, context_before,
+                        )
+                    has_recovered_rows = True
+                    settled_wording = _INTERRUPTED_RECOVERED_WORDING
             if crossed_user_turn:
                 # A newer user turn was accepted after this marker. Recovering
                 # the old run's tail now would place its context projection
@@ -4033,6 +4115,9 @@ def _retry_journal_recovery_in_place(
                 return False
             next_attempts = attempts + 1
             if next_attempts >= _JOURNAL_RETRY_MAX_ATTEMPTS:
+                if _flush_journal_carry(session, stream_id, replay['cursor']):
+                    _reorder_journal_tail_above_marker(session, idx)
+                    settled_wording = _INTERRUPTED_RECOVERED_WORDING
                 msg['content'] = settled_wording
                 _strip_journal_retry_meta(msg)
             else:
@@ -4165,10 +4250,14 @@ def _recover_dead_run_journal(session, stream_id: str | None) -> bool:
                     pending_started_at=getattr(session, 'pending_started_at', None),
                 )
                 marker['_recovered_stream_id'] = stream_id
-                if replay['truncated'] and not replay['visible_output']:
-                    # A capped pass that read only metadata rows: the output or
-                    # terminal row lies beyond it. Keep the cursor so the retry
-                    # continues from here instead of re-reading the same rows.
+                if replay['truncated'] and (
+                    not replay['visible_output']
+                    or (replay['cursor'] or {}).get('carry')
+                ):
+                    # A capped pass that read only metadata rows, or whose
+                    # visible text is still open on the cursor: the rest lies
+                    # beyond it. Keep the cursor so the retry continues from
+                    # here instead of re-reading the same rows.
                     _stamp_journal_cursor(marker, replay['cursor'])
                 _stamp_marker_with_run_time(marker, replay['run_time'])
                 session.messages.append(marker)

@@ -673,6 +673,72 @@ def test_pending_turn_repair_walks_an_oversized_journal_too(monkeypatch):
     assert not [m for m in session.messages if m.get("type") == "interrupted"]
 
 
+def test_token_stream_keeps_its_whitespace_across_pass_caps(monkeypatch):
+    """The pass cap is as artificial as a window boundary.
+
+    Text still open when a pass ends rides on the marker's cursor and is
+    flushed only at a semantic boundary or the journal end, so a token stream
+    spanning several passes stays one row with its whitespace.
+    """
+    session_id = "hweb13_pass_whitespace"
+    stream_id = "hweb13_stream_pass_whitespace"
+    session = _dead_session(session_id, stream_id)
+    words = ["Hello", " world", " this", " is", " one", " row."]
+    for word in words:
+        append_run_event(session_id, stream_id, "token", {"text": word})
+    append_run_event(session_id, stream_id, "done", {})
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_BYTES", 420)
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_WINDOWS", 1)
+
+    assert _recover_dead_run_journal(session, stream_id) is True
+    marker = session.messages[-1]
+    assert marker["_pending_journal_recovery"] is True
+    assert marker["_journal_retry_carry"]["assistant_text"].startswith("Hello")
+    assert _visible(session) == []
+
+    for _ in range(len(words) + 2):
+        if not models._session_has_pending_journal_retry(session):
+            break
+        models._retry_journal_recovery_in_place(session)
+    assert _visible(session) == ["Hello world this is one row."]
+    assistant_context = [
+        m["content"] for m in session.context_messages if m.get("role") == "assistant"
+    ]
+    assert assistant_context == ["Hello world this is one row."]
+    assert not [m for m in session.messages if m.get("type") == "interrupted"]
+
+
+def test_open_text_is_flushed_when_the_marker_settles_behind_a_newer_turn(monkeypatch):
+    session_id = "hweb13_carry_settle"
+    stream_id = "hweb13_stream_carry_settle"
+    session = _dead_session(session_id, stream_id)
+    for word in ["Partial", " answer"]:
+        append_run_event(session_id, stream_id, "token", {"text": word})
+    append_run_event(session_id, stream_id, "token", {"text": " continues"})
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_BYTES", 420)
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_WINDOWS", 1)
+
+    assert _recover_dead_run_journal(session, stream_id) is True
+    assert _visible(session) == []
+    carried = session.messages[-1]["_journal_retry_carry"]["assistant_text"]
+    assert carried and "Partial answer continues".startswith(carried)
+
+    newer = {"role": "user", "content": "Next question", "timestamp": 5}
+    session.messages.append(newer)
+    session.context_messages.append(dict(newer))
+    assert models._retry_journal_recovery_in_place(session) is False
+
+    # The open text is materialized as it was carried, above the marker.
+    assert _visible(session) == [carried]
+    marker = next(m for m in session.messages if m.get("type") == "interrupted")
+    assert "_journal_retry_carry" not in marker
+    assert marker["content"] == models._INTERRUPTED_RECOVERED_WORDING
+    assert session.messages.index(marker) > session.messages.index(
+        next(m for m in session.messages if m.get("content") == carried)
+    )
+    assert session.context_messages[-1]["content"] == "Next question"
+
+
 def test_tool_completion_in_a_later_wave_settles_the_earlier_card():
     session_id = "hweb13_wave_tool"
     stream_id = "hweb13_stream_wave_tool"
