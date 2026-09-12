@@ -439,6 +439,80 @@ def test_sign_out_revokes_presence_before_logout():
     assert "await window.HermesPresence.reset()" in sign_out
 
 
+def test_switch_paths_release_presence_exactly_once():
+    panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    sessions = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    # Each switch reset() is balanced by a single guarded release helper, so the
+    # reference count stays owned across overlapping switches.
+    for src in (panels, sessions):
+        assert "_presenceReleased" in src
+        assert src.count("_releasePresence(false)") >= 2  # success + finally safety net
+        assert "_releasePresence(true)" in src            # failure rollback
+
+
+def test_presence_throttle_uses_a_monotonic_clock():
+    presence = (ROOT / "static" / "presence.js").read_text(encoding="utf-8")
+    assert "performance.now()" in presence
+    assert "a negative delta" in presence  # clock-skew fallback for Date.now()
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_overlapping_switches_keep_suspension_until_the_last_release():
+    harness = _TIMER_BOOT + r"""
+global.AbortController = class { constructor(){ this.signal = {}; } abort(){} };
+global.location = { href: 'http://x/' };
+global.performance = undefined;
+global.fetch = (url, opts) => { calls.push(JSON.parse(opts.body)); return Promise.resolve({ ok: true }); };
+global.window = { crypto:{ randomUUID:()=>'aaaaaaaabbbbccccddddeeeeeeeeeeee' }, AbortController: global.AbortController, addEventListener(){} };
+global.document = document;
+new Function('document','window','fetch','AbortController','setTimeout','clearTimeout',src)(
+  document, window, global.fetch, global.AbortController, global.setTimeout, global.clearTimeout
+);
+(async () => {
+  fire('keydown'); await runTimers(); await tick();   // lease held
+  const P = window.HermesPresence;
+  P.reset(); P.reset();                                // two overlapping switches
+  await runTimers(); await tick();
+  const base = calls.length;
+  fire('keydown'); await runTimers(); await tick();
+  const afterOneRelease = (P.resume(), calls.length);  // first switch done
+  fire('keydown'); await runTimers(); await tick();    // still suspended -> no renewal
+  const stillSuspended = calls.length;
+  P.resume();                                          // second (last) switch done
+  fire('keydown'); await runTimers(); await tick();    // now renews
+  const afterLastRelease = calls.length;
+  process.stdout.write(JSON.stringify({ base, stillSuspended, afterLastRelease }));
+})();
+"""
+    out = _run_presence_harness(harness)
+    assert out["stillSuspended"] == out["base"], "input must not renew while any switch is outstanding"
+    assert out["afterLastRelease"] == out["base"] + 1, "input renews once the last switch releases"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_backward_clock_jump_does_not_wedge_the_throttle():
+    harness = _TIMER_BOOT + r"""
+global.AbortController = class { constructor(){ this.signal = {}; } abort(){} };
+global.location = { href: 'http://x/' };
+global.performance = undefined;  // force the Date.now() fallback
+global.fetch = (url, opts) => { calls.push(JSON.parse(opts.body)); return Promise.resolve({ ok: true }); };
+global.window = { crypto:{ randomUUID:()=>'aaaaaaaabbbbccccddddeeeeeeeeeeee' }, AbortController: global.AbortController, addEventListener(){} };
+global.document = document;
+new Function('document','window','fetch','AbortController','setTimeout','clearTimeout',src)(
+  document, window, global.fetch, global.AbortController, global.setTimeout, global.clearTimeout
+);
+(async () => {
+  fire('keydown'); await runTimers(); await tick();   // renewal at now=100000
+  const base = calls.length;
+  now -= 50000;                                        // wall clock jumps backward
+  fire('keydown'); await runTimers(); await tick();    // negative delta -> renews anyway
+  process.stdout.write(JSON.stringify({ base, afterBackwardJump: calls.length }));
+})();
+"""
+    out = _run_presence_harness(harness)
+    assert out["afterBackwardJump"] == out["base"] + 1, "a backward clock jump must not wedge the throttle"
+
+
 def test_successful_switch_resumes_before_trailing_work_and_logout_rolls_back_with_renew():
     panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
     sessions = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
@@ -447,9 +521,9 @@ def test_successful_switch_resumes_before_trailing_work_and_logout_rolls_back_wi
     for src, marker in ((panels, "S.activeProfileIsDefault = !!data.is_default;"),
                         (sessions, "S.activeProfileIsDefault=!!data.is_default;")):
         after = src[src.index(marker) + len(marker):]
-        resume_at = after.index("window.HermesPresence.resume()")
-        # The very next presence call after the cookie is set is a resume().
-        assert "_resetCronUnreadForProfileSwitch" not in after[:resume_at] or resume_at < 400
+        release_at = after.index("_releasePresence(false)")
+        # The release fires right after the cookie is set, before the trailing work.
+        assert "_resetCronUnreadForProfileSwitch" not in after[:release_at] or release_at < 400
     # Logout rollback restores the click's lease via renew(), like a failed switch.
     sign_out = panels[panels.index("async function signOut()"):]
     sign_out = sign_out[: sign_out.index("async function", 1)]
@@ -461,13 +535,15 @@ def test_scope_change_suspends_and_resumes_renewals():
     panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
     sessions = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
     presence = (ROOT / "static" / "presence.js").read_text(encoding="utf-8")
-    # reset() suspends; onInput() bails while suspended; resume()/renew() clear it.
-    assert "suspended=true" in presence
-    assert "if(suspended) return;" in presence
-    assert "resume:function(){ suspended=false; }" in presence
-    # Both switch paths resume on every exit; logout rolls back with renew().
-    assert "window.HermesPresence.resume()" in panels
-    assert "window.HermesPresence.resume()" in sessions
+    # reset() increments a reference count; onInput() bails while it is >0;
+    # resume()/renew() decrement so only the last outstanding switch lifts it.
+    assert "suspendCount++" in presence
+    assert "if(suspendCount>0) return;" in presence
+    assert "resume:function(){ if(suspendCount>0) suspendCount--; }" in presence
+    # Both switch paths release the suspension via the once-guarded helper; logout
+    # rolls back with renew().
+    assert "_releasePresence" in panels
+    assert "_releasePresence" in sessions
     sign_out = panels[panels.index("async function signOut()"):]
     sign_out = sign_out[: sign_out.index("async function", 1)]
     assert "window.HermesPresence.renew()" in sign_out
@@ -476,8 +552,8 @@ def test_scope_change_suspends_and_resumes_renewals():
 def test_failed_profile_switch_restores_presence():
     panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
     sessions = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
-    assert "window.HermesPresence.renew()" in panels
-    assert "window.HermesPresence.renew()" in sessions
+    assert "_releasePresence(true)" in panels
+    assert "_releasePresence(true)" in sessions
 
 
 def test_presence_module_bounds_settlement_without_abortsignal_timeout():
@@ -752,6 +828,7 @@ global.window = {
   AbortController: global.AbortController,
   addEventListener(type, fn) { (winListeners[type] = winListeners[type] || []).push(fn); },
 };
+global.performance = undefined;
 global.document = document;
 new Function('document', 'window', 'fetch', 'AbortController', 'setTimeout', 'clearTimeout', src)(
   document, window, global.fetch, global.AbortController, global.setTimeout, global.clearTimeout

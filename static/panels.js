@@ -7470,6 +7470,18 @@ async function switchToProfile(name) {
   // throttle before the switch cookie flips, so the destination profile is
   // not silently muted and its first input renews immediately.
   if (typeof window !== 'undefined' && window.HermesPresence && typeof window.HermesPresence.reset === 'function') window.HermesPresence.reset();
+  // Balance the reset() above with exactly one release on whichever exit runs
+  // first (success, failure, or supersession), so the reference-counted
+  // suspension stays owned across overlapping switches (#HWEB-97).
+  let _presenceReleased = false;
+  const _releasePresence = (useRenew) => {
+    if (_presenceReleased) return;
+    _presenceReleased = true;
+    if (typeof window !== 'undefined' && window.HermesPresence) {
+      const fn = useRenew ? window.HermesPresence.renew : window.HermesPresence.resume;
+      if (typeof fn === 'function') fn.call(window.HermesPresence);
+    }
+  };
   S._pendingSessionToolsets=null;
   // Profile switches are per-client cookie/TLS scoped, so a running stream in
   // the current session can safely continue while this tab moves to another
@@ -7557,11 +7569,11 @@ async function switchToProfile(name) {
     if (_switchGen !== _profileSwitchGeneration) return false;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
-    // The new-profile cookie is now set; end the presence suspension immediately
-    // so trusted input during the trailing session/list/workspace loads renews the
+    // The new-profile cookie is now set; release this switch's suspension so
+    // trusted input during the trailing session/list/workspace loads renews the
     // destination profile instead of being ignored (#HWEB-97). The finally still
-    // resumes on early-return/throw paths that never reach here.
-    if (typeof window !== 'undefined' && window.HermesPresence && typeof window.HermesPresence.resume === 'function') window.HermesPresence.resume();
+    // releases on early-return/throw paths that never reach here.
+    _releasePresence(false);
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
@@ -7763,8 +7775,9 @@ async function switchToProfile(name) {
       if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
       // The switch failed; reset() revoked the old-profile lease up front, so
       // re-establish it — the tab is still on the original profile and the
-      // switch click was genuine presence (#HWEB-97).
-      if (typeof window !== 'undefined' && window.HermesPresence && typeof window.HermesPresence.renew === 'function') window.HermesPresence.renew();
+      // switch click was genuine presence (#HWEB-97). renew() no-ops if a newer
+      // switch still owns the suspension.
+      _releasePresence(true);
       if (_workspaceVisibleAtStart && S.session && S.session.workspace && typeof loadDir === 'function') {
         loadDir('.');
       } else if (_workspaceVisibleAtStart && typeof clearWorkspaceTreeSkeleton === 'function') {
@@ -7786,10 +7799,11 @@ async function switchToProfile(name) {
     if (_switchGen === _profileSwitchGeneration && typeof _setProfileSwitchListEmbargo === 'function') {
       _setProfileSwitchListEmbargo(false);
     }
-    // End the presence suspension reset() opened for this switch (the latest
-    // switch owns cleanup, matching the embargo guard above). renew() in the
-    // catch already resumed on failure; this covers success and superseding.
-    if (_switchGen === _profileSwitchGeneration && typeof window !== 'undefined' && window.HermesPresence && typeof window.HermesPresence.resume === 'function') window.HermesPresence.resume();
+    // Safety net: release this switch's suspension on any exit the success/catch
+    // paths did not cover (early-return on supersession, a throw). NOT guarded by
+    // _switchGen — a superseded switch that called reset() must still release its
+    // own reference or the suspension would leak (#HWEB-97).
+    _releasePresence(false);
   }
 }
 
