@@ -445,7 +445,7 @@
     <div id="mainChat" class="main-view composer-hero">
     <div class="chat-header">
       <div class="chat-header-text">
-        <h1 class="chat-header-title" id="topbarTitle" data-empty="New conversation"></h1>
+        <h1 class="chat-header-title" id="topbarTitle"></h1>
         <div class="chat-header-meta" id="topbarMeta"></div>
         <div class="chat-context">
           <button type="button" class="chat-context-item chat-context-profile" data-src="#titlebarProfileLabel" data-open="titlebarProfileBtn" hidden></button>
@@ -471,7 +471,7 @@
         <h2 class="empty-hero-title" id="emptyHeroTitle"></h2>
       </div>
       <div class="messages-inner" id="msgInner"></div>
-      <script>(function(){try{var m=(location.pathname||'').match(/\/session\/([^\/?#]+)/),sid=m?m[1]:(localStorage.getItem('hermes-webui-session')||'');if(!sid)return;var raw=localStorage.getItem('hermes-boot:transcript');if(!raw)return;var snap=JSON.parse(raw);if(!snap||snap.sid!==sid)return;var html=document.documentElement,inner=document.getElementById('msgInner');if(snap.html){inner.innerHTML=snap.html;}inner.dataset.bootSnapshot=sid;var t=document.getElementById('topbarTitle');if(t&&snap.title)t.textContent=snap.title;var ctx=snap.ctx||{};['profile','model','effort','workspace'].forEach(function(k){var b=document.querySelector('.chat-context-'+k);if(b&&ctx[k]){b.textContent=ctx[k];b.hidden=false;}});if(Object.keys(ctx).length)html.classList.add('has-ctx-cache');if(snap.rows>0){html.dataset.sessionBoot='1';html.classList.add('boot-session');}else{delete html.dataset.sessionBoot;html.classList.remove('boot-session');}var sc=inner.closest('.messages');if(sc&&snap.rows>0){requestAnimationFrame(function(){sc.scrollTop=sc.scrollHeight;});}}catch(e){}})();</script>
+      <script>(function(){try{var m=(location.pathname||'').match(/\/session\/([^\/?#]+)/),sid=m?m[1]:(localStorage.getItem('hermes-webui-session')||'');if(!sid)return;var raw=localStorage.getItem('hermes-boot:transcript');if(!raw)return;var snap=JSON.parse(raw);if(!snap||snap.sid!==sid)return;var html=document.documentElement,inner=document.getElementById('msgInner');if(snap.html){inner.innerHTML=snap.html;}inner.dataset.bootSnapshot=sid;var t=document.getElementById('topbarTitle');if(t&&snap.title)t.textContent=snap.title;var hh=document.getElementById('emptyHeroTitle');if(hh&&snap.hero&&!(snap.rows>0)){hh.textContent=snap.hero;hh.classList.add('ready');}var ctx=snap.ctx||{};['profile','model','effort','workspace'].forEach(function(k){var b=document.querySelector('.chat-context-'+k);if(b&&ctx[k]){b.textContent=ctx[k];b.hidden=false;}});if(Object.keys(ctx).length)html.classList.add('has-ctx-cache');if(snap.rows>0){html.dataset.sessionBoot='1';html.classList.add('boot-session');}else{delete html.dataset.sessionBoot;html.classList.remove('boot-session');}var sc=inner.closest('.messages');if(sc&&snap.rows>0){requestAnimationFrame(function(){sc.scrollTop=sc.scrollHeight;});}}catch(e){}})();</script>
       <div id="liveRunStatus" hidden></div>
       <div id="a11yAnnouncer" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
       <div id="liveCompressionCards" class="live-compression-cards"></div>

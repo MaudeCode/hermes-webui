@@ -7954,8 +7954,6 @@ html.hub-active .layout .sidebar .resize-handle{display:none;}
 .chat-header{display:flex;align-items:center;gap:12px;min-height:48px;padding:8px 20px;border-bottom:1px solid var(--border);flex-shrink:0;}
 .chat-header-text{min-width:0;flex:1;display:flex;flex-direction:column;gap:1px;}
 .chat-header-title{margin:0;font-size:14px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.chat-header-title:empty::before{content:attr(data-empty);color:var(--muted);font-weight:500;}
-html[data-session-boot="1"] .chat-header-title:empty::before{content:"";}
 .chat-header-meta{font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .chat-header-meta:empty{display:none;}
 .chat-header .app-titlebar-profile{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 10px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface);color:var(--text);font-size:12.5px;font-weight:500;cursor:pointer;transition:background var(--dur) var(--ease);}
@@ -8195,4 +8193,6 @@ html.booting.has-ctx-cache .chat-context{visibility:visible;}
 html.booting:not(.boot-session) #mainChat::after{flex-grow:1!important;}
 html.booting:not(.boot-session) #mainChat .composer-wrap{background:transparent!important;}
 html.booting:not(.boot-session) .empty-state{display:flex!important;}
+/* Hero text restored from the snapshot is final: no fade, no rewrite */
+html.booting .empty-hero-title.ready{opacity:1;transition:none;}
 /* REDESIGN-LAYER-END */

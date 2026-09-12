@@ -376,8 +376,10 @@
     const ctx = {};
     document.querySelectorAll('.chat-context-item').forEach(b => { const k = b.className.match(/chat-context-(\w+)/); if (k && !b.hidden && b.textContent) ctx[k[1]] = b.textContent; });
     const title = (document.getElementById('topbarTitle') || {}).textContent || '';
+    const heroEl = document.getElementById('emptyHeroTitle');
+    const hero = (heroEl && heroEl.classList.contains('ready')) ? heroEl.textContent : '';
     const html = rows ? inner.innerHTML : '';
-    const snap = { sid, rows, title, ctx, html: html.length < LIMIT ? html : '', ts: Date.now() };
+    const snap = { sid, rows, title, hero, ctx, html: html.length < LIMIT ? html : '', ts: Date.now() };
     try { localStorage.setItem(TRANSCRIPT_KEY, JSON.stringify(snap)); } catch (e) { /* quota */ }
   }
   let sbTimer = null, trTimer = null;
@@ -402,24 +404,27 @@
     window.addEventListener('pagehide', () => { saveSidebarSnapshot(); saveTranscriptSnapshot(); });
   }
 
-  // A conversation with no session yet is titled "New conversation", not the
-  // assistant's name; the app writes the name when S.session is null.
-  function mountNewChatTitle() {
-    const title = document.getElementById('topbarTitle');
-    if (!title) return;
-    const label = () => (typeof t === 'function' && t('new_conversation') !== 'new_conversation') ? t('new_conversation') : 'New conversation';
-    const fix = () => {
-      let noSession = false, name = '';
-      try { noSession = (typeof S !== 'undefined' && S) ? !S.session : false; } catch (e) { noSession = false; }
-      try { name = (typeof assistantDisplayName === 'function') ? assistantDisplayName() : ''; } catch (e) { name = ''; }
-      if (noSession && name && title.textContent === name) title.textContent = label();
+  // During boot the sidebar shows its snapshot; app renders are deferred and
+  // collapsed into one at release, so intermediate lists (server list without
+  // the unsaved current session, counts not yet known) never paint.
+  let sidebarRenderPending = false, sidebarRenderOrig = null;
+  function mountDeferredSidebarRender() {
+    const orig = window.renderSessionList;
+    if (typeof orig !== 'function' || orig._hubDeferred) return;
+    sidebarRenderOrig = orig;
+    const wrapped = function () {
+      if (document.documentElement.classList.contains('booting') && document.getElementById('sessionList')?.dataset.bootSnapshot) {
+        sidebarRenderPending = true;
+        return Promise.resolve();
+      }
+      return orig.apply(this, arguments);
     };
-    new MutationObserver(fix).observe(title, { childList: true, characterData: true, subtree: true });
-    fix();
+    wrapped._hubDeferred = true;
+    window.renderSessionList = wrapped;
   }
 
   function init() {
-    mountNewChatTitle();
+    mountDeferredSidebarRender();
     mountEmptyMemo();
     mountBootSnapshots();
     // Sidebar skeleton from the first frame; the real list replaces it.
@@ -451,6 +456,7 @@
     document.documentElement.classList.remove('booting');
     document.documentElement.classList.remove('boot-session');
     // Safety net: snapshots are inert only until the app paints; never leave them inert.
+    if (sidebarRenderPending && sidebarRenderOrig) { sidebarRenderPending = false; try { void sidebarRenderOrig(); } catch (e) { /* app decides */ } }
     ['sessionList', 'msgInner'].forEach(id => { const el = document.getElementById(id); if (el) delete el.dataset.bootSnapshot; });
     const pending = window.__hermesPendingSid;
     if (pending) { window.__hermesPendingSid = null; if (typeof loadSession === 'function') { try { loadSession(pending); } catch (e) { /* app decides */ } } }
