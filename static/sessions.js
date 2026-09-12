@@ -2614,6 +2614,13 @@ async function loadSession(sid){
 
   // Clear the in-flight session marker now that this load has completed (#1060).
   if (_isCurrentLoad()) _loadingSessionId = null;
+  // An empty session never paints a transcript row, so nothing replaces the
+  // "Loading conversation..." placeholder written above; drop it here so the
+  // empty state is the only thing on screen.
+  if (_isCurrentLoad() && !(Array.isArray(S.messages) && S.messages.length)) {
+    const _emptyInner = $('msgInner');
+    if (_emptyInner && !_emptyInner.querySelector('.msg-row')) _emptyInner.innerHTML = '';
+  }
 
   // Re-acknowledge the visit after the async message-load gap. A deferred
   // sidebar /api/sessions poll can land while _ensureMessagesLoaded is in

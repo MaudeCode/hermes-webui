@@ -30,6 +30,11 @@ function showConversationEmptyState(){
   try{ delete document.documentElement.dataset.sessionBoot; }catch(_){}
   const empty=$('emptyState');
   if(empty) empty.style.display='';
+  // The empty state owns the pane: drop any load/404 placeholder text that a
+  // loadSession() attempt left in the transcript container (an unsaved new
+  // conversation reloads to a 404 and lands here).
+  const _inner=$('msgInner');
+  if(_inner && !_inner.querySelector('.msg-row')) _inner.innerHTML='';
   _setComposerHero(true);
   // Re-resolve the workspace-aware headline for the conversation we just landed on.
   if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
