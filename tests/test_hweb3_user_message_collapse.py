@@ -7,15 +7,22 @@ what get exercised:
   * width — a user row may use up to ~80% of the shared reading column
     (`--msg-max`), not the old 60%, and never escapes it;
   * disclosure — a message over 600 characters *or* over 8 lines renders
-    clipped behind a keyboard-reachable toggle that flips ``aria-expanded``;
-    a shorter one gets no control at all; and toggling never moves the
-    transcript's scroll offset.
+    visually clipped behind a keyboard-reachable action button whose accessible
+    name flips between "Show full message visually" and "Show less of message
+    visually" (HWEB-67: the clip is CSS-only, the full text is always in the
+    accessibility tree, so the control must not claim ``aria-expanded`` /
+    ``aria-controls``, nor be an ``aria-pressed`` toggle, whose name may not
+    change); a shorter one gets no control at all; and toggling never moves
+    the transcript's scroll offset.
 
 The 600-char / 8-line boundary is asserted on both sides (599 vs 601, 8 lines
 vs 9 lines) because an off-by-one there is the whole contract.
 """
 
 from __future__ import annotations
+
+import pathlib
+import re
 
 import pytest
 
@@ -46,7 +53,7 @@ _SETUP_JS = """
     // Render through the shipped user-message renderer so line breaks, markdown
     // and escaping match production exactly.
     row.innerHTML = window._userMessageBodyHtml(
-      window._getCachedRender(text, true), text, rawIdx, false);
+      window._getCachedRender(text, true), text, false);
     return row;
   };
   // The disclosure store is scoped by session_id, so give the page a session.
@@ -81,9 +88,12 @@ _MEASURE_JS = """
     out[name] = {
       hasToggle: !!btn,
       label: btn ? btn.textContent.trim() : null,
-      ariaExpanded: btn ? btn.getAttribute('aria-expanded') : null,
-      // aria-controls must actually resolve, or the toggle announces nothing.
-      controlsResolves: !!(btn && document.getElementById(btn.getAttribute('aria-controls'))),
+      ariaLabel: btn ? btn.getAttribute('aria-label') : null,
+      // The clip is visual-only, so the control must not claim a disclosure or
+      // a state: it is an action button, and only its name changes.
+      claimsState: !!(btn && (btn.hasAttribute('aria-expanded') || btn.hasAttribute('aria-controls') || btn.hasAttribute('aria-pressed'))),
+      // Nothing in the clip is hidden from assistive tech.
+      hiddenFromAT: !!(clip && clip.querySelector('[aria-hidden="true"], [hidden]')),
       clipHeight: clip ? clip.getBoundingClientRect().height : null,
       scrollHeight: clip ? clip.scrollHeight : null,
       rowWidth: row.getBoundingClientRect().width,
@@ -115,14 +125,14 @@ _TOGGLE_JS = """
     scrollTop: msgs.scrollTop,
     rowTop: row.getBoundingClientRect().top,
     clipHeight: clip.getBoundingClientRect().height,
-    aria: btn.getAttribute('aria-expanded'),
+    ariaLabel: btn.getAttribute('aria-label'),
   };
   btn.click();
   const expanded = {
     scrollTop: msgs.scrollTop,
     rowTop: row.getBoundingClientRect().top,
     clipHeight: clip.getBoundingClientRect().height,
-    aria: btn.getAttribute('aria-expanded'),
+    ariaLabel: btn.getAttribute('aria-label'),
     label: btn.textContent.trim(),
     rowExpanded: row.dataset.msgExpanded || '',
     stored: window._userMessageIsExpanded(window._userMessageExpandIdentity(text, 0)),
@@ -133,7 +143,7 @@ _TOGGLE_JS = """
     scrollTop: msgs.scrollTop,
     rowTop: row.getBoundingClientRect().top,
     clipHeight: clip.getBoundingClientRect().height,
-    aria: btn.getAttribute('aria-expanded'),
+    ariaLabel: btn.getAttribute('aria-label'),
     label: btn.textContent.trim(),
     rowExpanded: row.dataset.msgExpanded || '',
     stored: window._userMessageIsExpanded(window._userMessageExpandIdentity(text, 0)),
@@ -142,6 +152,22 @@ _TOGGLE_JS = """
   return { before, expanded, collapsed };
 }
 """
+
+
+def test_every_locale_keeps_the_visible_label_inside_the_accessible_name():
+    """WCAG 2.5.3 Label in Name: aria-label replaces the button's name, so each
+    locale's *_visually string must contain its visible show_*_message text
+    verbatim or voice-control users cannot target the control by what they see."""
+    src = (pathlib.Path(__file__).resolve().parent.parent / "static" / "i18n.js").read_text(encoding="utf-8")
+    blocks = [(m.start(), m.group(1)) for m in re.finditer(r"^  '?([a-zA-Z-]+)'?: \{$", src, re.M)]
+    assert len(blocks) >= 15, [b[1] for b in blocks]
+    for i, (start, name) in enumerate(blocks):
+        block = src[start:blocks[i + 1][0] if i + 1 < len(blocks) else len(src)]
+        for key in ("show_full_message", "show_less_message"):
+            visible = re.search(rf"^    {key}: '(.*)',$", block, re.M)
+            accessible = re.search(rf"^    {key}_visually: '(.*)',$", block, re.M)
+            assert visible and accessible, (name, key)
+            assert visible.group(1) in accessible.group(1), (name, key, visible.group(1), accessible.group(1))
 
 
 def _page(viewport_width: int):
@@ -194,19 +220,20 @@ def test_short_messages_get_no_disclosure_control():
         assert m[name]["clipHeight"] is None, (name, m[name])
 
 
-def test_long_messages_collapse_with_an_aria_expanded_control():
+def test_long_messages_collapse_behind_a_named_action_button():
     m = _measure([("c601", _601), ("l9", _9_LINES)])
     for name in ("c601", "l9"):
         probe = m[name]
         assert probe["hasToggle"] is True, (name, probe)
-        assert probe["ariaExpanded"] == "false", (name, probe)
-        assert probe["controlsResolves"] is True, (name, probe)
+        assert probe["ariaLabel"] == "Show full message visually", (name, probe)
+        assert probe["claimsState"] is False, (name, probe)
+        assert probe["hiddenFromAT"] is False, (name, probe)
         assert probe["label"], (name, probe)
         # Clipped: the rendered box is shorter than the content it holds.
         assert probe["clipHeight"] < probe["scrollHeight"] - 1, (name, probe)
 
 
-def test_toggle_flips_aria_expanded_and_holds_the_scroll_offset():
+def test_toggle_flips_the_accessible_name_and_holds_the_scroll_offset():
     playwright, browser, page = _page(1440)
     try:
         r = page.evaluate(_TOGGLE_JS, _601)
@@ -214,15 +241,16 @@ def test_toggle_flips_aria_expanded_and_holds_the_scroll_offset():
         browser.close()
         playwright.stop()
 
-    assert r["before"]["aria"] == "false", r
-    assert r["expanded"]["aria"] == "true", r
-    assert r["collapsed"]["aria"] == "false", r
+    assert r["before"]["ariaLabel"] == "Show full message visually", r
     assert r["expanded"]["rowExpanded"] == "1", r
     assert r["collapsed"]["rowExpanded"] == "", r
     # The owning store, not just the DOM row, tracks the state.
     assert r["expanded"]["stored"] is True, r
     assert r["collapsed"]["stored"] is False, r
     assert r["expanded"]["label"] != r["collapsed"]["label"], r
+    # Accessible name moves with the pressed state, not just the visible text.
+    assert r["expanded"]["ariaLabel"] == "Show less of message visually", r
+    assert r["collapsed"]["ariaLabel"] == "Show full message visually", r
 
     # The content really opened and closed again.
     assert r["expanded"]["clipHeight"] > r["before"]["clipHeight"] + 1, r
@@ -292,7 +320,7 @@ _RERENDER_JS = """
   const first = window.__hweb3Row(text, 7001);
   inner.appendChild(first);
   first.querySelector('.msg-expand-btn').click();
-  const afterToggle = first.querySelector('.msg-expand-btn').getAttribute('aria-expanded');
+  const afterToggle = first.querySelector('.msg-expand-btn').getAttribute('aria-label');
 
   inner.innerHTML = '';
   const rebuilt = document.createElement('div');
@@ -301,13 +329,13 @@ _RERENDER_JS = """
   rebuilt.dataset.msgExpandKey = window._userMessageExpandIdentity(text, 0);
   const expanded = window._userMessageIsExpanded(window._userMessageExpandIdentity(text, 0));
   rebuilt.innerHTML = window._userMessageBodyHtml(
-    window._getCachedRender(text, true), text, 7001, expanded);
+    window._getCachedRender(text, true), text, expanded);
   if (expanded) rebuilt.dataset.msgExpanded = '1';
   inner.appendChild(rebuilt);
   const btn = rebuilt.querySelector('.msg-expand-btn');
   const clip = rebuilt.querySelector('.msg-clip');
   const rebuiltState = {
-    aria: btn.getAttribute('aria-expanded'),
+    ariaLabel: btn.getAttribute('aria-label'),
     i18nKey: btn.getAttribute('data-i18n'),
     clipHeight: clip.getBoundingClientRect().height,
     contentHeight: clip.scrollHeight,
@@ -355,10 +383,10 @@ def test_expansion_survives_a_rebuild_and_is_released_on_session_switch():
         browser.close()
         playwright.stop()
 
-    assert r["afterToggle"] == "true", r
+    assert r["afterToggle"] == "Show less of message visually", r
     # Rebuilt from scratch, it comes back open — not silently re-collapsed.
-    assert r["rebuiltState"]["aria"] == "true", r
     assert r["rebuiltState"]["i18nKey"] == "show_less_message", r
+    assert r["rebuiltState"]["ariaLabel"] == "Show less of message visually", r
     assert r["rebuiltState"]["clipHeight"] >= r["rebuiltState"]["contentHeight"] - 1, r
     # Reader intent is not a measurement: dropping the height/render caches, which
     # ordinary transcript churn does on a stream settle, must not erase it.
@@ -391,7 +419,7 @@ _FOCUS_JS = r"""
   clip.appendChild(link);
   const btn = row.querySelector('.msg-expand-btn');
   const before = {
-    aria: btn.getAttribute('aria-expanded'),
+    ariaLabel: btn.getAttribute('aria-label'),
     linkTop: link.getBoundingClientRect().top,
     clipBottom: clip.getBoundingClientRect().bottom,
   };
@@ -399,7 +427,7 @@ _FOCUS_JS = r"""
   return {
     before,
     after: {
-      aria: btn.getAttribute('aria-expanded'),
+      ariaLabel: btn.getAttribute('aria-label'),
       focused: document.activeElement === link,
       linkVisible: link.getBoundingClientRect().bottom
         <= clip.getBoundingClientRect().bottom + 1,
@@ -419,10 +447,59 @@ def test_focusing_a_clipped_control_opens_the_message():
 
     # Precondition: the link really did start below the visible preview.
     assert r["before"]["linkTop"] > r["before"]["clipBottom"] + 1, r
-    assert r["before"]["aria"] == "false", r
-    assert r["after"]["aria"] == "true", r
+    assert r["before"]["ariaLabel"] == "Show full message visually", r
+    # Same choke point as a click: the name moves with the visual state.
+    assert r["after"]["ariaLabel"] == "Show less of message visually", r
     assert r["after"]["focused"] is True, r
     assert r["after"]["linkVisible"] is True, r
+
+
+def test_collapsed_message_is_a_named_button_with_its_full_text_in_the_tree():
+    """HWEB-67: the accessibility tree must carry the whole message while the
+    clip is collapsed, and the control must read as a plain button whose name
+    a keyboard user can flip with Enter/Space -- no expanded/pressed claim."""
+    playwright, browser, page = _page(1440)
+    try:
+        page.evaluate(
+            """
+            (text) => {
+              const inner = document.getElementById('msgInner');
+              inner.innerHTML = '';
+              const row = window.__hweb3Row(text, 7500);
+              row.id = 'probeA11y';
+              inner.appendChild(row);
+            }
+            """,
+            _9_LINES,
+        )
+        row = page.locator("#probeA11y")
+        btn = row.get_by_role("button", name="Show full message visually")
+        assert btn.count() == 1
+        assert btn.get_attribute("aria-pressed") is None
+        assert btn.get_attribute("aria-expanded") is None
+        assert btn.get_attribute("aria-controls") is None
+        # Every line, including the ninth that is visually clipped, is exposed.
+        snapshot = row.aria_snapshot()
+        for i in range(9):
+            assert f"line {i}" in snapshot, (i, snapshot)
+        assert "Show full message visually" in snapshot, snapshot
+
+        # Keyboard path: reach the control, press it, press it again.
+        btn.focus()
+        page.keyboard.press("Enter")
+        pressed = row.get_by_role("button", name="Show less of message visually")
+        assert pressed.count() == 1, row.aria_snapshot()
+        assert pressed.get_attribute("aria-pressed") is None
+        assert page.evaluate("() => document.getElementById('probeA11y').dataset.msgExpanded") == "1"
+        page.keyboard.press("Space")
+        assert btn.count() == 1, row.aria_snapshot()
+        assert page.evaluate("() => document.getElementById('probeA11y').dataset.msgExpanded || ''") == ""
+        # Still nothing hidden from AT in either state.
+        for i in range(9):
+            assert f"line {i}" in row.aria_snapshot(), i
+    finally:
+        browser.close()
+        playwright.stop()
 
 
 _LOCALE_JS = """
@@ -437,13 +514,15 @@ _LOCALE_JS = """
   const original = window.t('show_full_message');
   window.LOCALES.__hweb3test = Object.assign({}, window.LOCALES.en, {
     _lang: 'en', show_full_message: 'HWEB3_TRANSLATED',
+    show_full_message_visually: 'HWEB3_TRANSLATED_ARIA',
   });
   window.setLocale('__hweb3test');
   window.applyLocaleToDOM();
   const after = btn.textContent.trim();
+  const afterAria = btn.getAttribute('aria-label');
   window.setLocale('en');
   window.applyLocaleToDOM();
-  return { before, after, restored: btn.textContent.trim(), original };
+  return { before, after, afterAria, restored: btn.textContent.trim(), original };
 }
 """
 
@@ -457,6 +536,7 @@ def test_locale_change_retranslates_an_already_rendered_control():
         playwright.stop()
     assert r["before"] == r["original"], r
     assert r["after"] == "HWEB3_TRANSLATED", r
+    assert r["afterAria"] == "HWEB3_TRANSLATED_ARIA", r
     assert r["restored"] == r["original"], r
 
 
