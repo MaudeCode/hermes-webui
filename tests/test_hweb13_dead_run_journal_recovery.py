@@ -590,6 +590,41 @@ def test_rewound_offset_over_a_long_covered_prefix_keeps_advancing(monkeypatch):
     assert not [m for m in session.messages if m.get("type") == "interrupted"]
 
 
+def test_final_row_without_its_newline_is_still_recovered():
+    """A writer that crashed after its last row but before the newline.
+
+    The tail reader accepted such a row; the forward reader must too, or the
+    cursor sits before it forever and a final token or terminal event is lost.
+    If the newline arrives later, the next window steps over it.
+    """
+    from api.run_journal import _run_path
+
+    session_id = "hweb13_unterminated"
+    stream_id = "hweb13_stream_unterminated"
+    session = _dead_session(session_id, stream_id)
+    append_run_event(session_id, stream_id, "interim_assistant", {"text": "Before the crash."})
+    append_run_event(session_id, stream_id, "token", {"text": "Final tok"})
+    path = _run_path(session_id, stream_id)
+    raw = path.read_bytes()
+    assert raw.endswith(b"\n")
+    path.write_bytes(raw[:-1])
+
+    assert _recover_dead_run_journal(session, stream_id) is True
+    assert _visible(session) == ["Before the crash.", "Final tok"]
+    marker = session.messages[-1]
+    assert marker["_pending_journal_recovery"] is True
+    assert marker["_journal_retry_after_seq"] == 2
+
+    # The newline lands after all, followed by the rest of the run.
+    with path.open("ab") as fh:
+        fh.write(b"\n")
+    append_run_event(session_id, stream_id, "token", {"text": "en."})
+    append_run_event(session_id, stream_id, "done", {})
+    assert models._retry_journal_recovery_in_place(session) is True
+    assert _visible(session) == ["Before the crash.", "Final tok", "en."]
+    assert not [m for m in session.messages if m.get("type") == "interrupted"]
+
+
 def test_tool_completion_in_a_later_wave_settles_the_earlier_card():
     session_id = "hweb13_wave_tool"
     stream_id = "hweb13_stream_wave_tool"

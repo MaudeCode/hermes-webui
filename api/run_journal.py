@@ -781,7 +781,15 @@ def read_run_event_window(
                 start = 0
             if start:
                 fh.seek(start - 1)
-                if fh.read(1) != b"\n":
+                boundary = fh.read(2)
+                if boundary[:1] == b"\n":
+                    fh.seek(start)
+                elif boundary[1:2] == b"\n":
+                    # The previous window consumed an unterminated final row
+                    # whose newline has since been written: step over it.
+                    start += 1
+                    fh.seek(start)
+                else:
                     start = 0
                     fh.seek(0)
             raw = fh.read(byte_limit)
@@ -798,9 +806,25 @@ def read_run_event_window(
 
     end = raw.rfind(b"\n")
     lines = raw[: end + 1].split(b"\n")[:-1] if end >= 0 else []
+    suffix = raw[end + 1 :]
+    unterminated_row = None
+    if suffix.strip() and start + len(raw) >= size:
+        # The file ends without a newline. A writer that crashed after its
+        # final row was written but before the newline leaves exactly this
+        # shape, and the tail reader accepts it; a row still being written is
+        # not valid JSON yet and stays unconsumed.
+        try:
+            candidate = json.loads(suffix.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            candidate = None
+        if isinstance(candidate, dict):
+            unterminated_row = suffix
+            lines.append(suffix)
     rows_truncated = len(lines) > row_limit
     selected = lines[:row_limit]
     consumed = sum(len(line) + 1 for line in selected)
+    if unterminated_row is not None and selected and selected[-1] is unterminated_row:
+        consumed -= 1
     events: list[dict] = []
     malformed: list[dict] = []
     for offset, line in enumerate(selected, start=1):
