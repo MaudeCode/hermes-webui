@@ -149,12 +149,21 @@ def test_carry_forward_matches_a_transformed_prompt_across_the_swap():
   const a2={role:'user',content:'alpha',timestamp:1757500000,id:1};
   const b2={role:'user',content:'beta',timestamp:1757500000,id:2};
   _carryForwardEphemeralTurnFields([a,b],[a2,b2]);
+  // Imported twins: distinct ids, one FRACTIONAL timestamp and the same content
+  // prefix. The id conflict is final — the turn alias must not cross them.
+  const twinA={role:'user',content:'same opening',timestamp:1757400000.5,id:41,_statusCard:{kind:'A'}};
+  const twinB={role:'user',content:'same opening',timestamp:1757400000.5,id:42};
+  const twinB2={role:'user',content:'same opening',timestamp:1757400000.5,id:42};
+  _carryForwardEphemeralTurnFields([twinA],[twinB2]);
   return {
     settled: settledUser._statusCard||null,
     later: laterTurn._statusCard||null,
     legacy: legacyNext._statusCard||null,
     intA: a2._statusCard.kind, intB: b2._statusCard.kind,
     intTurn: _messageTurnIdentity(a),
+    twinShare: _messagesShareIdentity(twinA, twinB),
+    twinCarried: twinB2._statusCard||null,
+    sameTurnAlias: _messageTurnIdentity(twinA)===_messageTurnIdentity(twinB),
   };
 """,
         display=DISPLAY, transformed=TRANSFORMED, streamId=STREAM_ID, startedAt=STARTED_AT,
@@ -165,6 +174,10 @@ def test_carry_forward_matches_a_transformed_prompt_across_the_swap():
     assert (r["intA"], r["intB"]) == ("a", "b"), r
     # An integer-second timestamp is not a WebUI turn start: fail closed to ids/legacy.
     assert r["intTurn"] == "", r
+    # Precondition: the twins really do share a turn alias; the id still wins.
+    assert r["sameTurnAlias"] is True, r
+    assert r["twinShare"] is False, r
+    assert r["twinCarried"] is None, r
 
 
 def test_disclosure_state_follows_the_turn_from_optimistic_to_settled_to_reload():

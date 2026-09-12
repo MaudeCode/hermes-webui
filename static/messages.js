@@ -2659,9 +2659,19 @@ function _messageIdentityCandidates(m){
   if(legacy) out.push(legacy);
   return out;
 }
+// The first identity BOTH rows carry decides, and a conflict there is final:
+// two rows with different persisted ids are different messages even if they
+// share a timestamp (imports) or a content prefix; likewise for two rows that
+// both carry a turn start. Only rows lacking a shared strong identity fall
+// through to the legacy key.
 function _messagesShareIdentity(a, b){
-  const bk=new Set(_messageIdentityCandidates(b));
-  return bk.size>0&&_messageIdentityCandidates(a).some(k=>bk.has(k));
+  if(!a||!b||!a.role||a.role!==b.role) return false;
+  const ia=_messagePersistedId(a), ib=_messagePersistedId(b);
+  if(ia!=null&&ib!=null) return String(ia)===String(ib);
+  const ta=_messageTurnIdentity(a), tb=_messageTurnIdentity(b);
+  if(ta&&tb) return ta===tb;
+  const la=_messageIdentityKey(a);
+  return !!la&&la===_messageIdentityKey(b);
 }
 // Mirror of Python's f"{started:.17g}" for a unix timestamp (never exponent form).
 function _formatTurnStartedAt(startedAt){
@@ -8015,7 +8025,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     for(const nm of nextMessages){
       let pm=null;
-      for(const k of _messageIdentityCandidates(nm)){ pm=prevIdx.get(k); if(pm) break; }
+      for(const k of _messageIdentityCandidates(nm)){
+        // A candidate hit is only a match when no stronger identity conflicts
+        // (distinct persisted ids sharing a timestamp or a content prefix).
+        const hit=prevIdx.get(k);
+        if(hit&&_messagesShareIdentity(hit,nm)){ pm=hit; break; }
+      }
       if(!pm) continue;
       for(const f of _EPHEMERAL_TURN_FIELDS){
         if(f==='_anchor_activity_scene'&&_isHistoricalAnchorActivityScene(pm[f])) continue;
