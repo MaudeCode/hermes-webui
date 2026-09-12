@@ -309,7 +309,36 @@
     schedule();
   }
 
+  // Remember which session is empty so the next reload paints the hero layout
+  // from the first frame instead of starting at the bottom and jumping.
+  const EMPTY_KEY = 'hermes-webui-session-empty';
+  function currentSid() {
+    const m = (location.pathname || '').match(/\/session\/([^\/?#]+)/);
+    if (m) return m[1];
+    try { return localStorage.getItem('hermes-webui-session') || ''; } catch (e) { return ''; }
+  }
+  function syncEmptyMemo() {
+    const empty = document.getElementById('emptyState');
+    const inner = document.getElementById('msgInner');
+    if (!empty || !inner) return;
+    const hasRows = !!inner.querySelector('.msg-row');
+    const shown = getComputedStyle(empty).display !== 'none';
+    const id = currentSid();
+    try {
+      if (shown && !hasRows && id) localStorage.setItem(EMPTY_KEY, id);
+      else if (hasRows && localStorage.getItem(EMPTY_KEY) === id) localStorage.removeItem(EMPTY_KEY);
+    } catch (e) { /* storage unavailable */ }
+  }
+  function mountEmptyMemo() {
+    const empty = document.getElementById('emptyState');
+    const inner = document.getElementById('msgInner');
+    if (empty) new MutationObserver(syncEmptyMemo).observe(empty, { attributes: true, attributeFilter: ['style', 'class'] });
+    if (inner) new MutationObserver(syncEmptyMemo).observe(inner, { childList: true });
+    window.addEventListener('popstate', syncEmptyMemo);
+  }
+
   function init() {
+    mountEmptyMemo();
     // Sidebar skeleton from the first frame; the real list replaces it.
     if (typeof showSessionListSkeleton === 'function' && !document.querySelector('#sessionList .session-item')) {
       try { showSessionListSkeleton(); } catch (e) { /* cosmetic */ }
@@ -335,7 +364,7 @@
   // hard cap; a load-event timer would expire before the session resolves and
   // let the empty-state hero shift animate.
   const started = Date.now();
-  const release = () => { document.documentElement.classList.remove('booting'); document.documentElement.classList.remove('boot-session'); };
+  const release = () => { document.documentElement.classList.remove('booting'); document.documentElement.classList.remove('boot-session'); syncEmptyMemo(); };
   const poll = () => {
     // S is a top-level `let` in boot.js: reachable by name, not via window.
     let ready = false;

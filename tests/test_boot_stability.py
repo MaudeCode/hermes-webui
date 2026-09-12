@@ -46,3 +46,11 @@ def test_static_markup_provides_first_paint_chrome():
     assert 'class="panel-head-btn sidebar-search-toggle"' in INDEX
     assert 'class="panel-head-btn source-menu-btn"' in INDEX
     assert 'rel="preload" href="static/vendor/inter/InterVariable.woff2"' in INDEX
+
+
+def test_empty_session_memo_drives_first_paint():
+    # Inline head script clears the session-boot flag for a session remembered as empty,
+    # so the hero layout paints first instead of the composer jumping up after load.
+    assert "hermes-webui-session-empty" in INDEX
+    assert INDEX.index("hermes-webui-session-empty") < INDEX.index("classList.add('booting')")
+    assert "EMPTY_KEY = 'hermes-webui-session-empty'" in HUB

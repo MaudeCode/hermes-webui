@@ -78,6 +78,7 @@
 <link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__">
 <link rel="stylesheet" href="static/brandmark.css?v=__WEBUI_VERSION__">
 <script>document.documentElement.classList.add('booting');</script>
+<script>(function(){try{var p=location.pathname||'',m=p.match(/\/session\/([^\/?#]+)/),sid=m?m[1]:(localStorage.getItem('hermes-webui-session')||''),e=localStorage.getItem('hermes-webui-session-empty');if(sid&&e&&e===sid){delete document.documentElement.dataset.sessionBoot;}}catch(_){}})();</script>
 <script>(function(){var h=document.documentElement;h.classList.add('booting');if(h.dataset.sessionBoot==='1')h.classList.add('boot-session');if(!('SpeechRecognition' in window||'webkitSpeechRecognition' in window))h.classList.add('no-speech');})();</script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" integrity="sha384-LJcOxlx9IMbNXDqJ2axpfEQKkAYbFjJfhXexLfiRJhjDU81mzgkiQq8rkV0j6dVh" crossorigin="anonymous">
   <!-- KaTeX math rendering CSS (loaded eagerly from vendored assets to prevent font CSP noise) -->
