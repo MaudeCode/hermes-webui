@@ -64,6 +64,21 @@ Each skin defines paired light + dark variants so it reads cleanly on either
 theme. The skin is applied as `data-skin="<name>"` on `<html>` (the default
 skin clears the attribute).
 
+The WebUI brandmark uses Talaria's original winged sandal paths in
+`static/brandmark.svg`, adapted from Talaria's `Sandal.svg` source. The title bar
+and shared-chat header use a CSS mask colored by the active skin's `--accent`;
+the login page
+uses its existing gold accent. No app-icon shading or outline is included.
+The main app favicon follows the resolved light/dark theme, including system
+changes and extension skins. The standalone SVG favicon follows the browser's
+color scheme. Install and notification icons use a fixed dark tile; install
+icons include maskable safe-area padding.
+
+After editing the source SVG, regenerate the derived SVG, PNG and ICO assets
+with `uv run --no-project --with playwright python scripts/generate-brand-icons.py`.
+This uses an installed Playwright Chromium for rendering and is only an asset
+maintenance command, not an application build step.
+
 ---
 
 ## Creating a Custom Skin

@@ -23,6 +23,8 @@ const CACHE_NAME = 'hermes-shell-__WEBUI_VERSION__';
 const VQ = '?v=__WEBUI_VERSION__';
 const SHELL_ASSETS = [
   './static/style.css' + VQ,
+  './static/brandmark.css' + VQ,
+  './static/brandmark.svg',
   './static/pwa-startup.js' + VQ,
   './static/boot.js' + VQ,
   './static/assistant_turn_anchors.js' + VQ,
@@ -41,6 +43,8 @@ const SHELL_ASSETS = [
   './static/vendor/katex/0.16.22/katex.min.css' + VQ,
   './static/vendor/katex/0.16.22/katex.min.js' + VQ,
   './static/favicon.svg',
+  './static/favicon-light.svg',
+  './static/favicon-dark.svg',
   './static/favicon-32.png',
   './manifest.json',
 ];

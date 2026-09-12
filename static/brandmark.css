@@ -1,0 +1,2 @@
+/* The SVG owns the shape; the active skin supplies its color. */
+.brandmark{display:inline-block;width:18px;height:18px;flex-shrink:0;background-color:currentColor;color:var(--accent,currentColor);-webkit-mask:url('brandmark.svg') center/contain no-repeat;mask:url('brandmark.svg') center/contain no-repeat;}
