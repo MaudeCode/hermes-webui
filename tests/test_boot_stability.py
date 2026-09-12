@@ -86,7 +86,7 @@ def test_sidebar_snapshot_is_an_overlay_removed_at_release():
 
 def test_hub_defines_every_function_it_calls():
     import re
-    defined = set(re.findall(r"function (\w+)\s*\(", HUB))
+    defined = set(re.findall(r"function (\w+)\s*\(", HUB)) | set(re.findall(r"(?:const|let|var) (\w+) = (?:\(|function|async)", HUB))
     called = set(re.findall(r"^\s+(mount\w+|sync\w+|render\w+|save\w+|hold\w+)\(", HUB, re.M))
     app_globals = {"syncTopbar", "renderSessionList", "renderMessages", "syncAppTitlebar"}
     missing = {c for c in called if c not in defined and c not in app_globals}
