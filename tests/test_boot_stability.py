@@ -82,3 +82,11 @@ def test_sidebar_snapshot_is_an_overlay_removed_at_release():
     assert "has-sidebar-snapshot" in INDEX and "html.has-sidebar-snapshot #sessionList{display:none!important;}" in CSS
     assert "getElementById('sessionListBoot')" in HUB and "overlay.remove()" in HUB
     assert "snap.hero" in INDEX
+
+
+def test_hub_defines_every_function_it_calls():
+    import re
+    defined = set(re.findall(r"function (\w+)\s*\(", HUB))
+    called = set(re.findall(r"^\s+(mount\w+|sync\w+|render\w+|save\w+|hold\w+)\(", HUB, re.M))
+    missing = {c for c in called if c not in defined}
+    assert not missing, f"hub.js calls undefined functions: {missing}"

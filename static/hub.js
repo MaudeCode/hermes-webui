@@ -404,6 +404,31 @@
     window.addEventListener('pagehide', () => { saveSidebarSnapshot(); saveTranscriptSnapshot(); });
   }
 
+  // Text the snapshot painted (title, headline) is held during boot; the app's
+  // writes are remembered and applied once at release, so nothing flickers
+  // through intermediate values.
+  const holds = [];
+  function holdDuringBoot(el, opts) {
+    if (!el || !el.textContent) return;
+    const kept = { text: el.textContent, cls: el.className };
+    let last = null, guard = false;
+    const obs = new MutationObserver(() => {
+      if (guard || !document.documentElement.classList.contains('booting')) return;
+      last = { text: el.textContent, cls: el.className };
+      if (el.textContent !== kept.text || (opts && opts.keepClass && el.className !== kept.cls)) {
+        guard = true; el.textContent = kept.text; if (opts && opts.keepClass) el.className = kept.cls; guard = false;
+      }
+    });
+    obs.observe(el, { childList: true, characterData: true, subtree: true, attributes: !!(opts && opts.keepClass), attributeFilter: (opts && opts.keepClass) ? ['class'] : undefined });
+    holds.push(() => { obs.disconnect(); if (last && last.text) { el.textContent = last.text; if (opts && opts.keepClass) el.className = last.cls; } });
+  }
+  function mountBootHolds() {
+    const inner = document.getElementById('msgInner');
+    if (!inner || !inner.dataset.bootSnapshot) return; // only when a snapshot painted
+    holdDuringBoot(document.getElementById('topbarTitle'));
+    holdDuringBoot(document.getElementById('emptyHeroTitle'), { keepClass: true });
+  }
+
   function init() {
     mountBootHolds();
     mountEmptyMemo();
