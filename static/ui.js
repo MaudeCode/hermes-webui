@@ -1204,6 +1204,9 @@ function _messageViewportAnchorKeyForMessage(m){
   if(typeof _compressionMessageAnchorKey!=='function') return '';
   const key=_compressionMessageAnchorKey(m);
   if(!key) return '';
+  // HWEB-75: a row with a turn identity keys on it alone, so the key survives
+  // the optimistic -> settled swap (different ts, possibly transformed text).
+  if(key.turn) return [key.role||'','turn:'+key.turn].map(v=>_safeEncodeURIComponent(v)).join('|');
   return [key.role||'',key.ts??'',key.attachments??0,key.text||''].map(v=>_safeEncodeURIComponent(v)).join('|');
 }
 function _messageVisibleIndexForAnchorKey(anchorKey, visWithIdx){
@@ -1601,9 +1604,11 @@ function _clearUserRowIntrinsicHeightCache(){
 // every ORDINARY rerender — stream settle, refreshSession, a handoff rebuild —
 // builds fresh nodes and cannot read the state off the old row. Own it here.
 //
-// Keyed by session_id AND the message's CONTENT, deliberately not by position
-// and deliberately not by timestamp. Three things this must survive, each of
-// which broke a previous version of this store:
+// Keyed by session_id AND the message's identity — the server-owned turn
+// identity when the row has one (HWEB-75: `_messageStableIdentities`, i.e. the
+// persisted id, then the turn start stamped from /api/chat/start), else its
+// CONTENT — deliberately not by position and deliberately not by timestamp.
+// Three things this must survive, each of which broke a previous version:
 //
 //  1. Ordinary rerenders. The neighbouring height cache is keyed by index and
 //     released whenever the virtual-height cache is dropped — which happens on
@@ -1619,13 +1624,17 @@ function _clearUserRowIntrinsicHeightCache(){
 //     key therefore changes under the reader precisely when a freshly sent
 //     prompt settles — collapsing the message they just opened.
 //
-// So this cannot reuse `_messageViewportAnchorKeyForMessage()` verbatim: that
-// key embeds the timestamp, and the anchor system copes only because its
-// COMPARISON is tolerant (`!anchorTs || !candidateTs || equal`), which a plain
-// string key has no way to express. Role + attachment count + the first 160
-// normalized characters of the displayed text is stable across all three.
-// Two identical prompts in one session share a key, which merely means they
-// open together. The session-change release below is hygiene, not correctness.
+//  4. Slash transforms (HWEB-75). For /moa, bundle and /use turns the settled
+//     text is the TRANSFORMED invocation, not the displayed prompt, so even a
+//     content key changes at settlement. The turn identity does not.
+//
+// A row therefore answers to several identities, strongest first (see
+// `_userMessageExpandKeys`); a hit under a weaker one is moved onto the
+// strongest, which is how state expanded before /api/chat/start replied
+// migrates onto the turn key, and from there onto the persisted id. Collapsing
+// releases every identity of the row. Two identical legacy prompts in one
+// session share the content key, which merely means they open together. The
+// session-change release below is hygiene, not correctness.
 //
 // Lifetime: this store has NO cache-tied release, deliberately. The state has
 // two representations — this map, and the same state serialized as
@@ -1665,23 +1674,64 @@ function _userMessageExpandIdentity(rawText, attachmentCount){
   if(!text.trim()) return '';
   return 'u|'+(Number(attachmentCount)||0)+'|'+text.length+'|'+_worklogDetailHashKey(text);
 }
+// HWEB-75: every identity one row answers to, strongest first, as one
+// comma-joined string (stamped on the row as data-msg-expand-key): the
+// persisted id, the server turn start, then the content identity. None of the
+// parts can contain a comma.
+function _userMessageExpandKeys(m, rawText, attachmentCount){
+  const keys=(m&&typeof _messageStableIdentities==='function')
+    ? _messageStableIdentities(m).map(k=>'u|'+k) : [];
+  const content=_userMessageExpandIdentity(rawText, attachmentCount);
+  if(content) keys.push(content);
+  return keys.join(',');
+}
+// HWEB-75: runs once /api/chat/start has stamped the optimistic row with its
+// turn identity. Moves disclosure state opened before the reply (content key)
+// onto the turn key and refreshes the rendered row's identity attributes, so no
+// full re-render is needed for the toggle and viewport anchor to use it.
+function _syncUserMessageIdentityRow(m){
+  const rawIdx=(typeof S!=='undefined'&&Array.isArray(S.messages))?S.messages.indexOf(m):-1;
+  if(rawIdx<0) return;
+  const row=typeof document!=='undefined'?document.getElementById(_userMessageDomId(rawIdx)):null;
+  if(!row||!row.dataset) return;
+  const keys=_userMessageExpandKeys(m, row.dataset.rawText||'', (m.attachments&&m.attachments.length)||0);
+  _userMessageIsExpanded(keys);
+  row.dataset.msgExpandKey=keys;
+  row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
+}
 function _userMessageExpandKey(identity){
   const id=String(identity||'');
   if(!id) return '';
   const sid=String((typeof S!=='undefined'&&S.session&&S.session.session_id)||'');
   return sid?sid+':'+id:'';
 }
+function _userMessageExpandKeyList(identities){
+  return String(identities||'').split(',').filter(Boolean);
+}
 function _clearUserMessageExpandState(){
   for(const k in _userMsgExpandedByKey) delete _userMsgExpandedByKey[k];
 }
-function _userMessageIsExpanded(identity){
-  const k=_userMessageExpandKey(identity);
-  return !!k&&_userMsgExpandedByKey[k]===true;
+function _userMessageIsExpanded(identities){
+  const list=_userMessageExpandKeyList(identities);
+  for(let i=0;i<list.length;i++){
+    const k=_userMessageExpandKey(list[i]);
+    if(!k||_userMsgExpandedByKey[k]!==true) continue;
+    // Found under a weaker identity: move it onto the strongest one so the
+    // state survives the next representation of this row (settle, reload)
+    // and no later row can inherit the weaker key.
+    if(i>0){ delete _userMsgExpandedByKey[k]; _setUserMessageExpanded(list[0], true); }
+    return true;
+  }
+  return false;
 }
-function _setUserMessageExpanded(identity, expanded){
-  const k=_userMessageExpandKey(identity);
+function _setUserMessageExpanded(identities, expanded){
+  const list=_userMessageExpandKeyList(identities);
+  if(!expanded){
+    for(const id of list){ const k=_userMessageExpandKey(id); if(k) delete _userMsgExpandedByKey[k]; }
+    return;
+  }
+  const k=_userMessageExpandKey(list[0]);
   if(!k) return;
-  if(!expanded){ delete _userMsgExpandedByKey[k]; return; }
   // Re-insert so the key moves to the back of the eviction order on re-open.
   delete _userMsgExpandedByKey[k];
   _userMsgExpandedByKey[k]=true;
@@ -17001,14 +17051,23 @@ function _compressionMessageAnchorKey(m){
   const norm=content.replace(/\s+/g,' ').trim().slice(0,160);
   const ts=m._ts||m.timestamp||null;
   const attachments=Array.isArray(m.attachments)?m.attachments.length:0;
-  if(!norm && !attachments && !ts) return null;
-  return {role:String(m.role||''), ts, text:norm, attachments};
+  // HWEB-75: the server-owned turn start, when the row has one, outranks the
+  // ts/text pair — it is what an optimistic row and its settled copy share.
+  const turn=typeof _messageTurnIdentity==='function'?_messageTurnIdentity(m):'';
+  if(!norm && !attachments && !ts && !turn) return null;
+  return {role:String(m.role||''), ts, text:norm, attachments, turn};
 }
 function _compressionAnchorIndex(visWithIdx, anchorKey, fallbackIdx=null){
   if(anchorKey&&Array.isArray(visWithIdx)){
     for(let i=visWithIdx.length-1;i>=0;i--){
       const candidate=_compressionMessageAnchorKey(visWithIdx[i].m);
       if(!candidate) continue;
+      // Two rows that both carry a turn identity are the same message iff it
+      // matches; the fuzzy ts/text comparison below stays for legacy rows.
+      if(anchorKey.turn&&candidate.turn){
+        if(candidate.role===String(anchorKey.role||'')&&candidate.turn===anchorKey.turn) return i;
+        continue;
+      }
       const anchorTs=String(anchorKey.ts??'');
       const candidateTs=String(candidate.ts??'');
       if(
@@ -19125,8 +19184,8 @@ function renderMessages(options){
       // that extract it without these helpers (they stub every collaborator by name).
       const sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
       const messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
-      const expandIdentity=typeof _userMessageExpandIdentity==='function'
-        ? _userMessageExpandIdentity(newRawText, (m.attachments&&m.attachments.length)||0) : '';
+      const expandIdentity=typeof _userMessageExpandKeys==='function'
+        ? _userMessageExpandKeys(m, newRawText, (m.attachments&&m.attachments.length)||0) : '';
       const collapsible=typeof _userMessageNeedsCollapse==='function'&&_userMessageNeedsCollapse(newRawText);
       const wasExpanded=collapsible&&typeof _userMessageIsExpanded==='function'
         &&_userMessageIsExpanded(expandIdentity);

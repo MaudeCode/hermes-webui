@@ -2211,6 +2211,10 @@ async function send(){
   const startData = postStartData || {};
   streamId = postStartData ? postStartData.stream_id : null;
   S.activeStreamId = streamId;
+  // HWEB-75: the optimistic row adopts the server-owned turn identity so it
+  // stays the same message (disclosure state, viewport anchor, ephemeral turn
+  // fields) when the settled transcript replaces it with transformed text.
+  _adoptServerTurnIdentity(userMsg, streamId, startData);
   // setBusy(true) already ran with activeStreamId=null; refresh now that we
   // have a stream id so the primary button can switch to Stop (see
   // getComposerPrimaryAction).
@@ -2576,6 +2580,102 @@ function _flushPendingInflightPersists(){
   }
 }
 if(typeof window!=='undefined'&&typeof window.addEventListener==='function') window.addEventListener('pagehide',_flushPendingInflightPersists);
+
+// HWEB-75: one identity per chat message across the optimistic -> settled swap.
+//
+// The client sees a user turn in up to three shapes, and every consumer used to
+// reconstruct an identity from content and/or timestamp, each with a different
+// failure: the optimistic row (client `_ts`, user-facing text), the server's
+// eager row while the turn is live (`_active_turn_user`, server timestamp), and
+// the settled row (`id`, server timestamp, the TRANSFORMED text for /moa,
+// bundle and /use turns). The server-owned identity that survives all three is
+// the `started_at` half of `build_active_turn_token(stream_id, pending_started_at)`:
+// `/api/chat/start` returns it, the optimistic row is stamped with it below,
+// and every server copy carries the same float as `timestamp`. The public
+// projection strips `_active_turn_token` itself (api/helpers.py
+// `_PUBLIC_MESSAGE_INTERNAL_FIELDS`), so the token is read for its started_at
+// rather than compared as a string.
+//
+// Rows match on the FIRST identity both sides share, strongest first:
+//   1. persisted `id` / `message_id`  (settled <-> settled, reloads)
+//   2. turn start                      (optimistic <-> eager <-> settled)
+//   3. role|timestamp|content prefix   (legacy rows: no id, no token)
+// A row without a token only gets a turn identity when the server vouches for
+// its timestamp (`_active_turn_user`, or a persisted `id`), and never from an
+// integer-second timestamp: those come from imports, not from a WebUI turn,
+// and two of them could collide. Such rows fail closed to the legacy key.
+function _messageIdentityKey(m){
+  if(!m||!m.role) return '';
+  const ts=m._ts||m.timestamp||'';
+  let body='';
+  if(typeof m.content==='string') body=m.content;
+  else if(Array.isArray(m.content)){
+    try{ body=m.content.map(p=>(p&&typeof p==='object')?(p.text||p.input_text||'')||'':String(p||'')).join('').slice(0,160); }catch(_){ body=''; }
+  }
+  return `${m.role}|${ts}|${body.slice(0,160)}`;
+}
+function _messagePersistedId(m){
+  const id=(m&&m.id!=null&&m.id!=='')?m.id:(m&&m.message_id!=null&&m.message_id!=='')?m.message_id:null;
+  return (id==null||typeof id==='boolean')?null:id;
+}
+function _messageTurnStartedAt(m){
+  if(!m||!m.role) return NaN;
+  if(typeof m._active_turn_token==='string'){
+    const sep=m._active_turn_token.lastIndexOf(':');
+    return sep>0?Number(m._active_turn_token.slice(sep+1)):NaN;
+  }
+  if(m._active_turn_user===true||_messagePersistedId(m)!=null){
+    return Number(m._ts!=null?m._ts:m.timestamp);
+  }
+  return NaN;
+}
+function _messageTurnIdentity(m){
+  const started=_messageTurnStartedAt(m);
+  return (Number.isFinite(started)&&started>0&&started%1!==0)?String(started):'';
+}
+// Strong identities only (no legacy fallback), strongest first: 'id:N', 'turn:T'.
+function _messageStableIdentities(m){
+  const out=[];
+  const id=_messagePersistedId(m);
+  if(id!=null) out.push(`id:${id}`);
+  const turn=_messageTurnIdentity(m);
+  if(turn) out.push(`turn:${turn}`);
+  return out;
+}
+function _messageIdentityCandidates(m){
+  if(!m||!m.role) return [];
+  const out=_messageStableIdentities(m).map(k=>`${m.role}|${k}`);
+  const legacy=_messageIdentityKey(m);
+  if(legacy) out.push(legacy);
+  return out;
+}
+function _messagesShareIdentity(a, b){
+  const bk=new Set(_messageIdentityCandidates(b));
+  return bk.size>0&&_messageIdentityCandidates(a).some(k=>bk.has(k));
+}
+// Mirror of Python's f"{started:.17g}" for a unix timestamp (never exponent form).
+function _formatTurnStartedAt(startedAt){
+  const n=Number(startedAt);
+  if(!Number.isFinite(n)||n<=0) return '';
+  let s=n.toPrecision(17);
+  if(s.indexOf('e')>=0) return String(n);
+  if(s.indexOf('.')>=0) s=s.replace(/0+$/,'').replace(/\.$/,'');
+  return s;
+}
+// Stamp the optimistic user row with the turn identity /api/chat/start returned,
+// in the server's exact `build_active_turn_token` format. `_ts` becomes the
+// server's pending_started_at so the legacy key converges too. The row object
+// is shared by S.messages, INFLIGHT and the persisted in-flight snapshot, so
+// stamping it once covers every holder.
+function _adoptServerTurnIdentity(message, streamId, startData){
+  if(!message||!streamId||!startData) return false;
+  const startedAt=Number(startData.pending_started_at);
+  if(!Number.isFinite(startedAt)||startedAt<=0) return false;
+  message._ts=startedAt;
+  message._active_turn_token=`${String(streamId).trim()}:${_formatTurnStartedAt(startedAt)}`;
+  if(typeof _syncUserMessageIdentityRow==='function') _syncUserMessageIdentityRow(message);
+  return true;
+}
 
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
@@ -7881,18 +7981,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // SSE error recovery) replaces S.messages with fresh server data, those
   // fields are dropped and the usage badge / duration / gateway routing
   // pill flashes-then-disappears. Carry them forward by matching messages
-  // on (role, timestamp, content prefix) — the same identity the renderer
-  // already uses for stable keys.
-  function _messageIdentityKey(m){
-    if(!m||!m.role) return '';
-    const ts=m._ts||m.timestamp||'';
-    let body='';
-    if(typeof m.content==='string') body=m.content;
-    else if(Array.isArray(m.content)){
-      try{ body=m.content.map(p=>(p&&typeof p==='object')?(p.text||p.input_text||'')||'':String(p||'')).join('').slice(0,160); }catch(_){ body=''; }
-    }
-    return `${m.role}|${ts}|${body.slice(0,160)}`;
-  }
+  // on the first identity both rows share (HWEB-75: `_messageIdentityCandidates`
+  // — persisted id, then turn start, then the legacy role/timestamp/content key),
+  // so a /moa, bundle or /use prompt whose settled text differs from its
+  // optimistic text still matches across the swap.
   const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene'];
   function _isHistoricalAnchorActivityScene(scene){
     if(!scene||typeof scene!=='object') return false;
@@ -7905,14 +7997,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!prevMessages.length||!nextMessages.length) return nextMessages;
     const prevIdx=new Map();
     for(const pm of prevMessages){
-      const k=_messageIdentityKey(pm); if(!k) continue;
       // If duplicate keys, prefer the latest occurrence (it carries the
       // most-recently-attached ephemeral state).
-      prevIdx.set(k,pm);
+      for(const k of _messageIdentityCandidates(pm)) prevIdx.set(k,pm);
     }
     for(const nm of nextMessages){
-      const k=_messageIdentityKey(nm); if(!k) continue;
-      const pm=prevIdx.get(k); if(!pm) continue;
+      let pm=null;
+      for(const k of _messageIdentityCandidates(nm)){ pm=prevIdx.get(k); if(pm) break; }
+      if(!pm) continue;
       for(const f of _EPHEMERAL_TURN_FIELDS){
         if(f==='_anchor_activity_scene'&&_isHistoricalAnchorActivityScene(pm[f])) continue;
         if(pm[f]!=null && nm[f]==null) nm[f]=pm[f];
@@ -7986,11 +8078,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           _stagedMessages.length>0 &&
           _stagedMessages.length<_currentVisibleMessages.length &&
           _currentVisibleEndsWithTerminalMarker &&
-          _stagedMessages.every((message, idx)=>{
-            const stagedKey=_messageIdentityKey(message);
-            const currentKey=_messageIdentityKey(_currentVisibleMessages[idx]);
-            return !!stagedKey && stagedKey===currentKey;
-          })
+          _stagedMessages.every((message, idx)=>_messagesShareIdentity(message, _currentVisibleMessages[idx]))
         );
         const _preserveCurrentTranscript=preserveVisibleOnShorterTerminalSnapshot&&_stagedMatchesCurrentPrefix;
         const _resolvedMessages=_preserveCurrentTranscript
