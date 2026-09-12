@@ -2874,7 +2874,8 @@ def _replay_run_journal_windows(
     persist and the terminal state seen so far (terminal rows are kept across
     windows so `stream_end` after `done` still classifies as completed).
     ``truncated`` means rows remain beyond the last window; they wait for the
-    next pass, which resumes at the cursor.
+    next pass, which resumes at the cursor. ``advanced`` means the cursor moved
+    at all, including over rows the cursor already covered.
     """
     result = {
         'recovered_output': False,
@@ -2885,6 +2886,7 @@ def _replay_run_journal_windows(
         'visible_output': False,
         'run_time': None,
         'truncated': False,
+        'advanced': False,
     }
     terminal_events: list[dict] = []
     # One dedupe baseline for the whole pass: later windows must not treat the
@@ -2895,6 +2897,14 @@ def _replay_run_journal_windows(
             session.session_id, stream_id, cursor=result['cursor'],
         )
         events = journal.get('events') or []
+        window_cursor = journal.get('cursor') or {}
+        if int(window_cursor.get('offset') or 0) != int((result['cursor'] or {}).get('offset') or 0):
+            # The offset moved even when every scanned row was already covered
+            # (a rewound offset skipping its prefix): keep that progress so the
+            # next pass does not rescan the same rows.
+            result['advanced'] = True
+            result['cursor'] = window_cursor
+            result['truncated'] = bool(journal.get('truncated'))
         if not events:
             break
         result['events'] = True
@@ -3953,10 +3963,12 @@ def _retry_journal_recovery_in_place(
                     attempts,
                 )
                 return True
-            if replay['events'] and replay['truncated']:
-                # A capped pass of rows with nothing to place, with more rows
-                # beyond it: real progress, not a failed attempt. Persist the
-                # cursor and let the next read continue.
+            if replay['advanced'] and replay['truncated']:
+                # A capped pass that moved the cursor without placing anything
+                # (rows with nothing to place, or a rewound offset skipping its
+                # covered prefix), with more rows beyond it: real progress, not
+                # a failed attempt. Persist the cursor and let the next read
+                # continue.
                 _stamp_journal_cursor(msg, replay['cursor'])
                 try:
                     session.save(touch_updated_at=False)

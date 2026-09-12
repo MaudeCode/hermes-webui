@@ -557,6 +557,39 @@ def test_cursorless_multi_window_pass_keeps_repeated_activity(monkeypatch):
     assert all(t["done"] for t in session.tool_calls)
 
 
+def test_rewound_offset_over_a_long_covered_prefix_keeps_advancing(monkeypatch):
+    """Skipping already-covered rows is progress even when a pass places nothing.
+
+    A rewound offset whose covered prefix spans more than one pass must carry
+    the advanced cursor forward; otherwise every read rescans the same prefix
+    until the retry budget expires and the tail is never reached.
+    """
+    session_id = "hweb13_rewound_long"
+    stream_id = "hweb13_stream_rewound_long"
+    session = _dead_session(session_id, stream_id)
+    prefix = [f"Covered line {i}." for i in range(1, 7)]
+    for line in prefix:
+        append_run_event(session_id, stream_id, "interim_assistant", {"text": line})
+    assert _recover_dead_run_journal(session, stream_id) is True
+    assert _visible(session) == prefix
+    marker = session.messages[-1]
+    assert marker["_journal_retry_after_seq"] == len(prefix)
+    marker["_journal_retry_offset"] -= 3  # mid-row: falls back to the file start
+
+    append_run_event(session_id, stream_id, "interim_assistant", {"text": "The tail."})
+    append_run_event(session_id, stream_id, "done", {})
+    # One small window per pass: the covered prefix alone spans several passes.
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_BYTES", 300)
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_WINDOWS", 1)
+
+    for _ in range(len(prefix) + 2):
+        if not models._session_has_pending_journal_retry(session):
+            break
+        models._retry_journal_recovery_in_place(session)
+    assert _visible(session) == prefix + ["The tail."]
+    assert not [m for m in session.messages if m.get("type") == "interrupted"]
+
+
 def test_tool_completion_in_a_later_wave_settles_the_earlier_card():
     session_id = "hweb13_wave_tool"
     stream_id = "hweb13_stream_wave_tool"
