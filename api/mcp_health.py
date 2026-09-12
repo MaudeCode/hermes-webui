@@ -32,6 +32,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import threading
 import time
@@ -120,11 +121,17 @@ def _jsonrpc_from_body(raw: bytes) -> dict | None:
     if not text:
         return None
     candidates = [text]
-    candidates.extend(
-        line.strip()[5:].strip()
-        for line in text.splitlines()
-        if line.strip().startswith("data:")
-    )
+    # SSE: an event is the block up to a blank line, and its payload is every
+    # ``data:`` line in that block joined with newlines — a pretty-printed
+    # reply legitimately spans several of them.
+    for event in re.split(r"\r?\n\r?\n", text):
+        data_lines = [
+            line[5:].removeprefix(" ")
+            for line in event.splitlines()
+            if line.startswith("data:")
+        ]
+        if data_lines:
+            candidates.append("\n".join(data_lines).strip())
     for candidate in candidates:
         if not candidate.startswith("{"):
             continue
@@ -136,6 +143,19 @@ def _jsonrpc_from_body(raw: bytes) -> dict | None:
                 and payload.get("id") == _INITIALIZE_REQUEST["id"]):
             return payload
     return None
+
+
+def _socket_of(response):
+    """Find the socket under an ``http.client`` response, or ``None``.
+
+    ``HTTPResponse.fp`` is a ``BufferedReader`` over ``SocketIO``, whose
+    ``_sock`` is the connection. Private, but stable across 3.11–3.13; when the
+    shape differs (tests, other openers) the outer deadline check still bounds
+    the probe to at most one extra socket timeout.
+    """
+    raw = getattr(getattr(response, "fp", None), "raw", None)
+    sock = getattr(raw, "_sock", None)
+    return sock if callable(getattr(sock, "settimeout", None)) else None
 
 
 def _read_jsonrpc_reply(response) -> dict | None:
@@ -150,7 +170,16 @@ def _read_jsonrpc_reply(response) -> dict | None:
     """
     buf = bytearray()
     deadline = time.monotonic() + PROBE_TIMEOUT_S
-    while len(buf) < _MAX_PROBE_BODY_BYTES and time.monotonic() < deadline:
+    sock = _socket_of(response)
+    while len(buf) < _MAX_PROBE_BODY_BYTES:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        if sock is not None:
+            # Make every blocking read obey the one total deadline, instead of
+            # each inheriting the full socket timeout — a server that stalls
+            # right before the deadline would otherwise double the probe time.
+            sock.settimeout(remaining)
         line = response.readline(_MAX_PROBE_BODY_BYTES - len(buf))
         if not line:
             break

@@ -155,6 +155,26 @@ class TestProbeVerdicts:
             assert call.args[0] <= mcp_health._MAX_PROBE_BODY_BYTES
         return verdict
 
+    def test_a_pretty_printed_reply_split_across_data_lines_is_one_event(self):
+        """SSE joins an event's data: lines with newlines; each line alone is not JSON."""
+        pretty = json.dumps(json.loads(self._INIT_OK), indent=2).encode()
+        assert b"\n" in pretty
+        sse = b"event: message\n" + b"".join(b"data: " + line + b"\n" for line in pretty.splitlines()) + b"\n"
+        assert self._probe_body(sse, stays_open=True) == ("healthy", "HTTP 200")
+
+    def test_every_blocking_read_obeys_the_one_probe_deadline(self):
+        """A server that stalls just before the deadline must not double the probe time."""
+        sock = MagicMock()
+        response = self._response(b": keepalive\n\n" * 3, stays_open=True)
+        response.fp.raw._sock = sock
+        with patch("api.mcp_health._urlopen", return_value=response), \
+             patch("api.mcp_health.time.monotonic", side_effect=[0.0, 0.0, 3.0, 6.0, 7.5, 7.9, 8.5, 9.0]):
+            mcp_health.probe_server("a", {"url": "https://x/mcp"})
+        timeouts = [call.args[0] for call in sock.settimeout.call_args_list]
+        assert timeouts, "socket timeout was never narrowed to the remaining deadline"
+        assert all(0 < t <= mcp_health.PROBE_TIMEOUT_S for t in timeouts)
+        assert timeouts == sorted(timeouts, reverse=True), timeouts
+
     def test_an_sse_stream_the_server_keeps_open_is_parsed_without_waiting_for_eof(self):
         """A working server that never closes the stream must not be timed out into unhealthy."""
         sse = b"event: message\ndata: " + self._INIT_OK + b"\n\n"
