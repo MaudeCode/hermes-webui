@@ -345,10 +345,66 @@
     window.addEventListener('popstate', syncEmptyMemo);
   }
 
+  // Boot snapshots: the rendered sidebar and the current transcript are kept
+  // in localStorage and painted back synchronously during HTML parse (see the
+  // inline scripts in index.html). The real loaders replace them; these
+  // observers keep the snapshots current and clear the "snapshot" marker the
+  // moment the app paints its own content.
+  const SIDEBAR_KEY = 'hermes-boot:sidebar', TRANSCRIPT_KEY = 'hermes-boot:transcript';
+  const LIMIT = 350000;
+  function saveSidebarSnapshot() {
+    const list = document.getElementById('sessionList');
+    if (!list || list.dataset.bootSnapshot) return;
+    if (!list.querySelector('.session-item') || list.querySelector('.skeleton-row')) return;
+    const html = list.innerHTML;
+    try { if (html.length < LIMIT) localStorage.setItem(SIDEBAR_KEY, html); } catch (e) { /* quota */ }
+  }
+  function saveTranscriptSnapshot() {
+    const inner = document.getElementById('msgInner');
+    if (!inner || inner.dataset.bootSnapshot) return;
+    let loading = false, session = null;
+    try { loading = (typeof _loadingSessionId !== 'undefined') && !!_loadingSessionId; } catch (e) { loading = false; }
+    try { session = (typeof S !== 'undefined' && S) ? S.session : null; } catch (e) { session = null; }
+    const sid = currentSid();
+    if (loading || !sid || !session || String(session.id || session.session_id || '') !== sid) return;
+    const rows = inner.querySelectorAll('.msg-row').length;
+    const empty = document.getElementById('emptyState');
+    const emptyShown = empty && getComputedStyle(empty).display !== 'none';
+    if (!rows && !emptyShown) return;
+    const ctx = {};
+    document.querySelectorAll('.chat-context-item').forEach(b => { const k = b.className.match(/chat-context-(\w+)/); if (k && !b.hidden && b.textContent) ctx[k[1]] = b.textContent; });
+    const title = (document.getElementById('topbarTitle') || {}).textContent || '';
+    const html = rows ? inner.innerHTML : '';
+    const snap = { sid, rows, title, ctx, html: html.length < LIMIT ? html : '', ts: Date.now() };
+    try { localStorage.setItem(TRANSCRIPT_KEY, JSON.stringify(snap)); } catch (e) { /* quota */ }
+  }
+  let sbTimer = null, trTimer = null;
+  function mountBootSnapshots() {
+    const list = document.getElementById('sessionList');
+    const inner = document.getElementById('msgInner');
+    if (list) new MutationObserver(() => {
+      if (list.dataset.bootSnapshot) { delete list.dataset.bootSnapshot; return; }
+      clearTimeout(sbTimer); sbTimer = setTimeout(saveSidebarSnapshot, 600);
+    }).observe(list, { childList: true, subtree: true, characterData: true });
+    if (inner) new MutationObserver(() => {
+      if (inner.dataset.bootSnapshot) { delete inner.dataset.bootSnapshot; return; }
+      clearTimeout(trTimer); trTimer = setTimeout(saveTranscriptSnapshot, 1200);
+    }).observe(inner, { childList: true, subtree: true, characterData: true });
+    ['showConversationEmptyState', 'hideConversationEmptyState'].forEach(name => {
+      const orig = window[name];
+      if (typeof orig !== 'function' || orig._hubSnap) return;
+      const wrapped = function () { const r = orig.apply(this, arguments); clearTimeout(trTimer); trTimer = setTimeout(saveTranscriptSnapshot, 300); return r; };
+      wrapped._hubSnap = true; wrapped._hubWrapped = orig._hubWrapped;
+      window[name] = wrapped;
+    });
+    window.addEventListener('pagehide', () => { saveSidebarSnapshot(); saveTranscriptSnapshot(); });
+  }
+
   function init() {
     mountEmptyMemo();
+    mountBootSnapshots();
     // Sidebar skeleton from the first frame; the real list replaces it.
-    if (typeof showSessionListSkeleton === 'function' && !document.querySelector('#sessionList .session-item')) {
+    if (typeof showSessionListSkeleton === 'function' && !document.querySelector('#sessionList .session-item') && !document.getElementById('sessionList')?.dataset.bootSnapshot) {
       try { showSessionListSkeleton(); } catch (e) { /* cosmetic */ }
     }
     mountSourceMenu();

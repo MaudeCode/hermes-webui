@@ -59,3 +59,13 @@ def test_empty_session_memo_drives_first_paint():
 def test_empty_memo_hooks_the_app_empty_state_switches():
     assert "'showConversationEmptyState', 'hideConversationEmptyState'" in HUB
     assert "_hubWrapped" in HUB
+
+
+def test_boot_snapshots_restore_during_parse_and_loaders_respect_them():
+    assert "localStorage.getItem('hermes-boot:sidebar')" in INDEX
+    assert "localStorage.getItem('hermes-boot:transcript')" in INDEX
+    assert INDEX.index("hermes-boot:sidebar") > INDEX.index('id="sessionList"')
+    assert INDEX.index("hermes-boot:transcript") > INDEX.index('id="msgInner"')
+    assert "SIDEBAR_KEY = 'hermes-boot:sidebar'" in HUB and "TRANSCRIPT_KEY = 'hermes-boot:transcript'" in HUB
+    sessions = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    assert sessions.count("dataset.bootSnapshot") >= 2, "both loading-placeholder writes must skip a restored snapshot"
