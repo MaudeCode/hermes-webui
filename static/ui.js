@@ -1722,14 +1722,27 @@ function _rememberUserRowIntrinsicHeight(sessionMsgIdx, height, expanded){
 // one measures; reserve the ceiling (322 + 114px editor chrome + 6 gap) so no
 // aspect ratio under-reserves once metadata arrives.
 const USER_MSG_FILES_PX={image:102, audio:156, video:442, badge:36, strip:10};
+// A file badge is `badge:<name length>`: badges pack several to a row, and at
+// the fixed 12px badge font one measures 32px of chrome + ~6px per character
+// (62px for "a.txt", 276px for a 41-char name) at every font-size setting —
+// estimated a little wider so a row never holds more than it really does.
+// Anything else unknown counts as a full-row badge.
 function _estimateUserRowFilesHeight(kinds, columnWidth){
   const list=String(kinds||'').split(',').filter(Boolean);
   if(!list.length) return 0;
-  const n={image:0, audio:0, video:0, badge:0};
-  for(const k of list) n[k in n?k:'badge']++;
-  const perRow=(Number.isFinite(columnWidth)&&columnWidth>0)?Math.max(1, Math.floor((columnWidth*0.8+6)/130)):1;
-  return USER_MSG_FILES_PX.strip+Math.ceil(n.image/perRow)*USER_MSG_FILES_PX.image
-    +n.audio*USER_MSG_FILES_PX.audio+n.video*USER_MSG_FILES_PX.video+n.badge*USER_MSG_FILES_PX.badge;
+  const px=USER_MSG_FILES_PX;
+  const rowWidth=(Number.isFinite(columnWidth)&&columnWidth>0)?columnWidth*0.8:0;
+  let images=0, badgeRows=0, badgeUsed=Infinity, height=px.strip;
+  for(const k of list){
+    if(k==='image'){ images++; continue; }
+    if(k==='audio'||k==='video'){ height+=px[k]; continue; }
+    const len=Number(k.split(':')[1]);
+    const w=Number.isFinite(len)?Math.min(rowWidth||Infinity, 36+6.5*len):Infinity;
+    if(rowWidth&&badgeUsed+6+w<=rowWidth) badgeUsed+=6+w;
+    else{ badgeRows++; badgeUsed=w; }
+  }
+  const perRow=rowWidth?Math.max(1, Math.floor((rowWidth+6)/130)):1;
+  return height+Math.ceil(images/perRow)*px.image+badgeRows*px.badge;
 }
 function _userRowFilesReserve(row){
   const inner=(typeof $==='function')?$('msgInner'):null;
@@ -1911,6 +1924,27 @@ function _rememberRenderedUserRowIntrinsicHeights(){
       row.style.containIntrinsicSize='auto '+Math.round(h)+'px';
     }
   }
+}
+// HWEB-66: the attachment-strip reserve depends on the transcript column width
+// (thumbnails and badges per row), which changes on rotation and when the
+// sidebar, workspace panel or resizer move — none of which re-render. Re-apply
+// every user row's reserve when #msgInner resizes so an unseen row does not keep
+// a wider column's estimate until it paints; one pass per frame.
+function _initUserRowReserveResizeObserver(){
+  const inner=$('msgInner');
+  if(!inner||typeof ResizeObserver!=='function') return;
+  let raf=0;
+  new ResizeObserver(()=>{
+    if(raf) return;
+    raf=requestAnimationFrame(()=>{
+      raf=0;
+      inner.querySelectorAll('.msg-row[data-role="user"]').forEach(row=>_applyUserRowIntrinsicHeight(row));
+    });
+  }).observe(inner);
+}
+if(typeof document!=='undefined'){
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',_initUserRowReserveResizeObserver,{once:true});
+  else _initUserRowReserveResizeObserver();
 }
 function _scheduleMessageVirtualizedRender(force){
   const container=$('messages');
@@ -18933,7 +18967,7 @@ function renderMessages(options){
       filesHtml=`<div class="msg-files">${m.attachments.map(f=>{
         const fLabel=typeof f==='string'?f:(f&&(f.name||f.filename||f.path))||'';
         const fname=String(fLabel).split('/').pop()||String(fLabel);
-        attachmentKinds.push((typeof _mediaKindForName==='function'&&_mediaKindForName(fname))||'badge');
+        attachmentKinds.push((typeof _mediaKindForName==='function'&&_mediaKindForName(fname))||('badge:'+fname.length));
         // Use api/file/raw which resolves filename relative to the session workspace.
         const fileUrl='api/file/raw?session_id='+encodeURIComponent(_attachSid)+'&path='+encodeURIComponent(fname);
         return _renderAttachmentHtml(fname,fileUrl);

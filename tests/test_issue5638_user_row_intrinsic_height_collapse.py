@@ -194,20 +194,30 @@ def test_files_strip_estimate_by_kind_and_column_width():
     round-2 finding). Rows from the browser fixture, normal font: 3 images =
     198px strip at 390px (2 per row) and 300px at 700px (1 per row, the sidebar
     narrows the column); 3 wrapped long badges = 100px; an audio player 150px;
-    a video player 266px; every strip ends in a 10px margin."""
+    a video player 266px; every strip ends in a 10px margin.
+
+    Badges pack several to a row by their name width (`badge:<name length>`,
+    32px chrome + ~6px per character): three 21-char names wrap to three rows at
+    a 370px column, twelve 6-char names fit three per row, and an unknown width
+    or an unknown kind is charged one row each (Codex round-4 finding: a flat
+    per-badge charge over-reserved many short names by hundreds of px)."""
     js = UI_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + _fake_row_prelude() + r"""
 const px = USER_MSG_FILES_PX;
 const row = makeRow('user', 1, 0);
-row.dataset.attachmentKinds = 'image,badge';
+row.dataset.attachmentKinds = 'image,badge:5';
+const short12 = Array.from({length: 12}, () => 'badge:6').join(',');
 console.log(JSON.stringify({
   none: _estimateUserRowFilesHeight('', 370),
   img3phone: _estimateUserRowFilesHeight('image,image,image', 370),   // 2 per row -> 2 rows
   img3narrow: _estimateUserRowFilesHeight('image,image,image', 312),  // 1 per row -> 3 rows
   img3unknown: _estimateUserRowFilesHeight('image,image,image', NaN), // fail closed: 1 per row
-  badges3: _estimateUserRowFilesHeight('badge,badge,badge', 370),
+  long3: _estimateUserRowFilesHeight('badge:21,badge:21,badge:21', 370),  // 172px each -> 3 rows
+  short3: _estimateUserRowFilesHeight('badge:5,badge:5,badge:5', 370),    // 68px each -> 1 row
+  short12: _estimateUserRowFilesHeight(short12, 370),                      // 75px each, 3 per row -> 4 rows
+  short12unknown: _estimateUserRowFilesHeight(short12, NaN),               // fail closed: 12 rows
   media: _estimateUserRowFilesHeight('audio,video', 370),
-  unknownKind: _estimateUserRowFilesHeight('zip', 370),
+  unknownKind: _estimateUserRowFilesHeight('zip,zip', 370),
   // The row helper reads the stamped kinds; with no $() it fails closed to 1 per row.
   viaRow: _userRowFilesReserve(row),
   px,
@@ -219,9 +229,12 @@ console.log(JSON.stringify({
     assert m["img3phone"] == px["strip"] + 2 * px["image"], m
     assert m["img3narrow"] == px["strip"] + 3 * px["image"], m
     assert m["img3unknown"] == m["img3narrow"], "unknown width must fail closed to one thumbnail per row"
-    assert m["badges3"] == px["strip"] + 3 * px["badge"], m
+    assert m["long3"] == px["strip"] + 3 * px["badge"], m
+    assert m["short3"] == px["strip"] + 1 * px["badge"], m
+    assert m["short12"] == px["strip"] + 4 * px["badge"], m
+    assert m["short12unknown"] == px["strip"] + 12 * px["badge"], "unknown width must fail closed to one badge per row"
     assert m["media"] == px["strip"] + px["audio"] + px["video"], m
-    assert m["unknownKind"] == px["strip"] + px["badge"], "an unknown kind counts as a badge"
+    assert m["unknownKind"] == px["strip"] + 2 * px["badge"], "an unknown kind is charged a full row each"
     assert m["viaRow"] == px["strip"] + px["image"] + px["badge"], m
     # Each figure covers its measured row (96 / 150 / 29 + the 6px gap); the video
     # figure covers the stylesheet ceiling (320px max-height + border + 114px chrome).
@@ -533,7 +546,8 @@ def test_collapsed_row_reserve_covers_the_rendered_production_row(viewport_width
     the time of writing at 390px (plain / 1 image / 3 images / 3 file badges):
     small 285/391/493/394, normal 310/416/518/419, large 334/440/542/444,
     xlarge 359/465/567/469; at 700px the sidebar narrows the column so
-    thumbnails stack one per row (3 images = 300px strip).
+    thumbnails stack one per row (3 images = 300px strip); twelve short badges
+    pack four to a row at 390px (3 rows, 99px strip).
 
     Both bounds matter (Codex round 2): every variant must also reserve no more
     than its rendered height plus the slack the constants deliberately carry —
@@ -555,6 +569,7 @@ def test_collapsed_row_reserve_covers_the_rendered_production_row(viewport_width
                 img1: ['a.png'],
                 img3: ['a.png', 'b.png', 'c.png'],
                 file3: ['notes-long-name-1.txt', 'notes-long-name-2.txt', 'notes-long-name-3.txt'],
+                short12: Array.from({length: 12}, (_, i) => 'f' + (i + 1) + '.txt'),
                 media: ['voice.mp3', 'clip.mp4'],
               };
               const out = { cap: USER_MSG_COLLAPSED_ROW_PX, rows: {} };
@@ -612,9 +627,53 @@ def test_collapsed_row_reserve_covers_the_rendered_production_row(viewport_width
         # The cap's font-size headroom at this size, then the per-kind allowances.
         slack = m["cap"] - m["rows"][key.split("/")[0] + "/plain"]["real"]
         slack += 102 if variant.startswith("img") else 0          # one fail-closed thumbnail row
-        slack += 36 * r["files"] if variant in ("file3", "media") else 0  # badges sharing a row / gap
-        slack += 170 if variant == "media" else 0                  # video ceiling vs landscape/unloaded
+        slack += 36 * 2 if variant in ("file3", "short12") else 0  # badge width / 80%-column rounding: two rows
+        slack += 170 + 72 if variant == "media" else 0             # video ceiling vs landscape/unloaded + player chrome font variance
         assert r["reserve"] <= r["real"] + slack + 40, (
             f"{key}: reserve {r['reserve']}px is loose against the rendered {r['real']}px "
             f"(allowed slack {slack + 40}px) — tighten USER_MSG_FILES_PX"
         )
+
+
+def test_reserve_follows_the_transcript_column_width():
+    """HWEB-66 (Codex round-4): the thumbnails-per-row figure is read from the
+    transcript column at render time, but rotation and panel changes resize the
+    column without a re-render. A ResizeObserver on #msgInner re-applies every
+    user row's reserve, so an unseen three-image row rendered in a wide column
+    (one thumbnail per row at 700px, where the sidebar narrows the column) drops
+    to the two-per-row figure when the column widens to a phone layout, and
+    grows back when it narrows again — the direction that would otherwise
+    under-reserve and shift scrollHeight on first paint."""
+    from tests.test_hweb3_user_message_collapse import _page
+
+    render = """
+    () => {
+      S.messages = [];
+      renderMessages();
+      window._clearUserMessageExpandState();
+      window._clearMessageVirtualHeightCache();
+      S.messages = [{ role: 'user', content: 'resize' + 'y'.repeat(10000), attachments: ['a.png', 'b.png', 'c.png'] },
+                    { role: 'assistant', content: 'ok' }];
+      renderMessages();
+      return document.querySelector('#msgInner .msg-row[data-role="user"]').style.containIntrinsicSize;
+    }
+    """
+    read = "() => document.querySelector('#msgInner .msg-row[data-role=\"user\"]').style.containIntrinsicSize"
+    px = lambda v: int("".join(ch for ch in str(v) if ch.isdigit()))
+
+    playwright, browser, page = _page(700)
+    try:
+        wide = px(page.evaluate(render))
+        page.set_viewport_size({"width": 390, "height": 700})
+        page.wait_for_function(f"() => {read.split('=> ')[1]} !== 'auto {wide}px'", timeout=5000)
+        phone = px(page.evaluate(read))
+        page.set_viewport_size({"width": 700, "height": 700})
+        page.wait_for_function(f"() => {read.split('=> ')[1]} !== 'auto {phone}px'", timeout=5000)
+        back = px(page.evaluate(read))
+    finally:
+        browser.close()
+        playwright.stop()
+    assert wide - phone == 102, (
+        f"widening the column to two thumbnails per row must drop one image row; got {wide} -> {phone}"
+    )
+    assert back == wide, f"narrowing again must restore the one-per-row reserve; got {back} (was {wide})"
