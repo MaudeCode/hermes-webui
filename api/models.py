@@ -3283,12 +3283,16 @@ def _recover_journaled_output_and_terminal_error(
         )
         if replay_out is not None:
             replay_out.update(replay)
-        terminal_error_recovered = (
-            replay['terminal_error_recovered']
-            or _materialize_unsaved_gateway_terminal_error(
+        terminal_error_recovered = replay['terminal_error_recovered']
+        if not terminal_error_recovered and not replay['truncated'] and not replay['unavailable']:
+            # A tail-derived error is placed only once the walk has reached
+            # the end of the journal. Materializing it while rows remain
+            # would settle the turn, drop the cursor and lose the unread
+            # output ahead of the error; the pass that reaches the error row
+            # materializes it from that window instead.
+            terminal_error_recovered = _materialize_unsaved_gateway_terminal_error(
                 session, stream_id, terminal_recovery,
             )
-        )
         return replay['recovered_output'], terminal_error_recovered
     recovered_output = _append_journaled_partial_output(
         session,

@@ -900,6 +900,51 @@ def test_core_sync_repair_keeps_the_cursor_when_rows_remain(monkeypatch):
     assert not [m for m in session.messages if m.get("type") == "interrupted"]
 
 
+def test_pending_turn_defers_a_tail_error_until_the_walk_reaches_it(monkeypatch):
+    """A gateway error seen in the tail must not settle a capped walk early."""
+    session_id = "hweb13_pending_tail_error"
+    stream_id = "hweb13_stream_pending_tail_error"
+    session = _dead_session(session_id, stream_id)
+    session.pending_user_message = "Trace the regression"
+    session.pending_started_at = time.time() - 300
+    session.save()
+    lines = [f"Line {i} before the error." for i in range(1, 7)]
+    for line in lines:
+        append_run_event(session_id, stream_id, "interim_assistant", {"text": line})
+    append_run_event(
+        session_id, stream_id, "apperror",
+        {
+            "session_id": session_id,
+            "session": {
+                "session_id": session_id,
+                "messages": [
+                    {"role": "user", "content": "Trace the regression"},
+                    {"role": "assistant", "content": "Provider rejected the request.", "_error": True},
+                ],
+            },
+        },
+    )
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_BYTES", 600)
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_WINDOWS", 1)
+
+    assert models._apply_core_sync_or_error_marker(
+        session, models.SESSION_DIR / "missing-core.json", stream_id_for_recheck=stream_id,
+    ) is True
+    assert session.pending_user_message is None
+    assert lines[:1] <= _visible(session) < lines
+    assert not any(m.get("_error") and m.get("content") == "Provider rejected the request." for m in session.messages)
+    marker = session.messages[-1]
+    assert marker["_pending_journal_recovery"] is True
+
+    for _ in range(len(lines) + 2):
+        if not models._session_has_pending_journal_retry(session):
+            break
+        models._retry_journal_recovery_in_place(session)
+    assert _visible(session) == lines + ["Provider rejected the request."]
+    assert session.messages[-1]["_error"] is True
+    assert not [m for m in session.messages if m.get("type") == "interrupted"]
+
+
 def test_tool_completion_in_a_later_wave_settles_the_earlier_card():
     session_id = "hweb13_wave_tool"
     stream_id = "hweb13_stream_wave_tool"
