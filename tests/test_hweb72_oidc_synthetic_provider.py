@@ -543,6 +543,8 @@ def stack(tmp_path_factory):
             _prerequisite_failed(f"{host} does not resolve on this host: {exc}")
         if not addresses or not all(ipaddress.ip_address(a.split("%", 1)[0]).is_loopback for a in addresses):
             _prerequisite_failed(f"{host} must resolve only to loopback, got {sorted(addresses)}")
+        if "127.0.0.1" not in addresses:  # both services bind IPv4 loopback
+            _prerequisite_failed(f"{host} must resolve to 127.0.0.1, got {sorted(addresses)}")
     root = tmp_path_factory.mktemp("hweb72-oidc")
     print(f"HWEB-72 artifacts: {root}")
     pki = _make_pki(root)
