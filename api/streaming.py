@@ -5958,6 +5958,11 @@ def _deduplicate_context_messages(messages):
     return deduped
 
 
+# JavaScript's Number.MAX_SAFE_INTEGER: the client drops any numeric id above
+# it (HWEB-75 `_messagePersistedId`), so minting must stay below it.
+_MAX_SAFE_MESSAGE_ID = 2**53 - 1
+
+
 def _assign_stable_message_ids(result_messages, *existing_arrays):
     """Mint a stable, session-unique integer ``id`` on model-result rows lacking one.
 
@@ -5988,16 +5993,24 @@ def _assign_stable_message_ids(result_messages, *existing_arrays):
         if not isinstance(arr, list):
             continue
         for m in arr:
-            if isinstance(m, dict):
-                mid = m.get('id')
-                # An imported numeric-string id ("1") normalizes to the same
-                # stable identity as the integer 1 on both sides, so it must
-                # reserve its number too (HWEB-75).
-                if isinstance(mid, str) and mid.isascii() and mid.isdigit():
+            if not isinstance(m, dict):
+                continue
+            # Both aliases reserve their number (HWEB-75): an imported numeric
+            # string ("1", or a message_id-only row) normalizes to the same
+            # stable identity as the integer 1 on both sides. Digit strings are
+            # bounded to the JS safe-integer range so an absurd import can
+            # neither raise (int() conversion limit) nor push minted ids past
+            # what the client can represent; bool is an int subclass and is
+            # excluded so a stray True/False can never seed the counter.
+            for key in ('id', 'message_id'):
+                mid = m.get(key)
+                if isinstance(mid, str) and mid.isascii() and mid.isdigit() and len(mid) <= 15:
                     mid = int(mid)
-                # bool is an int subclass; exclude it so a stray True/False id
-                # can never seed the counter.
-                if isinstance(mid, int) and not isinstance(mid, bool) and mid > seed:
+                if (
+                    isinstance(mid, int)
+                    and not isinstance(mid, bool)
+                    and seed < mid <= _MAX_SAFE_MESSAGE_ID
+                ):
                     seed = mid
     stamped = 0
     for m in result_messages:

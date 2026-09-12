@@ -291,6 +291,9 @@ def test_persisted_ids_are_encoded_so_a_comma_or_bar_cannot_split_or_collide():
     numericAliasesAgree: _messagePersistedId({id:1, message_id:'1'}),
     conflictingAliases: _messagePersistedId({id:1, message_id:2}),
     boolAliasPoisons: _messagePersistedId({id:1, message_id:true}),
+    unsafeIntRejected: _messagePersistedId({id:9007199254740993}),
+    fractionRejected: _messagePersistedId({id:1.5}),
+    messageIdOnly: _messagePersistedId({message_id:12}),
     keyCount: _userMessageExpandKeyList(keysComma).length,
     prefixInherits: _userMessageIsExpanded(_userMessageExpandKeys(prefixOnly, IN.display, 0)),
     rejected: [_messagePersistedId({id:true}), _messagePersistedId({id:{}}), _messagePersistedId({id:''}), _messagePersistedId({message_id:'m1'})],
@@ -310,6 +313,10 @@ def test_persisted_ids_are_encoded_so_a_comma_or_bar_cannot_split_or_collide():
     assert r["numericAliasesAgree"] == "1", r
     assert r["conflictingAliases"] is None, r
     assert r["boolAliasPoisons"] is None, r
+    # Numeric ids count only as safe integers; anything JSON may have rounded is no id.
+    assert r["unsafeIntRejected"] is None, r
+    assert r["fractionRejected"] is None, r
+    assert r["messageIdOnly"] == "12", r
     assert r["keyCount"] == 2, r  # id + content, no stray split
     # Both rows share the content key, so the prefix-id row does read the shared
     # content entry — the existing "identical prompts open together" semantics —
@@ -375,6 +382,12 @@ def test_recovered_terminal_rows_keep_the_exact_start_time_and_get_an_id():
             messages=[
                 {"role": "assistant", "content": "previous answer", "id": 3},
                 {"role": "user", "content": "imported row", "id": "9", "timestamp": 1757500000},
+                # message_id-only alias reserves its number too; a digit string
+                # past the safe-integer range and an unsafe int are ignored, not
+                # raised on and not allowed to push minted ids out of range.
+                {"role": "assistant", "content": "alias only", "message_id": "12"},
+                {"role": "user", "content": "absurd", "id": "9" * 5000},
+                {"role": "user", "content": "unsafe", "id": 2**60},
             ],
             context_messages=[],
             pending_user_message=TRANSFORMED,
@@ -390,14 +403,14 @@ def test_recovered_terminal_rows_keep_the_exact_start_time_and_get_an_id():
     row = s.messages[-1]
     assert row["role"] == "user" and row["content"] == TRANSFORMED
     assert row["timestamp"] == STARTED_AT and isinstance(row["timestamp"], float)
-    assert row["id"] == 10
+    assert row["id"] == 13
     # The exact-checkpoint guard still recognises the float row: no duplicate.
     assert _materialize_pending_user_turn_before_error(s) is False
-    assert [m["role"] for m in s.messages].count("user") == 2
+    assert [m["role"] for m in s.messages].count("user") == 4
 
     s2 = session()
     recovered = models._append_recovered_pending_turn(s2, timestamp=STARTED_AT)
-    assert recovered["timestamp"] == STARTED_AT and recovered["id"] == 10
+    assert recovered["timestamp"] == STARTED_AT and recovered["id"] == 13
     assert s2.messages[-1] is recovered
 
     # And the client matches the optimistic row to that recovered row.

@@ -2619,13 +2619,15 @@ function _messageIdentityKey(m){
 // Mirrors the server's _stable_message_identity_details: each alias (`id`,
 // `message_id`) normalizes to a trimmed string; a malformed alias (bool,
 // object, blank) or two aliases that disagree fail closed to "no id", so a
-// stray or conflicting value can never mint a shared identity.
+// stray or conflicting value can never mint a shared identity. A numeric id
+// counts only as a safe integer: JSON parsing has already rounded anything
+// larger, and the WebUI never mints one (`_MAX_SAFE_MESSAGE_ID`).
 function _messagePersistedId(m){
   let found=null;
   for(const id of [m&&m.id, m&&m.message_id]){
     if(id==null||id==='') continue;
     let norm='';
-    if(typeof id==='number'&&Number.isFinite(id)) norm=String(id);
+    if(typeof id==='number'&&Number.isSafeInteger(id)) norm=String(id);
     else if(typeof id==='string') norm=id.trim();
     if(!norm) return null;
     if(found!=null&&found!==norm) return null;
