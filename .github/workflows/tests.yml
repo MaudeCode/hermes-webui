@@ -215,7 +215,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # Office parsers stay optional at runtime; CI installs them explicitly for the workspace preview tests.
-          pip install "pyyaml>=6.0" pytest pytest-timeout pytest-asyncio pytest-shard python-docx openpyxl python-pptx playwright
+          # cryptography is a runtime dependency (requirements.txt) that the OIDC
+          # tests need explicitly; the synthetic-provider gate (HWEB-72) must
+          # never skip for lack of it.
+          pip install "pyyaml>=6.0" "cryptography>=42.0" pytest pytest-timeout pytest-asyncio pytest-shard python-docx openpyxl python-pptx playwright
           # ruff is installed so tests/test_ruff_forward_lint.py runs its E9/F821
           # tree-clean assertions in-suite (mirrors how eslint is available for
           # tests/test_static_js_runtime_lint.py). If install fails the test
