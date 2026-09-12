@@ -88,6 +88,7 @@ from api.models import (
 from api.session_ops import mark_session_title_generated, session_has_manual_title
 from api.process_event_utils import (
     build_active_turn_token,
+    recovered_pending_turn_timestamp,
     claim_async_delegation_delivery,
     complete_async_delegation_delivery,
     completion_delivery_id,
@@ -5957,6 +5958,11 @@ def _deduplicate_context_messages(messages):
     return deduped
 
 
+# JavaScript's Number.MAX_SAFE_INTEGER: the client drops any numeric id above
+# it (HWEB-75 `_messagePersistedId`), so minting must stay below it.
+_MAX_SAFE_MESSAGE_ID = 2**53 - 1
+
+
 def _assign_stable_message_ids(result_messages, *existing_arrays):
     """Mint a stable, session-unique integer ``id`` on model-result rows lacking one.
 
@@ -5980,19 +5986,54 @@ def _assign_stable_message_ids(result_messages, *existing_arrays):
     if not result_messages:
         return 0
     seed = 0
+    used: set[int] = set()
     for arr in (result_messages, *existing_arrays):
-        for m in arr or []:
-            if isinstance(m, dict):
-                mid = m.get('id')
-                # bool is an int subclass; exclude it so a stray True/False id
-                # can never seed the counter.
-                if isinstance(mid, int) and not isinstance(mid, bool) and mid > seed:
-                    seed = mid
+        # Recovery callers pass whatever the session holds; a missing or
+        # non-list array (Mock sessions in tests, unmaterialized context)
+        # contributes nothing to the seed rather than raising.
+        if not isinstance(arr, list):
+            continue
+        for m in arr:
+            if not isinstance(m, dict):
+                continue
+            # Both aliases reserve their number (HWEB-75): an imported numeric
+            # string ("1", or a message_id-only row) normalizes to the same
+            # stable identity as the integer 1 on both sides. Digit strings up
+            # to 16 digits (every JS-safe integer has at most 16) are parsed,
+            # then the safe-range check below applies to strings and ints
+            # alike, so an absurd import can neither raise (int() conversion
+            # limit) nor push minted ids past what the client can represent;
+            # bool is an int subclass and is excluded so a stray True/False can
+            # never seed the counter.
+            for key in ('id', 'message_id'):
+                mid = m.get(key)
+                if isinstance(mid, str):
+                    # Same normalization as _stable_message_identity_details:
+                    # a padded " 1 " is the id 1 on both sides.
+                    mid = mid.strip()
+                    if mid.isascii() and mid.isdigit() and len(mid) <= 16:
+                        mid = int(mid)
+                if (
+                    isinstance(mid, int)
+                    and not isinstance(mid, bool)
+                    and 0 < mid <= _MAX_SAFE_MESSAGE_ID
+                ):
+                    used.add(mid)
+                    seed = max(seed, mid)
     stamped = 0
     for m in result_messages:
         if isinstance(m, dict) and m.get('id') is None:
-            seed += 1
-            m['id'] = seed
+            if seed < _MAX_SAFE_MESSAGE_ID:
+                seed += 1
+                minted = seed
+            else:
+                # An import already reserved the top of the safe range: take
+                # the smallest unused safe id instead of leaving the range.
+                minted = 1
+                while minted in used:
+                    minted += 1
+            used.add(minted)
+            m['id'] = minted
             stamped += 1
     return stamped
 
@@ -8169,10 +8210,8 @@ def _materialize_pending_user_turn_before_error(
     pending_text = str(getattr(session, 'pending_user_message', None) or '')
     if not pending_text:
         return False
-    recovered_ts = int(time.time())
     pending_started_at = getattr(session, 'pending_started_at', None)
-    if isinstance(pending_started_at, (int, float)) and pending_started_at > 0:
-        recovered_ts = int(pending_started_at)
+    recovered_ts = recovered_pending_turn_timestamp(pending_started_at)
     pending_source = getattr(session, 'pending_user_source', None) or 'webui'
     pending_attachments = list(getattr(session, 'pending_attachments', None) or [])
 
@@ -8226,7 +8265,7 @@ def _materialize_pending_user_turn_before_error(
             return False
         return (
             _normalize_user_text(_message_text(existing.get('content'))) == _normalize_user_text(pending_text)
-            and existing_ts == recovered_ts
+            and existing_ts == int(recovered_ts)
             and existing_source == pending_source
             and list(existing.get('attachments') or []) == pending_attachments
         )
@@ -8244,6 +8283,9 @@ def _materialize_pending_user_turn_before_error(
     stamp_message_source(recovered, pending_source)
     if pending_attachments:
         recovered['attachments'] = pending_attachments
+    # HWEB-75: a recovered row is a settled row; give it the persisted id the
+    # client keys its identity on (the public projection strips the turn token).
+    _assign_stable_message_ids([recovered], session.messages, getattr(session, 'context_messages', None))
     session.messages.append(recovered)
     # Mirror to context_messages so the _recovered flag survives the state.db
     # round-trip (#4283).  state.db has no _recovered column, so without this
@@ -14791,9 +14833,7 @@ def cancel_stream(stream_id: str) -> bool:
                                 if _pending_user == _last_content or _pending_user in _last_content:
                                     _already_persisted = True
                         if not _already_persisted:
-                            _recovered_ts = int(time.time())
-                            if isinstance(_pending_started, (int, float)) and _pending_started > 0:
-                                _recovered_ts = int(_pending_started)
+                            _recovered_ts = recovered_pending_turn_timestamp(_pending_started)
                             _user_turn: dict = {
                                 'role': 'user',
                                 'content': _pending_user,
@@ -14802,6 +14842,11 @@ def cancel_stream(stream_id: str) -> bool:
                             stamp_message_source(_user_turn, _pending_source)
                             if _pending_atts:
                                 _user_turn['attachments'] = _pending_atts
+                            # HWEB-75: settled row → persisted id (see
+                            # _materialize_pending_user_turn_before_error).
+                            _assign_stable_message_ids(
+                                [_user_turn], _msgs_for_recovery, getattr(_cs, 'context_messages', None)
+                            )
                             _msgs_for_recovery.append(_user_turn)
                 except Exception:
                     logger.debug(
