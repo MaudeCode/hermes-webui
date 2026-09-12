@@ -140,9 +140,11 @@ The on-disk locations below assume the default `~/.hermes/webui` state directory
 
 **Fix.** Reload the session in the browser. On the next `get_session()` call the marker is re-evaluated; if the journaled events are visible on disk the marker promotes to *"The partial output above was recovered from the run journal …"* wording and the journaled assistant text + tool cards land above the marker in chronological order. No manual sidecar editing is required.
 
+Recovery is incremental: the marker records how far into the journal it has replayed (`_journal_retry_after_seq`), so a journal that keeps surfacing in waves, or one larger than a single 8 MiB read, is appended one fragment at a time rather than replayed from the start. While the journal has no terminal row the marker stays armed with that cursor; a `done` row above recovered output removes the marker, and a `cancel` or error row settles it.
+
 **Trigger.** Sidebar metadata polling is intentionally not enough to run this self-heal. Requests such as `/api/session?messages=0&resolve_model=0` load the session with `metadata_only=True`, skip the full messages array, and therefore skip the lazy journal retry helper. Click/open the affected conversation so the message panel performs a full `messages=1` load; that full render is what re-checks the journal and can promote the marker.
 
-**Caps.** The lazy retry path gives up after 12 failed attempts or 24h of wall-clock age, at which point the marker is demoted to a neutral *"Partial output may have been lost."* wording so the "reload to retry" prompt doesn't linger forever for genuinely lost journals.
+**Caps.** The lazy retry path gives up after 12 failed attempts or 24h of wall-clock age, at which point the marker settles: it keeps the recovered-output wording if earlier passes placed output, and otherwise demotes to a neutral *"Partial output may have been lost."* wording so the "reload to retry" prompt doesn't linger forever for genuinely lost journals.
 
 **When to file a bug.** If, after the fix, you see the lazy-retry wording (*"Recovering the partial output from the run journal — reload this session to retry."*) but reloading the session never promotes it to the recovered wording even though the `.jsonl` clearly contains `token` events, capture the marker JSON and the run-journal file and file a bug.
 

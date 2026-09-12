@@ -331,13 +331,13 @@ def test_repeated_historical_prose_is_not_claimed_by_an_unrelated_row():
     assert len([m for m in session.messages if m.get("type") == "interrupted"]) == 1
 
 
-def test_recovered_prefix_is_settled_once_not_replayed():
-    """Recovering a visible prefix must not arm a cumulative replay.
+def test_recovered_prefix_is_replayed_incrementally_not_cumulatively():
+    """A visible prefix arms an incremental retry, never a cumulative replay.
 
-    `token` events aggregate, so replaying a grown journal yields "Hello" where
-    the first pass yielded "Hel". The content deduper cannot match the two, so
-    both rows would land in `messages` and in `context_messages`, feeding the
-    next model turn duplicated partial prose.
+    `token` events aggregate, so replaying a grown journal from the start yields
+    "Hello" where the first pass yielded "Hel"; the content deduper cannot match
+    the two and both rows land in `messages` and `context_messages`. The retry
+    carries a cursor instead, so the second pass appends only the tail.
     """
     session_id = "hweb13_prefix"
     stream_id = "hweb13_stream_prefix"
@@ -348,20 +348,169 @@ def test_recovered_prefix_is_settled_once_not_replayed():
     assert _visible(session) == ["Hel"]
     marker = session.messages[-1]
     assert marker["type"] == "interrupted"
-    assert "_pending_journal_recovery" not in marker
-    assert models._session_has_pending_journal_retry(session) is False
+    assert marker["_pending_journal_recovery"] is True
+    assert marker["_journal_retry_after_seq"] == 1
+    assert models._session_has_pending_journal_retry(session) is True
 
-    # The journal grows afterwards. No retry is armed, so nothing replays it and
-    # the transcript keeps exactly one assistant row for this run.
     append_run_event(session_id, stream_id, "token", {"text": "lo world."})
     append_run_event(session_id, stream_id, "done", {})
-    models._retry_journal_recovery_in_place(session)
+    assert models._retry_journal_recovery_in_place(session) is True
 
-    assert _visible(session) == ["Hel"]
+    assert _visible(session) == ["Hel", "lo world."]
     assistant_context = [
-        m for m in session.context_messages if m.get("role") == "assistant"
+        m["content"] for m in session.context_messages if m.get("role") == "assistant"
     ]
-    assert len(assistant_context) == 1, "cumulative replay duplicated prose into context"
+    assert assistant_context == ["Hel", "lo world."], "cumulative replay duplicated prose into context"
+    # The journal ended in `done`: the run completed, so no interruption marker
+    # survives, exactly as a first-pass recovery of a completed run.
+    assert not [m for m in session.messages if m.get("type") == "interrupted"]
+
+
+def test_three_nonterminal_waves_recover_each_fragment_once():
+    session_id = "hweb13_waves"
+    stream_id = "hweb13_stream_waves"
+    session = _dead_session(session_id, stream_id)
+    fragments = ["First wave.", "Second wave.", "Third wave."]
+
+    append_run_event(session_id, stream_id, "interim_assistant", {"text": fragments[0]})
+    assert _recover_dead_run_journal(session, stream_id) is True
+    for fragment in fragments[1:]:
+        append_run_event(session_id, stream_id, "interim_assistant", {"text": fragment})
+        assert models._retry_journal_recovery_in_place(session) is True
+        # Still nonterminal: the hook stays armed at the advanced cursor.
+        marker = session.messages[-1]
+        assert marker["type"] == "interrupted"
+        assert marker["_pending_journal_recovery"] is True
+
+    assert _visible(session) == fragments
+    assistant_context = [
+        m["content"] for m in session.context_messages if m.get("role") == "assistant"
+    ]
+    assert assistant_context == fragments
+    assert len([m for m in session.messages if m.get("type") == "interrupted"]) == 1
+    assert session.messages[-1]["_journal_retry_after_seq"] == 3
+
+    # A wave that only re-reads the unchanged journal is not progress.
+    assert models._retry_journal_recovery_in_place(session) is False
+    assert _visible(session) == fragments
+
+
+def test_oversized_journal_recovers_its_early_events(monkeypatch):
+    """A journal larger than one window is walked, not clipped to its tail."""
+    session_id = "hweb13_oversized_journal"
+    stream_id = "hweb13_stream_oversized_journal"
+    session = _dead_session(session_id, stream_id)
+    lines = [f"Line {i} of a long answer." for i in range(1, 7)]
+    for line in lines:
+        append_run_event(session_id, stream_id, "interim_assistant", {"text": line})
+    append_run_event(session_id, stream_id, "done", {})
+    # Roughly two rows per window: the journal spans several windows.
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_BYTES", 600)
+
+    assert _recover_dead_run_journal(session, stream_id) is True
+    assert _visible(session) == lines
+    assert not [m for m in session.messages if m.get("type") == "interrupted"]
+
+
+def test_journal_beyond_one_pass_continues_from_the_cursor(monkeypatch):
+    """Per-pass work stays capped; the cursor carries the rest to the next read."""
+    session_id = "hweb13_multipass"
+    stream_id = "hweb13_stream_multipass"
+    session = _dead_session(session_id, stream_id)
+    lines = [f"Line {i} of a long answer." for i in range(1, 7)]
+    for line in lines:
+        append_run_event(session_id, stream_id, "interim_assistant", {"text": line})
+    append_run_event(session_id, stream_id, "done", {})
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_BYTES", 600)
+    monkeypatch.setattr(models, "_RECOVERY_JOURNAL_MAX_WINDOWS", 1)
+
+    assert _recover_dead_run_journal(session, stream_id) is True
+    first_pass = _visible(session)
+    assert lines[:1] <= first_pass < lines, first_pass
+    marker = session.messages[-1]
+    assert marker["_pending_journal_recovery"] is True
+    assert marker["_journal_retry_after_seq"] == len(first_pass)
+
+    # Each later read advances one window until the terminal event lands.
+    for _ in range(len(lines)):
+        if not models._session_has_pending_journal_retry(session):
+            break
+        models._retry_journal_recovery_in_place(session)
+    assert _visible(session) == lines
+    assert not [m for m in session.messages if m.get("type") == "interrupted"]
+    assistant_context = [
+        m["content"] for m in session.context_messages if m.get("role") == "assistant"
+    ]
+    assert assistant_context == lines
+
+
+def test_rewound_cursor_offset_never_reapplies_covered_rows():
+    """The offset is a seek hint; the seq is the contract.
+
+    An offset that no longer sits on a row boundary falls back to the file
+    start, and the rows the cursor already covers are skipped rather than
+    replayed as a second copy of the prefix.
+    """
+    session_id = "hweb13_rewound"
+    stream_id = "hweb13_stream_rewound"
+    session = _dead_session(session_id, stream_id)
+    append_run_event(session_id, stream_id, "interim_assistant", {"text": "Already applied."})
+    assert _recover_dead_run_journal(session, stream_id) is True
+    marker = session.messages[-1]
+    assert marker["_journal_retry_after_seq"] == 1
+    marker["_journal_retry_offset"] -= 3  # mid-row: not a boundary
+
+    append_run_event(session_id, stream_id, "interim_assistant", {"text": "New tail."})
+    assert models._retry_journal_recovery_in_place(session) is True
+    assert _visible(session) == ["Already applied.", "New tail."]
+    assert session.messages[-1]["_journal_retry_after_seq"] == 2
+
+
+def test_tool_completion_in_a_later_wave_settles_the_earlier_card():
+    session_id = "hweb13_wave_tool"
+    stream_id = "hweb13_stream_wave_tool"
+    session = _dead_session(session_id, stream_id)
+    append_run_event(
+        session_id, stream_id, "tool",
+        {"name": "terminal", "preview": "rg cursor", "args": {"command": "rg cursor"}},
+    )
+    assert _recover_dead_run_journal(session, stream_id) is True
+    assert [t["done"] for t in session.tool_calls] == [False]
+
+    append_run_event(
+        session_id, stream_id, "tool_complete",
+        {"name": "terminal", "duration": 0.5, "is_error": False, "preview": "2 matches"},
+    )
+    append_run_event(session_id, stream_id, "cancel", {})
+    assert models._retry_journal_recovery_in_place(session) is True
+
+    assert len(session.tool_calls) == 1
+    assert session.tool_calls[0]["done"] is True
+    assert session.tool_calls[0]["preview"] == "2 matches"
+    marker = session.messages[-1]
+    assert marker["type"] == "interrupted"
+    assert "_pending_journal_recovery" not in marker
+
+
+def test_stuck_prefix_keeps_recovered_wording_when_the_retry_gives_up():
+    """A worker that died mid-answer leaves a prefix and never a terminal row.
+
+    The armed hook polls a journal that never grows; when its budget runs out
+    the marker must settle on the recovered wording, not claim the output above
+    it may have been lost.
+    """
+    session_id = "hweb13_stuck_prefix"
+    stream_id = "hweb13_stream_stuck_prefix"
+    session = _dead_session(session_id, stream_id)
+    append_run_event(session_id, stream_id, "token", {"text": "Hel"})
+    assert _recover_dead_run_journal(session, stream_id) is True
+
+    for _ in range(models._JOURNAL_RETRY_MAX_ATTEMPTS):
+        assert models._retry_journal_recovery_in_place(session) is False
+    marker = session.messages[-1]
+    assert "_pending_journal_recovery" not in marker
+    assert marker["content"] == models._INTERRUPTED_RECOVERED_WORDING
+    assert _visible(session) == ["Hel"]
 
 
 def test_terminal_journal_marker_is_final():
@@ -401,12 +550,18 @@ def test_recovery_never_reads_an_unbounded_journal(monkeypatch):
 
     windows = []
     real_tail = run_journal.read_run_event_tail
+    real_window = run_journal.read_run_event_window
 
     def _record(sid, rid, **kwargs):
         windows.append((kwargs.get("max_bytes"), kwargs.get("max_rows")))
         return real_tail(sid, rid, **kwargs)
 
+    def _record_window(sid, rid, **kwargs):
+        windows.append((kwargs.get("max_bytes"), kwargs.get("max_rows")))
+        return real_window(sid, rid, **kwargs)
+
     monkeypatch.setattr(run_journal, "read_run_event_tail", _record)
+    monkeypatch.setattr(run_journal, "read_run_event_window", _record_window)
 
     assert _recover_dead_run_journal(session, stream_id) is True
     assert _visible(session) == [
@@ -557,18 +712,18 @@ def test_one_recovery_uses_a_single_journal_snapshot(monkeypatch):
     session = _dead_session(session_id, stream_id)
     append_run_event(session_id, stream_id, "interim_assistant", {"text": "Only the prefix."})
 
-    real_read = models._read_run_journal_for_recovery
+    real_read = models._read_run_journal_window
     reads = {"n": 0}
 
-    def _advancing_read(sid, rid):
+    def _advancing_read(sid, rid, **kwargs):
         # Simulate the journal becoming visible mid-call: every read after the
         # first also sees a terminal `done` the replay never got.
         reads["n"] += 1
         if reads["n"] > 1:
             append_run_event(sid, rid, "done", {})
-        return real_read(sid, rid)
+        return real_read(sid, rid, **kwargs)
 
-    monkeypatch.setattr(models, "_read_run_journal_for_recovery", _advancing_read)
+    monkeypatch.setattr(models, "_read_run_journal_window", _advancing_read)
 
     assert _recover_dead_run_journal(session, stream_id) is True
     assert reads["n"] == 1, f"recovery took {reads['n']} journal snapshots, expected 1"

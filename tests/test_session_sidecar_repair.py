@@ -1659,10 +1659,11 @@ class TestRetryJournalRecoveryInPlace:
         promoted = s.messages[marker_idx]
         assert promoted is marker_before
         assert "recovered from the run journal" in promoted["content"]
-        assert "_pending_journal_recovery" not in promoted
-        assert "_journal_retry_stream_id" not in promoted
-        assert "_journal_retry_attempts" not in promoted
-        assert "_journal_retry_first_seen_ts" not in promoted
+        # The journal is still nonterminal, so the hook stays armed with the
+        # replay cursor (HWEB-76): a later wave appends only what follows it.
+        assert promoted["_pending_journal_recovery"] is True
+        assert promoted["_journal_retry_stream_id"] == stream_id
+        assert promoted["_journal_retry_after_seq"] == 2
 
         # Journaled rows reordered ABOVE the marker, preserving order
         before_marker = s.messages[:marker_idx]
@@ -1795,7 +1796,8 @@ class TestGetSessionLazyRetryHook:
             if m.get("type") == "interrupted" and m.get("_error")
         )
         assert "recovered from the run journal" in marker["content"]
-        assert "_pending_journal_recovery" not in marker
+        # Nonterminal journal: the hook stays armed at the cursor (HWEB-76).
+        assert marker["_journal_retry_after_seq"] == 1
 
     def test_triggers_retry_on_cold_load(self, hermes_home, monkeypatch):
         sid = "lazy_get_cold"
@@ -1811,7 +1813,7 @@ class TestGetSessionLazyRetryHook:
             if m.get("type") == "interrupted" and m.get("_error")
         )
         assert "recovered from the run journal" in marker["content"]
-        assert "_pending_journal_recovery" not in marker
+        assert marker["_journal_retry_after_seq"] == 1
 
     def test_short_circuit_when_no_pending_marker(self, hermes_home, monkeypatch):
         sid = "lazy_get_no_pending"
@@ -2036,7 +2038,8 @@ class TestWslPageCacheRace:
         assert ok is True
         marker_after = next(m for m in s.messages if m.get("type") == "interrupted")
         assert "recovered from the run journal" in marker_after["content"]
-        assert "_pending_journal_recovery" not in marker_after
+        # Nonterminal journal: the hook stays armed at the cursor (HWEB-76).
+        assert marker_after["_journal_retry_after_seq"] == 1
 
     def test_journal_grows_between_reads(self, hermes_home, monkeypatch):
         sid = "wsl_grow_sid"
