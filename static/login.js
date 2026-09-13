@@ -3,6 +3,12 @@
  * i18n strings so the server does not need to inject JS literals.
  */
 document.addEventListener('DOMContentLoaded', function () {
+  // Whoever signs in next must not inherit the previous identity's boot
+  // snapshots (transcript, sidebar, context line) painted from localStorage.
+  try {
+    ['hermes-boot:sidebar', 'hermes-boot:transcript', 'hermes-boot:ctx', 'hermes-boot:hero', 'hermes-webui-session-empty']
+      .forEach(function (k) { localStorage.removeItem(k); });
+  } catch (e) { /* storage unavailable */ }
   var form = document.getElementById('login-form');
   var input = document.getElementById('pw');
   var passkeyBtn = document.getElementById('passkey-login');

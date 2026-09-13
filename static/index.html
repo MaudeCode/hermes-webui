@@ -74,8 +74,11 @@
     };
   }
 })()</script>
+<link rel="preload" href="static/vendor/inter/InterVariable.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__">
 <link rel="stylesheet" href="static/brandmark.css?v=__WEBUI_VERSION__">
+<script>(function(){try{var p=location.pathname||'',m=p.match(/\/session\/([^\/?#]+)/),sid=m?m[1]:(localStorage.getItem('hermes-webui-session')||''),e=localStorage.getItem('hermes-webui-session-empty');if(sid&&e&&e===sid){delete document.documentElement.dataset.sessionBoot;}}catch(_){}})();</script>
+<script>(function(){var h=document.documentElement;h.classList.add('booting');if(h.dataset.sessionBoot==='1')h.classList.add('boot-session');if(!('SpeechRecognition' in window||'webkitSpeechRecognition' in window))h.classList.add('no-speech');})();</script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" integrity="sha384-LJcOxlx9IMbNXDqJ2axpfEQKkAYbFjJfhXexLfiRJhjDU81mzgkiQq8rkV0j6dVh" crossorigin="anonymous">
   <!-- KaTeX math rendering CSS (loaded eagerly from vendored assets to prevent font CSP noise) -->
   <link rel="stylesheet" href="static/vendor/katex/0.16.22/katex.min.css">
@@ -156,6 +159,7 @@
 </header>
 <div class="layout">
   <nav class="rail" aria-label="Primary navigation">
+    <button class="rail-brand" type="button" aria-label="New conversation" onclick="switchPanel('chat',{fromRailClick:true});var b=document.getElementById('btnNewChat');if(b)b.click();"><span class="brandmark rail-brandmark" aria-hidden="true"></span></button>
     <button class="rail-btn nav-tab active has-tooltip" data-panel="chat" onclick="switchPanel('chat',{fromRailClick:true})" data-tooltip="Chat" data-i18n-title="tab_chat" aria-label="Chat"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="tasks" onclick="switchPanel('tasks',{fromRailClick:true})" data-tooltip="Tasks" data-i18n-title="tab_tasks" aria-label="Tasks"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="kanban" onclick="switchPanel('kanban',{fromRailClick:true})" data-tooltip="Kanban" data-i18n-title="tab_kanban" aria-label="Kanban"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 4v16"/><path d="M16 4v16"/><path d="M3 10h18"/></svg></button>
@@ -199,6 +203,8 @@
       <div class="panel-head">
         <span data-i18n="tab_chat">Chat</span>
         <div class="panel-head-actions">
+          <button class="panel-head-btn source-menu-btn has-tooltip has-tooltip--bottom" type="button" data-tooltip="Conversation source" aria-label="Conversation source" aria-haspopup="menu"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg></button>
+          <button class="panel-head-btn sidebar-search-toggle has-tooltip has-tooltip--bottom" type="button" data-tooltip="Filter conversations" aria-label="Filter conversations"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></button>
           <button class="panel-head-btn has-tooltip has-tooltip--bottom-right" id="btnNewChat" data-tooltip="New conversation (Cmd+K)" data-i18n-title="new_conversation" aria-label="New conversation">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
           </button>
@@ -206,6 +212,7 @@
       </div>
       <div class="session-search sidebar-search"><div class="session-search-field"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="sessionSearch" type="search" placeholder="Filter conversations..." data-i18n-placeholder="filter_conversations" oninput="filterSessions()" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other"><button type="button" id="sessionSearchClear" class="session-search-clear has-tooltip has-tooltip--bottom-right" aria-label="Clear conversation filter" data-tooltip="Clear conversation filter" onclick="clearSessionSearch()" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div></div>
       <div class="session-list" id="sessionList"></div>
+      <script>(function(){try{var h=localStorage.getItem('hermes-boot:sidebar');if(h){var l=document.getElementById('sessionList');var o=document.createElement('div');o.id='sessionListBoot';o.className='session-list';o.innerHTML=h;l.after(o);document.documentElement.classList.add('has-sidebar-snapshot');o.addEventListener('click',function(ev){var it=ev.target.closest&&ev.target.closest('.session-item');var sid=it&&(it.dataset.sid||it.dataset.sessionId);if(sid){ev.preventDefault();ev.stopPropagation();window.__hermesPendingSid=sid;}},true);}}catch(e){}})();</script>
     </div>
     <!-- Tasks (cron) panel -->
     <div class="panel-view" id="panelTasks">
@@ -435,6 +442,18 @@
       </div>
     </div>
     <div id="mainChat" class="main-view composer-hero">
+    <div class="chat-header">
+      <div class="chat-header-text">
+        <h1 class="chat-header-title" id="topbarTitle"></h1>
+        <div class="chat-header-meta" id="topbarMeta"></div>
+        <div class="chat-context">
+          <button type="button" class="chat-context-item chat-context-profile" data-src="#titlebarProfileLabel" data-open="titlebarProfileBtn" hidden></button>
+          <button type="button" class="chat-context-item chat-context-model" data-src="#composerModelChip .composer-model-label" data-open="composerModelChip" hidden></button>
+          <button type="button" class="chat-context-item chat-context-effort" data-src="#composerReasoningChip .composer-reasoning-label" data-open="composerReasoningChip" hidden></button>
+          <button type="button" class="chat-context-item chat-context-workspace" data-src="#composerMobileWorkspaceLabel" data-open="composerMobileWorkspaceAction" hidden></button>
+        </div>
+      </div>
+    </div>
     <div class="messages-shell">
       <button id="jumpToSessionStartBtn" class="session-jump-btn session-jump-btn--start" aria-label="Jump to beginning of session" data-i18n-aria-label="session_jump_start_label" data-i18n-title="session_jump_start_label" onclick="jumpToSessionStart()" style="display:none"><span aria-hidden="true">↑</span><span data-i18n="session_jump_start">Start</span></button>
       <button id="scrollToBottomBtn" class="scroll-to-bottom-btn" style="display:none" onclick="scrollToBottom()" aria-label="Scroll to bottom" data-i18n-aria-label="session_jump_end_label" data-i18n-title="session_jump_end_label"><span aria-hidden="true">↓</span><span class="session-jump-btn__text" data-i18n="session_jump_end">End</span></button>
@@ -451,6 +470,8 @@
         <h2 class="empty-hero-title" id="emptyHeroTitle"></h2>
       </div>
       <div class="messages-inner" id="msgInner"></div>
+      <script>(function(){try{var h=document.documentElement;var c=JSON.parse(localStorage.getItem('hermes-boot:ctx')||'null');if(c){['profile','model','effort','workspace'].forEach(function(k){var b=document.querySelector('.chat-context-'+k);if(b&&c[k]){b.textContent=c[k];b.hidden=false;}});h.classList.add('has-ctx-cache');}var hero=localStorage.getItem('hermes-boot:hero');var hh=document.getElementById('emptyHeroTitle');if(hh&&hero&&h.dataset.sessionBoot!=='1'){hh.textContent=hero;hh.classList.add('ready');}}catch(e){}})();</script>
+      <script>(function(){try{var m=(location.pathname||'').match(/\/session\/([^\/?#]+)/),sid=m?m[1]:(localStorage.getItem('hermes-webui-session')||'');if(!sid)return;var raw=localStorage.getItem('hermes-boot:transcript');if(!raw)return;var snap=JSON.parse(raw);if(!snap||snap.sid!==sid)return;var html=document.documentElement,inner=document.getElementById('msgInner');if(snap.html){inner.innerHTML=snap.html;}inner.dataset.bootSnapshot=sid;var t=document.getElementById('topbarTitle');if(t&&snap.title)t.textContent=snap.title;var hh=document.getElementById('emptyHeroTitle');if(hh&&snap.hero&&!(snap.rows>0)){hh.textContent=snap.hero;hh.classList.add('ready');}var ctx=snap.ctx||{};['profile','model','effort','workspace'].forEach(function(k){var b=document.querySelector('.chat-context-'+k);if(b&&ctx[k]){b.textContent=ctx[k];b.hidden=false;}});if(Object.keys(ctx).length)html.classList.add('has-ctx-cache');if(snap.rows>0){html.dataset.sessionBoot='1';html.classList.add('boot-session');}else{delete html.dataset.sessionBoot;html.classList.remove('boot-session');}var sc=inner.closest('.messages');if(sc&&snap.rows>0){requestAnimationFrame(function(){sc.scrollTop=sc.scrollHeight;});}}catch(e){}})();</script>
       <div id="liveRunStatus" hidden></div>
       <div id="a11yAnnouncer" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
       <div id="liveCompressionCards" class="live-compression-cards"></div>
@@ -691,6 +712,7 @@
               </button>
               <div class="ctx-tooltip" id="ctxTooltip" role="tooltip" aria-hidden="true">
                 <div class="ctx-tooltip-title">Context window</div>
+                <script>(function(){try{var m=(location.pathname||'').match(/\/session\/([^\/?#]+)/),sid=m?m[1]:(localStorage.getItem('hermes-webui-session')||'');if(!sid)return;var snap=JSON.parse(localStorage.getItem('hermes-boot:transcript')||'null');if(!snap||snap.sid!==sid||!snap.ring)return;var rg=snap.ring,rw=document.getElementById('ctxIndicatorWrap'),ri=document.getElementById('ctxIndicator'),rv=document.getElementById('ctxRingValue'),rp=document.getElementById('ctxPercent');if(rw&&ri&&rv){ri.className=rg.cls||ri.className;rv.style.strokeDasharray=rg.dasharray||'';rv.style.strokeDashoffset=rg.dashoffset||'';if(rp)rp.textContent=rg.pct||'';rw.style.display='';document.documentElement.classList.add('has-ring-cache');}}catch(e){}})();</script>
                 <div class="ctx-tooltip-line" id="ctxTooltipUsage"></div>
                 <div class="ctx-tooltip-line" id="ctxTooltipTokens"></div>
                 <div class="ctx-tooltip-line" id="ctxTooltipThreshold"></div>
@@ -1793,6 +1815,7 @@
 <script src="static/messages.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/extension_settings.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/hub.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/boot.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/presence.js?v=__WEBUI_VERSION__" defer></script>

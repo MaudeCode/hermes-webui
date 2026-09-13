@@ -3066,7 +3066,9 @@ function applyBotName(){
   const logo=document.querySelector('.sidebar-header .logo');
   if(logo) logo.textContent=name.charAt(0).toUpperCase();
   const topbarTitle=$('topbarTitle');
-  if(topbarTitle && (!S.session)) topbarTitle.textContent=name;
+  // While a saved session is still booting, leave the chat title blank rather
+  // than flashing the assistant name before the real title lands.
+  if(topbarTitle && (!S.session) && !document.documentElement.dataset.sessionBoot) topbarTitle.textContent=name;
   const msg=$('msg');
   if(msg) msg.placeholder='Message '+name+'\u2026';
   if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();

@@ -919,6 +919,19 @@ function _isCronScheduleError(job) {
     (job.state === 'error' || job.last_status === 'error');
 }
 
+// "in 2 hours" / "3 days ago" for list rows; the detail view keeps full timestamps.
+function _cronRelTime(iso) {
+  const ms = new Date(iso).getTime() - Date.now();
+  if (!Number.isFinite(ms)) return '';
+  const abs = Math.abs(ms) / 1000;
+  const [unit, div] = abs < 60 ? ['second', 1] : abs < 3600 ? ['minute', 60] : abs < 86400 ? ['hour', 3600] : ['day', 86400];
+  // Format in the WebUI locale, not the browser's, so the row reads in one language.
+  const lang = (typeof _localeCode !== 'undefined' && _localeCode) || document.documentElement.lang || undefined;
+  let fmt;
+  try { fmt = new Intl.RelativeTimeFormat(lang, { numeric: 'auto' }); } catch (_) { fmt = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' }); }
+  return fmt.format(Math.round(ms / 1000 / div), unit);
+}
+
 function _cronStatusMeta(job) {
   if (_isCronNeedsAttention(job)) return {
     state: 'needs_attention',
@@ -1187,6 +1200,11 @@ async function loadCrons(animate) {
           <span class="cron-profile-badge" title="${esc(ownerProfileTitle)}">${esc(ownerProfileLabel)}</span>
           <span class="cron-status ${status.listClass}">${esc(status.label)}</span>
           ${readOnlyBadge}
+        </div>
+        <div class="cron-row-meta">
+          <span class="cron-row-cell" title="${esc(t('cron_schedule_preset_label'))}">${esc(job.schedule_display || '')}</span>
+          <span class="cron-row-cell" title="${esc(t('cron_last'))}">${job.last_run_at ? esc(t('cron_last') + ' ' + _cronRelTime(job.last_run_at)) : ''}</span>
+          <span class="cron-row-cell" title="${esc(t('cron_next'))}">${job.next_run_at ? esc(t('cron_next') + ' ' + _cronRelTime(job.next_run_at)) : ''}</span>
         </div>`;
       item.onclick = () => openCronDetail(job, item);
       if (_currentCronDetailKey && _currentCronDetailKey === _cronJobKey(job)) item.classList.add('active');
@@ -5424,7 +5442,7 @@ function _renderSkillDetail(name, content, linkedFiles) {
   const { frontmatter, body: markdownBody } = _stripYamlFrontmatter(content);
   let html = '';
   if (frontmatter) {
-    html += `<details class="skill-frontmatter"><summary>${esc(t('skill_metadata'))}</summary><pre><code>${esc(frontmatter)}</code></pre></details>`;
+    html += `<details class="skill-frontmatter"><summary>${esc(t('skill_metadata'))}</summary>${_skillFrontmatterHtml(frontmatter)}</details>`;
   }
   html += _skillMarkdownHtml(markdownBody || '(no content)');
   const lf = linkedFiles || {};
@@ -5477,6 +5495,33 @@ function _setSkillHeaderButtons(mode) {
   if (mode === 'read') { if (header) header.style.display = 'flex';  show(editBtn); show(delBtn); hide(cancelBtn); hide(saveBtn); }
   else if (mode === 'create' || mode === 'edit') { if (header) header.style.display = 'flex'; hide(editBtn); hide(delBtn); show(cancelBtn); show(saveBtn); }
   else { if (header) header.style.display = 'none';  hide(editBtn); hide(delBtn); hide(cancelBtn); hide(saveBtn); }
+}
+
+
+// Frontmatter as key/value rows instead of a raw YAML block. Handles the
+// shapes skills actually use: `key: value`, nested mappings by indent, and
+// `- item` lists. Anything else falls back to a monospace line.
+function _skillFrontmatterHtml(frontmatter) {
+  const lines = String(frontmatter || '').split('\n');
+  const rows = [];
+  for (const raw of lines) {
+    if (!raw.trim()) continue;
+    const m = raw.match(/^(\s*)(?:- )?([\w.\-\/ ]+?):\s?(.*)$/);
+    const li = raw.match(/^(\s*)-\s+(.*)$/);
+    if (m && !raw.trim().startsWith('- ')) {
+      const depth = Math.min(4, Math.floor(m[1].length / 2));
+      let val = m[3].trim();
+      if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+      else if (val.startsWith("'") && val.endsWith("'")) val = val.slice(1, -1).replace(/''/g, "'");
+      rows.push(`<div class="skill-meta-row" style="--d:${depth}"><span class="skill-meta-key">${esc(m[2].trim())}</span><span class="skill-meta-val${val ? '' : ' skill-meta-group'}">${esc(val)}</span></div>`);
+    } else if (li) {
+      const depth = Math.min(4, Math.floor(li[1].length / 2));
+      rows.push(`<div class="skill-meta-row skill-meta-item" style="--d:${depth}"><span class="skill-meta-key"></span><span class="skill-meta-val">${esc(li[2].trim())}</span></div>`);
+    } else {
+      rows.push(`<div class="skill-meta-row skill-meta-raw" style="--d:0"><span class="skill-meta-val">${esc(raw)}</span></div>`);
+    }
+  }
+  return `<div class="skill-meta">${rows.join('')}</div>`;
 }
 
 async function openSkill(name, el) {
@@ -13639,6 +13684,9 @@ async function signOut(){
     if(typeof window!=='undefined'&&window.HermesPresence&&typeof window.HermesPresence.reset==='function'){
       try{ await window.HermesPresence.reset(); }catch(_){}
     }
+    // Boot snapshots paint the last transcript before the server authorizes
+    // the next load; they must not survive into another identity's session.
+    try{ if(window.HermesBoot) window.HermesBoot.clearSnapshots(); }catch(_){}
     const response=await api('/api/auth/logout',{method:'POST',body:'{}'});
     window.location.href=response.trusted_logout_url||'login';
   }catch(e){
