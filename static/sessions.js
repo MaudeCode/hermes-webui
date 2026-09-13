@@ -3414,6 +3414,10 @@ function _prefetchSessionMessages(sid, generation){
 function _prefetchOlderThanMetadata(prefetchData, metaSession){
   const pre=prefetchData&&prefetchData.session;
   if(!pre||!metaSession||String(metaSession.session_id||'')!==String(pre.session_id||'')) return false;
+  // Both responses carry the server's revision of the sidecar + state.db pair;
+  // any write between the two snapshots (including an in-place rewrite that
+  // keeps count and timestamps) changes it, so a mismatch means "refetch".
+  if(pre._load_revision&&metaSession._load_revision&&pre._load_revision!==metaSession._load_revision) return true;
   if(Number(pre.message_count||0)<Number(metaSession.message_count||0)) return true;
   return Number(pre.updated_at||0)<Number(metaSession.updated_at||0);
 }

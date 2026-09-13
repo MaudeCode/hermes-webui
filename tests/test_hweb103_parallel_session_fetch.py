@@ -109,6 +109,10 @@ __HELPERS__
   out.sameAccepted = _prefetchOlderThanMetadata({session:{session_id:'sid-a', message_count:11, updated_at:200}}, meta)===false;
   out.newerAccepted = _prefetchOlderThanMetadata({session:{session_id:'sid-a', message_count:12, updated_at:201}}, meta)===false;
   out.otherSessionIgnored = _prefetchOlderThanMetadata({session:{session_id:'sid-b', message_count:1, updated_at:1}}, meta)===false;
+  const metaRev={session_id:'sid-a', message_count:11, updated_at:200, _load_revision:'r2'};
+  out.revisionMismatchRefused = _prefetchOlderThanMetadata({session:{session_id:'sid-a', message_count:11, updated_at:200, _load_revision:'r1'}}, metaRev)===true;
+  out.revisionMatchAccepted = _prefetchOlderThanMetadata({session:{session_id:'sid-a', message_count:11, updated_at:200, _load_revision:'r2'}}, metaRev)===false;
+  out.revisionAbsentFallsBack = _prefetchOlderThanMetadata({session:{session_id:'sid-a', message_count:11, updated_at:200}}, metaRev)===false;
   // 8. An abandoned prefetch that rejects never surfaces as an unhandled rejection.
   _prefetchSessionMessages('sid-z', 9);
   pending[4].reject(new Error('abandoned'));
@@ -155,5 +159,8 @@ def test_prefetch_stash_semantics(tmp_path):
         "sameAccepted": True,
         "newerAccepted": True,
         "otherSessionIgnored": True,
+        "revisionMismatchRefused": True,
+        "revisionMatchAccepted": True,
+        "revisionAbsentFallsBack": True,
         "unhandled": 0,
     }

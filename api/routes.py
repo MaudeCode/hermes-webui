@@ -10702,6 +10702,26 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
     return floor, sidecar_messages
 
 
+def _session_load_revision(session) -> str | None:
+    """Return a cheap revision of the sidecar and state.db for one session.
+
+    Combines the sidecar stat signature with the state.db session signature,
+    the same two revisions the display-merge cache and the prefix-proof memo
+    are keyed on. None when either cannot be resolved, so the client treats
+    the pair as unbound and keeps the prefetched window.
+    """
+    from api.models import _sidecar_stat_signature
+
+    sid = str(getattr(session, "session_id", "") or "")
+    if not sid or not is_safe_session_id(sid):
+        return None
+    self_sig = _sidecar_stat_signature(SESSION_DIR / f"{sid}.json")
+    state_sig = _state_db_session_signature(sid, getattr(session, "profile", None) or None)
+    if self_sig is None or state_sig is None:
+        return None
+    return hashlib.sha256(repr((self_sig, state_sig)).encode("utf-8")).hexdigest()[:32]
+
+
 _PREFIX_PROOF_CACHE_MAX = 64
 _prefix_proof_cache: "OrderedDict[str, tuple]" = OrderedDict()
 _prefix_proof_cache_lock = threading.Lock()
@@ -14759,6 +14779,11 @@ def _handle_session_get(handler, parsed) -> bool:
         raw["_messages_truncated"] = _truncated
         raw["_messages_offset"] = _messages_offset
         raw["_msg_limit_max"] = _MAX_MSG_LIMIT
+        # HWEB-103: the client issues messages=0 and messages=1 together and
+        # must not pair a transcript window with metadata from a different
+        # server state. Both responses carry the same revision of the two
+        # transcript sources, so a mismatch tells the client to refetch.
+        raw["_load_revision"] = _session_load_revision(s)
         _t4 = _time.monotonic()
         if _diag: _diag.stage("t4_after_compact_and_merge")
         if effective_model:

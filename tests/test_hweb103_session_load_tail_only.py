@@ -278,6 +278,20 @@ def test_display_merge_cache_hits_until_state_db_grows(tmp_path, monkeypatch, me
     assert third["session"]["messages"][-1]["content"] == "appended later"
 
 
+def test_both_load_responses_carry_the_same_load_revision(tmp_path, monkeypatch):
+    db_path = _install(tmp_path, monkeypatch, _rows(400))
+
+    meta = _get(META)["session"]
+    window = _get(WINDOW)["session"]
+    assert meta["_load_revision"] and meta["_load_revision"] == window["_load_revision"]
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE messages SET content = 'rewritten in place' WHERE id = 5")
+    conn.commit()
+    conn.close()
+    assert _get(META)["session"]["_load_revision"] != meta["_load_revision"]
+
+
 def test_cache_weight_counts_ascii_strings_at_their_real_size():
     rows = [{"role": "user", "content": "x" * 10_000}]
     weight = routes._display_merge_messages_weight(rows, limit=10**9)
