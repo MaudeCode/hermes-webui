@@ -8270,7 +8270,9 @@ html.booting.has-ring-cache #ctxIndicatorWrap{display:flex!important;visibility:
 .workspace-panel-tab.has-artifacts .workspace-artifacts-count{background:var(--accent-bg);color:var(--accent-text);}
 /* ── Phone: bottom tab bar ─────────────────────────────────────────────── */
 .tabbar,.tabbar-sheet{display:none;}
-@media (max-width:768px){
+/* Same boundary as _isDesktopWidth() and the rail (min-width:641px): the tab
+   bar replaces the rail, never sits beside it. */
+@media (max-width:640px){
   .tabbar{position:fixed;left:0;right:0;bottom:0;z-index:150;display:flex;height:calc(56px + env(safe-area-inset-bottom,0px));padding:0 4px env(safe-area-inset-bottom,0px);background:var(--sidebar);border-top:1px solid var(--border);}
   .tabbar-btn{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;border:0;background:transparent;color:var(--muted);font:inherit;font-size:10.5px;font-weight:500;cursor:pointer;border-radius:var(--r-md);margin:6px 2px;transition:color var(--dur) var(--ease),background var(--dur) var(--ease);}
   .tabbar-btn svg{width:20px;height:20px;}

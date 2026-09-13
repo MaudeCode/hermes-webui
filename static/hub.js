@@ -546,6 +546,7 @@
     const bar = document.createElement('nav');
     bar.className = 'tabbar';
     bar.setAttribute('aria-label', label('primary_navigation'));
+    bar.dataset.i18nAriaLabel = 'primary_navigation';
     let sheet = null, onDoc = null;
     const closeSheet = () => {
       if (onDoc) { document.removeEventListener('click', onDoc); onDoc = null; }
@@ -573,7 +574,8 @@
       const b = document.createElement('button');
       b.type = 'button'; b.className = 'tabbar-btn'; b.dataset.tab = tab.key;
       const ic = railIcon(tab.panel || tab.items[0][0]); if (ic) b.appendChild(ic);
-      const l = document.createElement('span'); l.textContent = label(tab.label); b.appendChild(l);
+      // data-i18n lets applyLocaleToDOM() retranslate the persistent labels on a runtime language change.
+      const l = document.createElement('span'); l.dataset.i18n = tab.label; l.textContent = label(tab.label); b.appendChild(l);
       b.addEventListener('click', () => {
         if (tab.panel) { closeSheet(); goTo(tab.panel); }
         else if (sheet && b.classList.contains('open')) closeSheet(); else openSheet(tab, b);

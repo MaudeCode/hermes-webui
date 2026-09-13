@@ -925,7 +925,11 @@ function _cronRelTime(iso) {
   if (!Number.isFinite(ms)) return '';
   const abs = Math.abs(ms) / 1000;
   const [unit, div] = abs < 60 ? ['second', 1] : abs < 3600 ? ['minute', 60] : abs < 86400 ? ['hour', 3600] : ['day', 86400];
-  return new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' }).format(Math.round(ms / 1000 / div), unit);
+  // Format in the WebUI locale, not the browser's, so the row reads in one language.
+  const lang = (typeof _localeCode !== 'undefined' && _localeCode) || document.documentElement.lang || undefined;
+  let fmt;
+  try { fmt = new Intl.RelativeTimeFormat(lang, { numeric: 'auto' }); } catch (_) { fmt = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' }); }
+  return fmt.format(Math.round(ms / 1000 / div), unit);
 }
 
 function _cronStatusMeta(job) {
@@ -1198,9 +1202,9 @@ async function loadCrons(animate) {
           ${readOnlyBadge}
         </div>
         <div class="cron-row-meta">
-          <span class="cron-row-cell" title="Schedule">${esc(job.schedule_display || '')}</span>
-          <span class="cron-row-cell" title="Last run">${job.last_run_at ? 'Last run ' + esc(_cronRelTime(job.last_run_at)) : ''}</span>
-          <span class="cron-row-cell" title="Next run">${job.next_run_at ? 'Next ' + esc(_cronRelTime(job.next_run_at)) : ''}</span>
+          <span class="cron-row-cell" title="${esc(t('cron_schedule_preset_label'))}">${esc(job.schedule_display || '')}</span>
+          <span class="cron-row-cell" title="${esc(t('cron_last'))}">${job.last_run_at ? esc(t('cron_last') + ' ' + _cronRelTime(job.last_run_at)) : ''}</span>
+          <span class="cron-row-cell" title="${esc(t('cron_next'))}">${job.next_run_at ? esc(t('cron_next') + ' ' + _cronRelTime(job.next_run_at)) : ''}</span>
         </div>`;
       item.onclick = () => openCronDetail(job, item);
       if (_currentCronDetailKey && _currentCronDetailKey === _cronJobKey(job)) item.classList.add('active');
