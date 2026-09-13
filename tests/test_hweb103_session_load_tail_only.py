@@ -29,6 +29,26 @@ SID = "hweb103tailsession"
 T0 = 1_700_000_000.0
 
 
+@pytest.fixture(autouse=True)
+def _clear_module_caches():
+    """Leave no per-session cache state behind for later tests in the shard."""
+    yield
+    with routes._display_merge_cache_lock:
+        routes._display_merge_cache.clear()
+    with routes._lineage_display_cache_lock:
+        routes._lineage_display_cache.clear()
+    with routes._prefix_proof_cache_lock:
+        routes._prefix_proof_cache.clear()
+    try:
+        models.clear_sidecar_metadata_cache()
+    except Exception:
+        pass
+    try:
+        routes._clear_session_list_cache()
+    except Exception:
+        pass
+
+
 def _rows(count):
     rows = []
     ts = T0
