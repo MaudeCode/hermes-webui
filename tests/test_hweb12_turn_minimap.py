@@ -137,6 +137,10 @@ def page():
         p = browser.new_page(viewport={"width": _WIDE, "height": 900})
         p.goto(BASE, wait_until="domcontentloaded")
         p.wait_for_selector("#composerBox", timeout=15000)
+        p.wait_for_function(
+            "() => typeof S !== 'undefined' && S._bootReady === true",
+            timeout=20000,
+        )
         yield p
     finally:
         browser.close()
@@ -286,9 +290,10 @@ def test_hover_and_focus_preview_show_the_question_and_its_final_answer(page):
     assert preview["top"] >= preview["shellTop"] - 1, preview
     assert preview["bottom"] <= preview["shellBottom"] + 1, preview
 
-    # Keyboard focus is an equal path to the same preview.
-    page.evaluate("() => document.querySelector('.outline-mark-preview').dispatchEvent("
-                  "new MouseEvent('pointerout', {bubbles: true}))")
+    # Keyboard focus is an equal path to the same preview. Move the real pointer
+    # off the rail first so Playwright does not immediately re-fire pointerover
+    # for the previously hovered mark after the programmatic focus change.
+    page.hover("#composerBox")
     page.evaluate("() => document.querySelectorAll('.outline-mark')[5].focus()")
     page.wait_for_timeout(120)
     focused = page.evaluate(

@@ -163,11 +163,19 @@ def _geometry(page):
 
 def _render_first_user_row(page):
     """Replay send()'s first optimistic pass without starting a real agent run."""
+    page.wait_for_function(
+        "() => typeof S !== 'undefined' && S._bootReady === true",
+        timeout=20000,
+    )
     page.evaluate(
         "() => { S.messages.push({role:'user',content:'hello there',"
         "_ts:Date.now()/1000,_pending:true}); renderMessages(); }"
     )
     _settle(page)
+    page.wait_for_function(
+        "() => !document.getElementById('mainChat').classList.contains('composer-hero')",
+        timeout=3000,
+    )
 
 
 @pytest.mark.parametrize("size", [DESKTOP, NARROW, PHONE], ids=["desktop", "narrow", "phone"])

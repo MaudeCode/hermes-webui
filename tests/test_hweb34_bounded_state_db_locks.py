@@ -28,7 +28,7 @@ from api.agent_sessions import (
     resolve_live_compression_tip,
 )
 
-# The bound is 250 ms; the pre-fix default was 5 s. Anything under a second
+# The bound is 50 ms; the pre-fix default was 5 s. Anything under a second
 # proves the wait is bounded without making the test flaky on a loaded machine.
 LOCK_BUDGET_S = 1.0
 

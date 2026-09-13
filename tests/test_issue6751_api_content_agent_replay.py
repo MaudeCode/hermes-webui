@@ -438,6 +438,7 @@ def test_issue6751_sync_chat_agent_receives_original_api_content_bytes(monkeypat
     monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: tmp_path)
     monkeypatch.setattr(routes, "load_settings", lambda: {})
     monkeypatch.setattr(routes, "_resolve_cli_toolsets", lambda: [])
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_kwargs: None)
 
     original_wire = "[Workspace::v1: /original-workspace]\nturn-two request"
     context = [
@@ -632,6 +633,7 @@ def test_issue6751_json_import_nested_tool_calls_are_removed_at_agent_boundary(
     monkeypatch.setattr(config, "get_config", lambda: {"model": "test-model", "provider": "test-provider"})
     monkeypatch.setattr(routes, "get_config", lambda: {"model": "test-model", "provider": "test-provider"})
     monkeypatch.setattr(routes, "_resolve_cli_toolsets", lambda: [])
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_kwargs: None)
     captured_response = {}
 
     def fake_json(handler, payload, status=200, **_kwargs):

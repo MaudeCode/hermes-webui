@@ -61,8 +61,25 @@ available for optional assistant context. The user request is authoritative;
 assistant text is used only to clarify vague references or concrete terminology.
 Generated titles are limited to 50 characters and aim to capture the durable
 subject and desired outcome rather than tools, intermediate findings, or
-workflow status. Title generation can still run when no visible assistant text
-is available.
+workflow status. Explicit title regeneration can still run when no visible
+assistant text is available.
+
+For structured messages containing text and native images, title generation
+uses the user text without flattening or modifying the stored message. Title
+comparison and title-model inputs remove the internal `[Workspace::v1: ...]`
+prefix and one terminal `[Attached files: ...]` or
+`[Attached files for this steer: ...]` suffix separated by a blank line.
+For structured content, this cleanup applies to the first text part that
+provides title content. Literal legacy `[Workspace: ...]` text and later text
+parts remain unchanged. Initial generation, explicit regeneration, and adaptive
+refresh use this title-specific cleanup.
+
+Background generation requires user text and a substantive assistant response.
+It recognizes the sanitized provisional title as well as the existing raw
+placeholder, so internal metadata does not make an image-containing turn look
+manually titled. Image-only or metadata-only content does not provide title
+text. Existing manual-title protection and the title-generation setting still
+apply; this cleanup does not rewrite the transcript or native image parts.
 
 Automatic title-generation LLM calls honor the active Hermes profile's
 `auxiliary.title_generation.enabled` setting (default: `true`):

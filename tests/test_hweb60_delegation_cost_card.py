@@ -29,6 +29,12 @@ from api.streaming import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UI_JS_PATH = REPO_ROOT / "static" / "ui.js"
 AGENT_DELEGATE_TOOL = Path.home() / ".hermes" / "hermes-agent" / "tools" / "delegate_tool.py"
+AGENT_DELEGATE_CHILD_RUN = (
+    Path.home() / ".hermes" / "hermes-agent" / "tools" / "delegate_tool_child_run.py"
+)
+AGENT_DELEGATE_DISPATCH = (
+    Path.home() / ".hermes" / "hermes-agent" / "tools" / "delegate_tool_dispatch.py"
+)
 
 NODE = shutil.which("node")
 
@@ -78,6 +84,10 @@ def _delegate_result(*costs, trace_entries: int = 0) -> str:
 def test_agent_emits_cost_usd_per_delegation_entry():
     """The name WebUI reads is the one delegate_task actually writes."""
     source = AGENT_DELEGATE_TOOL.read_text(encoding="utf-8")
+    if AGENT_DELEGATE_CHILD_RUN.exists():
+        source += AGENT_DELEGATE_CHILD_RUN.read_text(encoding="utf-8")
+    if AGENT_DELEGATE_DISPATCH.exists():
+        source += AGENT_DELEGATE_DISPATCH.read_text(encoding="utf-8")
     assert 'entry["cost_usd"]' in source, (
         "hermes-agent no longer stamps cost_usd on a delegation entry — "
         "_delegation_cost_usd() is reading a field that does not exist."

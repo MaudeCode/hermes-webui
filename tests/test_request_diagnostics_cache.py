@@ -74,11 +74,11 @@ def test_sessions_route_emits_cache_store_diagnostic_stages():
     diag = RequestDiagnostics("GET", "/api/sessions", auto_start=False)
     payload = routes._get_cached_session_list_payload(
         key=key,
-        builder=lambda: {"sessions": ["rebuilt"], "cli_count": 0},
+        builder=lambda: {"sessions": [{"session_id": "rebuilt"}], "cli_count": 0},
         diag=diag,
     )
 
-    assert payload == {"sessions": ["rebuilt"], "cli_count": 0}
+    assert payload == {"sessions": [{"session_id": "rebuilt"}], "cli_count": 0}
     assert _session_cache_diag_stage_names(diag) == [
         "start",
         "session_list_cache_lookup",
@@ -96,7 +96,7 @@ def test_sessions_route_emits_invalidation_retry_diagnostic_stage():
         calls["count"] += 1
         if calls["count"] == 1:
             routes._session_list_cache_clear()
-        return {"sessions": [calls["count"]], "cli_count": 0}
+        return {"sessions": [{"session_id": str(calls["count"])}], "cli_count": 0}
 
     diag = RequestDiagnostics("GET", "/api/sessions", auto_start=False)
     payload = routes._get_cached_session_list_payload(
@@ -105,7 +105,7 @@ def test_sessions_route_emits_invalidation_retry_diagnostic_stage():
         diag=diag,
     )
 
-    assert payload == {"sessions": [2], "cli_count": 0}
+    assert payload == {"sessions": [{"session_id": "2"}], "cli_count": 0}
     assert calls["count"] == 2
     assert _session_cache_diag_stage_names(diag) == [
         "start",

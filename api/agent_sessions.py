@@ -11,11 +11,25 @@ logger = logging.getLogger(__name__)
 # that multi-GB WAL database and can hold a lock for seconds; sqlite's default
 # 5s busy timeout turns any such lock into a stalled worker (HWEB-34, and it
 # compounds the profile-lock starvation in HWEB-26/HWEB-29). Every WebUI open of
-# the agent DB is bounded to a quarter second and raises instead of blocking —
-# every caller already wraps its read in try/except and degrades. Matches the
-# bound ``_state_db_session_signature`` in ``api/routes.py`` already uses.
-STATE_DB_BUSY_TIMEOUT_MS = 250
+# the agent DB uses a short busy timeout and raises instead of blocking. Every
+# caller already wraps its read in try/except and degrades. A 50 ms SQLite
+# busy timeout stays below one second even on builds whose busy handler sleeps
+# in coarse backoff steps. Matches the bound ``_state_db_session_signature`` in
+# ``api/routes.py`` already uses.
+STATE_DB_BUSY_TIMEOUT_MS = 50
 STATE_DB_CONNECT_TIMEOUT_S = STATE_DB_BUSY_TIMEOUT_MS / 1000.0
+
+# state.db paths that already produced the "no 'source' column" warning below.
+# ``get_cli_sessions(all_profiles=True)`` re-reads every profile DB on every
+# sidebar poll (behind a 5 s cache), so a single pre-``source`` profile DB would
+# otherwise re-emit the identical WARNING line every ~15 s for the life of the
+# process. The condition is a property of the DB file, not of the poll, so it
+# is reported once per path. Process-lifetime only: a restart warns again,
+# which is the desired behaviour (the log line is the operator's cue that the
+# agent still needs upgrading). Plain ``set`` mutation under the GIL is
+# sufficient here; a duplicate line from two racing first calls is harmless.
+_SOURCE_COLUMN_WARNED_DB_PATHS: set[str] = set()
+
 
 # Two reads are NOT on a request thread and must not take the budget above: for
 # them a wrong answer costs more than a slow one, and there is no worker to
@@ -625,12 +639,15 @@ def read_importable_agent_session_rows(
         cur.execute("PRAGMA table_info(messages)")
         message_cols = {row[1] for row in cur.fetchall()}
         if 'source' not in session_cols:
-            log.warning(
-                "agent session listing skipped: state.db at %s has no 'source' column "
-                "(older hermes-agent?). Agent sessions unavailable. "
-                "Upgrade hermes-agent to fix this.",
-                db_path,
-            )
+            warned_key = str(db_path.resolve())
+            if warned_key not in _SOURCE_COLUMN_WARNED_DB_PATHS:
+                _SOURCE_COLUMN_WARNED_DB_PATHS.add(warned_key)
+                log.warning(
+                    "agent session listing skipped: state.db at %s has no 'source' column "
+                    "(older hermes-agent?). Agent sessions unavailable. "
+                    "Upgrade hermes-agent to fix this.",
+                    db_path,
+                )
             return []
 
         parent_expr = _optional_col('parent_session_id', session_cols)

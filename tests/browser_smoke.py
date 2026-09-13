@@ -220,10 +220,23 @@ def main():
     with open(os.path.join(no_agent_dir, "run_agent.py"), "w", encoding="utf-8") as f:
         f.write("# agent-free browser smoke sentinel\n")
     env = os.environ.copy()
-    # Strip real provider keys so nothing leaks into the smoke server.
+    # Strip real provider keys and every auth mode so the smoke server always
+    # reaches the application shell instead of an operator-configured login.
     for k in list(env):
-        if k.endswith("_API_KEY"):
+        if k.endswith("_API_KEY") or k.startswith("HERMES_WEBUI_OIDC_"):
             env.pop(k, None)
+    for k in (
+        "HERMES_WEBUI_PASSWORD",
+        "HERMES_WEBUI_PASSKEY",
+        "HERMES_WEBUI_TRUSTED_AUTH_HEADER",
+        "HERMES_WEBUI_TRUSTED_GROUPS_HEADER",
+        "HERMES_WEBUI_GROUP_PROFILE_MAP",
+        "HERMES_WEBUI_TRUSTED_AUTH_LOGOUT_URL",
+        "HERMES_WEBUI_TRUSTED_GROUPS_PIPE_SEPARATOR",
+        "HERMES_WEBUI_SECURE",
+        "HERMES_WEBUI_TRUST_FORWARDED_PROTO",
+    ):
+        env.pop(k, None)
     env.update({
         "HERMES_WEBUI_PORT": str(PORT),
         "HERMES_WEBUI_HOST": "127.0.0.1",

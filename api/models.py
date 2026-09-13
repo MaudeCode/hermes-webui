@@ -1403,6 +1403,25 @@ def model_explicit_pick_signature(model, model_provider) -> str:
     return f"{_m}\x1f{_p}"
 
 
+_SIDEBAR_HEAVY_METADATA_FIELDS = (
+    'compression_anchor_summary',
+    'compression_anchor_details',
+    'context_engine_state',
+    'compression_recovery',
+    'gateway_routing_history',
+    'composer_draft',
+    'process_wakeup_pause',
+    'share_token',
+)
+
+
+def _strip_sidebar_heavy_metadata(row: dict) -> dict:
+    """Remove detail-only values after sidebar reconciliation is complete."""
+    for key in _SIDEBAR_HEAVY_METADATA_FIELDS:
+        row.pop(key, None)
+    return row
+
+
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), created_workspace=None,
@@ -1979,7 +1998,12 @@ class Session:
                     n += 1
         return n
 
-    def compact(self, include_runtime=False, active_stream_ids=None) -> dict:
+    def compact(
+        self,
+        include_runtime=False,
+        active_stream_ids=None,
+        sidebar_metadata_only=False,
+    ) -> dict:
         active_stream_ids = active_stream_ids if active_stream_ids is not None else set()
         has_pending_user_message = bool(self.pending_user_message)
         message_count = (
@@ -1992,7 +2016,7 @@ class Session:
         last_message_at = _last_message_timestamp(self.messages) or self.updated_at
         if has_pending_user_message and self.pending_started_at:
             last_message_at = self.pending_started_at
-        return {
+        compact = {
             'session_id': self.session_id,
             'title': self.title,
             'workspace': self.workspace,
@@ -2067,6 +2091,9 @@ class Session:
                 self.active_stream_id, active_stream_ids
             ) if include_runtime else False,
         }
+        if sidebar_metadata_only:
+            _strip_sidebar_heavy_metadata(compact)
+        return compact
 
 
 PROCESS_WAKEUP_PROVIDER_UNAVAILABLE_TYPES = frozenset({
@@ -7417,7 +7444,12 @@ def _diag_stage(diag, name: str) -> None:
             pass
 
 
-def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
+def all_sessions(
+    diag=None,
+    *,
+    include_lineage_metadata: bool = True,
+    sidebar_metadata_only: bool = False,
+):
     _diag_stage(diag, "all_sessions.active_streams")
     active_stream_ids = _active_stream_ids()
     # Phase C: try index first for O(1) read; fall back to full scan
@@ -7463,7 +7495,7 @@ def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
                     _diag_stage(diag, "all_sessions.backfill_load")
                     full = Session.load(s.get('session_id'))
                     if full:
-                        index[i] = full.compact()
+                        index[i] = full.compact(sidebar_metadata_only=sidebar_metadata_only)
                         backfilled.append(full)
             if backfilled:
                 try:
@@ -7485,6 +7517,7 @@ def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
                     index_map[s.session_id] = s.compact(
                         include_runtime=True,
                         active_stream_ids=active_stream_ids,
+                        sidebar_metadata_only=sidebar_metadata_only,
                     )
             missing_persisted_ids = []
             if persisted_ids is not None:
@@ -7517,6 +7550,7 @@ def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
                     index_map[sidecar.session_id] = sidecar.compact(
                         include_runtime=True,
                         active_stream_ids=active_stream_ids,
+                        sidebar_metadata_only=sidebar_metadata_only,
                     )
                     recovered_sidecars.append(sidecar)
                 if recovered_sidecars:
@@ -7574,6 +7608,9 @@ def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
             for s in result:
                 if not s.get('profile'):
                     s['profile'] = 'default'
+            if sidebar_metadata_only:
+                for s in result:
+                    _strip_sidebar_heavy_metadata(s)
             return result
         except Exception:
             logger.debug("Failed to load session index, falling back to full scan")
@@ -7604,7 +7641,11 @@ def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
     # Hide empty Untitled sessions from the UI entirely — kept consistent with the
     # index-path filter above. No grace window: a 0-message Untitled session is
     # never shown regardless of age (#1171).  Same streaming exemption as above (#1327).
-    result = [s.compact(include_runtime=True, active_stream_ids=active_stream_ids) for s in out if not (
+    result = [s.compact(
+        include_runtime=True,
+        active_stream_ids=active_stream_ids,
+        sidebar_metadata_only=sidebar_metadata_only,
+    ) for s in out if not (
         s.title == 'Untitled'
         and len(s.messages) == 0
         and not s.active_stream_id
@@ -7627,6 +7668,9 @@ def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
     for s in result:
         if not s.get('profile'):
             s['profile'] = 'default'
+    if sidebar_metadata_only:
+        for s in result:
+            _strip_sidebar_heavy_metadata(s)
     return result
 
 
@@ -8357,7 +8401,7 @@ def _reload_cli_sessions_after_inflight(
     stale_stamp,
     load_sessions,
     all_profiles: bool,
-    db_path: str,
+    db_path: Path | str,
 ) -> list:
     while True:
         event, is_owner = _cli_sessions_cache_claim_rebuild(cache_key)
@@ -8452,7 +8496,7 @@ def _callable_accepts_include_claude_code(callable_obj) -> bool:
 
 
 def _sqlite_content_fingerprint(db_path: Path):
-    """Return a commit-reliable content fingerprint for a state.db.
+    """Return a row-insert fingerprint for a state.db.
 
     The stat-only key below (mtime_ns + size of the .db/-wal/-shm files) is NOT
     reliable for cache invalidation: in WAL mode a commit lands in the -wal file,
@@ -8463,10 +8507,10 @@ def _sqlite_content_fingerprint(db_path: Path):
     Python cache. PRAGMA data_version does NOT help here either — read from a
     fresh per-request connection it always reports that connection's own initial
     value and never advances (verified). A cheap content fingerprint over the
-    sessions/messages tables, read on a fresh connection, DOES advance on every
-    commit (incl. external gateway writes) and is immune to mtime granularity.
-    Cost is a pair of indexed COUNT/MAX queries (sub-ms), far cheaper than the
-    full uncached session scan this key gates.
+    sessions/messages tables, read on a fresh connection, advances on inserted
+    rows (including external gateway writes) and is immune to mtime granularity.
+    Cost is a pair of indexed MAX queries (sub-ms), far cheaper than the full
+    uncached session scan this key gates.
     """
     try:
         if not Path(db_path).exists():
@@ -8496,14 +8540,11 @@ def _sqlite_content_fingerprint(db_path: Path):
                     # rowid + a count-free total: we deliberately avoid COUNT(*)
                     # which forces a full SCAN on large messages tables (~tens of
                     # ms per sidebar refresh on a big store). MAX(rowid) misses a
-                    # pure DELETE-without-insert, but the file-stat fallback in
-                    # _sqlite_file_stat_cache_key still moves on a delete commit,
-                    # and a delete never makes a MISSING row appear (the flake we
-                    # fix is an ADDED row not showing up). It also misses a plain
-                    # `UPDATE sessions SET title/message_count` with no message
-                    # insert (state_sync.py sync) — those fall back to the stat
-                    # stamp + 5s TTL, i.e. the prior behavior (a title-only rename
-                    # can lag <=5s); no regression vs the old stat-only key.
+                    # pure DELETE-without-insert or a plain `UPDATE sessions SET
+                    # title/message_count` with no message insert. Those changes
+                    # remain bounded by the 5s cache TTL; neither can make a
+                    # missing row appear, which is the immediate-invalidation
+                    # contract this fingerprint protects.
                     row = conn.execute(
                         f"SELECT MAX(rowid) FROM {table}"
                     ).fetchone()
@@ -8521,15 +8562,18 @@ def _sqlite_content_fingerprint(db_path: Path):
 
 
 def _sqlite_file_stat_cache_key(db_path: Path):
-    """Return a commit-reliable invalidation key for a SQLite DB.
+    """Return a bounded invalidation key for a SQLite DB.
 
-    Combines a content fingerprint (the authoritative signal — advances on every
-    commit, immune to mtime-granularity collisions that flaked the gateway_sync
-    test) with the cheap file stat stamps as a belt-and-suspenders fallback for
-    the case where the fingerprint can't be read.
+    Prefer the content fingerprint so creating read-optimization indexes cannot
+    invalidate a projection whose rows did not change. File stat stamps remain a
+    fallback when the fingerprint cannot be read. Updates and deletions that do
+    not advance MAX(rowid) remain bounded by the normal cache TTL.
     """
+    fingerprint = _sqlite_content_fingerprint(db_path)
+    if fingerprint is not None and any(part is not None for part in fingerprint):
+        return ('content', fingerprint)
     return (
-        _sqlite_content_fingerprint(db_path),
+        'stat',
         _path_stat_cache_key(db_path),
         _path_stat_cache_key(Path(f"{db_path}-wal")),
         _path_stat_cache_key(Path(f"{db_path}-shm")),
@@ -9161,6 +9205,7 @@ def get_cli_sessions(
     bridge is purely additive and never crashes the WebUI.
     """
     source_filter = _normalize_cli_session_source_filter(source_filter)
+    contexts = []
     if all_profiles:
         contexts, context_cache_key = _all_profiles_cli_contexts()
         db_path = "all profiles"

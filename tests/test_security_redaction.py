@@ -503,6 +503,7 @@ def _create_session_with_credentials() -> str:
     return sid
 
 
+
 @_needs_server
 def test_api_session_redacts_messages(test_server):
     """GET /api/session must redact credentials in its observable response."""
@@ -512,6 +513,7 @@ def test_api_session_redacts_messages(test_server):
     _assert_no_plaintext_credentials(
         json.dumps(payload),
         "GET /api/session",
+
     )
 
 

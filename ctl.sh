@@ -560,8 +560,16 @@ for family, socktype, proto, _, address in addresses:
     if key in seen:
         continue
     seen.add(key)
+    connect_address = address
+    if family == socket.AF_INET and address[0] == "0.0.0.0":
+        connect_address = ("127.0.0.1", address[1])
+    elif family == socket.AF_INET6 and address[0] == "::":
+        connect_address = ("::1", address[1], 0, 0)
+    with socket.socket(family, socktype, proto) as probe:
+        probe.settimeout(0.2)
+        if probe.connect_ex(connect_address) == 0:
+            raise SystemExit(1)
     with socket.socket(family, socktype, proto) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.bind(address)
         except OSError:
@@ -817,7 +825,7 @@ start_cmd() {
     if ! _port_is_bindable "${CTL_HOST}" "${CTL_PORT}"; then
       port_bound=1
     fi
-    if hermes_webui_probe_health "${probe_host}" "${CTL_PORT}" "/health" 1 direct >/dev/null 2>&1; then
+    if hermes_webui_probe_health "${probe_host}" "${CTL_PORT}" "/health" 0.2 direct >/dev/null 2>&1; then
       healthy=1
       port_bound=1
       break

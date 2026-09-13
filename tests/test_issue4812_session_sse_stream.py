@@ -542,6 +542,12 @@ def test_session_route_live_delivery_skips_replayed_active_run_items(monkeypatch
     )
     monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda *_args, **_kwargs: "run_active")
     monkeypatch.setattr(routes, "STREAMS", {"run_active": stream})
+    import api.config as config
+    monkeypatch.setattr(
+        config,
+        "STREAMS",
+        {"run_active": stream},
+    )
     monkeypatch.setattr(
         routes,
         "read_session_run_events",
@@ -615,6 +621,12 @@ def test_session_route_breaks_on_terminal_even_when_reconciliation_replayed_it(m
     )
     monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda *_a, **_k: "run_active")
     monkeypatch.setattr(routes, "STREAMS", {"run_active": stream})
+    import api.config as config
+    monkeypatch.setattr(
+        config,
+        "STREAMS",
+        {"run_active": stream},
+    )
     # Reconciliation replays the active run's terminal event (run_active:1) — same id
     # as the queued live copy, at the cutoff.
     monkeypatch.setattr(
@@ -675,6 +687,12 @@ def test_session_route_unsubscribes_when_replay_disconnects(monkeypatch):
     )
     monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda *_args, **_kwargs: "run_active")
     monkeypatch.setattr(routes, "STREAMS", {"run_active": stream})
+    import api.config as config
+    monkeypatch.setattr(
+        config,
+        "STREAMS",
+        {"run_active": stream},
+    )
     monkeypatch.setattr(
         routes,
         "read_session_run_events",
@@ -726,6 +744,12 @@ def test_session_route_live_delivery_without_cursor_keeps_buffered_active_items(
     )
     monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda *_args, **_kwargs: "run_active")
     monkeypatch.setattr(routes, "STREAMS", {"run_active": stream})
+    import api.config as config
+    monkeypatch.setattr(
+        config,
+        "STREAMS",
+        {"run_active": stream},
+    )
     monkeypatch.setattr(
         routes,
         "read_session_run_events",
@@ -768,6 +792,12 @@ def test_session_route_reconciles_late_attach_cutoff_once(monkeypatch):
     monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: SimpleNamespace(session_id=sid, compact=lambda **_kwargs: {}))
     monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda *_args, **_kwargs: "run_active" if available["value"] else None)
     monkeypatch.setattr(routes, "STREAMS", {"run_active": stream})
+    import api.config as config
+    monkeypatch.setattr(
+        config,
+        "STREAMS",
+        {"run_active": stream},
+    )
     monkeypatch.setattr(
         routes,
         "read_session_run_events",
@@ -812,6 +842,12 @@ def test_session_route_emits_snapshot_when_reconciliation_fails(monkeypatch):
     )
     monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda *_args, **_kwargs: "run_active")
     monkeypatch.setattr(routes, "STREAMS", {"run_active": stream})
+    import api.config as config
+    monkeypatch.setattr(
+        config,
+        "STREAMS",
+        {"run_active": stream},
+    )
     monkeypatch.setattr(
         routes,
         "read_session_run_events",
@@ -857,6 +893,12 @@ def test_session_route_bounds_sent_event_id_deduplication(monkeypatch):
     monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: SimpleNamespace(session_id=sid, compact=lambda **_kwargs: {}))
     monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda *_args, **_kwargs: "run_active")
     monkeypatch.setattr(routes, "STREAMS", {"run_active": stream})
+    import api.config as config
+    monkeypatch.setattr(
+        config,
+        "STREAMS",
+        {"run_active": stream},
+    )
 
     handler = _FakeHandler()
     routes._handle_session_sse_stream_for_session(handler, urlparse("/api/sessions/session_1/events"), "session_1")

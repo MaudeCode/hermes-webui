@@ -99,6 +99,10 @@ def _phone_page(width: int = PHONE, height: int = 844, reduced_motion: str | Non
         page = context.new_page()
         page.goto(BASE, wait_until="domcontentloaded")
         page.wait_for_selector("#composerBox", timeout=15000)
+        page.wait_for_function(
+            "() => typeof S !== 'undefined' && S._bootReady === true",
+            timeout=20000,
+        )
         # The onboarding wizard is a pointer-event-blocking modal, and whether it
         # shows depends on the shared test server's settings at the moment of the
         # run — so hide it in this page only (no /api/onboarding/complete POST,
