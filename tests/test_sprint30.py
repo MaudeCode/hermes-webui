@@ -96,15 +96,16 @@ class TestClarifyCardHTML:
         assert 'id="clarifyHeading"' in html, "clarify heading missing"
         assert 'id="clarifyQuestion"' in html, "clarify question text missing"
         assert 'id="clarifyChoices"' in html, "clarify choices container missing"
-        assert 'id="clarifyInput"' in html, "clarify input missing"
-        assert 'id="clarifySubmit"' in html, "clarify submit button missing"
+        # HWEB-8: the chat composer is the answer field; the card owns no input.
+        assert 'id="clarifyInput"' not in html
+        assert 'id="clarifySubmit"' not in html
+        assert 'id="clarifyProgress"' in html, "clarify progress line missing"
         assert 'id="clarifyCollapse"' in html, "clarify collapse button missing"
 
     def test_clarify_card_has_data_i18n(self):
         html = read(REPO / "static/index.html")
         assert 'data-i18n="clarify_heading"' in html
-        assert 'data-i18n="clarify_send"' in html
-        assert 'data-i18n-placeholder="clarify_input_placeholder"' in html
+        assert 'data-i18n="clarify_hint"' in html
 
     def test_clarify_card_has_aria_roles(self):
         html = read(REPO / "static/index.html")
@@ -165,9 +166,7 @@ class TestClarifyCardCSS:
             ".clarify-question",
             ".clarify-choices",
             ".clarify-choice",
-            ".clarify-response",
-            ".clarify-input",
-            ".clarify-submit",
+            ".clarify-progress",
             ".clarify-collapse",
             ".clarify-hint",
             ".clarify-card.collapsed",
@@ -182,8 +181,7 @@ class TestClarifyCardCSS:
 
     def test_clarify_focus_styles_present(self):
         css = read(REPO / "static/style.css")
-        assert ".clarify-choice:focus" in css and ".clarify-submit:focus" in css, \
-            "clarify focus styles missing"
+        assert ".clarify-choice:focus" in css, "clarify focus styles missing"
 
 
 # ── i18n keys ────────────────────────────────────────────────────────────────
@@ -241,7 +239,11 @@ class TestClarifyI18nKeys:
         "clarify_hint",
         "clarify_other",
         "clarify_send",
-        "clarify_input_placeholder",
+        "clarify_composer_placeholder",
+        "clarify_composer_placeholder_choices",
+        "clarify_progress",
+        "composer_clarify",
+        "composer_clarify_next",
         "clarify_responding",
     ]
 
@@ -311,8 +313,8 @@ class TestClarifyMessagesJS:
     def test_show_clarify_card_present(self):
         src = read(REPO / "static/messages.js")
         assert "function showClarifyCard" in src, "showClarifyCard missing"
-        assert "clarifyChoices" in src and "clarifyInput" in src, \
-            "showClarifyCard should manage clarify DOM elements"
+        assert "clarifyChoices" in src and "lockComposerForClarify" in src, \
+            "showClarifyCard should manage the choices and point the composer at the question"
 
     def test_respond_clarify_uses_api_endpoint(self):
         src = read(REPO / "static/messages.js")
@@ -618,10 +620,10 @@ class TestClarifyCardTimerLogic:
                       src, re.DOTALL)
         assert m, '_stashClarifyDraft function not found'
         body = m.group(0)
-        assert 'classList.contains("loading")' in body, \
+        assert 'if (_clarifySubmitting) return false;' in body, \
             'must not stash draft while a clarify submit is in flight (#3651)'
-        assert body.index('classList.contains("loading")') < body.index('clarifyInput'), \
-            'loading guard must short-circuit before reading the draft'
+        assert body.index('_clarifySubmitting') < body.index('_clarifyRescueText()'), \
+            'in-flight guard must short-circuit before reading the draft'
 
     def test_cancel_stream_does_not_preserve_clarify_draft(self):
         src = self._get_js().read_text()

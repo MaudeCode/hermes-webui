@@ -9134,24 +9134,54 @@ function setComposerStatus(t,timeoutMs){
 let _composerLockState=null;
 let _compressionPlaceholderSaved=null;
 
-function lockComposerForClarify(placeholderText){
+// HWEB-8: while a clarification is pending, #msg IS the answer field. The
+// ordinary draft (text) is parked here and put back on unlock; pending
+// attachments and quoted selections stay in S untouched and never reach the
+// clarify payload because respondClarify() reads only the textarea.
+function isClarifyComposerActive(){
+  return !!_composerLockState;
+}
+
+function clarifyComposerDraft(){
+  return _composerLockState?_composerLockState.draft:null;
+}
+
+// A draft restore that lands mid-clarification must update the parked draft,
+// not the answer the user is typing.
+function setClarifyComposerDraft(text){
+  if(!_composerLockState) return false;
+  _composerLockState.draft=String(text||'');
+  return true;
+}
+
+function lockComposerForClarify(opts){
   const input=$('msg');
   if(!input) return;
-  // Save the current composer text as a server-side draft before locking,
-  // so the user's draft is preserved if they switch sessions while a clarify
-  // card is active (and survives page refresh / syncs across clients).
-  const sid = S && S.session && S.session.session_id;
-  if (sid && typeof _saveComposerDraftNow === 'function') {
-    _saveComposerDraftNow(sid, input.value || '', S.pendingFiles ? [...S.pendingFiles] : []);
-  }
+  opts=opts||{};
   if(!_composerLockState){
+    // Save the current composer text as a server-side draft before locking,
+    // so the user's draft is preserved if they switch sessions while a clarify
+    // card is active (and survives page refresh / syncs across clients).
+    const sid = S && S.session && S.session.session_id;
+    if (sid && typeof _saveComposerDraftNow === 'function') {
+      _saveComposerDraftNow(sid, input.value || '', S.pendingFiles ? [...S.pendingFiles] : []);
+    }
     _composerLockState={
       disabled: input.disabled,
       placeholder: input.placeholder,
+      ariaLabel: input.getAttribute('aria-label'),
+      draft: input.value||'',
     };
+    input.value='';
+    if(window._micActive&&typeof window._stopMic==='function'){try{window._stopMic();}catch(_){ }}
+    if(typeof hideCmdDropdown==='function') hideCmdDropdown();
+    const box=$('composerBox');
+    if(box) box.classList.add('clarify-active');
   }
-  input.disabled=true;
-  if(placeholderText) input.placeholder=placeholderText;
+  input.disabled=false;
+  if(opts.placeholder) input.placeholder=opts.placeholder;
+  if(opts.label) input.setAttribute('aria-label',opts.label);
+  if(typeof autoResize==='function') autoResize();
   updateSendBtn();
 }
 
@@ -9163,10 +9193,16 @@ function unlockComposerForClarify(){
     if(typeof _composerLockState.placeholder==='string'){
       input.placeholder=_composerLockState.placeholder;
     }
+    if(_composerLockState.ariaLabel===null) input.removeAttribute('aria-label');
+    else input.setAttribute('aria-label',_composerLockState.ariaLabel);
+    input.value=_composerLockState.draft;
     _composerLockState=null;
+    const box=$('composerBox');
+    if(box) box.classList.remove('clarify-active');
   }else{
     input.disabled=false;
   }
+  if(typeof autoResize==='function') autoResize();
   updateSendBtn();
 }
 
@@ -9196,6 +9232,12 @@ function _getExplicitBusyCommandAction(text){
 
 function getComposerPrimaryAction(){
   const msg=$('msg');
+  if(typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()){
+    const state=typeof clarifyComposerState==='function'?clarifyComposerState():{};
+    if(state.submitting) return 'disabled';
+    const typed=!!(msg&&String(msg.value||'').trim());
+    return (typed||state.canAdvance)?'clarify':'disabled';
+  }
   const hasContent=_composerHasContent();
   const locked=!!(msg&&msg.disabled);
   if(locked) return 'disabled';
@@ -9226,6 +9268,7 @@ function _applyBusyComposerPlaceholder(){
   if(!input) return;
   if(_compressionPlaceholderSaved!==null) return;
   if(input.disabled) return;
+  if(typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()) return;
   if(_composerHasContent()) return;
   const idlePlaceholder='Message '+assistantDisplayName()+'\u2026';
   if(!window._showBusyPlaceholderHint||!S.busy){
@@ -9278,9 +9321,11 @@ function updateSendBtn(){
   const _tt=(key,fb)=>{if(typeof t!=='function')return fb;const val=t(key);return val===key?fb:(val||fb);};
   let _btnTitle;
   if(action==='disabled'){
-    const _dmsg=$('msg');
-    if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
+    if(typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
     else _btnTitle=_tt('composer_disabled_empty','Type a message to send');
+  }else if(action==='clarify'){
+    const state=typeof clarifyComposerState==='function'?clarifyComposerState():{};
+    _btnTitle=state.hasNext?_tt('composer_clarify_next','Next question'):_tt('composer_clarify','Send answer');
   }else if(action==='queue'&&typeof isCompressionUiRunning==='function'&&isCompressionUiRunning()){
     _btnTitle=_tt('composer_compression_will_queue','Type a message — it will queue and send after compression');
   }else{
@@ -9304,6 +9349,12 @@ function updateSendBtn(){
 }
 
 async function handleComposerPrimaryAction(){
+  // A pending clarification owns the composer: its only action is the answer.
+  // Checked before Stop so the button can never cancel the run instead.
+  if(typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()){
+    if(getComposerPrimaryAction()==='clarify'&&typeof respondClarify==='function') await respondClarify();
+    return;
+  }
   if(window._micActive){
     window._micPendingSend=true;
     _stopMic();
@@ -9345,7 +9396,7 @@ function setBusy(v){
         // wrong chat.  Put it back into the original session's queue and
         // skip sending — it will drain when the user returns to that session
         // or when its next stream completes while it is the active view.
-        if(S.session&&S.session.session_id!==sid){
+        if((S.session&&S.session.session_id!==sid)||(typeof isClarifyComposerActive==='function'&&isClarifyComposerActive())){
           queueSessionMessage(sid,next);
           updateQueueBadge(sid);
           return;
@@ -24046,6 +24097,8 @@ function _showUploadTooLarge(file){
   else if(typeof showToast==='function')showToast(message,5000,'error');
 }
 function addFiles(files){
+  // Attachments belong to the chat message, never to a clarification answer.
+  if(typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()) return;
   for(const f of files){
     if(f&&f.size>MAX_UPLOAD_BYTES){_showUploadTooLarge(f);continue;}
     if(!S.pendingFiles.find(p=>p.name===f.name))S.pendingFiles.push(f);

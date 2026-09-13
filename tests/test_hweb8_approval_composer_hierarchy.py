@@ -69,7 +69,7 @@ def test_skin_no_longer_promotes_allow_session_to_a_primary_button():
     # geist-contrast paints its primary actions with the accent fill; "Allow
     # session" is a policy choice now, so it must not be on that list.
     assert '.approval-btn.session,' not in STYLE_CSS
-    assert ':root[data-skin="geist-contrast"] .approval-btn.once,' in STYLE_CSS
+    assert ':root[data-skin="geist-contrast"] .approval-btn.once{background:var(--accent)!important' in STYLE_CSS
 
 
 def test_collapsed_strip_hides_the_overflow_menu_with_the_buttons():
@@ -357,7 +357,9 @@ def test_clarify_card_renders_the_queue_position_it_was_handed():
         "const _rememberClarifyPending=p=>'s1';",
         "const _ensureClarifyCardDom=()=>$('clarifyCard');",
         "const _startClarifyCountdown=()=>{}; const _clearClarifyCountdownTimer=()=>{};",
-        "const _renderClarifyBatch=()=>{}; const _clarifySetControlsDisabled=()=>{};",
+        "const _renderClarifyQuestion=()=>{}; const _clarifySetControlsDisabled=()=>{};",
+        "const _clarifyCurrent=()=>null; const _clarifyComposerActive=()=>false;",
+        "let _clarifyBatch=null,_clarifySubmitting=false;",
         "const _ensureClarifyResizeListener=()=>{}; const _setPromptFlyoutHidden=()=>{};",
         "const _syncClarifyCollapseButton=()=>{}; const _syncClarifyTranscriptSpace=()=>{};",
         "const lockComposerForClarify=()=>{}; const applyLocaleToDOM=()=>{}; const syncTopbar=()=>{};",

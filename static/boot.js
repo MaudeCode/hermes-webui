@@ -2309,6 +2309,13 @@ $('modelSelect').onchange=async()=>{
 $('msg').addEventListener('input',()=>{
   updateSendBtn();
   scheduleComposerAutoResize();
+  // HWEB-8: the textarea is a clarification answer. It is not the session
+  // draft and slash/path autocomplete are message-only features.
+  if(typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()){
+    hideCmdDropdown();
+    if(typeof onClarifyComposerInput==='function') onClarifyComposerInput();
+    return;
+  }
   // Persist composer draft to server (debounced in _saveComposerDraft).
   const sid = S && S.session && S.session.session_id;
   if (sid && typeof _saveComposerDraft === 'function') {
@@ -2586,6 +2593,8 @@ function _attachLargePastedText(file){
   return file;
 }
 $('msg').addEventListener('paste',e=>{
+  // A clarification answer is plain text: no screenshot or large-text attachments.
+  if(typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()) return;
   const items=Array.from(e.clipboardData?.items||[]);
   // Extract image items (kind==='file' filter avoids misclassifying text/html
   // with embedded data URIs as images).

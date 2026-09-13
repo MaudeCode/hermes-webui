@@ -362,7 +362,16 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   if (targetSid && _loadingSessionId !== null && _loadingSessionId !== targetSid) return;
   const text = (draft && typeof draft.text === 'string') ? draft.text : '';
   const files = (draft && Array.isArray(draft.files)) ? draft.files : [];
-  const current = ta.value || '';
+  // HWEB-8: mid-clarification the textarea holds the answer; the ordinary
+  // draft lives in the composer lock and is what a restore must target.
+  const clarifyActive = typeof isClarifyComposerActive === 'function' && isClarifyComposerActive();
+  const current = clarifyActive ? String(clarifyComposerDraft() || '') : (ta.value || '');
+  const write = (value) => {
+    if (clarifyActive) { setClarifyComposerDraft(value); return; }
+    ta.value = value;
+    if (typeof autoResize === 'function') autoResize();
+    if (typeof updateSendBtn === 'function') updateSendBtn();
+  };
   const preserveActiveInput = !!(opts && opts.preserveActiveInput);
   const restoreSid = targetSid || (S.session && S.session.session_id);
   const hasServerDraftPayload = _composerDraftHasPayload(text, files);
@@ -380,19 +389,11 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   // If there's no text and no files, clear the textarea (a previous session's
   // draft may still be sitting there from a cross-session switch).
   if (!text && !files.length) {
-    if (current) {
-      ta.value = '';
-      if (typeof autoResize === 'function') autoResize();
-      if (typeof updateSendBtn === 'function') updateSendBtn();
-    }
+    if (current) write('');
     return;
   }
   // Only update if different to avoid cursor jumps on unrelated session switches.
-  if (current !== text) {
-    ta.value = text;
-    if (typeof autoResize === 'function') autoResize();
-    if (typeof updateSendBtn === 'function') updateSendBtn();
-  }
+  if (current !== text) write(text);
   // Files restoration is skipped for now (requires S.pendingFiles plumbing).
 }
 
