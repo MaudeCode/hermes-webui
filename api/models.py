@@ -9806,8 +9806,13 @@ def get_state_db_session_message_keys_before_timestamp(
     before_timestamp,
     *,
     profile=None,
+    limit=None,
 ) -> list[tuple] | None:
     """Return visible-identity keys before ``before_timestamp`` in DB order.
+
+    ``limit`` (HWEB-103) returns only the last ``limit`` keys before the
+    timestamp, still in ascending DB order, so a caller can prove the rows
+    adjacent to a tail-read floor without materialising the whole prefix.
 
     Missing timestamps are intentionally excluded because the bounded reader
     keeps them with ``timestamp IS NULL OR timestamp >= ?``.  The caller uses
@@ -9845,18 +9850,26 @@ def get_state_db_session_message_keys_before_timestamp(
             if not {'id', 'session_id', 'role', 'content', 'timestamp', 'tool_calls'}.issubset(available):
                 return None
             api_content_select = ", api_content" if "api_content" in available else ""
+            bounded = isinstance(limit, int) and not isinstance(limit, bool) and limit > 0
             cur.execute(
-                f"""
+                """
                 SELECT
                     COALESCE(role, '') AS role,
                     COALESCE(content, '') AS content,
                     tool_calls{api_content_select}
                 FROM messages
                 WHERE session_id = ? AND timestamp IS NOT NULL AND timestamp < ?
-                ORDER BY timestamp ASC, id ASC
-                """,
-                (str(sid), before_ts),
+                ORDER BY timestamp {order}, id {order}{limit_clause}
+                """.format(
+                    api_content_select=api_content_select,
+                    order="DESC" if bounded else "ASC",
+                    limit_clause=" LIMIT ?" if bounded else "",
+                ),
+                (str(sid), before_ts, int(limit)) if bounded else (str(sid), before_ts),
             )
+            fetched = cur.fetchall()
+            if bounded:
+                fetched.reverse()
             return [
                 _session_message_visible_key(
                     {
@@ -9867,7 +9880,7 @@ def get_state_db_session_message_keys_before_timestamp(
                     },
                     normalize_workspace_prefix=True,
                 )
-                for row in cur.fetchall()
+                for row in fetched
             ]
     except Exception:
         return None

@@ -30,7 +30,7 @@ import time
 import uuid
 import http.client
 import socket as _socket
-from collections import defaultdict, deque, OrderedDict
+from collections import Counter, defaultdict, deque, OrderedDict
 from pathlib import Path
 from contextlib import ExitStack, closing, contextmanager, nullcontext
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
@@ -9962,6 +9962,59 @@ def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None
 _DISPLAY_STATE_SIGNATURE_UNSET = object()
 
 
+_DISPLAY_TAIL_MERGE_ANCHOR_ROWS = 300
+
+
+def _display_tail_merge_start(sidecar_messages, state_db_messages, tail_floor):
+    """Return the sidecar index a bounded tail merge may start from, or None.
+
+    HWEB-103. ``tail_floor`` is the timestamp floor the state.db rows were
+    read from, after ``_state_db_since_timestamp_for_limited_display`` proved
+    the sidecar prefix before it matches state.db. Rows before the floor are
+    then carried over unmerged. That is exact only when every state.db row is
+    a mirror of a sidecar row at or after the floor: the merge settles such
+    rows through its visible-identity duplicate accounting, which only needs
+    the matching sidecar rows to be present, and never appends them. The
+    check is a multiset containment of exact visible keys, stricter than the
+    merge's own loose matching, so any shape it accepts the full merge would
+    also have deduplicated. Any other shape returns None and the caller runs
+    the full merge (unchanged behaviour).
+    """
+    if tail_floor is None:
+        return None
+    try:
+        floor = float(tail_floor)
+    except (TypeError, ValueError):
+        return None
+    prefix_end = None
+    for idx, msg in enumerate(sidecar_messages):
+        ts = _message_timestamp_as_float(msg)
+        if ts is None:
+            return None
+        if ts < floor:
+            if prefix_end is not None:
+                return None
+        elif prefix_end is None:
+            prefix_end = idx
+    if prefix_end is None:
+        prefix_end = len(sidecar_messages)
+    if prefix_end == 0:
+        return None
+    tail_keys = Counter(
+        _session_message_visible_key(msg, normalize_workspace_prefix=False)
+        for msg in sidecar_messages[prefix_end:]
+        if isinstance(msg, dict)
+    )
+    for msg in state_db_messages:
+        if not isinstance(msg, dict):
+            return None
+        key = _session_message_visible_key(msg, normalize_workspace_prefix=True)
+        if key is None or tail_keys.get(key, 0) <= 0:
+            return None
+        tail_keys[key] -= 1
+    return max(0, prefix_end - _DISPLAY_TAIL_MERGE_ANCHOR_ROWS)
+
+
 def _limited_webui_messages_for_display_with_sidecar(
     session,
     sidecar_messages,
@@ -9970,6 +10023,7 @@ def _limited_webui_messages_for_display_with_sidecar(
     state_db_signature=_DISPLAY_STATE_SIGNATURE_UNSET,
     msg_before=None,
     omitted_state_db_rows=0,
+    tail_floor=None,
 ) -> list:
     if sidecar_messages is None:
         sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
@@ -10031,12 +10085,28 @@ def _limited_webui_messages_for_display_with_sidecar(
             if _display_merge_cache_entry_usable(entry, cache_key):
                 _display_merge_cache.move_to_end(sid, last=True)
                 return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
-    merged = merge_session_messages_append_only(
-        sidecar_messages,
-        state_db_messages,
-        truncation_watermark=getattr(session, "truncation_watermark", None),
-        truncation_boundary=getattr(session, "truncation_boundary", None),
-    )
+    tail_start = None
+    if (
+        tail_floor is not None
+        and not omitted_state_db_rows
+        and getattr(session, "truncation_watermark", None) in (None, "")
+        and getattr(session, "truncation_boundary", None) in (None, "")
+    ):
+        tail_start = _display_tail_merge_start(sidecar_messages, state_db_messages, tail_floor)
+    if tail_start:
+        merged = sidecar_messages[:tail_start] + merge_session_messages_append_only(
+            sidecar_messages[tail_start:],
+            state_db_messages,
+            truncation_watermark=getattr(session, "truncation_watermark", None),
+            truncation_boundary=getattr(session, "truncation_boundary", None),
+        )
+    else:
+        merged = merge_session_messages_append_only(
+            sidecar_messages,
+            state_db_messages,
+            truncation_watermark=getattr(session, "truncation_watermark", None),
+            truncation_boundary=getattr(session, "truncation_boundary", None),
+        )
     if cache_key is not None:
         _state_key = cache_key[4]
         _streaming_key = (
@@ -10056,10 +10126,28 @@ def _limited_webui_messages_for_display_with_sidecar(
             cache_key = None
     if cache_key is not None:
         sid = str(getattr(session, "session_id", "") or "")
-        cache_weight = _display_merge_messages_weight(
-            merged,
-            limit=_DISPLAY_MERGE_CACHE_MAX_ENTRY_BYTES,
-        )
+        cache_weight = None
+        if tail_start:
+            # HWEB-103: the carried-over prefix is the lineage cache's own row
+            # set; reuse its weight (an upper bound for the prefix) and walk
+            # only the merged tail instead of the whole transcript again.
+            with _lineage_display_cache_lock:
+                _lineage_entry = _lineage_display_cache.get(sid)
+            if (
+                _lineage_entry is not None
+                and _lineage_entry.get("self_sig") is not None
+                and _lineage_entry.get("self_sig")
+                == getattr(sidecar_cache_source, "sidecar_signature", None)
+            ):
+                cache_weight = int(_lineage_entry.get("weight") or 0) + _display_merge_messages_weight(
+                    merged[tail_start:],
+                    limit=_DISPLAY_MERGE_CACHE_MAX_ENTRY_BYTES,
+                )
+        if cache_weight is None:
+            cache_weight = _display_merge_messages_weight(
+                merged,
+                limit=_DISPLAY_MERGE_CACHE_MAX_ENTRY_BYTES,
+            )
         if cache_weight <= _DISPLAY_MERGE_CACHE_MAX_ENTRY_BYTES:
             with _display_merge_cache_lock:
                 _display_merge_cache[sid] = {
@@ -10121,9 +10209,10 @@ def _display_merge_messages_weight(messages, *, limit: int) -> int:
             else:
                 stack.extend(value)
         elif isinstance(value, str):
-            # Four bytes per code point is a conservative UTF-8 upper bound and
-            # avoids allocating another copy of a potentially huge string.
-            total += 49 + (4 * len(value))
+            # HWEB-103: the old ``49 + 4 * len`` estimate quadrupled ASCII
+            # transcripts (CPython stores them at one byte per character), so
+            # every large session overshot the entry cap and was never cached.
+            total += sys.getsizeof(value)
         elif isinstance(value, (bytes, bytearray, memoryview)):
             total += 33 + len(value)
         else:
@@ -10581,15 +10670,20 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
     if sidecar_before_count == 0:
         return floor, sidecar_messages
 
-    sidecar_before_keys = [
-        _session_message_visible_key(msg)
+    # HWEB-103: the prefix count already matched above. Prove identity for
+    # the ``raw_budget`` rows adjacent to the floor instead of re-keying the
+    # whole prefix on both sides, which made this O(transcript) per load.
+    sidecar_before = [
+        msg
         for msg, ts in zip(sidecar_messages, sidecar_timestamps, strict=True)
         if ts < floor
-    ]
+    ][-raw_budget:]
+    sidecar_before_keys = [_session_message_visible_key(msg) for msg in sidecar_before]
     state_before_keys = get_state_db_session_message_keys_before_timestamp(
         getattr(session, "session_id", None),
         floor,
         profile=getattr(session, "profile", None) or None,
+        limit=raw_budget,
     )
     if state_before_keys is None or state_before_keys != sidecar_before_keys:
         return None, sidecar_messages
@@ -14392,6 +14486,7 @@ def _handle_session_get(handler, parsed) -> bool:
                         state_db_signature=_display_state_db_signature,
                         msg_before=msg_before,
                         omitted_state_db_rows=_display_omitted_state_db_rows,
+                        tail_floor=state_db_since_timestamp,
                     )
             else:
                 _all_msgs = merge_session_messages_append_only(
@@ -14648,10 +14743,12 @@ def _handle_session_get(handler, parsed) -> bool:
             for row in _all_msgs
         )
         if (
-            not raw.get("read_only")
+            load_messages
+            and not raw.get("read_only")
             and not _truncated
             and (not raw.get("is_cli_session") or imported_turn_marker)
         ):
+            # HWEB-103: messages=0 never carries the revision; skip the merge.
             from api.session_ops import regeneration_authority, regeneration_state
             canonical_state = regeneration_state(s)
             revision = regeneration_authority(
