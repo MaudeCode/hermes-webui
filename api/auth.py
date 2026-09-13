@@ -47,6 +47,25 @@ def _resolve_session_ttl() -> int:
     return SESSION_TTL
 
 
+def _resolve_session_sliding() -> bool:
+    """Operator env overrides webui.session_sliding in settings.json."""
+    value = os.getenv('HERMES_WEBUI_SESSION_SLIDING', '').strip().lower()
+    if value:
+        return value in ('1', 'true', 'yes', 'on')
+    from api.config import _read_raw_settings_file
+
+    try:
+        webui = _read_raw_settings_file(strict=True).get('webui', {})
+    except (OSError, ValueError) as exc:
+        _warn_trusted_auth_once(
+            'session-sliding-settings',
+            'Cannot read session sliding policy (%s); session renewal is disabled',
+            type(exc).__name__,
+        )
+        return False
+    return isinstance(webui, dict) and webui.get('session_sliding', True) is True
+
+
 # ── Public paths (no auth required) ─────────────────────────────────────────
 PUBLIC_PATHS = frozenset({
     '/login', '/health', '/favicon.ico', '/sw.js',
@@ -745,7 +764,8 @@ def verify_session(cookie_value: str) -> bool:
     full_sig = hmac.new(_signing_key(), token.encode(), hashlib.sha256).hexdigest()
     # Accept both new (64-char) and legacy (32-char truncated) signatures so
     # existing sessions survive the upgrade without a forced global logout.
-    # The legacy branch can be removed once session TTLs have expired (~30 days).
+    # Sliding sessions can outlive the default TTL, so elapsed time since the
+    # upgrade alone is not enough to retire the legacy branch.
     valid = hmac.compare_digest(sig, full_sig) or (
         len(sig) == 32 and hmac.compare_digest(sig, full_sig[:32])
     )
@@ -881,14 +901,14 @@ def _queue_pending_cookie(handler, cookie_header: str) -> None:
     pending.append(cookie_header)
 
 
-def _auth_cookie_header(cookie_value, handler=None) -> str:
+def _auth_cookie_header(cookie_value, handler=None, *, ttl=None) -> str:
     cookie = http.cookies.SimpleCookie()
     name = _resolve_cookie_name()
     cookie[name] = cookie_value
     cookie[name]['httponly'] = True
     cookie[name]['samesite'] = 'Lax'
     cookie[name]['path'] = '/'
-    cookie[name]['max-age'] = str(_resolve_session_ttl())
+    cookie[name]['max-age'] = str(_resolve_session_ttl() if ttl is None else ttl)
     if _is_secure_context(handler):
         cookie[name]['secure'] = True
     return cookie[name].OutputString()
@@ -972,6 +992,7 @@ def _remember_trusted_auth_session(handler, info: dict | None, cookie_value: str
 
 def reset_trusted_auth_request_state(handler) -> None:
     for name in (
+        '_auth_session_refresh_cookie',
         '_trusted_auth_session_reconciled',
         '_trusted_auth_session_rejected',
         '_trusted_auth_session_info',
@@ -1281,6 +1302,35 @@ def request_can_manage_server(handler) -> bool:
     return session_can_manage_server(ensure_trusted_auth_session(handler))
 
 
+def refresh_session_for_response(handler, status: int) -> bool:
+    """Renew an authorized session only when its response succeeds.
+
+    The auth gate owns the request-local candidate, after identity/policy and
+    profile reconciliation. Waiting for the response also excludes route-level
+    authorization failures. Replacing records keeps persistence snapshots stable.
+    """
+    if status < 200:
+        return False
+    cookie_value = getattr(handler, '_auth_session_refresh_cookie', None)
+    handler._auth_session_refresh_cookie = None
+    if not cookie_value or status >= 400 or not _resolve_session_sliding():
+        return False
+    ttl = _resolve_session_ttl()
+    token = _session_token_from_cookie_value(cookie_value)
+    with _SESSIONS_LOCK:
+        record = _sessions.get(token)
+        expiry = _session_expiry(record)
+        now = time.time()
+        if expiry is None or now >= expiry or expiry - now >= ttl - min(ttl / 10, 3600):
+            return False
+        updated = dict(record) if isinstance(record, dict) else {}
+        updated['expiry'] = now + ttl
+        _sessions[token] = updated
+    _persist_sessions()
+    _queue_pending_cookie(handler, _auth_cookie_header(cookie_value, handler, ttl=ttl))
+    return True
+
+
 def check_auth(handler, parsed) -> bool:
     """Check if request is authorized. Returns True if OK.
     If not authorized, sends 401 (API) or 302 redirect (page) and returns False."""
@@ -1324,6 +1374,9 @@ def check_auth(handler, parsed) -> bool:
             handler.end_headers()
             handler.wfile.write(body)
             return False
+        handler._auth_session_refresh_cookie = (
+            getattr(handler, '_trusted_auth_session_cookie_value', None) or cookie_val
+        )
         return True
     # Not authorized
     if parsed.path.startswith('/api/'):

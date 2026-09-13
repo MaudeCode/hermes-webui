@@ -10574,11 +10574,15 @@ _settings_file_cache: dict[str, tuple] = {}
 _settings_file_cache_lock = threading.Lock()
 
 
-def _read_raw_settings_file() -> dict:
-    """Read settings.json without applying defaults."""
+def _read_raw_settings_file(*, strict: bool = False) -> dict:
+    """Read settings.json; strict callers distinguish absence from unreadable policy."""
     try:
         st = SETTINGS_FILE.stat()
+    except FileNotFoundError:
+        return {}
     except OSError:
+        if strict:
+            raise
         # Missing file, PermissionError, or other OS-level error (e.g. UID
         # mismatch in Docker). Treat as missing rather than failing startup.
         logger.debug("Cannot stat settings file %s (missing or inaccessible?)", SETTINGS_FILE)
@@ -10596,12 +10600,19 @@ def _read_raw_settings_file() -> dict:
     try:
         loaded = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
     except Exception:
+        if strict:
+            raise
         # Do NOT cache the failure: a partially written file re-read on the next
         # call is cheaper than pinning {} until the next stat change.
         logger.debug("Failed to load settings from %s", SETTINGS_FILE)
         return {}
 
-    raw = loaded if isinstance(loaded, dict) else {}
+    if not isinstance(loaded, dict):
+        if strict:
+            raise ValueError('settings.json must contain an object')
+        # Do not cache malformed input as verified-empty policy for strict readers.
+        return {}
+    raw = loaded
     with _settings_file_cache_lock:
         _settings_file_cache[cache_key] = (stat_key, raw)
     return copy.deepcopy(raw)

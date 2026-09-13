@@ -103,11 +103,12 @@ logger = logging.getLogger(__name__)
 from api.logging_hygiene import install_webui_dependency_log_floors
 # Install dependency log floors before importing routes or starting an agent.
 install_webui_dependency_log_floors()
-from api.auth import check_auth, reset_trusted_auth_request_state
+from api.auth import check_auth, refresh_session_for_response, reset_trusted_auth_request_state
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import (
     j,
     get_profile_cookie,
+    flush_pending_auth_cookies,
     _build_csp_report_only_policy,
     _CLIENT_DISCONNECT_ERRORS,
 )
@@ -303,6 +304,11 @@ class Handler(BaseHTTPRequestHandler):
     @classmethod
     def csp_report_only_policy(cls, extra_connect_src=None, extra_frame_src=None) -> str:
         return _build_csp_report_only_policy(extra_connect_src, extra_frame_src)
+
+    def send_response(self, code, message=None) -> None:
+        super().send_response(code, message)
+        if refresh_session_for_response(self, code):
+            flush_pending_auth_cookies(self)
 
     def end_headers(self) -> None:
         extra_connect_src = getattr(self, "_csp_extra_connect_src", None)
