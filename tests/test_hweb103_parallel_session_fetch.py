@@ -10,7 +10,6 @@ existing stale-load guards keep deciding what lands on screen.
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import subprocess
 from pathlib import Path
