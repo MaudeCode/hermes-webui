@@ -8267,4 +8267,27 @@ html.booting.has-ring-cache #ctxIndicatorWrap{display:flex!important;visibility:
 .ws-empty-btn:hover{background:var(--hover-bg);}
 .workspace-artifacts-count{opacity:1;font-family:var(--font-mono);font-size:10.5px;padding:0 5px;border-radius:4px;background:var(--surface-subtle);color:var(--muted);margin-left:4px;}
 .workspace-panel-tab.has-artifacts .workspace-artifacts-count{background:var(--accent-bg);color:var(--accent-text);}
+/* ── Phone: bottom tab bar ─────────────────────────────────────────────── */
+.tabbar,.tabbar-sheet{display:none;}
+@media (max-width:768px){
+  .tabbar{position:fixed;left:0;right:0;bottom:0;z-index:150;display:flex;height:calc(56px + env(safe-area-inset-bottom,0px));padding:0 4px env(safe-area-inset-bottom,0px);background:var(--sidebar);border-top:1px solid var(--border);}
+  .tabbar-btn{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;border:0;background:transparent;color:var(--muted);font:inherit;font-size:10.5px;font-weight:500;cursor:pointer;border-radius:var(--r-md);margin:6px 2px;transition:color var(--dur) var(--ease),background var(--dur) var(--ease);}
+  .tabbar-btn svg{width:20px;height:20px;}
+  .tabbar-btn.active{color:var(--accent-text);}
+  .tabbar-btn.open{background:var(--hover-bg);color:var(--text);}
+  .tabbar-sheet{position:fixed;left:8px;right:8px;bottom:calc(64px + env(safe-area-inset-bottom,0px));z-index:151;display:flex;flex-direction:column;padding:6px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);box-shadow:var(--shadow-md);}
+  .tabbar-sheet-item{display:flex;align-items:center;gap:12px;height:44px;padding:0 12px;border:0;border-radius:var(--r-md);background:transparent;color:var(--text);font:inherit;font-size:14px;cursor:pointer;text-align:left;}
+  .tabbar-sheet-item svg{width:18px;height:18px;color:var(--muted);}
+  .tabbar-sheet-item:hover,.tabbar-sheet-item:active{background:var(--hover-bg);}
+  /* The drawer keeps only the conversation list; the rail strip inside it goes */
+  .sidebar > .sidebar-nav{display:none!important;}
+  .sidebar.mobile-panel-drawer > .panel-view,.sidebar > .panel-view{margin-left:0!important;padding-left:0!important;}
+  /* Room for the bar under the composer and every scroll pane */
+  .layout,.sidebar{padding-bottom:calc(56px + env(safe-area-inset-bottom,0px));box-sizing:border-box;}
+  .workspace-panel-edge-toggle{bottom:calc(72px + env(safe-area-inset-bottom,0px));top:auto;transform:none!important;}
+  /* Chat header and composer footer stay compact on phones */
+  .chat-context{display:none;}
+  .chat-header{min-height:44px;}
+  #btnMic,.composer-reasoning-wrap{display:none!important;}
+}
 /* REDESIGN-LAYER-END */

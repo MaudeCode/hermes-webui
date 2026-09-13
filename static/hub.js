@@ -503,7 +503,67 @@
     }
   }
 
+  // Phone: a bottom tab bar (Chat · Tasks · Kanban · Agent · More) replaces the
+  // rail-inside-the-drawer. Agent and More open a small sheet of the remaining
+  // destinations. The drawer keeps the conversation list.
+  const TABS = [
+    { key: 'chat', label: 'Chat', panel: 'chat' },
+    { key: 'tasks', label: 'Tasks', panel: 'tasks' },
+    { key: 'kanban', label: 'Kanban', panel: 'kanban' },
+    { key: 'agent', label: 'Agent', items: [['skills', 'Skills'], ['memory', 'Memory'], ['profiles', 'Profiles'], ['workspaces', 'Spaces']] },
+    { key: 'more', label: 'More', items: [['todos', 'Todos'], ['insights', 'Insights'], ['logs', 'Logs'], ['settings', 'Settings']] },
+  ];
+  function railIcon(panel) { const b = document.querySelector('.rail-btn[data-panel="' + panel + '"] svg'); return b ? b.cloneNode(true) : null; }
+  function mountTabbar() {
+    if (document.querySelector('.tabbar')) return;
+    const bar = document.createElement('nav');
+    bar.className = 'tabbar';
+    bar.setAttribute('aria-label', 'Primary navigation');
+    let sheet = null;
+    const closeSheet = () => { if (sheet) { sheet.remove(); sheet = null; } bar.querySelectorAll('.tabbar-btn').forEach(b => b.classList.remove('open')); };
+    const openSheet = (tab, btn) => {
+      closeSheet();
+      sheet = document.createElement('div');
+      sheet.className = 'tabbar-sheet';
+      tab.items.forEach(([panel, label]) => {
+        const it = document.createElement('button');
+        it.type = 'button'; it.className = 'tabbar-sheet-item';
+        const ic = railIcon(panel); if (ic) it.appendChild(ic);
+        const t = document.createElement('span'); t.textContent = label; it.appendChild(t);
+        it.addEventListener('click', () => { closeSheet(); if (typeof switchPanel === 'function') switchPanel(panel); });
+        sheet.appendChild(it);
+      });
+      document.body.appendChild(sheet);
+      btn.classList.add('open');
+      setTimeout(() => document.addEventListener('click', (e) => { if (sheet && !sheet.contains(e.target) && !btn.contains(e.target)) closeSheet(); }, { once: true }), 0);
+    };
+    TABS.forEach(tab => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'tabbar-btn'; b.dataset.tab = tab.key;
+      const ic = railIcon(tab.panel || tab.items[0][0]); if (ic) b.appendChild(ic);
+      const l = document.createElement('span'); l.textContent = tab.label; b.appendChild(l);
+      b.addEventListener('click', () => {
+        if (tab.panel) { closeSheet(); if (typeof switchPanel === 'function') switchPanel(tab.panel); const sb = document.querySelector('.sidebar'); if (sb && tab.panel !== 'chat') sb.classList.remove('mobile-open'); }
+        else if (sheet && b.classList.contains('open')) closeSheet(); else openSheet(tab, b);
+      });
+      bar.appendChild(b);
+    });
+    document.body.appendChild(bar);
+    const main = document.querySelector('main.main');
+    const syncActive = () => {
+      const active = [...document.querySelectorAll('.rail-btn.nav-tab.active')].map(x => x.dataset.panel)[0] || 'chat';
+      bar.querySelectorAll('.tabbar-btn').forEach(b => {
+        const tab = TABS.find(t => t.key === b.dataset.tab);
+        const on = tab.panel ? tab.panel === active : tab.items.some(([p]) => p === active);
+        b.classList.toggle('active', on);
+      });
+    };
+    if (main) new MutationObserver(syncActive).observe(main, { attributes: true, attributeFilter: ['class'] });
+    syncActive();
+  }
+
   function init() {
+    mountTabbar();
     mountWorkspacePanel();
     mountGlobalCaches();
     mountBootHolds();
