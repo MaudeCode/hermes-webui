@@ -2085,8 +2085,15 @@ async function loadSession(sid){
   // repaired by the deferred resolver after S.session is assigned.
   // Guard against network/server failures to prevent a permanently stuck loading state.
   let data;
+  // HWEB-103: issue the metadata request, then start the transcript-window
+  // fetch before awaiting it so the two round-trips overlap;
+  // _ensureMessagesLoaded() picks the stashed window up below. Skip the
+  // prefetch when an INFLIGHT snapshot will restore the transcript without a
+  // fetch.
+  const _metadataRequest = api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
+  if(typeof _prefetchSessionMessages==='function'&&!(typeof INFLIGHT!=='undefined'&&INFLIGHT&&INFLIGHT[sid])) _prefetchSessionMessages(sid,_loadGeneration);
   try {
-    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
+    data = await _metadataRequest;
   } catch(e) {
     const profileMismatch=_sessionProfileMismatchFromError(e);
     if(profileMismatch && profileMismatch.profile && !opts.skipProfileResolve){
@@ -3378,6 +3385,39 @@ function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
   }
 }
 
+// HWEB-103: the transcript-window request no longer waits for the metadata
+// request to finish. loadSession() starts it alongside the messages=0 fetch and
+// _ensureMessagesLoaded() consumes the stashed promise when the session id,
+// load generation, and URL all still match; anything else is ignored and the
+// normal request is issued. Rejections are folded into the settled value so an
+// abandoned prefetch never surfaces as an unhandled rejection.
+let _sessionMessagesPrefetch=null;
+function _sessionMessagesLoadUrl(sid){
+  // Mirrors the URL _ensureMessagesLoaded() builds; a drift between the two
+  // only makes the prefetch go unused (the URLs must match to be consumed).
+  const reloadLimit=_messageReloadLimitForSession(sid);
+  const boundedReloadLimit=Math.max(
+    _INITIAL_MSG_LIMIT,
+    Math.min(Number(reloadLimit)||_INITIAL_MSG_LIMIT, _msgLimitMax, _FORCE_RELOAD_MSG_LIMIT)
+  );
+  return `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${boundedReloadLimit}&expand_renderable=1`;
+}
+function _prefetchSessionMessages(sid, generation){
+  const url=_sessionMessagesLoadUrl(sid);
+  const promise=api(url,{timeoutMs:120000}).then(data=>({data}),error=>({error}));
+  _sessionMessagesPrefetch={sid, generation, url, promise};
+}
+function _takeSessionMessagesPrefetch(sid, generation, url){
+  const pre=_sessionMessagesPrefetch;
+  if(!pre) return null;
+  if(pre.sid!==sid||pre.generation!==generation||pre.url!==url){
+    if(pre.generation<=generation) _sessionMessagesPrefetch=null;
+    return null;
+  }
+  _sessionMessagesPrefetch=null;
+  return pre.promise;
+}
+
 async function _ensureMessagesLoaded(sid, opts) {
   // `opts` is an explicit named parameter (vs loadSession's arguments[1]
   // pattern) because _ensureMessagesLoaded is a module-private helper: it is
@@ -3415,12 +3455,18 @@ async function _ensureMessagesLoaded(sid, opts) {
   // The server now counts msg_limit by visible transcript rows by default; keep
   // the flag for compatibility with mixed-version deployments.
   const expandParam = '&expand_renderable=1';
+  const messagesUrl = `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`;
   let data;
   try {
-    data = await api(
-      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`,
-      {timeoutMs:120000}
-    );
+    // HWEB-103: loadSession() may have started this exact request already.
+    const prefetched = (_loadGeneration === null || typeof _takeSessionMessagesPrefetch !== 'function') ? null : _takeSessionMessagesPrefetch(sid, _loadGeneration, messagesUrl);
+    if (prefetched) {
+      const settled = await prefetched;
+      if (settled.error) throw settled.error;
+      data = settled.data;
+    } else {
+      data = await api(messagesUrl, {timeoutMs:120000});
+    }
   } finally {
     if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);
   }
