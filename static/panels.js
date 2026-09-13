@@ -5493,7 +5493,8 @@ function _skillFrontmatterHtml(frontmatter) {
     if (m && !raw.trim().startsWith('- ')) {
       const depth = Math.min(4, Math.floor(m[1].length / 2));
       let val = m[3].trim();
-      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) val = val.slice(1, -1);
+      if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+      else if (val.startsWith("'") && val.endsWith("'")) val = val.slice(1, -1).replace(/''/g, "'");
       rows.push(`<div class="skill-meta-row" style="--d:${depth}"><span class="skill-meta-key">${esc(m[2].trim())}</span><span class="skill-meta-val${val ? '' : ' skill-meta-group'}">${esc(val)}</span></div>`);
     } else if (li) {
       const depth = Math.min(4, Math.floor(li[1].length / 2));
