@@ -7803,7 +7803,6 @@ html[data-workspace-panel="closed"] .rightpanel{margin-left:calc(-1 * var(--isla
 .send-btn:hover{background:var(--accent-hover);transform:none;box-shadow:none;}
 .send-btn:disabled{background:var(--surface-subtle-hover);color:var(--muted);opacity:.7;}
 :root:not(.dark) .send-btn{color:#fff;}
-:root[data-chat-width="full"][data-workspace-panel="closed"] .composer-wrap,:root[data-chat-width="full"][data-workspace-panel="closed"] .messages{padding-right:64px;}
 
 /* ── Form controls ───────────────────────────────────────────────────────── */
 input[type="text"],input[type="password"],input[type="number"],input[type="search"],input[type="url"],input[type="email"],textarea,select,#mainSettings select,.settings-field select,.app-dialog-input,.provider-card-input{background:var(--input-bg);border:1px solid var(--border);border-radius:var(--r-md);color:var(--text);transition:border-color var(--dur) var(--ease),box-shadow var(--dur) var(--ease);}
@@ -7947,7 +7946,6 @@ html.hub-active .layout .sidebar .resize-handle{display:none;}
   .main-view-empty.hub-empty{padding:12px 14px 24px;}
   .hub-toolbar{padding:8px 14px;}
   .hub-list .skill-item .skill-name{min-width:0;}
-  :root[data-chat-width="full"][data-workspace-panel="closed"] .composer-wrap,:root[data-chat-width="full"][data-workspace-panel="closed"] .messages{padding-right:10px;}
 }
 
 /* ── Chat header replaces the window title bar on desktop browsers ────────── */
@@ -8027,6 +8025,7 @@ body{font-size:14px;letter-spacing:-.006em;}
 .composer-model-chip:hover,.composer-reasoning-chip:hover{background:var(--hover-bg);}
 .icon-btn{width:30px;height:30px;}
 .send-btn{width:30px;height:30px;border-radius:7px;}
+@media (max-width:768px){ .icon-btn,.send-btn{width:44px;height:44px;} }
 /* Right panel + headers */
 .panel-header,.panel-head{font-size:13px;font-weight:600;letter-spacing:-.01em;min-height:44px;padding:8px 14px;}
 .workspace-panel-tabs{padding:6px 10px;gap:4px;}
@@ -8100,12 +8099,12 @@ html.hub-active .workspace-panel-edge-toggle{display:none!important;}
 .chat-context-model{font-family:var(--font-mono);font-size:11.5px;}
 /* Composer footer keeps attach, voice, overflow, send */
 @media (min-width:769px){
-  .composer-model-wrap,.composer-reasoning-wrap,.composer-divider{position:absolute;width:1px;height:1px;overflow:visible;opacity:0;pointer-events:none;left:12px;bottom:44px;}
-  .composer-model-wrap .model-dropdown{opacity:1;pointer-events:auto;}
+  .composer-model-wrap,.composer-reasoning-wrap,.composer-divider{position:absolute;width:1px;height:1px;visibility:hidden;pointer-events:none;left:12px;bottom:44px;}
+  .composer-model-wrap .model-dropdown{visibility:visible;pointer-events:auto;}
 }
 /* Turns read as a transcript: user turns are quiet blocks with a gold rule,
    agent turns are full width. No bubbles. */
-.msg-row[data-role="user"]{align-self:stretch;max-width:var(--msg-max);}
+.msg-row[data-role="user"]{align-self:flex-start;}
 .msg-row[data-role="user"] .msg-body{background:transparent;border:0;border-left:2px solid var(--accent);border-radius:0;padding:2px 0 2px 14px;color:var(--text);font-size:var(--message-body-font-size);}
 .msg-row[data-role="user"] .msg-body code{background:var(--code-inline-bg);}
 .msg-row[data-role="user"] .msg-foot{padding-left:16px;justify-content:flex-start;}
@@ -8171,11 +8170,13 @@ html.booting #mainChat::after{transition:none!important;}
 .chat-header .app-titlebar-profile{margin-left:auto;}
 
 /* ── Boot: no flashes while the app resolves state ───────────────────────── */
-html.booting *,html.booting *::before,html.booting *::after{animation:none!important;}
+/* Entrance animations are skipped while booting; state indicators (activity
+   glow, spinners, pulses) keep running so live rows read correctly at once. */
+html.booting .send-btn.visible,html.booting .session-item.session-list-flip-enter,html.booting .session-item.new-flash,html.booting .skeleton-row,html.booting .skeleton-tree-row,html.booting .skeleton-group-label,html.booting .skeleton-empty-hint,html.booting .transparent-event-row[data-earlier-revealed="1"],html.booting .stream-fade-word.is-new,html.booting .queue-pill-outer.show,html.booting .pwa-resumed .app-titlebar-title,html.booting .outline-jump-flash{animation:none!important;}
 /* A saved session that is still resolving never shows the welcome state, even
    if an intermediate render asks for it; it appears only once boot settles. */
-html.booting.boot-session .empty-state{display:none!important;}
-html.booting.boot-session #mainChat.composer-hero::after{flex-grow:0!important;}
+html.booting:not(.boot-ready)[data-session-boot="1"] .empty-state{display:none!important;}
+html.booting:not(.boot-ready)[data-session-boot="1"] #mainChat.composer-hero::after{flex-grow:0!important;}
 /* Context line and workspace toggle wait for their real values */
 html.booting .chat-context{visibility:hidden;}
 /* Skeleton rows keep their sheen even while other animation is suppressed */
@@ -8190,9 +8191,9 @@ html.booting:not(.no-speech) #btnMic[style*="display:none"],html.booting:not(.no
 html.has-sidebar-snapshot #sessionList{display:none!important;}
 #sessionListBoot{flex:1;overflow-y:auto;min-height:0;}
 html.booting.has-ctx-cache .chat-context{visibility:visible;}
-html.booting:not(.boot-session) #mainChat::after{flex-grow:1!important;}
-html.booting:not(.boot-session) #mainChat .composer-wrap{background:transparent!important;}
-html.booting:not(.boot-session) .empty-state{display:flex!important;}
+html.booting:not(.boot-ready):not([data-session-boot="1"]) #mainChat::after{flex-grow:1!important;}
+html.booting:not(.boot-ready):not([data-session-boot="1"]) #mainChat .composer-wrap{background:transparent!important;}
+html.booting:not(.boot-ready):not([data-session-boot="1"]) .empty-state{display:flex!important;}
 /* Hero text restored from the snapshot is final: no fade, no rewrite */
 html.booting .empty-hero-title.ready{opacity:1;transition:none;}
 html.booting.title-pending .chat-header-title{visibility:hidden;}

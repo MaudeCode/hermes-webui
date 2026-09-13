@@ -33,7 +33,7 @@ def test_hub_release_removes_both_boot_classes():
 def test_css_boot_suppression_is_scoped_to_booting():
     for rule in (
         "html.booting *,html.booting *::before,html.booting *::after{transition:none!important;}",
-        "html.booting.boot-session .empty-state{display:none!important;}",
+        "html.booting:not(.boot-ready)[data-session-boot=\"1\"] .empty-state{display:none!important;}",
         "html.booting .chat-context{visibility:hidden;}",
     ):
         assert rule in CSS, rule

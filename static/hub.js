@@ -608,6 +608,7 @@
   const started = Date.now();
   const release = () => {
     document.documentElement.classList.remove('booting');
+    document.documentElement.classList.remove('boot-ready');
     document.documentElement.classList.remove('boot-session');
     document.documentElement.classList.remove('title-pending');
     // Safety net: snapshots are inert only until the app paints; never leave them inert.
@@ -620,11 +621,34 @@
     if (pending) { window.__hermesPendingSid = null; if (typeof loadSession === 'function') { try { loadSession(pending); } catch (e) { /* app decides */ } } }
     syncEmptyMemo();
   };
+  let releasing = false;
+  const settle = () => {
+    if (releasing) return;
+    releasing = true;
+    // Layout holds (hero spacer, empty state) end now; the transition freeze
+    // stays a little longer so the app's post-boot re-renders don't animate.
+    document.documentElement.classList.add('boot-ready');
+    setTimeout(release, 450);
+  };
+  // S is a top-level `const` in ui.js: reachable by name, not via window.
+  // Observe the ready flag synchronously so a user action in the same tick
+  // that boot finishes already sees the layout holds lifted.
+  try {
+    if (typeof S !== 'undefined' && S && !Object.getOwnPropertyDescriptor(S, '_bootReady')?.get) {
+      let flag = S._bootReady;
+      Object.defineProperty(S, '_bootReady', {
+        configurable: true, enumerable: true,
+        get() { return flag; },
+        set(v) { flag = v; if (v) settle(); },
+      });
+      if (flag) settle();
+    }
+  } catch (e) { /* fall back to polling */ }
   const poll = () => {
-    // S is a top-level `let` in boot.js: reachable by name, not via window.
+    if (releasing) return;
     let ready = false;
     try { ready = (typeof S !== 'undefined') && !!S && !!S._bootReady; } catch (e) { ready = false; }
-    if (ready || Date.now() - started > 12000) { setTimeout(release, 450); return; }
+    if (ready || Date.now() - started > 12000) { settle(); return; }
     setTimeout(poll, 60);
   };
   poll();

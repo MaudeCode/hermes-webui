@@ -1435,8 +1435,11 @@ def main() -> int:
             print("OK  settled: final prose and the same semantic activity coexist without duplication")
 
         page.reload(wait_until="domcontentloaded")
+        # A boot snapshot repaints the last transcript from localStorage during
+        # parse; wait for the app's own render to replace it before measuring.
         page.wait_for_function(
-            "text => (document.querySelector('#msgInner') || {}).innerText?.includes(text)",
+            "text => { const inner = document.querySelector('#msgInner');"
+            " return !!inner && !inner.dataset.bootSnapshot && inner.innerText.includes(text); }",
             arg=TERMINAL_ERROR_TEXT if scenario == "terminal-error" else FINAL_TEXT,
             timeout=15000,
         )

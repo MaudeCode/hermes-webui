@@ -9903,14 +9903,15 @@ const USER_MSG_COLLAPSE_CHARS=600;
 const USER_MSG_COLLAPSE_LINES=8;
 // Rendered height of a collapsed user row on a coarse-pointer layout, for the
 // contain-intrinsic-size reserve (HWEB-66). Measured through renderMessages in
-// Chromium at 390px: 285px (small font) → 310 (normal) → 334 (large) → 359
-// (xlarge); 8 clipped lines + the 44px touch-target disclosure + the 40px
-// action footer + row chrome. Sized to the largest so no font setting
-// under-reserves (under-reserving is the #5638 jump-back); the ~60px
-// over-reserve at the default size is replaced by the real measurement once
-// the row paints. Re-measure when --msg-collapse-lines, the button or the
-// footer sizing changes; test_issue5638 pins it against the stylesheet.
-const USER_MSG_COLLAPSED_ROW_PX=370;
+// Chromium at 390px: 267px (small font) → 292 (normal) → 316 (large) → 341
+// (xlarge), and 244 → 269 → 293 → 318 at 700px; 8 clipped lines + the 44px
+// touch-target disclosure + the 40px action footer + row chrome. Sized to the
+// largest so no font setting under-reserves (under-reserving is the #5638
+// jump-back); the ~60px over-reserve at the default size is replaced by the
+// real measurement once the row paints. Re-measure when --msg-collapse-lines,
+// the button or the footer sizing changes; test_issue5638 pins it against
+// the stylesheet.
+const USER_MSG_COLLAPSED_ROW_PX=350;
 function _userMessageNeedsCollapse(text){
   const s=String(text==null?'':text);
   if(s.length>USER_MSG_COLLAPSE_CHARS) return true;

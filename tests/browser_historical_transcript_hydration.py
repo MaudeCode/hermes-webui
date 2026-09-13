@@ -211,8 +211,11 @@ def main() -> int:
         print("OK  historical load: ID-linked transcript hydrated to one Anchor Worklog")
 
         page.reload(wait_until="domcontentloaded")
+        # A boot snapshot repaints the last transcript from localStorage during
+        # parse; wait for the app's own render to replace it before measuring.
         page.wait_for_function(
-            "text => (document.querySelector('#msgInner') || {}).innerText?.includes(text)",
+            "text => { const inner = document.querySelector('#msgInner');"
+            " return !!inner && !inner.dataset.bootSnapshot && inner.innerText.includes(text); }",
             arg=FINAL_TEXT,
             timeout=15000,
         )
