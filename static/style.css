@@ -8241,4 +8241,8 @@ html.booting.has-ring-cache #ctxIndicatorWrap{display:flex!important;visibility:
   .main-view-body{padding:16px 14px 32px;}
   .detail-row-label{flex-basis:110px;}
 }
+/* Skill metadata (frontmatter) wraps instead of scrolling sideways */
+.skill-frontmatter>summary{font-size:13px;font-weight:500;text-transform:none;letter-spacing:0;}
+.skill-frontmatter pre,.skill-frontmatter pre code{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;overflow-x:visible;}
+.skill-frontmatter pre{margin:0;padding:10px 12px;border:0;border-top:1px solid var(--border);border-radius:0;font-size:12.5px;line-height:1.5;}
 /* REDESIGN-LAYER-END */
