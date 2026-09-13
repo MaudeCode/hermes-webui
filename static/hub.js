@@ -456,7 +456,55 @@
     window.addEventListener('pagehide', saveGlobalCaches);
   }
 
+  // Workspace panel: header names the workspace and shows its path, the empty
+  // state offers the two actions that fill it, and the Artifacts tab lights up
+  // when a run produced something.
+  function mountWorkspacePanel() {
+    const heading = document.getElementById('workspacePanelHeading');
+    const group = heading && heading.closest('.workspace-panel-title-group');
+    const nameSrc = document.getElementById('sidebarWsName');
+    const pathSrc = document.getElementById('sidebarWsPath');
+    if (group && !group.querySelector('.workspace-panel-path')) {
+      const path = document.createElement('span');
+      path.className = 'workspace-panel-path';
+      group.appendChild(path);
+      const sync = () => {
+        const name = nameSrc ? nameSrc.textContent.trim() : '';
+        const p = pathSrc ? pathSrc.textContent.trim() : '';
+        if (name && name !== 'Workspace') heading.textContent = name;
+        path.textContent = p;
+        path.title = p;
+        path.hidden = !p;
+      };
+      sync();
+      [nameSrc, pathSrc].forEach(el => { if (el) new MutationObserver(sync).observe(el, { childList: true, characterData: true, subtree: true }); });
+    }
+    const empty = document.getElementById('wsEmptyState');
+    if (empty && !document.querySelector('.ws-empty-actions')) {
+      const actions = document.createElement('div');
+      actions.className = 'ws-empty-actions';
+      [['Upload a file', 'btnUploadWorkspace'], ['New file', 'btnNewFile']].forEach(([label, id]) => {
+        const b = document.createElement('button');
+        b.type = 'button'; b.className = 'ws-empty-btn'; b.textContent = label;
+        b.addEventListener('click', () => document.getElementById(id)?.click());
+        actions.appendChild(b);
+      });
+      empty.after(actions);
+      const syncEmpty = () => { actions.style.display = (empty.style.display !== 'none' && empty.textContent.indexOf('No workspace') < 0) ? '' : 'none'; };
+      new MutationObserver(syncEmpty).observe(empty, { attributes: true, attributeFilter: ['style'], childList: true, characterData: true, subtree: true });
+      syncEmpty();
+    }
+    const count = document.getElementById('workspaceArtifactsCount');
+    const tab = document.getElementById('workspaceArtifactsTab');
+    if (count && tab) {
+      const syncCount = () => tab.classList.toggle('has-artifacts', /^[1-9]/.test(count.textContent.trim()));
+      new MutationObserver(syncCount).observe(count, { childList: true, characterData: true, subtree: true });
+      syncCount();
+    }
+  }
+
   function init() {
+    mountWorkspacePanel();
     mountGlobalCaches();
     mountBootHolds();
     mountEmptyMemo();
