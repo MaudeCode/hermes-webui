@@ -13680,6 +13680,9 @@ async function signOut(){
     if(typeof window!=='undefined'&&window.HermesPresence&&typeof window.HermesPresence.reset==='function'){
       try{ await window.HermesPresence.reset(); }catch(_){}
     }
+    // Boot snapshots paint the last transcript before the server authorizes
+    // the next load; they must not survive into another identity's session.
+    try{ if(window.HermesBoot) window.HermesBoot.clearSnapshots(); }catch(_){}
     const response=await api('/api/auth/logout',{method:'POST',body:'{}'});
     window.location.href=response.trusted_logout_url||'login';
   }catch(e){

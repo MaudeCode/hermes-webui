@@ -358,6 +358,12 @@
   // observers keep the snapshots current and clear the "snapshot" marker the
   // moment the app paints its own content.
   const SIDEBAR_KEY = 'hermes-boot:sidebar', TRANSCRIPT_KEY = 'hermes-boot:transcript';
+  // Snapshots are painted before the server authorizes the request, so they
+  // must never outlive the identity that produced them: signOut() and the
+  // login page both drop them (see static/login.js).
+  const SNAPSHOT_KEYS = [SIDEBAR_KEY, TRANSCRIPT_KEY, 'hermes-boot:ctx', 'hermes-boot:hero', EMPTY_KEY];
+  function clearBootSnapshots() { SNAPSHOT_KEYS.forEach(k => { try { localStorage.removeItem(k); } catch (e) { /* storage unavailable */ } }); }
+  window.HermesBoot = { clearSnapshots: clearBootSnapshots };
   const LIMIT = 350000;
   function saveSidebarSnapshot() {
     const list = document.getElementById('sessionList');
@@ -519,43 +525,57 @@
   // rail-inside-the-drawer. Agent and More open a small sheet of the remaining
   // destinations. The drawer keeps the conversation list.
   const TABS = [
-    { key: 'chat', label: 'Chat', panel: 'chat' },
-    { key: 'tasks', label: 'Tasks', panel: 'tasks' },
-    { key: 'kanban', label: 'Kanban', panel: 'kanban' },
-    { key: 'agent', label: 'Agent', items: [['skills', 'Skills'], ['memory', 'Memory'], ['profiles', 'Profiles'], ['workspaces', 'Spaces']] },
-    { key: 'more', label: 'More', items: [['todos', 'Todos'], ['insights', 'Insights'], ['logs', 'Logs'], ['settings', 'Settings']] },
+    { key: 'chat', label: 'tab_chat', panel: 'chat' },
+    { key: 'tasks', label: 'tab_tasks', panel: 'tasks' },
+    { key: 'kanban', label: 'tab_kanban', panel: 'kanban' },
+    { key: 'agent', label: 'tab_agent', items: [['skills', 'tab_skills'], ['memory', 'tab_memory'], ['profiles', 'tab_profiles'], ['workspaces', 'tab_workspaces']] },
+    { key: 'more', label: 'tab_more', items: [['todos', 'tab_todos'], ['insights', 'tab_insights'], ['logs', 'tab_logs'], ['settings', 'tab_settings']] },
   ];
+  function label(key) { return typeof t === 'function' ? t(key) : key; }
   function railIcon(panel) { const b = document.querySelector('.rail-btn[data-panel="' + panel + '"] svg'); return b ? b.cloneNode(true) : null; }
+  // Sidebar-only panels (Todos) live in the drawer; switchPanel opens it for a
+  // rail click, so pass that flag for them and leave the drawer closed otherwise.
+  function goTo(panel) {
+    if (typeof switchPanel !== 'function') return;
+    const drawerOnly = typeof MAIN_VIEW_PANELS !== 'undefined' && panel !== 'chat' && !MAIN_VIEW_PANELS.includes(panel);
+    switchPanel(panel, drawerOnly ? { fromRailClick: true } : undefined);
+    if (!drawerOnly && panel !== 'chat') { const sb = document.querySelector('.sidebar'); if (sb) sb.classList.remove('mobile-open'); }
+  }
   function mountTabbar() {
     if (document.querySelector('.tabbar')) return;
     const bar = document.createElement('nav');
     bar.className = 'tabbar';
-    bar.setAttribute('aria-label', 'Primary navigation');
-    let sheet = null;
-    const closeSheet = () => { if (sheet) { sheet.remove(); sheet = null; } bar.querySelectorAll('.tabbar-btn').forEach(b => b.classList.remove('open')); };
+    bar.setAttribute('aria-label', label('primary_navigation'));
+    let sheet = null, onDoc = null;
+    const closeSheet = () => {
+      if (onDoc) { document.removeEventListener('click', onDoc); onDoc = null; }
+      if (sheet) { sheet.remove(); sheet = null; }
+      bar.querySelectorAll('.tabbar-btn').forEach(b => b.classList.remove('open'));
+    };
     const openSheet = (tab, btn) => {
       closeSheet();
       sheet = document.createElement('div');
       sheet.className = 'tabbar-sheet';
-      tab.items.forEach(([panel, label]) => {
+      tab.items.forEach(([panel, key]) => {
         const it = document.createElement('button');
         it.type = 'button'; it.className = 'tabbar-sheet-item';
         const ic = railIcon(panel); if (ic) it.appendChild(ic);
-        const t = document.createElement('span'); t.textContent = label; it.appendChild(t);
-        it.addEventListener('click', () => { closeSheet(); if (typeof switchPanel === 'function') switchPanel(panel); });
+        const tx = document.createElement('span'); tx.textContent = label(key); it.appendChild(tx);
+        it.addEventListener('click', () => { closeSheet(); goTo(panel); });
         sheet.appendChild(it);
       });
       document.body.appendChild(sheet);
       btn.classList.add('open');
-      setTimeout(() => document.addEventListener('click', (e) => { if (sheet && !sheet.contains(e.target) && !btn.contains(e.target)) closeSheet(); }, { once: true }), 0);
+      onDoc = (e) => { if (sheet && !sheet.contains(e.target) && !btn.contains(e.target)) closeSheet(); };
+      setTimeout(() => { if (onDoc) document.addEventListener('click', onDoc); }, 0);
     };
     TABS.forEach(tab => {
       const b = document.createElement('button');
       b.type = 'button'; b.className = 'tabbar-btn'; b.dataset.tab = tab.key;
       const ic = railIcon(tab.panel || tab.items[0][0]); if (ic) b.appendChild(ic);
-      const l = document.createElement('span'); l.textContent = tab.label; b.appendChild(l);
+      const l = document.createElement('span'); l.textContent = label(tab.label); b.appendChild(l);
       b.addEventListener('click', () => {
-        if (tab.panel) { closeSheet(); if (typeof switchPanel === 'function') switchPanel(tab.panel); const sb = document.querySelector('.sidebar'); if (sb && tab.panel !== 'chat') sb.classList.remove('mobile-open'); }
+        if (tab.panel) { closeSheet(); goTo(tab.panel); }
         else if (sheet && b.classList.contains('open')) closeSheet(); else openSheet(tab, b);
       });
       bar.appendChild(b);
@@ -565,7 +585,7 @@
     const syncActive = () => {
       const active = [...document.querySelectorAll('.rail-btn.nav-tab.active')].map(x => x.dataset.panel)[0] || 'chat';
       bar.querySelectorAll('.tabbar-btn').forEach(b => {
-        const tab = TABS.find(t => t.key === b.dataset.tab);
+        const tab = TABS.find(x => x.key === b.dataset.tab);
         const on = tab.panel ? tab.panel === active : tab.items.some(([p]) => p === active);
         b.classList.toggle('active', on);
       });
