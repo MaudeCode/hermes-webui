@@ -52,7 +52,17 @@ def _resolve_session_sliding() -> bool:
     value = os.getenv('HERMES_WEBUI_SESSION_SLIDING', '').strip().lower()
     if value:
         return value in ('1', 'true', 'yes', 'on')
-    webui = load_settings().get('webui', {})
+    from api.config import _read_raw_settings_file
+
+    try:
+        webui = _read_raw_settings_file(strict=True).get('webui', {})
+    except (OSError, ValueError) as exc:
+        _warn_trusted_auth_once(
+            'session-sliding-settings',
+            'Cannot read session sliding policy (%s); session renewal is disabled',
+            type(exc).__name__,
+        )
+        return False
     return isinstance(webui, dict) and webui.get('session_sliding', True) is True
 
 
