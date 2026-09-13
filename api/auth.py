@@ -200,7 +200,14 @@ def _load_sessions() -> dict[str, float | dict]:
         if expiry is None or expiry <= now:
             continue
         if isinstance(record, dict):
-            normalized = dict(record)
+            # Retain only current OIDC metadata so obsolete evidence is not
+            # carried into the next persisted snapshot after an upgrade.
+            normalized = {
+                key: value for key, value in record.items()
+                if not key.startswith('oidc_') or key in (
+                    'oidc_mapping_fingerprint', 'oidc_profile_identity', 'oidc_owner',
+                )
+            }
             normalized['expiry'] = expiry
             sessions[token] = normalized
         else:
@@ -705,10 +712,7 @@ def create_session(
             record['oidc_mapping_fingerprint'] = oidc_binding.get('mapping_fingerprint')
             record['oidc_profile_identity'] = oidc_binding.get('profile_identity')
             if oidc_binding.get('owner'):
-                # Owner evidence is server-created and expires on the deadline
-                # fixed at login; nothing downstream may extend it.
                 record['oidc_owner'] = True
-                record['oidc_owner_expiry'] = min(expiry, float(oidc_binding.get('owner_expiry') or 0))
     else:
         record = expiry
     with _SESSIONS_LOCK:

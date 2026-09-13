@@ -47,10 +47,13 @@ other OIDC session reports `false`, including unbound ones.
   provider error detail, or any reusable credential. Owner permission travels
   as server-side evidence attached to the pending exchange, never as a claim or
   authority in the callback URL.
-- Owner evidence expires at the earlier of the session expiry or one hour after
-  the validated browser login. The exchange does not restart that clock, and an
-  owner-policy or profile-mapping change between login and exchange rejects the
-  exchange rather than minting a session from superseded evidence.
+- Owner permission is decided at the validated browser login and lasts for the
+  session lifetime, with no separate owner deadline. IdP group removal takes
+  effect at the next login, once the IdP stops issuing the claim. A local
+  owner-policy, login-allowlist, issuer, or profile-mapping change still
+  invalidates existing sessions at the next authorization check. A change
+  between login and exchange rejects the exchange rather than minting a
+  session from superseded evidence.
 - Native pending state is process-local, so the shipped single-process server
   works. Multi-process deployments require shared pending state with atomic
   consume semantics, or deterministic routing that sends native start, browser
