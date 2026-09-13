@@ -1519,7 +1519,7 @@ async function newSession(flash, options={}){
       }
       await _saveComposerDraftNow(
         departingSid,
-        ($('msg')||{}).value||'',
+        typeof composerDraftText==='function'?composerDraftText():(($('msg')||{}).value||''),
         S.pendingFiles?[...S.pendingFiles]:[]
       );
       // A sidebar navigation may have won while draft persistence yielded.
@@ -1983,7 +1983,11 @@ async function loadSession(sid){
   if(typeof stopSessionStream==='function') stopSessionStream();
   _yoloEnabled=false;_updateYoloPill();
   if(typeof stopClarifyPolling==='function') stopClarifyPolling();
-  if(typeof hideClarifyCard==='function') hideClarifyCard(forceReload, forceReload?'external-refresh':'dismissed');
+  // Leaving for another session releases the clarify composer lock now, not
+  // after the 30s minimum-visible timer: that timer would otherwise restore the
+  // departing session's parked draft into the destination's textarea (HWEB-8).
+  const _leavingSession = !!(currentSid && currentSid !== sid);
+  if(typeof hideClarifyCard==='function') hideClarifyCard(forceReload||_leavingSession, forceReload?'external-refresh':(_leavingSession?'session':'dismissed'));
   // #6572: clear stale compression state when switching sessions.
   // The compression UI state is per-session and must not leak across loads.
   // Without this, a compression card from a prior session can appear as a
@@ -2020,7 +2024,7 @@ async function loadSession(sid){
     // from mutating a newer rapid-switch target after the save settles.
     const loadingInner=$('msgInner');
     if(loadingInner && (loadingInner.dataset||{}).bootSnapshot!==String(sid)) loadingInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
-    await _saveComposerDraftNow(currentSid, ($('msg') || {}).value || '', S.pendingFiles ? [...S.pendingFiles] : []);
+    await _saveComposerDraftNow(currentSid, typeof composerDraftText==='function'?composerDraftText():(($('msg') || {}).value || ''), S.pendingFiles ? [...S.pendingFiles] : []);
     // The awaited draft save above yields the event loop. If another
     // loadSession() started for a different session while we were waiting
     // (rapid switch B→C), _loadingSessionId now points at that newer load —

@@ -9146,6 +9146,14 @@ function clarifyComposerDraft(){
   return _composerLockState?_composerLockState.draft:null;
 }
 
+// The session's draft as a persist site must see it: the parked text while a
+// clarification owns the textarea, the textarea otherwise. A session switch
+// or New Chat that saved #msg directly would store the answer as the draft.
+function composerDraftText(){
+  const input=$('msg');
+  return _composerLockState?_composerLockState.draft:((input&&input.value)||'');
+}
+
 // A draft restore that lands mid-clarification must update the parked draft,
 // not the answer the user is typing.
 function setClarifyComposerDraft(text){

@@ -10061,17 +10061,20 @@ function _clarifyBatchSummary(answers) {
   return lines.join('\n\n');
 }
 
-// What the user had typed or already answered when the prompt went away.
+// What the user had typed, picked, or already answered when the prompt went
+// away. Pressed choices on the open question count: they are on screen and
+// would have been the answer.
 function _clarifyRescueText() {
   const msg = $('msg');
   const typed = String((_clarifyComposerActive() && msg && msg.value) || '').trim();
-  if (!_clarifyBatch) return typed;
+  const current = typed || _clarifyPickedChoices().join(', ');
+  if (!_clarifyBatch) return current;
   const parts = [];
   const summary = _clarifyBatchSummary(_clarifyBatch.answers);
   if (summary) parts.push(summary);
   const cur = _clarifyCurrent();
-  if (typed && cur && !Object.prototype.hasOwnProperty.call(_clarifyBatch.answers, cur.qid)) {
-    parts.push(cur.question + '\n' + typed);
+  if (current && cur && !Object.prototype.hasOwnProperty.call(_clarifyBatch.answers, cur.qid)) {
+    parts.push(cur.question + '\n' + current);
   }
   return parts.join('\n\n');
 }

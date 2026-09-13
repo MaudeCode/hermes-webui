@@ -333,6 +333,45 @@ def test_server_draft_restore_lands_in_the_parked_draft_not_the_answer():
     assert result["restored"] == ""
 
 
+def test_session_switch_saves_the_parked_draft_not_the_answer():
+    """Codex P1: loadSession()'s non-forced hide defers behind the 30s
+    minimum-visible window, so the lock is still held when the switch persists
+    the departing draft. The persist sites must read the parked draft, and a
+    real switch must release the lock so the deferred timer cannot dump the old
+    draft into the destination's textarea."""
+    result = run_clarify_harness("""
+    const msg = $('msg');
+    msg.value = 'ordinary draft';
+    showClarifyCard({question: 'Which branch?', clarify_id: 'c1'});
+    msg.value = 'half an answer';
+    hideClarifyCard(false, 'dismissed');
+    const deferred = {active: isClarifyComposerActive(), persisted: composerDraftText(), value: msg.value};
+    hideClarifyCard(true, 'session');
+    console.log(JSON.stringify({deferred, after: {active: isClarifyComposerActive(), persisted: composerDraftText(), value: msg.value}}));
+    """)
+    assert result["deferred"] == {"active": True, "persisted": "ordinary draft", "value": "half an answer"}
+    assert result["after"] == {"active": False, "persisted": "ordinary draft", "value": "ordinary draft"}
+    sessions = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    assert sessions.count("composerDraftText()") == 2, "both departing-draft saves (loadSession, newSession) read through the lock"
+    assert "hideClarifyCard(forceReload||_leavingSession, forceReload?'external-refresh':(_leavingSession?'session':'dismissed'))" in sessions
+
+
+def test_expiry_rescues_pressed_multi_select_picks_on_the_open_question():
+    """Codex P2: picks that were pressed but not yet advanced are on screen and
+    must be rescued like typed text."""
+    result = run_clarify_harness(BATCH + """
+    $('clarifyChoices').querySelectorAll('.clarify-choice')[0].onclick();
+    await tick();
+    msg.value = 'tomorrow';
+    await send();
+    const who = $('clarifyChoices').querySelectorAll('.clarify-choice');
+    who[0].onclick(); who[1].onclick();
+    hideClarifyCard(true, 'expired');
+    console.log(JSON.stringify({value: msg.value}));
+    """)
+    assert result["value"] == "How much?\n500\n\nWhen?\ntomorrow\n\nWho?\nann, bo"
+
+
 def test_expiry_rescues_typed_and_recorded_answers_after_restoring_the_draft():
     result = run_clarify_harness(BATCH.replace("showClarifyCard(", "$('msg').value = 'keep me';\n    showClarifyCard(") + """
     $('clarifyChoices').querySelectorAll('.clarify-choice')[0].onclick();
