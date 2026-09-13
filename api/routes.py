@@ -10702,13 +10702,38 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
     return floor, sidecar_messages
 
 
-def _session_load_revision(session) -> str | None:
-    """Return a cheap revision of the sidecar and state.db for one session.
+def _lineage_parent_sidecar_signatures(session, *, max_hops: int = 20) -> tuple | None:
+    """Return the stat signatures of every ancestor sidecar, or None when unresolvable."""
+    from api.models import _sidecar_stat_signature
 
-    Combines the sidecar stat signature with the state.db session signature,
-    the same two revisions the display-merge cache and the prefix-proof memo
-    are keyed on. None when either cannot be resolved, so the client treats
-    the pair as unbound and keeps the prefetched window.
+    signatures = []
+    seen = {str(getattr(session, "session_id", "") or "")}
+    current = session
+    for _ in range(max(0, int(max_hops))):
+        parent_id = str(getattr(current, "parent_session_id", "") or "").strip()
+        if not parent_id:
+            break
+        if parent_id in seen or not is_safe_session_id(parent_id):
+            return None
+        seen.add(parent_id)
+        parent_path = SESSION_DIR / f"{parent_id}.json"
+        signatures.append((parent_id, _sidecar_stat_signature(parent_path)))
+        try:
+            current = Session.load_metadata_only(parent_id)
+        except Exception:
+            return None
+        if current is None:
+            break
+    return tuple(signatures)
+
+
+def _session_load_revision(session) -> str | None:
+    """Return a cheap revision of every transcript source behind one session.
+
+    Combines the sidecar stat signature, the stat signatures of its snapshot
+    lineage parents, and the state.db session signature: the same revisions
+    the display-merge cache, the lineage cache and the prefix-proof memo are
+    keyed on. None when any of them cannot be resolved.
     """
     from api.models import _sidecar_stat_signature
 
@@ -10717,9 +10742,24 @@ def _session_load_revision(session) -> str | None:
         return None
     self_sig = _sidecar_stat_signature(SESSION_DIR / f"{sid}.json")
     state_sig = _state_db_session_signature(sid, getattr(session, "profile", None) or None)
-    if self_sig is None or state_sig is None:
+    parent_sigs = _lineage_parent_sidecar_signatures(session)
+    if self_sig is None or state_sig is None or parent_sigs is None:
         return None
-    return hashlib.sha256(repr((self_sig, state_sig)).encode("utf-8")).hexdigest()[:32]
+    return hashlib.sha256(repr((self_sig, parent_sigs, state_sig)).encode("utf-8")).hexdigest()[:32]
+
+
+def _bracketed_load_revision(before: str | None, after: str | None) -> str:
+    """Return a revision that identifies the state the response was read from.
+
+    ``before`` is sampled before any transcript source is read and ``after``
+    once the payload is assembled. Equal samples prove the reads happened at
+    that revision. Anything else (a write in between, or an unresolvable
+    revision) yields a one-off token, so the client can never pair this
+    response with another one by revision and falls back to refetching.
+    """
+    if before is not None and before == after:
+        return before
+    return f"unstable-{uuid.uuid4().hex}"
 
 
 _PREFIX_PROOF_CACHE_MAX = 64
@@ -10740,10 +10780,17 @@ def _prefix_proof_cache_key(session, sidecar_messages, floor):
     lineage_sig = getattr(sidecar_messages, "sidecar_signature", None)
     if lineage_sig is not None and lineage_sig != self_sig:
         return None
-    state_sig = _state_db_session_signature(sid, getattr(session, "profile", None) or None)
+    profile = getattr(session, "profile", None) or None
+    state_sig = _state_db_session_signature(sid, profile)
     if state_sig is None:
         return None
-    return (self_sig, len(sidecar_messages), state_sig, float(floor))
+    # The session signature covers supported writers and the newest row; the
+    # SQL aggregate over the skipped prefix additionally changes for any
+    # rewrite there that alters a row's length or timing.
+    prefix_aggregate = get_state_db_session_message_prefix_aggregate(sid, floor, profile=profile)
+    if prefix_aggregate is None:
+        return None
+    return (self_sig, len(sidecar_messages), state_sig, prefix_aggregate, float(floor))
 
 
 def _messages_start_with_visible_prefix(messages, prefix) -> bool:
@@ -11567,6 +11614,7 @@ from api.models import (
     get_cli_session_messages,
     get_state_db_session_messages,
     get_state_db_session_message_prefix_summary,
+    get_state_db_session_message_prefix_aggregate,
     get_state_db_session_message_keys_before_timestamp,
     get_state_db_session_summary,
     merge_session_messages_append_only,
@@ -14371,6 +14419,10 @@ def _handle_session_get(handler, parsed) -> bool:
         _t1 = _time.monotonic()
         if _diag: _diag.stage("t1_after_get_session_check")
         s = get_session(sid, metadata_only=(not load_messages))
+        # HWEB-103: sample the transcript-source revision before any row is
+        # read; it is re-sampled once the payload exists and only emitted when
+        # both samples agree (see _bracketed_load_revision).
+        _load_revision_before = _session_load_revision(s)
         _session_profile = getattr(s, 'profile', None) or None
         if not _session_visible_to_active_profile(_session_profile, handler):
             if _session_profile:
@@ -14783,7 +14835,7 @@ def _handle_session_get(handler, parsed) -> bool:
         # must not pair a transcript window with metadata from a different
         # server state. Both responses carry the same revision of the two
         # transcript sources, so a mismatch tells the client to refetch.
-        raw["_load_revision"] = _session_load_revision(s)
+        raw["_load_revision"] = _bracketed_load_revision(_load_revision_before, _session_load_revision(s))
         _t4 = _time.monotonic()
         if _diag: _diag.stage("t4_after_compact_and_merge")
         if effective_model:

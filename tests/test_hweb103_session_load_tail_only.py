@@ -292,6 +292,76 @@ def test_both_load_responses_carry_the_same_load_revision(tmp_path, monkeypatch)
     assert _get(META)["session"]["_load_revision"] != meta["_load_revision"]
 
 
+def test_prefix_proof_memo_sees_a_rewrite_the_session_signature_misses(tmp_path, monkeypatch):
+    """A prefix rewrite invalidates the memo even when the session signature is frozen."""
+    db_path = _install(tmp_path, monkeypatch, _rows(2000))
+    monkeypatch.setattr(routes, "_state_db_session_signature", lambda sid, profile=None: ("frozen",))
+    calls = []
+    original = models.get_state_db_session_message_keys_before_timestamp
+
+    def counting(*args, **kwargs):
+        calls.append(args[1])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(routes, "get_state_db_session_message_keys_before_timestamp", counting)
+
+    _get(WINDOW)
+    _get(WINDOW)
+    assert len(calls) == 1
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE messages SET content = content || ' (edited)' WHERE id = 10")
+    conn.commit()
+    conn.close()
+    routes._display_merge_cache.clear()
+
+    _get(WINDOW)
+    assert len(calls) == 2, "the prefix aggregate must invalidate the memo on a deep rewrite"
+
+
+def test_load_revision_is_a_one_off_token_when_a_write_lands_mid_request(tmp_path, monkeypatch):
+    db_path = _install(tmp_path, monkeypatch, _rows(400))
+    session = models.get_session(SID)
+    stable = routes._session_load_revision(session)
+    assert stable
+
+    reader = routes.get_state_db_session_messages
+
+    def write_during_read(*args, **kwargs):
+        rows = reader(*args, **kwargs)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp, active) VALUES (?, 'user', 'landed mid-read', ?, 1)",
+            (SID, T0 + 401.0),
+        )
+        conn.commit()
+        conn.close()
+        return rows
+
+    monkeypatch.setattr(routes, "get_state_db_session_messages", write_during_read)
+    window = _get(WINDOW)["session"]
+    assert window["_load_revision"].startswith("unstable-")
+    assert window["_load_revision"] != routes._session_load_revision(models.get_session(SID))
+    assert window["_load_revision"] != stable
+
+
+def test_load_revision_covers_lineage_parents(tmp_path, monkeypatch):
+    _install(tmp_path, monkeypatch, _rows(400))
+    parent_id = "hweb103parent"
+    Session(session_id=parent_id, title="parent", messages=_rows(4), pre_compression_snapshot=True).save()
+    child = models.get_session(SID)
+    child.parent_session_id = parent_id
+    child.save()
+    child = models.get_session(SID)
+
+    before = routes._session_load_revision(child)
+    assert before
+    parent = Session.load(parent_id)
+    parent.title = "parent repaired"
+    parent.save()
+    assert routes._session_load_revision(child) != before
+
+
 def test_cache_weight_counts_ascii_strings_at_their_real_size():
     rows = [{"role": "user", "content": "x" * 10_000}]
     weight = routes._display_merge_messages_weight(rows, limit=10**9)
