@@ -353,7 +353,35 @@ def test_session_switch_saves_the_parked_draft_not_the_answer():
     assert result["after"] == {"active": False, "persisted": "ordinary draft", "value": "ordinary draft"}
     sessions = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
     assert sessions.count("composerDraftText()") == 2, "both departing-draft saves (loadSession, newSession) read through the lock"
-    assert "hideClarifyCard(forceReload||_leavingSession, forceReload?'external-refresh':(_leavingSession?'session':'dismissed'))" in sessions
+    assert "if(currentSid && currentSid !== sid && typeof hideClarifyCard==='function') hideClarifyCard(true,'session');" in sessions
+
+
+def test_failed_navigation_re_arms_the_prompt_owner_that_stayed_on_screen():
+    """Codex round 2 P1: the switch releases the lock and stops the polls before
+    the destination fetch; when that fetch fails, the session still on screen
+    must get its polls and cached prompt back."""
+    sessions = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    exit_block = block(sessions, "const _selfHealedCurrent = (e.status===404) && (currentSid===sid);", "// Guard: api() may have redirected (401)")
+    for call in ("startApprovalPolling(currentSid);", "startClarifyPolling(currentSid);", "_renderPendingPromptsForActiveSession();"):
+        assert call in exit_block, call
+    assert exit_block.index("startSessionStream(currentSid);") < exit_block.index("startClarifyPolling(currentSid);")
+
+
+def test_lock_leaves_hands_free_voice_mode_before_taking_the_composer():
+    """Codex round 2 P2: turn-based voice mode is not the dictation mic; its
+    recognition would keep writing speech into #msg and calling send()."""
+    result = run_clarify_harness("""
+    const calls = [];
+    window._micActive = true;
+    window._stopMic = () => calls.push('mic');
+    window._voiceModeActive = () => true;
+    window._voiceModeDeactivate = () => { calls.push('voice'); $('msg').value = ''; };
+    $('msg').value = 'spoken so far';
+    showClarifyCard({question: 'Which branch?', clarify_id: 'c1'});
+    console.log(JSON.stringify({calls, parked: clarifyComposerDraft()}));
+    """)
+    assert result["calls"] == ["voice", "mic"]
+    assert result["parked"] == "", "voice mode is left before the draft is parked, so its cleared text is what gets parked"
 
 
 def test_expiry_rescues_pressed_multi_select_picks_on_the_open_question():

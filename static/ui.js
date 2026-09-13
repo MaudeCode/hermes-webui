@@ -9167,6 +9167,12 @@ function lockComposerForClarify(opts){
   if(!input) return;
   opts=opts||{};
   if(!_composerLockState){
+    // Hands-free voice mode owns its own recognition instance (not the
+    // dictation mic) and writes speech into #msg then calls send(); with the
+    // lock held that speech would become the answer. Leave voice mode first.
+    if(typeof window._voiceModeActive==='function'&&window._voiceModeActive()&&typeof window._voiceModeDeactivate==='function'){
+      try{window._voiceModeDeactivate();}catch(_){ }
+    }
     // Save the current composer text as a server-side draft before locking,
     // so the user's draft is preserved if they switch sessions while a clarify
     // card is active (and survives page refresh / syncs across clients).

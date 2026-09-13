@@ -1986,8 +1986,8 @@ async function loadSession(sid){
   // Leaving for another session releases the clarify composer lock now, not
   // after the 30s minimum-visible timer: that timer would otherwise restore the
   // departing session's parked draft into the destination's textarea (HWEB-8).
-  const _leavingSession = !!(currentSid && currentSid !== sid);
-  if(typeof hideClarifyCard==='function') hideClarifyCard(forceReload||_leavingSession, forceReload?'external-refresh':(_leavingSession?'session':'dismissed'));
+  if(currentSid && currentSid !== sid && typeof hideClarifyCard==='function') hideClarifyCard(true,'session');
+  if(typeof hideClarifyCard==='function') hideClarifyCard(forceReload, forceReload?'external-refresh':'dismissed');
   // #6572: clear stale compression state when switching sessions.
   // The compression UI state is per-session and must not leak across loads.
   // Without this, a compression card from a prior session can appear as a
@@ -2189,6 +2189,16 @@ async function loadSession(sid){
     if (currentSid && !_selfHealedCurrent && _loadingSessionId === null
         && typeof startSessionStream === 'function') {
       startSessionStream(currentSid);
+    }
+    // The approval and clarify polls were stopped and their cards hidden at
+    // the top of this load, before the destination fetch. The session that
+    // stayed on screen still owns its pending prompt: re-arm both polls and
+    // paint the cached prompt back, or its run sits blocked with no card
+    // until the prompt times out (HWEB-8 review).
+    if (currentSid && !_selfHealedCurrent && _loadingSessionId === null) {
+      if (typeof startApprovalPolling === 'function') startApprovalPolling(currentSid);
+      if (typeof startClarifyPolling === 'function') startClarifyPolling(currentSid);
+      if (typeof _renderPendingPromptsForActiveSession === 'function') _renderPendingPromptsForActiveSession();
     }
     return;
   }
