@@ -53,6 +53,8 @@ def test_ensure_messages_loaded_consumes_the_stash_before_fetching():
     fetch = body.index("data = await api(messagesUrl, {timeoutMs:120000});")
     assert take < fetch
     assert "if (settled.error) throw settled.error;" in body
+    # A window snapshotted before the accepted metadata is refetched, never applied.
+    assert "if (_prefetchOlderThanMetadata(data, S.session)) data = await api(messagesUrl, {timeoutMs:120000});" in body
 
 
 NODE_SCRIPT = r"""
@@ -100,7 +102,14 @@ __HELPERS__
   _prefetchSessionMessages('sid-a', 6);
   out.urlDriftNull = _takeSessionMessagesPrefetch('sid-a', 6, inlineUrl.replace('msg_limit=30','msg_limit=80'))===null;
   out.driftDiscarded = _sessionMessagesPrefetch===null;
-  // 7. An abandoned prefetch that rejects never surfaces as an unhandled rejection.
+  // 7. A prefetch older than the accepted metadata is refused.
+  const meta={session_id:'sid-a', message_count:11, updated_at:200};
+  out.olderCountRefused = _prefetchOlderThanMetadata({session:{session_id:'sid-a', message_count:10, updated_at:200}}, meta)===true;
+  out.olderUpdatedRefused = _prefetchOlderThanMetadata({session:{session_id:'sid-a', message_count:11, updated_at:199}}, meta)===true;
+  out.sameAccepted = _prefetchOlderThanMetadata({session:{session_id:'sid-a', message_count:11, updated_at:200}}, meta)===false;
+  out.newerAccepted = _prefetchOlderThanMetadata({session:{session_id:'sid-a', message_count:12, updated_at:201}}, meta)===false;
+  out.otherSessionIgnored = _prefetchOlderThanMetadata({session:{session_id:'sid-b', message_count:1, updated_at:1}}, meta)===false;
+  // 8. An abandoned prefetch that rejects never surfaces as an unhandled rejection.
   _prefetchSessionMessages('sid-z', 9);
   pending[4].reject(new Error('abandoned'));
   await new Promise(r=>setTimeout(r,10));
@@ -116,7 +125,12 @@ def test_prefetch_stash_semantics(tmp_path):
         pytest.skip("node not available")
     helpers = "\n".join(
         _function(SESSIONS_JS, name)
-        for name in ("_sessionMessagesLoadUrl", "_prefetchSessionMessages", "_takeSessionMessagesPrefetch")
+        for name in (
+            "_sessionMessagesLoadUrl",
+            "_prefetchSessionMessages",
+            "_prefetchOlderThanMetadata",
+            "_takeSessionMessagesPrefetch",
+        )
     )
     script = tmp_path / "prefetch.js"
     script.write_text(NODE_SCRIPT.replace("__HELPERS__", helpers), encoding="utf-8")
@@ -136,5 +150,10 @@ def test_prefetch_stash_semantics(tmp_path):
         "errorFolded": True,
         "urlDriftNull": True,
         "driftDiscarded": True,
+        "olderCountRefused": True,
+        "olderUpdatedRefused": True,
+        "sameAccepted": True,
+        "newerAccepted": True,
+        "otherSessionIgnored": True,
         "unhandled": 0,
     }

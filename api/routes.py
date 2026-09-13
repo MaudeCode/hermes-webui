@@ -10670,24 +10670,60 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
     if sidecar_before_count == 0:
         return floor, sidecar_messages
 
-    # HWEB-103: the prefix count already matched above. Prove identity for
-    # the ``raw_budget`` rows adjacent to the floor instead of re-keying the
-    # whole prefix on both sides, which made this O(transcript) per load.
-    sidecar_before = [
-        msg
+    # HWEB-103: proving the whole skipped prefix re-keys every sidecar and
+    # state.db row before the floor, which is O(transcript). Memoize a passed
+    # proof on the exact sidecar and state.db revisions it was computed from;
+    # any write to either source changes a signature and forces a fresh proof.
+    proof_sid = str(getattr(session, "session_id", "") or "")
+    proof_key = _prefix_proof_cache_key(session, sidecar_messages, floor)
+    if proof_key is not None:
+        with _prefix_proof_cache_lock:
+            if _prefix_proof_cache.get(proof_sid) == proof_key:
+                _prefix_proof_cache.move_to_end(proof_sid, last=True)
+                return floor, sidecar_messages
+    sidecar_before_keys = [
+        _session_message_visible_key(msg)
         for msg, ts in zip(sidecar_messages, sidecar_timestamps, strict=True)
         if ts < floor
-    ][-raw_budget:]
-    sidecar_before_keys = [_session_message_visible_key(msg) for msg in sidecar_before]
+    ]
     state_before_keys = get_state_db_session_message_keys_before_timestamp(
         getattr(session, "session_id", None),
         floor,
         profile=getattr(session, "profile", None) or None,
-        limit=raw_budget,
     )
     if state_before_keys is None or state_before_keys != sidecar_before_keys:
         return None, sidecar_messages
+    if proof_key is not None:
+        with _prefix_proof_cache_lock:
+            _prefix_proof_cache[proof_sid] = proof_key
+            _prefix_proof_cache.move_to_end(proof_sid, last=True)
+            while len(_prefix_proof_cache) > _PREFIX_PROOF_CACHE_MAX:
+                _prefix_proof_cache.popitem(last=False)
     return floor, sidecar_messages
+
+
+_PREFIX_PROOF_CACHE_MAX = 64
+_prefix_proof_cache: "OrderedDict[str, tuple]" = OrderedDict()
+_prefix_proof_cache_lock = threading.Lock()
+
+
+def _prefix_proof_cache_key(session, sidecar_messages, floor):
+    """Return the (sidecar revision, state.db revision, floor) a prefix proof is valid for, or None."""
+    from api.models import _sidecar_stat_signature
+
+    sid = str(getattr(session, "session_id", "") or "")
+    if not sid or not is_safe_session_id(sid):
+        return None
+    self_sig = _sidecar_stat_signature(SESSION_DIR / f"{sid}.json")
+    if self_sig is None:
+        return None
+    lineage_sig = getattr(sidecar_messages, "sidecar_signature", None)
+    if lineage_sig is not None and lineage_sig != self_sig:
+        return None
+    state_sig = _state_db_session_signature(sid, getattr(session, "profile", None) or None)
+    if state_sig is None:
+        return None
+    return (self_sig, len(sidecar_messages), state_sig, float(floor))
 
 
 def _messages_start_with_visible_prefix(messages, prefix) -> bool:

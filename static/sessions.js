@@ -3407,6 +3407,16 @@ function _prefetchSessionMessages(sid, generation){
   const promise=api(url,{timeoutMs:120000}).then(data=>({data}),error=>({error}));
   _sessionMessagesPrefetch={sid, generation, url, promise};
 }
+// The two requests are independent server snapshots: a turn that lands
+// between them makes the accepted metadata newer than the prefetched window.
+// Refuse such a window (the caller refetches) so the opened conversation never
+// shows fewer rows than the metadata it was loaded with.
+function _prefetchOlderThanMetadata(prefetchData, metaSession){
+  const pre=prefetchData&&prefetchData.session;
+  if(!pre||!metaSession||String(metaSession.session_id||'')!==String(pre.session_id||'')) return false;
+  if(Number(pre.message_count||0)<Number(metaSession.message_count||0)) return true;
+  return Number(pre.updated_at||0)<Number(metaSession.updated_at||0);
+}
 function _takeSessionMessagesPrefetch(sid, generation, url){
   const pre=_sessionMessagesPrefetch;
   if(!pre) return null;
@@ -3464,6 +3474,8 @@ async function _ensureMessagesLoaded(sid, opts) {
       const settled = await prefetched;
       if (settled.error) throw settled.error;
       data = settled.data;
+      if (!_ownsLoad()) return;
+      if (_prefetchOlderThanMetadata(data, S.session)) data = await api(messagesUrl, {timeoutMs:120000});
     } else {
       data = await api(messagesUrl, {timeoutMs:120000});
     }

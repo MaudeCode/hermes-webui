@@ -196,19 +196,48 @@ def test_limited_load_merges_only_the_sidecar_tail(tmp_path, monkeypatch, merge_
     assert merge_calls[len(original):] == [(2000, 300), (2000, 2000)]
 
 
-def test_limited_load_falls_back_when_a_prefix_row_differs(tmp_path, monkeypatch, merge_calls):
+def test_limited_load_falls_back_when_any_prefix_row_differs(tmp_path, monkeypatch, merge_calls):
     db_path = _install(tmp_path, monkeypatch, _rows(2000))
-    # Row 1500 sits inside the 300-row proof window adjacent to the floor (rows
-    # 1400-1699 for a 300-row tail read).
+    # A same-count rewrite deep in the prefix (row 10 of 2000, far from the
+    # tail floor) must still be detected: the whole skipped prefix is proven.
     conn = sqlite3.connect(db_path)
-    conn.execute("UPDATE messages SET content = 'rewritten' WHERE id = 1500")
+    conn.execute("UPDATE messages SET content = 'rewritten' WHERE id = 10")
     conn.commit()
     conn.close()
 
     body = _get(WINDOW)
 
-    assert body["session"]["message_count"] == 2000
+    # Full merge over every row, exactly as before this change; the rewritten
+    # row no longer matches its sidecar mirror, so append-only reconciliation
+    # surfaces it as an extra row rather than silently keeping the stale one.
     assert merge_calls == [(2000, 2000)]
+    assert body["session"]["message_count"] == 2001
+
+
+def test_prefix_proof_is_memoized_on_both_revisions(tmp_path, monkeypatch, merge_calls):
+    db_path = _install(tmp_path, monkeypatch, _rows(2000))
+    calls = []
+    original = models.get_state_db_session_message_keys_before_timestamp
+
+    def counting(*args, **kwargs):
+        calls.append(args[1])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(routes, "get_state_db_session_message_keys_before_timestamp", counting)
+
+    _get(WINDOW)
+    _get(WINDOW)
+    assert len(calls) == 1, "an unchanged sidecar + state.db must reuse the prefix proof"
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE messages SET content = 'rewritten' WHERE id = 10")
+    conn.commit()
+    conn.close()
+    routes._display_merge_cache.clear()
+
+    _get(WINDOW)
+    assert len(calls) == 2, "a state.db write must invalidate the memoized proof"
+    assert merge_calls[-1] == (2000, 2000)
 
 
 def test_state_only_tail_row_forces_the_full_merge(tmp_path, monkeypatch, merge_calls):
