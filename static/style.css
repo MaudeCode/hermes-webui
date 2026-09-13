@@ -8004,7 +8004,7 @@ body{font-size:14px;letter-spacing:-.006em;}
 .session-list{padding:0 6px 8px;}
 .session-item{padding:7px 8px;font-size:13px;letter-spacing:-.006em;}
 .session-item .session-title{font-weight:450;}
-.session-item.active .session-title{font-weight:550;}
+.session-item.active .session-title{color:var(--accent-text);font-weight:550;}
 .session-time,.session-meta{font-family:var(--font-mono);font-size:10.5px;letter-spacing:0;}
 /* Chat */
 .chat-header{min-height:44px;padding:6px 20px;}
@@ -8068,7 +8068,7 @@ input[type="text"],input[type="password"],input[type="number"],input[type="searc
 .session-item{position:relative;border-radius:7px;}
 .session-item.active{background:var(--surface-subtle-hover);}
 .session-item.active::before{content:'';position:absolute;left:-6px;top:8px;bottom:8px;width:2px;border-radius:1px;background:var(--accent);}
-.session-item.active .session-title{color:var(--text);}
+.session-item.active .session-title{color:var(--accent-text);}
 .session-time{opacity:.8;}
 /* Inputs and secondary buttons: filled, border appears on focus/hover */
 input[type="text"],input[type="password"],input[type="number"],input[type="search"],input[type="url"],input[type="email"],textarea,select,#mainSettings select,.settings-field select,.app-dialog-input,.provider-card-input{background:var(--input-bg);border-color:transparent;}

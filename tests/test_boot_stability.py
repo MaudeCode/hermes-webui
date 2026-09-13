@@ -43,8 +43,8 @@ def test_css_boot_suppression_is_scoped_to_booting():
 def test_static_markup_provides_first_paint_chrome():
     assert 'class="rail-brand"' in INDEX
     assert 'id="topbarTitle"' in INDEX
-    assert 'class="panel-head-btn sidebar-search-toggle"' in INDEX
-    assert 'class="panel-head-btn source-menu-btn"' in INDEX
+    assert 'class="panel-head-btn sidebar-search-toggle has-tooltip has-tooltip--bottom"' in INDEX
+    assert 'class="panel-head-btn source-menu-btn has-tooltip has-tooltip--bottom"' in INDEX
     assert 'rel="preload" href="static/vendor/inter/InterVariable.woff2"' in INDEX
 
 
@@ -68,7 +68,7 @@ def test_boot_snapshots_restore_during_parse_and_loaders_respect_them():
     assert INDEX.index("hermes-boot:transcript") > INDEX.index('id="msgInner"')
     assert "SIDEBAR_KEY = 'hermes-boot:sidebar'" in HUB and "TRANSCRIPT_KEY = 'hermes-boot:transcript'" in HUB
     sessions = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
-    assert sessions.count("dataset.bootSnapshot") >= 2, "both loading-placeholder writes must skip a restored snapshot"
+    assert sessions.count("dataset||{}).bootSnapshot") >= 2, "both loading-placeholder writes must skip a restored snapshot"
 
 
 def test_snapshot_clicks_are_queued_and_replayed():
