@@ -10740,8 +10740,20 @@ def _session_load_revision(session) -> str | None:
     sid = str(getattr(session, "session_id", "") or "")
     if not sid or not is_safe_session_id(sid):
         return None
+    from api.models import _agent_state_db_path
+
+    profile = getattr(session, "profile", None) or None
     self_sig = _sidecar_stat_signature(SESSION_DIR / f"{sid}.json")
-    state_sig = _state_db_session_signature(sid, getattr(session, "profile", None) or None)
+    try:
+        state_db_present = _agent_state_db_path(profile=profile) is not None
+    except Exception:
+        state_db_present = True
+    # A profile that has not created state.db yet is a supported, stable
+    # state: represent it as an empty source rather than as read uncertainty,
+    # so the metadata/window pair still binds and the client does not refetch.
+    state_sig = (
+        _state_db_session_signature(sid, profile) if state_db_present else ("state-db-absent",)
+    )
     parent_sigs = _lineage_parent_sidecar_signatures(session)
     if self_sig is None or state_sig is None or parent_sigs is None:
         return None

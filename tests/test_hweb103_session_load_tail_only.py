@@ -362,6 +362,15 @@ def test_load_revision_covers_lineage_parents(tmp_path, monkeypatch):
     assert routes._session_load_revision(child) != before
 
 
+def test_load_revision_is_stable_when_state_db_is_absent(tmp_path, monkeypatch):
+    _install(tmp_path, monkeypatch, _rows(40))
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: tmp_path / "missing-state.db")
+    meta = _get(META)["session"]
+    window = _get(WINDOW)["session"]
+    assert meta["_load_revision"] == window["_load_revision"]
+    assert not meta["_load_revision"].startswith("unstable-")
+
+
 def test_cache_weight_counts_ascii_strings_at_their_real_size():
     rows = [{"role": "user", "content": "x" * 10_000}]
     weight = routes._display_merge_messages_weight(rows, limit=10**9)
