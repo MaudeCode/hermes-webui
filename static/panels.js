@@ -5424,7 +5424,7 @@ function _renderSkillDetail(name, content, linkedFiles) {
   const { frontmatter, body: markdownBody } = _stripYamlFrontmatter(content);
   let html = '';
   if (frontmatter) {
-    html += `<details class="skill-frontmatter"><summary>${esc(t('skill_metadata'))}</summary><pre><code>${esc(frontmatter)}</code></pre></details>`;
+    html += `<details class="skill-frontmatter"><summary>${esc(t('skill_metadata'))}</summary>${_skillFrontmatterHtml(frontmatter)}</details>`;
   }
   html += _skillMarkdownHtml(markdownBody || '(no content)');
   const lf = linkedFiles || {};
@@ -5477,6 +5477,32 @@ function _setSkillHeaderButtons(mode) {
   if (mode === 'read') { if (header) header.style.display = 'flex';  show(editBtn); show(delBtn); hide(cancelBtn); hide(saveBtn); }
   else if (mode === 'create' || mode === 'edit') { if (header) header.style.display = 'flex'; hide(editBtn); hide(delBtn); show(cancelBtn); show(saveBtn); }
   else { if (header) header.style.display = 'none';  hide(editBtn); hide(delBtn); hide(cancelBtn); hide(saveBtn); }
+}
+
+
+// Frontmatter as key/value rows instead of a raw YAML block. Handles the
+// shapes skills actually use: `key: value`, nested mappings by indent, and
+// `- item` lists. Anything else falls back to a monospace line.
+function _skillFrontmatterHtml(frontmatter) {
+  const lines = String(frontmatter || '').split('\n');
+  const rows = [];
+  for (const raw of lines) {
+    if (!raw.trim()) continue;
+    const m = raw.match(/^(\s*)(?:- )?([\w.\-\/ ]+?):\s?(.*)$/);
+    const li = raw.match(/^(\s*)-\s+(.*)$/);
+    if (m && !raw.trim().startsWith('- ')) {
+      const depth = Math.min(4, Math.floor(m[1].length / 2));
+      let val = m[3].trim();
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) val = val.slice(1, -1);
+      rows.push(`<div class="skill-meta-row" style="--d:${depth}"><span class="skill-meta-key">${esc(m[2].trim())}</span><span class="skill-meta-val${val ? '' : ' skill-meta-group'}">${esc(val)}</span></div>`);
+    } else if (li) {
+      const depth = Math.min(4, Math.floor(li[1].length / 2));
+      rows.push(`<div class="skill-meta-row skill-meta-item" style="--d:${depth}"><span class="skill-meta-key"></span><span class="skill-meta-val">${esc(li[2].trim())}</span></div>`);
+    } else {
+      rows.push(`<div class="skill-meta-row skill-meta-raw" style="--d:0"><span class="skill-meta-val">${esc(raw)}</span></div>`);
+    }
+  }
+  return `<div class="skill-meta">${rows.join('')}</div>`;
 }
 
 async function openSkill(name, el) {

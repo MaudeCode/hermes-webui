@@ -8245,4 +8245,13 @@ html.booting.has-ring-cache #ctxIndicatorWrap{display:flex!important;visibility:
 .skill-frontmatter>summary{font-size:13px;font-weight:500;text-transform:none;letter-spacing:0;}
 .skill-frontmatter pre,.skill-frontmatter pre code{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;overflow-x:visible;}
 .skill-frontmatter pre{margin:0;padding:10px 12px;border:0;border-top:1px solid var(--border);border-radius:0;font-size:12.5px;line-height:1.5;}
+/* Skill metadata as key/value rows */
+.skill-meta{padding:6px 12px 10px;border-top:1px solid var(--border);font-size:13px;}
+.skill-meta-row{display:grid;grid-template-columns:minmax(120px,180px) 1fr;gap:12px;padding:5px 0;padding-left:calc(var(--d,0) * 16px);border-bottom:1px solid var(--border-subtle);align-items:baseline;}
+.skill-meta-row:last-child{border-bottom:0;}
+.skill-meta-key{font-family:var(--font-mono);font-size:12px;color:var(--muted);overflow-wrap:anywhere;}
+.skill-meta-val{color:var(--text);overflow-wrap:anywhere;white-space:pre-wrap;}
+.skill-meta-group{color:var(--muted);}
+.skill-meta-item .skill-meta-val::before{content:'•';color:var(--muted);margin-right:8px;}
+.skill-meta-raw .skill-meta-val{font-family:var(--font-mono);font-size:12px;grid-column:1 / -1;}
 /* REDESIGN-LAYER-END */
