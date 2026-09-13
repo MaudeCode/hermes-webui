@@ -3,8 +3,8 @@
 Owner permission for an OIDC identity comes from an explicit operator
 allowlist (``webui_oidc.owner_claim`` / ``owner_values``), never from an empty
 ``bound_profile``. These tests cover the configuration contract, exact claim
-matching, the route/``/api/auth/status`` agreement, and the one-hour evidence
-deadline that makes IdP group removal take effect.
+matching, the route/``/api/auth/status`` agreement, and owner permission for
+the session lifetime. IdP group removal takes effect at the next login.
 
 Everything here is synthetic: locally generated keys, locally signed tokens,
 and locally patched provider transport. No IdP, credential, or network is used.
@@ -1032,7 +1032,7 @@ def test_matching_identity_receives_owner_evidence(monkeypatch):
 
     binding = result["oidc_binding"]
     assert binding["owner"] is True
-    assert 3500 < binding["owner_expiry"] - time.time() <= 3600
+    assert "owner_expiry" not in binding
     assert result["bound_profile"] is None
 
 
@@ -1416,70 +1416,81 @@ def test_relay_publisher_registration_uses_the_owner_helper(monkeypatch):
         assert seen[-1][1] is expected_operator
 
 
-# ── the one-hour deadline and policy revocation ──────────────────────────────
+# ── session lifetime and policy revocation ──────────────────────────────────
 
 
-def _expired_owner_session(monkeypatch, cfg_age_seconds):
-    import api.auth as auth
-    import api.auth_oidc as auth_oidc
-
-    cfg = auth_oidc._resolve_oidc_config()
-    binding = auth_oidc._oidc_profile_binding(
-        cfg, None, owner=True, now=time.time() - cfg_age_seconds
-    )
-    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
-    return auth.create_session(auth_type="oidc", username="owner", oidc_binding=binding)
+def _owner_session(monkeypatch):
+    private_key, token = _configure(monkeypatch)
+    return _session(monkeypatch, _login(monkeypatch, private_key, token, {
+        "email": "owner@example.com", "groups": [OWNER_GROUP],
+    }))
 
 
-def test_owner_evidence_expires_one_hour_after_login(monkeypatch):
+def test_owner_permission_survives_one_hour_until_session_expiry(monkeypatch):
     import api.auth as auth
 
-    _configure(monkeypatch)
-    fresh = _expired_owner_session(monkeypatch, 60)
-    stale = _expired_owner_session(monkeypatch, 3601)
+    monkeypatch.setenv("HERMES_WEBUI_SESSION_TTL", str(30 * 86400))
+    now = time.time()
+    monkeypatch.setattr(time, "time", lambda: now)
+    cookie = _owner_session(monkeypatch)
+    expiry = auth.get_session_info(cookie)["expiry"]
 
     try:
-        assert auth.session_can_manage_server(auth.get_session_info(fresh)) is True
-        assert auth.session_can_manage_server(auth.get_session_info(stale)) is False
-
-        # An expired elevation invalidates the session outright: the next
-        # request has to go back through the IdP for a fresh claim set.
-        handler = RouteFakeHandler(stale)
-        assert auth.ensure_trusted_auth_session(handler) is None
-        assert auth.verify_session(stale) is False
-    finally:
-        auth.invalidate_session(fresh)
-        auth.invalidate_session(stale)
-
-
-def test_owner_evidence_is_capped_by_a_shorter_session_expiry(monkeypatch):
-    import api.auth as auth
-
-    _configure(monkeypatch)
-    monkeypatch.setenv("HERMES_WEBUI_SESSION_TTL", "60")
-    cookie = _expired_owner_session(monkeypatch, 0)
-
-    try:
-        info = auth.get_session_info(cookie)
-        assert info["oidc_owner_expiry"] == info["expiry"]
-        assert info["oidc_owner_expiry"] - time.time() <= 60
+        for instant in (now + 60, now + 7200, expiry - 1):
+            now = instant
+            assert auth.session_can_manage_server(auth.get_session_info(cookie)) is True
+            assert auth.ensure_trusted_auth_session(RouteFakeHandler(cookie)) is not None
+            assert _operator_guard(cookie)[0] is True
+            assert _status(monkeypatch, cookie)["can_manage_server"] is True
+        now = expiry + 1
+        assert auth.ensure_trusted_auth_session(RouteFakeHandler(cookie)) is None
+        assert auth.session_can_manage_server(auth.get_session_info(cookie)) is False
+        assert _operator_guard(cookie)[1].status == 401
     finally:
         auth.invalidate_session(cookie)
 
 
-def test_persisted_reload_does_not_extend_owner_evidence(monkeypatch):
+def test_owner_permission_ends_at_a_shorter_session_expiry(monkeypatch):
     import api.auth as auth
 
-    _configure(monkeypatch)
-    cookie = _expired_owner_session(monkeypatch, 3601)
+    monkeypatch.setenv("HERMES_WEBUI_SESSION_TTL", "60")
+    now = time.time()
+    monkeypatch.setattr(time, "time", lambda: now)
+    cookie = _owner_session(monkeypatch)
 
     try:
-        auth._persist_sessions()
+        assert auth.get_session_info(cookie)["expiry"] == now + 60
+        now += 59
+        assert _operator_guard(cookie)[0] is True
+        now += 2
+        assert _operator_guard(cookie)[1].status == 401
+        assert auth.session_can_manage_server(auth.get_session_info(cookie)) is False
+    finally:
+        auth.invalidate_session(cookie)
+
+
+def test_persisted_reload_keeps_owner_permission_and_drops_obsolete_evidence(monkeypatch):
+    import api.auth as auth
+
+    cookie = _owner_session(monkeypatch)
+    token = cookie.rsplit(".", 1)[0]
+    persisted = json.loads(auth._SESSIONS_FILE.read_text())
+    persisted[token]["oidc_owner_expiry"] = time.time() - 3601
+    auth._SESSIONS_FILE.write_text(json.dumps(persisted))
+
+    try:
         with auth._SESSIONS_LOCK:
             auth._sessions.clear()
             auth._sessions.update(auth._load_sessions())
         assert auth.verify_session(cookie) is True, "the session itself has not expired"
-        assert auth.session_can_manage_server(auth.get_session_info(cookie)) is False
+        assert auth.ensure_trusted_auth_session(RouteFakeHandler(cookie)) is not None
+        assert auth.session_can_manage_server(auth.get_session_info(cookie)) is True
+        assert _operator_guard(cookie)[0] is True
+        auth._persist_sessions()
+        rewritten = json.loads(auth._SESSIONS_FILE.read_text())
+        expected = dict(persisted[token])
+        del expected["oidc_owner_expiry"]
+        assert rewritten[token] == expected
     finally:
         auth.invalidate_session(cookie)
 
@@ -1627,8 +1638,21 @@ def test_native_exchange_carries_owner_evidence_without_leaking_claims(monkeypat
         info = auth.get_session_info(cookie)
         assert info["oidc_owner"] is True
         assert auth.session_can_manage_server(info) is True
-        # The deadline was fixed at login, not at exchange time.
-        assert info["oidc_owner_expiry"] <= time.time() + 3600
+        assert "oidc_owner_expiry" not in info
+        later = time.time() + 7200
+        monkeypatch.setattr(time, "time", lambda: later)
+        assert auth.ensure_trusted_auth_session(RouteFakeHandler(cookie)) is not None
+        assert _operator_guard(cookie, "/api/provider/quotas")[0] is True
+        assert _status(monkeypatch, cookie)["can_manage_server"] is True
+        monkeypatch.setattr(auth, "_passkey_feature_flag_enabled", lambda: True)
+        owner_route = RouteFakeHandler(cookie)
+        owner_route.command = "POST"
+        owner_route.headers[auth.CSRF_HEADER_NAME] = auth.csrf_token_for_session(cookie)
+        parsed = SimpleNamespace(path="/api/auth/passkeys", query="")
+        assert auth.check_auth(owner_route, parsed) is True
+        routes.handle_post(owner_route, parsed)
+        assert owner_route.status == 200
+        assert owner_route.json_body() == {"credentials": []}
     finally:
         auth.invalidate_session(cookie)
 

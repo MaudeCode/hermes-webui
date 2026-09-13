@@ -32,11 +32,6 @@ _CLOCK_SKEW_SECONDS = 60
 _CACHE_TTL_SECONDS = 300
 _NATIVE_FLOW_TTL_SECONDS = 600
 _NATIVE_EXCHANGE_TTL_SECONDS = 60
-# Owner privilege granted by an OIDC claim is deliberately short-lived: the
-# only evidence we hold is the claim set validated at login, and the session
-# TTL (30 days by default) is far too broad to stand in for "still in the
-# admin group". Re-login is what refreshes it.
-_OWNER_EVIDENCE_TTL_SECONDS = 3600
 _NATIVE_CALLBACK_HOST = "oidc-callback"
 _NATIVE_CALLBACK_SCHEMES = {"talaria", "talaria-branch"}
 _NATIVE_VALUE_RE = re.compile(r"^[A-Za-z0-9._~-]{16,256}$")
@@ -941,14 +936,13 @@ def _oidc_profile_binding(
     profile: str | None,
     *,
     owner: bool = False,
-    now: float | None = None,
 ) -> dict[str, Any]:
     """Server-side evidence for one OIDC session.
 
     The fingerprint covers every policy input that decides admission, profile
     binding, and owner permission, so changing any of them invalidates existing
     sessions at their next authorization check. ``profile_identity`` is empty
-    for an unbound session; owner evidence carries a deadline fixed at login.
+    for an unbound session; owner permission lasts for the session lifetime.
     """
     mapping_payload = {
         "issuer": str(cfg.get("issuer") or ""),
@@ -979,7 +973,6 @@ def _oidc_profile_binding(
     }
     if owner:
         binding["owner"] = True
-        binding["owner_expiry"] = (time.time() if now is None else now) + _OWNER_EVIDENCE_TTL_SECONDS
     return binding
 
 
@@ -1019,8 +1012,7 @@ def oidc_session_binding_is_current(
     privilege: dropping an identity from the login allowlist or changing the
     issuer must end ordinary access too, not only owner access. Only a legacy
     record with no fingerprint, no profile, and no owner evidence has nothing
-    to check. Expired owner evidence invalidates the elevated session rather
-    than silently demoting it.
+    to check.
     """
     profile = str(session_info.get("bound_profile") or "").strip()
     owner_evidence = bool(session_info.get("oidc_owner"))
@@ -1031,18 +1023,7 @@ def oidc_session_binding_is_current(
         "mapping_fingerprint": fingerprint,
         "profile_identity": session_info.get("oidc_profile_identity"),
     }
-    if not _oidc_binding_is_current(binding, profile, cfg):
-        return False
-    if owner_evidence and _owner_evidence_expiry(session_info) <= time.time():
-        return False
-    return True
-
-
-def _owner_evidence_expiry(session_info: dict[str, Any]) -> float:
-    try:
-        return float(session_info.get("oidc_owner_expiry") or 0)
-    except (TypeError, ValueError):
-        return 0.0
+    return _oidc_binding_is_current(binding, profile, cfg)
 
 
 def oidc_session_can_manage_server(session_info: dict[str, Any]) -> bool:
@@ -1070,8 +1051,6 @@ def oidc_session_can_manage_server(session_info: dict[str, Any]) -> bool:
         # cannot be re-read as a legacy owner after the settings disappear.
         return oidc_session_binding_is_current(session_info, cfg)
     if not session_info.get("oidc_owner"):
-        return False
-    if _owner_evidence_expiry(session_info) <= time.time():
         return False
     return oidc_session_binding_is_current(session_info, cfg)
 
