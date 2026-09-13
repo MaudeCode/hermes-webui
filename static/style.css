@@ -8334,4 +8334,7 @@ html.booting.has-ring-cache #ctxIndicatorWrap{display:flex!important;visibility:
 @media (max-width:768px){
   .hub-list .cron-row-meta{grid-template-columns:1fr;gap:2px;}
 }
+/* Profile / Space rows: state badges are quiet text, not pills or eyebrows */
+.hub-list .detail-badge,.hub-list .profile-card-name > span{text-transform:none;letter-spacing:0;font-size:11px;font-weight:500;border-radius:var(--r-sm);}
+.hub-list .ws-row .detail-badge.active{background:transparent;border:0;color:var(--accent-text);padding:0;}
 /* REDESIGN-LAYER-END */
