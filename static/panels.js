@@ -919,6 +919,15 @@ function _isCronScheduleError(job) {
     (job.state === 'error' || job.last_status === 'error');
 }
 
+// "in 2 hours" / "3 days ago" for list rows; the detail view keeps full timestamps.
+function _cronRelTime(iso) {
+  const ms = new Date(iso).getTime() - Date.now();
+  if (!Number.isFinite(ms)) return '';
+  const abs = Math.abs(ms) / 1000;
+  const [unit, div] = abs < 60 ? ['second', 1] : abs < 3600 ? ['minute', 60] : abs < 86400 ? ['hour', 3600] : ['day', 86400];
+  return new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' }).format(Math.round(ms / 1000 / div), unit);
+}
+
 function _cronStatusMeta(job) {
   if (_isCronNeedsAttention(job)) return {
     state: 'needs_attention',
@@ -1187,6 +1196,11 @@ async function loadCrons(animate) {
           <span class="cron-profile-badge" title="${esc(ownerProfileTitle)}">${esc(ownerProfileLabel)}</span>
           <span class="cron-status ${status.listClass}">${esc(status.label)}</span>
           ${readOnlyBadge}
+        </div>
+        <div class="cron-row-meta">
+          <span class="cron-row-cell" title="Schedule">${esc(job.schedule_display || '')}</span>
+          <span class="cron-row-cell" title="Last run">${job.last_run_at ? 'Last run ' + esc(_cronRelTime(job.last_run_at)) : ''}</span>
+          <span class="cron-row-cell" title="Next run">${job.next_run_at ? 'Next ' + esc(_cronRelTime(job.next_run_at)) : ''}</span>
         </div>`;
       item.onclick = () => openCronDetail(job, item);
       if (_currentCronDetailKey && _currentCronDetailKey === _cronJobKey(job)) item.classList.add('active');
