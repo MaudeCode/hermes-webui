@@ -30,7 +30,7 @@ import time
 import uuid
 import http.client
 import socket as _socket
-from collections import defaultdict, deque, OrderedDict
+from collections import Counter, defaultdict, deque, OrderedDict
 from pathlib import Path
 from contextlib import ExitStack, closing, contextmanager, nullcontext
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
@@ -9962,6 +9962,59 @@ def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None
 _DISPLAY_STATE_SIGNATURE_UNSET = object()
 
 
+_DISPLAY_TAIL_MERGE_ANCHOR_ROWS = 300
+
+
+def _display_tail_merge_start(sidecar_messages, state_db_messages, tail_floor):
+    """Return the sidecar index a bounded tail merge may start from, or None.
+
+    HWEB-103. ``tail_floor`` is the timestamp floor the state.db rows were
+    read from, after ``_state_db_since_timestamp_for_limited_display`` proved
+    the sidecar prefix before it matches state.db. Rows before the floor are
+    then carried over unmerged. That is exact only when every state.db row is
+    a mirror of a sidecar row at or after the floor: the merge settles such
+    rows through its visible-identity duplicate accounting, which only needs
+    the matching sidecar rows to be present, and never appends them. The
+    check is a multiset containment of exact visible keys, stricter than the
+    merge's own loose matching, so any shape it accepts the full merge would
+    also have deduplicated. Any other shape returns None and the caller runs
+    the full merge (unchanged behaviour).
+    """
+    if tail_floor is None:
+        return None
+    try:
+        floor = float(tail_floor)
+    except (TypeError, ValueError):
+        return None
+    prefix_end = None
+    for idx, msg in enumerate(sidecar_messages):
+        ts = _message_timestamp_as_float(msg)
+        if ts is None:
+            return None
+        if ts < floor:
+            if prefix_end is not None:
+                return None
+        elif prefix_end is None:
+            prefix_end = idx
+    if prefix_end is None:
+        prefix_end = len(sidecar_messages)
+    if prefix_end == 0:
+        return None
+    tail_keys = Counter(
+        _session_message_visible_key(msg, normalize_workspace_prefix=False)
+        for msg in sidecar_messages[prefix_end:]
+        if isinstance(msg, dict)
+    )
+    for msg in state_db_messages:
+        if not isinstance(msg, dict):
+            return None
+        key = _session_message_visible_key(msg, normalize_workspace_prefix=True)
+        if key is None or tail_keys.get(key, 0) <= 0:
+            return None
+        tail_keys[key] -= 1
+    return max(0, prefix_end - _DISPLAY_TAIL_MERGE_ANCHOR_ROWS)
+
+
 def _limited_webui_messages_for_display_with_sidecar(
     session,
     sidecar_messages,
@@ -9970,6 +10023,7 @@ def _limited_webui_messages_for_display_with_sidecar(
     state_db_signature=_DISPLAY_STATE_SIGNATURE_UNSET,
     msg_before=None,
     omitted_state_db_rows=0,
+    tail_floor=None,
 ) -> list:
     if sidecar_messages is None:
         sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
@@ -10031,12 +10085,28 @@ def _limited_webui_messages_for_display_with_sidecar(
             if _display_merge_cache_entry_usable(entry, cache_key):
                 _display_merge_cache.move_to_end(sid, last=True)
                 return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
-    merged = merge_session_messages_append_only(
-        sidecar_messages,
-        state_db_messages,
-        truncation_watermark=getattr(session, "truncation_watermark", None),
-        truncation_boundary=getattr(session, "truncation_boundary", None),
-    )
+    tail_start = None
+    if (
+        tail_floor is not None
+        and not omitted_state_db_rows
+        and getattr(session, "truncation_watermark", None) in (None, "")
+        and getattr(session, "truncation_boundary", None) in (None, "")
+    ):
+        tail_start = _display_tail_merge_start(sidecar_messages, state_db_messages, tail_floor)
+    if tail_start:
+        merged = sidecar_messages[:tail_start] + merge_session_messages_append_only(
+            sidecar_messages[tail_start:],
+            state_db_messages,
+            truncation_watermark=getattr(session, "truncation_watermark", None),
+            truncation_boundary=getattr(session, "truncation_boundary", None),
+        )
+    else:
+        merged = merge_session_messages_append_only(
+            sidecar_messages,
+            state_db_messages,
+            truncation_watermark=getattr(session, "truncation_watermark", None),
+            truncation_boundary=getattr(session, "truncation_boundary", None),
+        )
     if cache_key is not None:
         _state_key = cache_key[4]
         _streaming_key = (
@@ -10056,10 +10126,28 @@ def _limited_webui_messages_for_display_with_sidecar(
             cache_key = None
     if cache_key is not None:
         sid = str(getattr(session, "session_id", "") or "")
-        cache_weight = _display_merge_messages_weight(
-            merged,
-            limit=_DISPLAY_MERGE_CACHE_MAX_ENTRY_BYTES,
-        )
+        cache_weight = None
+        if tail_start:
+            # HWEB-103: the carried-over prefix is the lineage cache's own row
+            # set; reuse its weight (an upper bound for the prefix) and walk
+            # only the merged tail instead of the whole transcript again.
+            with _lineage_display_cache_lock:
+                _lineage_entry = _lineage_display_cache.get(sid)
+            if (
+                _lineage_entry is not None
+                and _lineage_entry.get("self_sig") is not None
+                and _lineage_entry.get("self_sig")
+                == getattr(sidecar_cache_source, "sidecar_signature", None)
+            ):
+                cache_weight = int(_lineage_entry.get("weight") or 0) + _display_merge_messages_weight(
+                    merged[tail_start:],
+                    limit=_DISPLAY_MERGE_CACHE_MAX_ENTRY_BYTES,
+                )
+        if cache_weight is None:
+            cache_weight = _display_merge_messages_weight(
+                merged,
+                limit=_DISPLAY_MERGE_CACHE_MAX_ENTRY_BYTES,
+            )
         if cache_weight <= _DISPLAY_MERGE_CACHE_MAX_ENTRY_BYTES:
             with _display_merge_cache_lock:
                 _display_merge_cache[sid] = {
@@ -10121,9 +10209,10 @@ def _display_merge_messages_weight(messages, *, limit: int) -> int:
             else:
                 stack.extend(value)
         elif isinstance(value, str):
-            # Four bytes per code point is a conservative UTF-8 upper bound and
-            # avoids allocating another copy of a potentially huge string.
-            total += 49 + (4 * len(value))
+            # HWEB-103: the old ``49 + 4 * len`` estimate quadrupled ASCII
+            # transcripts (CPython stores them at one byte per character), so
+            # every large session overshot the entry cap and was never cached.
+            total += sys.getsizeof(value)
         elif isinstance(value, (bytes, bytearray, memoryview)):
             total += 33 + len(value)
         else:
@@ -10581,6 +10670,17 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
     if sidecar_before_count == 0:
         return floor, sidecar_messages
 
+    # HWEB-103: proving the whole skipped prefix re-keys every sidecar and
+    # state.db row before the floor, which is O(transcript). Memoize a passed
+    # proof on the exact sidecar and state.db revisions it was computed from;
+    # any write to either source changes a signature and forces a fresh proof.
+    proof_sid = str(getattr(session, "session_id", "") or "")
+    proof_key = _prefix_proof_cache_key(session, sidecar_messages, floor)
+    if proof_key is not None:
+        with _prefix_proof_cache_lock:
+            if _prefix_proof_cache.get(proof_sid) == proof_key:
+                _prefix_proof_cache.move_to_end(proof_sid, last=True)
+                return floor, sidecar_messages
     sidecar_before_keys = [
         _session_message_visible_key(msg)
         for msg, ts in zip(sidecar_messages, sidecar_timestamps, strict=True)
@@ -10593,7 +10693,116 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
     )
     if state_before_keys is None or state_before_keys != sidecar_before_keys:
         return None, sidecar_messages
+    if proof_key is not None:
+        with _prefix_proof_cache_lock:
+            _prefix_proof_cache[proof_sid] = proof_key
+            _prefix_proof_cache.move_to_end(proof_sid, last=True)
+            while len(_prefix_proof_cache) > _PREFIX_PROOF_CACHE_MAX:
+                _prefix_proof_cache.popitem(last=False)
     return floor, sidecar_messages
+
+
+def _lineage_parent_sidecar_signatures(session, *, max_hops: int = 20) -> tuple | None:
+    """Return the stat signatures of every ancestor sidecar, or None when unresolvable."""
+    from api.models import _sidecar_stat_signature
+
+    signatures = []
+    seen = {str(getattr(session, "session_id", "") or "")}
+    current = session
+    for _ in range(max(0, int(max_hops))):
+        parent_id = str(getattr(current, "parent_session_id", "") or "").strip()
+        if not parent_id:
+            break
+        if parent_id in seen or not is_safe_session_id(parent_id):
+            return None
+        seen.add(parent_id)
+        parent_path = SESSION_DIR / f"{parent_id}.json"
+        signatures.append((parent_id, _sidecar_stat_signature(parent_path)))
+        try:
+            current = Session.load_metadata_only(parent_id)
+        except Exception:
+            return None
+        if current is None:
+            break
+    return tuple(signatures)
+
+
+def _session_load_revision(session) -> str | None:
+    """Return a cheap revision of every transcript source behind one session.
+
+    Combines the sidecar stat signature, the stat signatures of its snapshot
+    lineage parents, and the state.db session signature: the same revisions
+    the display-merge cache, the lineage cache and the prefix-proof memo are
+    keyed on. None when any of them cannot be resolved.
+    """
+    from api.models import _sidecar_stat_signature
+
+    sid = str(getattr(session, "session_id", "") or "")
+    if not sid or not is_safe_session_id(sid):
+        return None
+    from api.models import _agent_state_db_path
+
+    profile = getattr(session, "profile", None) or None
+    self_sig = _sidecar_stat_signature(SESSION_DIR / f"{sid}.json")
+    try:
+        state_db_present = _agent_state_db_path(profile=profile) is not None
+    except Exception:
+        state_db_present = True
+    # A profile that has not created state.db yet is a supported, stable
+    # state: represent it as an empty source rather than as read uncertainty,
+    # so the metadata/window pair still binds and the client does not refetch.
+    state_sig = (
+        _state_db_session_signature(sid, profile) if state_db_present else ("state-db-absent",)
+    )
+    parent_sigs = _lineage_parent_sidecar_signatures(session)
+    if self_sig is None or state_sig is None or parent_sigs is None:
+        return None
+    return hashlib.sha256(repr((self_sig, parent_sigs, state_sig)).encode("utf-8")).hexdigest()[:32]
+
+
+def _bracketed_load_revision(before: str | None, after: str | None) -> str:
+    """Return a revision that identifies the state the response was read from.
+
+    ``before`` is sampled before any transcript source is read and ``after``
+    once the payload is assembled. Equal samples prove the reads happened at
+    that revision. Anything else (a write in between, or an unresolvable
+    revision) yields a one-off token, so the client can never pair this
+    response with another one by revision and falls back to refetching.
+    """
+    if before is not None and before == after:
+        return before
+    return f"unstable-{uuid.uuid4().hex}"
+
+
+_PREFIX_PROOF_CACHE_MAX = 64
+_prefix_proof_cache: "OrderedDict[str, tuple]" = OrderedDict()
+_prefix_proof_cache_lock = threading.Lock()
+
+
+def _prefix_proof_cache_key(session, sidecar_messages, floor):
+    """Return the (sidecar revision, state.db revision, floor) a prefix proof is valid for, or None."""
+    from api.models import _sidecar_stat_signature
+
+    sid = str(getattr(session, "session_id", "") or "")
+    if not sid or not is_safe_session_id(sid):
+        return None
+    self_sig = _sidecar_stat_signature(SESSION_DIR / f"{sid}.json")
+    if self_sig is None:
+        return None
+    lineage_sig = getattr(sidecar_messages, "sidecar_signature", None)
+    if lineage_sig is not None and lineage_sig != self_sig:
+        return None
+    profile = getattr(session, "profile", None) or None
+    state_sig = _state_db_session_signature(sid, profile)
+    if state_sig is None:
+        return None
+    # The session signature covers supported writers and the newest row; the
+    # SQL aggregate over the skipped prefix additionally changes for any
+    # rewrite there that alters a row's length or timing.
+    prefix_aggregate = get_state_db_session_message_prefix_aggregate(sid, floor, profile=profile)
+    if prefix_aggregate is None:
+        return None
+    return (self_sig, len(sidecar_messages), state_sig, prefix_aggregate, float(floor))
 
 
 def _messages_start_with_visible_prefix(messages, prefix) -> bool:
@@ -11417,6 +11626,7 @@ from api.models import (
     get_cli_session_messages,
     get_state_db_session_messages,
     get_state_db_session_message_prefix_summary,
+    get_state_db_session_message_prefix_aggregate,
     get_state_db_session_message_keys_before_timestamp,
     get_state_db_session_summary,
     merge_session_messages_append_only,
@@ -14221,6 +14431,10 @@ def _handle_session_get(handler, parsed) -> bool:
         _t1 = _time.monotonic()
         if _diag: _diag.stage("t1_after_get_session_check")
         s = get_session(sid, metadata_only=(not load_messages))
+        # HWEB-103: sample the transcript-source revision before any row is
+        # read; it is re-sampled once the payload exists and only emitted when
+        # both samples agree (see _bracketed_load_revision).
+        _load_revision_before = _session_load_revision(s)
         _session_profile = getattr(s, 'profile', None) or None
         if not _session_visible_to_active_profile(_session_profile, handler):
             if _session_profile:
@@ -14392,6 +14606,7 @@ def _handle_session_get(handler, parsed) -> bool:
                         state_db_signature=_display_state_db_signature,
                         msg_before=msg_before,
                         omitted_state_db_rows=_display_omitted_state_db_rows,
+                        tail_floor=state_db_since_timestamp,
                     )
             else:
                 _all_msgs = merge_session_messages_append_only(
@@ -14628,6 +14843,11 @@ def _handle_session_get(handler, parsed) -> bool:
         raw["_messages_truncated"] = _truncated
         raw["_messages_offset"] = _messages_offset
         raw["_msg_limit_max"] = _MAX_MSG_LIMIT
+        # HWEB-103: the client issues messages=0 and messages=1 together and
+        # must not pair a transcript window with metadata from a different
+        # server state. Both responses carry the same revision of the two
+        # transcript sources, so a mismatch tells the client to refetch.
+        raw["_load_revision"] = _bracketed_load_revision(_load_revision_before, _session_load_revision(s))
         _t4 = _time.monotonic()
         if _diag: _diag.stage("t4_after_compact_and_merge")
         if effective_model:
@@ -14648,10 +14868,12 @@ def _handle_session_get(handler, parsed) -> bool:
             for row in _all_msgs
         )
         if (
-            not raw.get("read_only")
+            load_messages
+            and not raw.get("read_only")
             and not _truncated
             and (not raw.get("is_cli_session") or imported_turn_marker)
         ):
+            # HWEB-103: messages=0 never carries the revision; skip the merge.
             from api.session_ops import regeneration_authority, regeneration_state
             canonical_state = regeneration_state(s)
             revision = regeneration_authority(

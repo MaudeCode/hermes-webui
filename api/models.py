@@ -9801,6 +9801,70 @@ def get_state_db_session_message_prefix_summary(
         return None
 
 
+def get_state_db_session_message_prefix_aggregate(sid, before_timestamp, *, profile=None):
+    """Return cheap SQL aggregates over the active rows before ``before_timestamp``.
+
+    HWEB-103: (count, sum of content lengths, sum of tool_calls lengths, sum of
+    timestamps, max id). Pure SQL, so it costs milliseconds even on a large
+    session, and it changes for any rewrite that alters a row's length or
+    timing. Used as part of the prefix-proof memo identity. ``None`` on any
+    failure or unsupported schema (callers then do not memoize).
+    """
+    try:
+        import sqlite3
+    except ImportError:
+        return None
+    if not sid:
+        return None
+    try:
+        before_ts = float(before_timestamp)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(profile, str) and profile:
+        db_path = _get_profile_home(profile) / 'state.db'
+        if not db_path.exists():
+            db_path = _active_state_db_path()
+    else:
+        db_path = _active_state_db_path()
+    if not db_path.exists():
+        return None
+    try:
+        with closing(open_state_db_readonly(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(messages)")
+            available = {str(row['name']) for row in cur.fetchall()}
+            if not {'id', 'session_id', 'content', 'timestamp'}.issubset(available):
+                return None
+            tool_calls_expr = "COALESCE(SUM(length(COALESCE(tool_calls, ''))), 0)" if 'tool_calls' in available else "0"
+            active_clause = " AND (active IS NULL OR active != 0)" if 'active' in available else ""
+            cur.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS count,
+                    COALESCE(SUM(length(COALESCE(content, ''))), 0) AS content_length,
+                    {tool_calls_expr} AS tool_calls_length,
+                    COALESCE(SUM(timestamp), 0) AS timestamp_sum,
+                    COALESCE(MAX(id), 0) AS max_id
+                FROM messages
+                WHERE session_id = ? AND timestamp IS NOT NULL AND timestamp < ?{active_clause}
+                """,
+                (str(sid), before_ts),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return (
+                int(row['count']),
+                int(row['content_length']),
+                int(row['tool_calls_length']),
+                float(row['timestamp_sum']),
+                int(row['max_id']),
+            )
+    except Exception:
+        return None
+
+
 def get_state_db_session_message_keys_before_timestamp(
     sid,
     before_timestamp,

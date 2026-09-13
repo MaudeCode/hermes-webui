@@ -187,15 +187,35 @@ def restore_regeneration_state(session, snapshot):
     session.__dict__.update(copy.deepcopy(snapshot))
 
 
+_REGENERATION_REVISION_TAIL_ROWS = 300
+
+
 def regeneration_revision_for(rows, *, session=None, context=None) -> str:
-    """Hash the canonical writable transcript and its aligned context."""
+    """Hash the canonical transcript's length, tail, and session markers.
+
+    HWEB-103: serializing every row made minting the revision O(transcript)
+    on each session load. Regeneration only ever rewrites the final exchange,
+    so the revision covers the row count, the last
+    ``_REGENERATION_REVISION_TAIL_ROWS`` rows, and the truncation/compression
+    markers: any append changes the count, any edit inside the tail changes
+    the digest, and a compression changes the anchor key. ``context`` is
+    accepted for signature compatibility but no longer hashed; the anchor key
+    marker covers the only way the aligned context diverges from the rows.
+    """
+    # ponytail: an edit deeper than the last 300 rows is invisible to the
+    # revision; widen the window if a deep-edit flow ever needs staleness.
+    rows = list(rows or [])
+    del context
     payload = json.dumps(
         {
             "session_id": str(getattr(session, "session_id", "") or "") if session is not None else "",
-            "messages": list(rows or []),
-            "context_messages": list(context or []),
+            "message_count": len(rows),
+            "messages_tail": rows[-_REGENERATION_REVISION_TAIL_ROWS:],
             "truncation_watermark": getattr(session, "truncation_watermark", None) if session is not None else None,
             "truncation_boundary": getattr(session, "truncation_boundary", None) if session is not None else None,
+            "compression_anchor_message_key": (
+                getattr(session, "compression_anchor_message_key", None) if session is not None else None
+            ),
         },
         sort_keys=True,
         separators=(",", ":"),

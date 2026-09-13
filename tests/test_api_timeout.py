@@ -228,12 +228,14 @@ def test_update_flows_keep_explicit_longer_timeouts():
 def test_session_message_loads_keep_explicit_longer_timeouts():
     """Large state.db installs can take longer than the generic 30s API timeout."""
     src = _source(SESSIONS_JS)
+    # HWEB-103: _ensureMessagesLoaded builds the URL once and either consumes
+    # the loadSession() prefetch or issues the request itself; both call sites
+    # keep the long timeout.
     assert (
-        "api(\n"
-        "      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`,\n"
-        "      {timeoutMs:120000}\n"
-        "    )"
+        "const messagesUrl = `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`;"
     ) in src
+    assert "data = await api(messagesUrl, {timeoutMs:120000});" in src
+    assert "const promise=api(url,{timeoutMs:120000}).then(data=>({data}),error=>({error}));" in src
     # _loadOlderMessages now picks between two strategies (tail-growth vs
     # msg_before paging) via a useBeforePaging ternary, but both keep the long
     # timeoutMs:120000. Assert each URL + timeout survives in the source.
