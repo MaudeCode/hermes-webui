@@ -469,8 +469,10 @@
       path.className = 'workspace-panel-path';
       group.appendChild(path);
       const sync = () => {
-        const name = nameSrc ? nameSrc.textContent.trim() : '';
-        const p = pathSrc ? pathSrc.textContent.trim() : '';
+        // The sidebar name/path nodes no longer exist in the markup; read the session directly.
+        const ws = (typeof S !== 'undefined' && S) ? ((S.session && S.session.workspace) || S._profileDefaultWorkspace || '') : '';
+        const name = nameSrc ? nameSrc.textContent.trim() : (ws && typeof getWorkspaceFriendlyName === 'function' ? getWorkspaceFriendlyName(ws) : '');
+        const p = pathSrc ? pathSrc.textContent.trim() : ws;
         if (name && name !== 'Workspace') heading.textContent = name;
         path.textContent = p;
         path.title = p;
@@ -478,6 +480,10 @@
       };
       sync();
       [nameSrc, pathSrc].forEach(el => { if (el) new MutationObserver(sync).observe(el, { childList: true, characterData: true, subtree: true }); });
+      // Session workspace changes surface as composer label rewrites.
+      const chipLabel = document.getElementById('composerWorkspaceLabel');
+      if (chipLabel) new MutationObserver(sync).observe(chipLabel, { childList: true, characterData: true, subtree: true });
+      setTimeout(sync, 600);
     }
     const empty = document.getElementById('wsEmptyState');
     if (empty && !document.querySelector('.ws-empty-actions')) {

@@ -8286,8 +8286,9 @@ html.booting.has-ring-cache #ctxIndicatorWrap{display:flex!important;visibility:
   .layout,.sidebar{padding-bottom:calc(56px + env(safe-area-inset-bottom,0px));box-sizing:border-box;}
   .workspace-panel-edge-toggle{bottom:calc(72px + env(safe-area-inset-bottom,0px));top:auto;transform:none!important;}
   /* Chat header and composer footer stay compact on phones */
+  /* The app titlebar already carries the title, new-chat and refresh on phones. */
+  .chat-header{display:none;}
   .chat-context{display:none;}
-  .chat-header{min-height:44px;}
   #btnMic,.composer-reasoning-wrap{display:none!important;}
 }
 /* REDESIGN-LAYER-END */
