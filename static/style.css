@@ -8291,4 +8291,30 @@ html.booting.has-ring-cache #ctxIndicatorWrap{display:flex!important;visibility:
   .chat-context{display:none;}
   #btnMic,.composer-reasoning-wrap{display:none!important;}
 }
+/* ── Kanban: the board owns its filters ───────────────────────────────── */
+.hub-toolbar #panelKanban.active{gap:8px 10px;}
+.hub-toolbar .kanban-filter-stack{display:contents;}
+.hub-toolbar .kanban-filter-stack .sidebar-search{width:220px;margin:0;}
+.hub-toolbar .kanban-filter-stack .sidebar-search input{height:30px;font-size:12.5px;}
+.hub-toolbar .kanban-check{display:inline-flex;align-items:center;gap:6px;margin:0;padding:0 2px;color:var(--text);cursor:pointer;}
+.hub-toolbar .kanban-stats{order:98;margin-left:auto;padding:0;}
+.hub-toolbar .kanban-stats-grid{gap:0;}
+.hub-toolbar .kanban-stat-cell{padding:0 8px;border-left:1px solid var(--border);font-size:12px;color:var(--muted);}
+.hub-toolbar .kanban-stat-cell:first-child{border-left:0;padding-left:0;}
+.hub-toolbar .kanban-stat-cell strong{color:var(--text);font-weight:600;margin-right:3px;}
+.hub-toolbar .kanban-bulk-bar{display:inline-flex;gap:6px;margin:0;}
+.hub-toolbar .kanban-bulk-bar select{flex:0 0 auto;min-width:96px;}
+.hub-toolbar .kanban-bulk-bar .kanban-nudge-dispatch-btn,.hub-toolbar .kanban-bulk-bar .kanban-run-dispatch-btn{display:none;}
+.hub-toolbar .kanban-bulk-bar .btn,.hub-toolbar .kanban-new-task-row .btn{height:30px;padding:0 10px;font-size:12.5px;}
+.hub-toolbar .kanban-new-task-row{display:inline-flex;gap:6px;margin:0;order:97;}
+.hub-toolbar .kanban-new-task-row input{width:180px;flex:0 0 auto;height:30px;padding:0 10px;}
+.hub-toolbar .kanban-summary,.hub-toolbar .kanban-list,.hub-toolbar #panelKanban .panel-head{display:none;}
+.hub-toolbar .kanban-bulk-bar:empty{display:none;}
+@media (max-width:768px){
+  .hub-toolbar #panelKanban.active{padding:8px 0;gap:8px;}
+  .hub-toolbar .kanban-filter-stack .sidebar-search{width:100%;}
+  .hub-toolbar .kanban-stats{order:0;margin-left:0;width:100%;overflow-x:auto;}
+  .hub-toolbar .kanban-new-task-row{width:100%;}
+  .hub-toolbar .kanban-new-task-row input{flex:1;width:auto;}
+}
 /* REDESIGN-LAYER-END */

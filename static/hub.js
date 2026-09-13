@@ -18,6 +18,7 @@
     tasks:      { panel: 'panelTasks',      main: 'mainTasks',      empty: 'taskDetailEmpty',      body: 'taskDetailBody',      title: 'taskDetailTitle' },
     insights:   { panel: 'panelInsights',   main: 'mainInsights',   toolbar: true },
     logs:       { panel: 'panelLogs',       main: 'mainLogs',       toolbar: true },
+    kanban:     { panel: 'panelKanban',     main: 'mainKanban',     toolbar: true },
   };
   const BACK_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>';
 
@@ -66,6 +67,11 @@
       };
       if (body) new MutationObserver(sync).observe(body, { attributes: true, attributeFilter: ['style'] });
       sync();
+    }
+    if (name === 'kanban') {
+      const actions = main.querySelector('.main-view-actions');
+      const headActions = panel.querySelector('.panel-head-actions');
+      if (actions && headActions) actions.prepend(...headActions.children);
     }
     main.classList.add('hub-page');
     main.dataset.hubPage = name;
