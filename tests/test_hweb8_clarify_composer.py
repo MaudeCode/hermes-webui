@@ -384,6 +384,30 @@ def test_lock_leaves_hands_free_voice_mode_before_taking_the_composer():
     assert result["parked"] == "", "voice mode is left before the draft is parked, so its cleared text is what gets parked"
 
 
+def test_dictation_completion_never_writes_into_or_submits_a_locked_composer():
+    """Codex round 3 P2: _stopMic() only requests a stop; Web Speech's onend,
+    the MediaRecorder transcript commit and the raw-audio path all complete
+    later and would write the transcript into #msg or call send()."""
+    mic = block(BOOT_JS, "async function _sendRawAudio(blob){", "function _isServerSttUnavailable(err){")
+    probe = "typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()"
+    assert mic.count("if(" + probe + "){window._micPendingSend=false;return;}") == 2, "raw audio and transcript commit both bail"
+    onend = block(BOOT_JS, "sr.onend=()=>{", "sr.onerror=(event)=>{")
+    assert "const claimed=" + probe + ";" in onend
+    assert "if(!claimed){\n        ta.value=committed;" in onend
+    assert "if(!claimed&&_micShouldRestartDictation())" in onend
+    assert "if(claimed){\n        window._micPendingSend=false;\n      }else if(window._micPendingSend){" in onend
+    onresult = block(BOOT_JS, "sr.onresult=(event)=>{", "sr.onend=()=>{")
+    assert "if(" + probe + ") return;" in onresult
+    result = run_clarify_harness("""
+    window._micActive = true;
+    window._micPendingSend = true;
+    window._stopMic = () => {};
+    showClarifyCard({question: 'Which branch?', clarify_id: 'c1'});
+    console.log(JSON.stringify({pending: window._micPendingSend}));
+    """)
+    assert result["pending"] is False
+
+
 def test_expiry_rescues_pressed_multi_select_picks_on_the_open_question():
     """Codex P2: picks that were pressed but not yet advanced are on screen and
     must be rescued like typed text."""

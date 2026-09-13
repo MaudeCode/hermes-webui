@@ -777,7 +777,13 @@ function _micToastKeyForRecognitionError(error){
   }
   window._applyDictationAppendPreference=_applyDictationAppendPreference;
 
+  // HWEB-8: a clarification that arrives mid-dictation claims #msg. Every
+  // completion callback below finishes asynchronously after _stopMic(), so
+  // each one checks the claim (inline: the callbacks are extracted on their
+  // own by tests) before writing a transcript or honouring a pending send —
+  // otherwise the transcript would become the answer.
   async function _sendRawAudio(blob){
+    if(typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()){window._micPendingSend=false;return;}
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const file=new File([blob],`voice-input-${Date.now()}.${ext}`,{type:blob.type||`audio/${ext}`});
     S.pendingFiles.push(file);
@@ -830,6 +836,7 @@ function _micToastKeyForRecognitionError(error){
       // Replace mode (explicit): dictated text overwrites the composer.
       committed = clean;
     }
+    if(typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()){window._micPendingSend=false;return;}
     ta.value=committed;
     autoResize();
     if(window._micPendingSend){
@@ -1009,23 +1016,27 @@ function _micToastKeyForRecognitionError(error){
         if(event.results[i].isFinal){ final+=t; _finalText=final; }
         else{ interim+=t; }
       }
+      if(typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()) return;
       ta.value=_prefix+(final||interim);
       autoResize();
     };
 
     sr.onend=()=>{
+      const claimed=typeof isClarifyComposerActive==='function'&&isClarifyComposerActive();
       const committed=_finalText
         ? (_prefix&&!_prefix.endsWith(' ')&&!_prefix.endsWith('\n')
             ? _prefix+' '+_finalText.trimStart()
             : _prefix+_finalText)
         : ta.value;
-      ta.value=committed;
-      autoResize();
+      if(!claimed){
+        ta.value=committed;
+        autoResize();
+      }
       // Mobile / opt-in continuity: a natural pause ends this recognition run but
       // the user is still dictating, so restart to keep the session alive. Desktop
       // (one-shot) and intentional stops (_speechStopRequested) skip this and
       // finalize. Bounded by _micMaxRestarts so a stolen audio session can't loop.
-      if(_micShouldRestartDictation()){
+      if(!claimed&&_micShouldRestartDictation()){
         _prefix=committed&&!committed.endsWith(' ')&&!committed.endsWith('\n')
           ? committed+' '
           : committed;
@@ -1045,7 +1056,9 @@ function _micToastKeyForRecognitionError(error){
       _micRestartCount=0;
       void _releaseMicWakeLock();
       _setRecording(false);
-      if(window._micPendingSend){
+      if(claimed){
+        window._micPendingSend=false;
+      }else if(window._micPendingSend){
         window._micPendingSend=false;
         send();
       }

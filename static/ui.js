@@ -9188,6 +9188,9 @@ function lockComposerForClarify(opts){
     };
     input.value='';
     if(window._micActive&&typeof window._stopMic==='function'){try{window._stopMic();}catch(_){ }}
+    // The stop completes asynchronously; a send queued behind it must not
+    // fire into the clarification (its callbacks also check the lock).
+    window._micPendingSend=false;
     if(typeof hideCmdDropdown==='function') hideCmdDropdown();
     const box=$('composerBox');
     if(box) box.classList.add('clarify-active');
