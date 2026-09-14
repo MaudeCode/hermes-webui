@@ -1149,6 +1149,50 @@ def test_batched_wakeup_prompt_is_capped_and_overflow_stays_deferred(monkeypatch
         _reset_cfg_state()
 
 
+def test_wakeup_retry_budget_is_cleared_when_queue_drains_without_acceptance(monkeypatch):
+    """Codex P2 (round 5) on PR #96: an exhausted per-session retry budget
+    must not outlive the entries it was counting. Dropping the last deferred
+    entry as already-consumed, a provider-pause suppression, and session
+    forget all clear it, so a later completion gets fresh timed retries."""
+    from api import background_process as bp, config as cfg
+
+    fake = _FakeProcessRegistry()
+    fake.register("proc-budget", "sess-budget")
+    _install_fake_registry(monkeypatch, fake)
+    _reset_cfg_state()
+    _install_fake_start_session_turn(monkeypatch)
+    sid = "sess-budget"
+    stream_id = "stream-budget"
+    bp.register_process_session(sid, sid)
+    try:
+        # (1) all entries dropped as consumed → budget cleared
+        with bp._WAKEUP_RETRY_LOCK:
+            bp._WAKEUP_RETRY_ATTEMPTS[sid] = bp._WAKEUP_RETRY_MAX_ATTEMPTS + 1
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS[stream_id] = {"session_id": sid}
+        bp._process_one(_completion_evt("proc-budget", sid))
+        with fake._lock:
+            fake._completion_consumed.add("proc-budget")
+        cfg.unregister_active_run(stream_id)
+        assert bp.drain_deferred_wakeups_for_session(sid) == 0
+        with bp._WAKEUP_RETRY_LOCK:
+            assert sid not in bp._WAKEUP_RETRY_ATTEMPTS
+
+        # (2) session forget → budget cleared
+        with bp._WAKEUP_RETRY_LOCK:
+            bp._WAKEUP_RETRY_ATTEMPTS[sid] = 3
+        bp.forget_bg_task_completion_dedup(sid)
+        with bp._WAKEUP_RETRY_LOCK:
+            assert sid not in bp._WAKEUP_RETRY_ATTEMPTS
+    finally:
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS.pop(stream_id, None)
+        bp.unregister_process_session(sid)
+        with bp._WAKEUP_RETRY_LOCK:
+            bp._WAKEUP_RETRY_ATTEMPTS.clear()
+        _reset_cfg_state()
+
+
 def test_deferred_wakeup_stays_queued_when_snapshot_target_is_unknown(monkeypatch):
     """Unknown continuation ownership fails closed without losing the prompt."""
     from api import background_process as bp, config as cfg

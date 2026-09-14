@@ -108,6 +108,14 @@ _WAKEUP_RETRY_ATTEMPTS: dict[str, int] = {}
 # already truncated to ~4k chars). Overflow stays deferred for the batched
 # turn's own teardown, so a burst never exceeds the model context in one turn.
 _WAKEUP_BATCH_MAX_CHARS = 24_000
+
+
+def _clear_wakeup_retry_budget(session_id: str) -> None:
+    """Forget a session's failed-admission count once nothing is pending for it."""
+    if not session_id:
+        return
+    with _WAKEUP_RETRY_LOCK:
+        _WAKEUP_RETRY_ATTEMPTS.pop(session_id, None)
 _EMIT_COALESCE_LOCK = threading.Lock()
 _LAST_EMIT_TS: dict[str, float] = {}
 _PENDING_EMIT_PAYLOADS: dict[str, dict] = {}
@@ -1849,6 +1857,10 @@ def drain_deferred_wakeups_for_session(session_id: str) -> int:
                 target_session_id,
                 ", ".join(consumed),
             )
+        if not pending:
+            # Queue reached a terminal empty state without an accepted wakeup:
+            # a later, independent completion must start with a fresh budget.
+            _clear_wakeup_retry_budget(target_session_id)
         # Cap the aggregate prompt: take entries in order until the next one
         # would exceed the budget (always at least one), re-defer the rest for
         # this batched turn's own teardown.
@@ -2003,6 +2015,7 @@ def _start_server_side_wakeup_turn(
             )
             status = int((resp or {}).get("_status", 200) or 200)
             if status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
+                _clear_wakeup_retry_budget(target_session_id)
                 logger.info(
                     "server-side wakeup suppressed for session %s: provider credential state is paused",
                     target_session_id,
@@ -2035,8 +2048,7 @@ def _start_server_side_wakeup_turn(
                     (resp or {}).get("error"),
                 )
             else:
-                with _WAKEUP_RETRY_LOCK:
-                    _WAKEUP_RETRY_ATTEMPTS.pop(target_session_id, None)
+                _clear_wakeup_retry_budget(target_session_id)
                 # The agent now owns these results: stamp the shared dedupe
                 # marker for the deferred entries.
                 for entry in batched:
@@ -2197,6 +2209,7 @@ def forget_bg_task_completion_dedup(session_id: str) -> None:
 
     with _cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
         _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(str(session_id), None)
+    _clear_wakeup_retry_budget(str(session_id))
 
 
 def start_drain_thread() -> bool:
