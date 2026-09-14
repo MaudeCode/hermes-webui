@@ -381,7 +381,7 @@ def test_lock_leaves_hands_free_voice_mode_before_taking_the_composer():
     console.log(JSON.stringify({calls, parked: clarifyComposerDraft()}));
     """)
     assert result["calls"] == ["voice", "mic"]
-    assert result["parked"] == "", "voice mode is left before the draft is parked, so its cleared text is what gets parked"
+    assert result["parked"] == "spoken so far", "the interim transcript is read before deactivation clears the textarea"
 
 
 def test_dictation_completion_never_writes_into_or_submits_a_locked_composer():
@@ -390,22 +390,39 @@ def test_dictation_completion_never_writes_into_or_submits_a_locked_composer():
     later and would write the transcript into #msg or call send()."""
     mic = block(BOOT_JS, "async function _sendRawAudio(blob){", "function _isServerSttUnavailable(err){")
     probe = "typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()"
-    assert mic.count("if(" + probe + "){window._micPendingSend=false;return;}") == 2, "raw audio and transcript commit both bail"
+    raw = block(mic, "async function _sendRawAudio(blob){", "function _commitTranscript(")
+    assert raw.index("S.pendingFiles.push(file);") < raw.index("if(" + probe + "){window._micPendingSend=false;return;}"), \
+        "a finished recording stays staged for the message; only the send is suppressed"
+    assert "setClarifyComposerDraft(!clean ? parked : (_dictationAppend ? appendTo(parkedBase) : clean));" in mic
     onend = block(BOOT_JS, "sr.onend=()=>{", "sr.onerror=(event)=>{")
     assert "const claimed=" + probe + ";" in onend
-    assert "if(!claimed){\n        ta.value=committed;" in onend
+    assert "if(_finalText&&typeof setClarifyComposerDraft==='function') setClarifyComposerDraft(committed);" in onend
+    assert "}else{\n        ta.value=committed;" in onend
     assert "if(!claimed&&_micShouldRestartDictation())" in onend
     assert "if(claimed){\n        window._micPendingSend=false;\n      }else if(window._micPendingSend){" in onend
     onresult = block(BOOT_JS, "sr.onresult=(event)=>{", "sr.onend=()=>{")
     assert "if(" + probe + ") return;" in onresult
-    result = run_clarify_harness("""
+    commit = block(BOOT_JS, "  function _commitTranscript(text, prefixOverride){", "  function _isServerSttUnavailable(err){")
+    result = run_clarify_harness(commit + """
+    const ta = $('msg');
+    const _dictationAppend = true;
+    const _prefix = '';
     window._micActive = true;
     window._micPendingSend = true;
     window._stopMic = () => {};
+    ta.value = 'ordinary draft';
     showClarifyCard({question: 'Which branch?', clarify_id: 'c1'});
-    console.log(JSON.stringify({pending: window._micPendingSend}));
+    const pendingAfterLock = window._micPendingSend;
+    ta.value = 'my answer';
+    window._micPendingSend = true;
+    _commitTranscript('and the transcript', 'ordinary draft');
+    console.log(JSON.stringify({pendingAfterLock, pending: window._micPendingSend, value: ta.value, parked: clarifyComposerDraft(), chat: sendCalls, api: apiCalls.length}));
     """)
+    assert result["pendingAfterLock"] is False
     assert result["pending"] is False
+    assert result["value"] == "my answer", "the late transcript never touches the answer"
+    assert result["parked"] == "ordinary draft and the transcript", "the late transcript is folded into the parked draft"
+    assert result["chat"] == [] and result["api"] == 0
 
 
 def test_expiry_rescues_pressed_multi_select_picks_on_the_open_question():

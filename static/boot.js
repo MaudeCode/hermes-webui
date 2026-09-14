@@ -783,11 +783,13 @@ function _micToastKeyForRecognitionError(error){
   // own by tests) before writing a transcript or honouring a pending send —
   // otherwise the transcript would become the answer.
   async function _sendRawAudio(blob){
-    if(typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()){window._micPendingSend=false;return;}
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const file=new File([blob],`voice-input-${Date.now()}.${ext}`,{type:blob.type||`audio/${ext}`});
     S.pendingFiles.push(file);
     renderTray();
+    // The recording belongs to the message: it stays staged (the tray comes
+    // back with the draft) but must not be sent as the clarification answer.
+    if(typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()){window._micPendingSend=false;return;}
     // An explicit Send-button click while recording sets _micPendingSend — that
     // is an unambiguous send intent, so honor it even when the composer already
     // has text (mirrors the transcribe path). Otherwise (manual mic-stop): send
@@ -820,23 +822,32 @@ function _micToastKeyForRecognitionError(error){
     // Resolution: when prefixOverride IS provided (server-STT path), trust live
     // ta.value unconditionally — even when empty. Otherwise fall back to _prefix.
     const clean=(text||'').trim();
+    const appendTo=(base)=>{
+      if(!base) return clean;
+      return (!base.endsWith(' ') && !base.endsWith('\n'))
+        ? base+' '+clean.trimStart()
+        : base+clean;
+    };
+    // With a clarification holding #msg, the message text is the parked
+    // draft: fold the transcript into that draft (same rules as below) so it
+    // comes back with it, and never send it as the answer.
+    if(typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()){
+      window._micPendingSend=false;
+      const parked=composerDraftText();
+      const parkedBase = prefixOverride !== undefined ? parked : (parked || _prefix);
+      setClarifyComposerDraft(!clean ? parked : (_dictationAppend ? appendTo(parkedBase) : clean));
+      return;
+    }
     let committed;
     if(!clean){
       committed = ta.value;
     }else if(_dictationAppend){
       const base = prefixOverride !== undefined ? ta.value : (ta.value || _prefix);
-      if(!base){
-        committed = clean;
-      }else{
-        committed = (!base.endsWith(' ') && !base.endsWith('\n'))
-          ? base+' '+clean.trimStart()
-          : base+clean;
-      }
+      committed = appendTo(base);
     }else{
       // Replace mode (explicit): dictated text overwrites the composer.
       committed = clean;
     }
-    if(typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()){window._micPendingSend=false;return;}
     ta.value=committed;
     autoResize();
     if(window._micPendingSend){
@@ -1028,7 +1039,11 @@ function _micToastKeyForRecognitionError(error){
             ? _prefix+' '+_finalText.trimStart()
             : _prefix+_finalText)
         : ta.value;
-      if(!claimed){
+      if(claimed){
+        // _prefix is the message text captured at recording start; the
+        // finished utterance belongs with it, in the parked draft.
+        if(_finalText&&typeof setClarifyComposerDraft==='function') setClarifyComposerDraft(committed);
+      }else{
         ta.value=committed;
         autoResize();
       }

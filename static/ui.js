@@ -9167,6 +9167,9 @@ function lockComposerForClarify(opts){
   if(!input) return;
   opts=opts||{};
   if(!_composerLockState){
+    // The draft is whatever is on screen right now, including an interim
+    // hands-free transcript: read it before anything below can clear it.
+    const draft=input.value||'';
     // Hands-free voice mode owns its own recognition instance (not the
     // dictation mic) and writes speech into #msg then calls send(); with the
     // lock held that speech would become the answer. Leave voice mode first.
@@ -9178,13 +9181,13 @@ function lockComposerForClarify(opts){
     // card is active (and survives page refresh / syncs across clients).
     const sid = S && S.session && S.session.session_id;
     if (sid && typeof _saveComposerDraftNow === 'function') {
-      _saveComposerDraftNow(sid, input.value || '', S.pendingFiles ? [...S.pendingFiles] : []);
+      _saveComposerDraftNow(sid, draft, S.pendingFiles ? [...S.pendingFiles] : []);
     }
     _composerLockState={
       disabled: input.disabled,
       placeholder: input.placeholder,
       ariaLabel: input.getAttribute('aria-label'),
-      draft: input.value||'',
+      draft,
     };
     input.value='';
     if(window._micActive&&typeof window._stopMic==='function'){try{window._stopMic();}catch(_){ }}
