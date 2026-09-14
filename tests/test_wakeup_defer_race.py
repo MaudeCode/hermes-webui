@@ -1016,6 +1016,49 @@ def test_idle_wakeup_exception_redefers_under_resolved_continuation(monkeypatch)
         _reset_cfg_state()
 
 
+def test_failed_idle_wakeup_admission_is_retried_without_a_teardown(monkeypatch):
+    """Codex P2 (round 3) on PR #96: an idle-path wakeup whose admission fails
+    (non-409) is re-deferred AND retried on a timer, so a closed-tab session
+    with no future teardown still gets the completion. Acceptance resets the
+    per-session attempt counter."""
+    from api import background_process as bp, config as cfg
+
+    fake = _FakeProcessRegistry()
+    fake.register("proc-retry", "sess-retry")
+    _install_fake_registry(monkeypatch, fake)
+    _reset_cfg_state()
+    monkeypatch.setattr(bp, "_WAKEUP_RETRY_SECONDS", 0.05)
+    with bp._WAKEUP_RETRY_LOCK:
+        bp._WAKEUP_RETRY_ATTEMPTS.clear()
+    import api.routes as routes
+
+    calls = []
+    accepted = threading.Event()
+
+    def _flaky(session_id, message, *, source="process_wakeup"):
+        calls.append(message)
+        if len(calls) == 1:
+            return {"_status": 500, "error": "workspace persistence failed"}
+        accepted.set()
+        return {"_status": 200, "stream_id": "retry-stream"}
+
+    monkeypatch.setattr(routes, "start_session_turn", _flaky)
+    sid = "sess-retry"
+    bp.register_process_session(sid, sid)
+    try:
+        bp._process_one(_completion_evt("proc-retry", sid))  # idle branch → 500
+        assert accepted.wait(timeout=3.0), "no timed retry after a failed admission"
+        assert len(calls) == 2
+        assert "proc-retry" in calls[1]
+        assert _wait_for(lambda: fake.is_completion_consumed("proc-retry"))
+        assert _wait_for(lambda: sid not in cfg.DEFERRED_PROCESS_WAKEUPS)
+        with bp._WAKEUP_RETRY_LOCK:
+            assert sid not in bp._WAKEUP_RETRY_ATTEMPTS
+    finally:
+        bp.unregister_process_session(sid)
+        _reset_cfg_state()
+
+
 def test_deferred_wakeup_stays_queued_when_snapshot_target_is_unknown(monkeypatch):
     """Unknown continuation ownership fails closed without losing the prompt."""
     from api import background_process as bp, config as cfg

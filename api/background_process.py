@@ -94,6 +94,16 @@ _THREAD_LIFECYCLE_LOCK = threading.Lock()
 # open tab. The first emit for a session fires immediately, then any further
 # emits inside the 1s window are payload-replaced and flushed after 1s of quiet.
 _EMIT_COALESCE_WINDOW_SECS = 1.0
+
+# HWEB-96: a wakeup that fails admission (non-409 error or exception) is
+# re-deferred; with no turn active nothing else would drain it until the next
+# teardown, so schedule a bounded timed retry. Per-session attempt counter,
+# reset on acceptance; past the cap the entries stay deferred for the next
+# teardown / next-turn drain.
+_WAKEUP_RETRY_SECONDS = 30.0
+_WAKEUP_RETRY_MAX_ATTEMPTS = 5
+_WAKEUP_RETRY_LOCK = threading.Lock()
+_WAKEUP_RETRY_ATTEMPTS: dict[str, int] = {}
 _EMIT_COALESCE_LOCK = threading.Lock()
 _LAST_EMIT_TS: dict[str, float] = {}
 _PENDING_EMIT_PAYLOADS: dict[str, dict] = {}
@@ -1926,6 +1936,23 @@ def _start_server_side_wakeup_turn(
                     target, str((entry or {}).get("process_id") or ""), prompt
                 )
 
+    def _schedule_retry(target: str) -> None:
+        with _WAKEUP_RETRY_LOCK:
+            attempts = _WAKEUP_RETRY_ATTEMPTS.get(target, 0) + 1
+            _WAKEUP_RETRY_ATTEMPTS[target] = attempts
+        if attempts > _WAKEUP_RETRY_MAX_ATTEMPTS:
+            logger.warning(
+                "server-side wakeup retry budget exhausted for session %s; "
+                "deferred entries wait for the next turn teardown",
+                target,
+            )
+            return
+        timer = threading.Timer(
+            _WAKEUP_RETRY_SECONDS, drain_deferred_wakeups_for_session, args=(target,)
+        )
+        timer.daemon = True
+        timer.start()
+
     def _runner() -> None:
         target_session_id = ""
         try:
@@ -1964,9 +1991,10 @@ def _start_server_side_wakeup_turn(
                 )
             elif status >= 400:
                 # Retryable admission failure (e.g. a workspace-persistence
-                # 500): keep every entry so a later teardown/next-turn drain
-                # can redeliver the batch instead of losing it.
+                # 500): keep every entry and arrange a bounded timed retry —
+                # with no turn active, no teardown would otherwise drain it.
                 _redefer(target_session_id)
+                _schedule_retry(target_session_id)
                 logger.warning(
                     "server-side wakeup failed for session %s: status=%s err=%r; "
                     "re-deferred for redelivery",
@@ -1975,9 +2003,10 @@ def _start_server_side_wakeup_turn(
                     (resp or {}).get("error"),
                 )
             else:
+                with _WAKEUP_RETRY_LOCK:
+                    _WAKEUP_RETRY_ATTEMPTS.pop(target_session_id, None)
                 # The agent now owns these results: stamp the shared dedupe
-                # marker for the deferred entries (the idle path stamped it in
-                # ``_process_one`` before spawning this thread).
+                # marker for the deferred entries.
                 for entry in batched:
                     pid = str((entry or {}).get("process_id") or "")
                     if pid:
@@ -1992,6 +2021,7 @@ def _start_server_side_wakeup_turn(
             # already followed: the sealed parent's teardown never runs again,
             # so entries keyed on it would strand.
             _redefer(target_session_id or session_id)
+            _schedule_retry(target_session_id or session_id)
             logger.warning(
                 "server-side wakeup turn raised for session %s; re-deferred for redelivery",
                 target_session_id or session_id,
