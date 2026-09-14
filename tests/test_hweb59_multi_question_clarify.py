@@ -7,9 +7,6 @@ one-submit rendering keyed by ``qid``.
 """
 
 import json
-import shutil
-import subprocess
-import textwrap
 from pathlib import Path
 
 import pytest
@@ -203,124 +200,31 @@ def test_callback_advertises_the_questions_keyword():
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# Frontend — one form with N fields, one submit keyed by qid
+# Frontend — one question at a time, one submit keyed by qid (HWEB-8 moved
+# the typed answer into the chat composer; the wire contract is unchanged)
 # ══════════════════════════════════════════════════════════════════════════
-def _run_clarify_dom_harness(body: str):
-    node = shutil.which("node")
-    if not node:  # pragma: no cover - environment dependent
-        pytest.skip("node not available")
-
-    functions = _block(
-        MESSAGES_JS,
-        "function _clarifyBatchChoiceButton(",
-        "function showClarifyCard(pending) {",
-    )
-    harness = _MINI_DOM + functions + "\n" + textwrap.dedent(body)
-    proc = subprocess.run(
-        [node, "--input-type=module", "-e", harness],
-        capture_output=True, text=True, timeout=60,
-    )
-    assert proc.returncode == 0, proc.stderr or proc.stdout
-    return json.loads(proc.stdout)
+from tests._clarify_composer_harness import run_clarify_harness
 
 
-# A DOM stub covering exactly what the clarify batch helpers touch. jsdom is
-# not a dependency of this repo and the app ships no bundler.
-_MINI_DOM = """
-class El {
-  constructor(tag) {
-    this.tagName = String(tag).toUpperCase();
-    this.children = [];
-    this.dataset = {};
-    this.attrs = {};
-    this.classNameValue = '';
-    this._text = '';
-    this.value = '';
-    this.hidden = false;
-    this.disabled = false;
-    this.onclick = null;
-    this.onkeydown = null;
-    this.placeholder = '';
-    this.autocomplete = '';
-    this.type = '';
-  }
-  set id(v) { this.attrs.id = String(v); }
-  get id() { return this.attrs.id || ''; }
-  set className(v) { this.classNameValue = String(v); }
-  get className() { return this.classNameValue; }
-  set textContent(v) { this._text = String(v); this.children = []; }
-  get textContent() {
-    return this.children.length ? this.children.map(c => c.textContent).join('') : this._text;
-  }
-  set innerHTML(v) { if (!v) this.children = []; }
-  get innerHTML() { return this.children.length ? '<child>' : ''; }
-  appendChild(child) { this.children.push(child); child.parent = this; return child; }
-  setAttribute(k, v) { this.attrs[k] = String(v); }
-  getAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null; }
-  _classes() { return this.classNameValue.split(/\\s+/).filter(Boolean); }
-  _matches(sel) {
-    const attr = sel.match(/^(\\.[-\\w]+)\\[([-\\w]+)="([^"]*)"\\]$/);
-    if (attr) return this._matches(attr[1]) && this.getAttribute(attr[2]) === attr[3];
-    if (sel.startsWith('.')) return this._classes().includes(sel.slice(1));
-    return this.tagName === sel.toUpperCase();
-  }
-  _descendants() {
-    return this.children.flatMap(c => [c, ...c._descendants()]);
-  }
-  querySelectorAll(selector) {
-    const parts = selector.split(',').map(s => s.trim()).filter(Boolean);
-    return this._descendants().filter(el => parts.some(p => el._matches(p)));
-  }
-  querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
-}
-const document = {createElement: (tag) => new El(tag)};
-const _els = {};
-function $(id) { return _els[id] || null; }
-function t(key) { return key; }
-function respondClarify() {}
-"""
-
-
-def test_batch_renders_one_field_per_question_and_submits_qid_keyed_answers():
-    result = _run_clarify_dom_harness("""
-    const container = new El('div');
-    container.className = 'clarify-questions';
-    _els.clarifyQuestions = container;
-
-    _renderClarifyBatch(container, [
+def test_batch_answers_are_keyed_by_qid_and_submitted_once():
+    result = run_clarify_harness("""
+    showClarifyCard({clarify_id: 'b1', questions: [
       {qid: 'q0', id: 'budget', question: 'How much?', choices: ['500', '1000']},
       {qid: 'q1', id: 'when', question: 'When?'},
       {qid: 'q2', id: 'who', question: 'Who?', choices: ['ann', 'bo'], multi_select: true},
-    ]);
-
-    const blocks = container.querySelectorAll('.clarify-q');
-    const fields = container.querySelectorAll('.clarify-q-input');
-
-    // Single-select: pick the second choice, then re-pick the first.
-    const first = blocks[0].querySelectorAll('.clarify-choice');
-    _toggleClarifyBatchChoice(blocks[0], first[1]);
-    _toggleClarifyBatchChoice(blocks[0], first[0]);
-    // Open-ended: type an answer.
-    fields[1].value = '  next week  ';
-    // Multi-select: both choices stay pressed.
-    const third = blocks[2].querySelectorAll('.clarify-choice');
-    _toggleClarifyBatchChoice(blocks[2], third[0]);
-    _toggleClarifyBatchChoice(blocks[2], third[1]);
-
-    const submission = _clarifyResolveSubmission();
-    console.log(JSON.stringify({
-      blocks: blocks.length,
-      fields: fields.length,
-      questions: blocks.map(b => b.querySelector('.clarify-question').textContent),
-      submission: JSON.parse(submission.value),
-      echo: submission.echo,
-    }));
+    ]});
+    $('clarifyChoices').querySelectorAll('.clarify-choice')[0].onclick();
+    await tick();
+    $('msg').value = '  next week  ';
+    await respondClarify();
+    const who = $('clarifyChoices').querySelectorAll('.clarify-choice');
+    who[0].onclick(); who[1].onclick();
+    await respondClarify();
+    console.log(JSON.stringify({calls: apiCalls.length, body: apiCalls[0].body, echo: S.messages[0].content}));
     """)
-
-    assert result["blocks"] == 3
-    assert result["fields"] == 3, "every question gets its own answer field"
-    assert result["questions"] == ["How much?", "When?", "Who?"]
-    assert result["submission"] == {"answers": {
+    assert result["calls"] == 1, "one request carries every answer"
+    assert result["body"]["clarify_id"] == "b1"
+    assert json.loads(result["body"]["response"]) == {"answers": {
         "q0": "500",
         "q1": "next week",
         "q2": ["ann", "bo"],
@@ -328,135 +232,41 @@ def test_batch_renders_one_field_per_question_and_submits_qid_keyed_answers():
     assert "How much?" in result["echo"] and "next week" in result["echo"]
 
 
-def test_unanswered_batch_questions_are_omitted_and_empty_batch_blocks_submit():
-    result = _run_clarify_dom_harness("""
-    const container = new El('div');
-    container.className = 'clarify-questions';
-    _els.clarifyQuestions = container;
-    _renderClarifyBatch(container, [
-      {qid: 'q0', question: 'A?'},
-      {qid: 'q1', question: 'B?'},
-    ]);
-
-    const nothingAnswered = _clarifyResolveSubmission();
-    container.querySelectorAll('.clarify-q-input')[1].value = 'only B';
-    const partial = _clarifyResolveSubmission();
-
-    console.log(JSON.stringify({
-      nothingAnswered,
-      partial: JSON.parse(partial.value),
-    }));
+def test_unanswered_question_blocks_progress_instead_of_being_omitted():
+    """Every question is required: an empty answer neither advances nor submits."""
+    result = run_clarify_harness("""
+    showClarifyCard({clarify_id: 'b1', questions: [{qid: 'q0', question: 'A?'}, {qid: 'q1', question: 'B?'}]});
+    await respondClarify();
+    const stuck = $('clarifyQuestion').textContent;
+    $('msg').value = 'only A';
+    await respondClarify();
+    await respondClarify();
+    console.log(JSON.stringify({stuck, now: $('clarifyQuestion').textContent, calls: apiCalls.length}));
     """)
-
-    assert result["nothingAnswered"] is None, "an empty form must not submit"
-    assert result["partial"] == {"answers": {"q1": "only B"}}
+    assert result == {"stuck": "A?", "now": "B?", "calls": 0}
 
 
 def test_single_question_submission_is_byte_identical_without_a_batch():
-    result = _run_clarify_dom_harness("""
-    const input = new El('input');
-    _els.clarifyInput = input;
-    const container = new El('div');
-    container.hidden = true;
-    _els.clarifyQuestions = container;
-
-    input.value = '  typed answer  ';
-    const typed = _clarifyResolveSubmission();
-    const clicked = _clarifyResolveSubmission('main (Recommended)');
-    input.value = '   ';
-    const blank = _clarifyResolveSubmission(undefined);
-
-    console.log(JSON.stringify({typed, clicked, blank}));
+    result = run_clarify_harness("""
+    showClarifyCard({question: 'Which branch?', choices_offered: ['main (Recommended)'], clarify_id: 'c1'});
+    $('msg').value = '  typed answer  ';
+    await respondClarify();
+    showClarifyCard({question: 'Which branch?', choices_offered: ['main (Recommended)'], clarify_id: 'c2'});
+    $('clarifyChoices').querySelectorAll('.clarify-choice')[0].onclick();
+    await tick();
+    console.log(JSON.stringify(apiCalls.map(c => c.body.response)));
     """)
-
-    assert result["typed"] == {"value": "typed answer", "echo": "typed answer"}
-    assert result["clicked"] == {"value": "main (Recommended)", "echo": "main (Recommended)"}
-    assert result["blank"] is None
+    assert result == ["typed answer", "main (Recommended)"]
 
 
-def test_batch_card_hides_the_shared_single_question_controls():
-    show = _block(MESSAGES_JS, "function showClarifyCard(pending) {", "async function respondClarify(")
-
-    assert "const isBatch = batchQuestions.length > 0;" in show
-    assert "questionEl.hidden = isBatch;" in show
-    assert "input.hidden = isBatch;" in show
-    assert "if (isBatch && !sameClarify) _renderClarifyBatch(questionsEl, batchQuestions);" in show
-    # The signature must carry the whole set so a changed batch re-renders.
-    assert "questions: batchQuestions," in show
-    assert 'card.setAttribute("aria-describedby", isBatch ? "clarifyQuestions clarifyHint"' in show
-
-
-def test_single_select_submits_the_answer_that_is_on_screen():
-    """Typing after picking (or picking after typing) must not hide an answer.
-
-    Both controls stay live until the shared Send, so the losing one has to be
-    cleared visibly rather than silently discarded at submit time (codex P1).
-    """
-    result = _run_clarify_dom_harness("""
-    const container = new El('div');
-    container.className = 'clarify-questions';
-    _els.clarifyQuestions = container;
-    _renderClarifyBatch(container, [
-      {qid: 'q0', question: 'Which branch?', choices: ['main', 'dev']},
-      {qid: 'q1', question: 'Which files?', choices: ['a', 'b'], multi_select: true},
-    ]);
-
-    const blocks = container.querySelectorAll('.clarify-q');
-    const fields = container.querySelectorAll('.clarify-q-input');
-
-    // Pick a choice, then type a custom answer over it.
-    _toggleClarifyBatchChoice(blocks[0], blocks[0].querySelectorAll('.clarify-choice')[0]);
-    fields[0].value = 'a release tag';
-    fields[0].oninput();
-    const typedWins = JSON.parse(_clarifyResolveSubmission().value);
-    const picksAfterTyping = blocks[0]
-      .querySelectorAll('.clarify-choice[aria-pressed="true"]').length;
-
-    // Now pick a choice again: the stale typed answer must clear.
-    _toggleClarifyBatchChoice(blocks[0], blocks[0].querySelectorAll('.clarify-choice')[1]);
-    const pickWins = JSON.parse(_clarifyResolveSubmission().value);
-
-    // Multi-select keeps typing as an extra "Other" answer alongside picks.
-    _toggleClarifyBatchChoice(blocks[1], blocks[1].querySelectorAll('.clarify-choice')[0]);
-    fields[1].value = 'and README';
-    fields[1].oninput();
-    const multi = JSON.parse(_clarifyResolveSubmission().value);
-
-    console.log(JSON.stringify({
-      typedWins, picksAfterTyping, pickWins, typedAfterPick: fields[0].value, multi,
-    }));
+def test_multi_select_scalar_and_array_answers_never_mix():
+    """A typed custom answer to a multi-select question is still an array (codex P2)."""
+    result = run_clarify_harness("""
+    showClarifyCard({clarify_id: 'b1', questions: [{qid: 'q0', question: 'Files?', choices: ['a', 'b'], multi_select: true}]});
+    $('clarifyChoices').querySelectorAll('.clarify-choice')[0].onclick();
+    $('msg').value = 'and README';
+    onClarifyComposerInput();
+    await respondClarify();
+    console.log(JSON.stringify(JSON.parse(apiCalls[0].body.response)));
     """)
-
-    assert result["typedWins"] == {"answers": {"q0": "a release tag"}}
-    assert result["picksAfterTyping"] == 0, "typing must clear the single-select pick"
-    assert result["pickWins"] == {"answers": {"q0": "dev"}}
-    assert result["typedAfterPick"] == "", "picking must clear the stale typed answer"
-    assert result["multi"]["answers"]["q1"] == ["a", "and README"]
-
-
-def test_each_batch_field_is_labelled_by_its_own_question():
-    """Screen-reader users tabbing between fields need per-question names."""
-    result = _run_clarify_dom_harness("""
-    const container = new El('div');
-    container.className = 'clarify-questions';
-    _els.clarifyQuestions = container;
-    _renderClarifyBatch(container, [
-      {qid: 'q0', question: 'Which branch?'},
-      {qid: 'q1', question: 'Which runtime?', choices: ['a', 'b']},
-    ]);
-
-    const blocks = container.querySelectorAll('.clarify-q');
-    console.log(JSON.stringify({
-      labelIds: blocks.map(b => b.querySelector('.clarify-question').id),
-      fieldLabels: container.querySelectorAll('.clarify-q-input')
-        .map(i => i.getAttribute('aria-labelledby')),
-      groupRoles: blocks.map(b => b.getAttribute('role')),
-      groupLabels: blocks.map(b => b.getAttribute('aria-labelledby')),
-    }));
-    """)
-
-    assert result["labelIds"] == ["clarifyQ-q0-label", "clarifyQ-q1-label"]
-    assert len(set(result["labelIds"])) == 2, "each question needs a unique label id"
-    assert result["fieldLabels"] == result["labelIds"]
-    assert result["groupRoles"] == ["group", "group"]
-    assert result["groupLabels"] == result["labelIds"]
+    assert result == {"answers": {"q0": ["and README"]}}

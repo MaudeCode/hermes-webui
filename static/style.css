@@ -222,18 +222,15 @@
   :root[data-skin="graphite"] .new-chat-btn,
   :root[data-skin="graphite"] button.send-btn:not(:disabled),
   :root[data-skin="graphite"] .btn.primary,
-  :root[data-skin="graphite"] .update-primary,
-  :root[data-skin="graphite"] .clarify-submit{background:var(--accent)!important;border-color:var(--accent)!important;color:#fff!important;font-weight:600!important;box-shadow:none!important;}
+  :root[data-skin="graphite"] .update-primary{background:var(--accent)!important;border-color:var(--accent)!important;color:#fff!important;font-weight:600!important;box-shadow:none!important;}
   :root.dark[data-skin="graphite"] .new-chat-btn,
   :root.dark[data-skin="graphite"] button.send-btn:not(:disabled),
   :root.dark[data-skin="graphite"] .btn.primary,
-  :root.dark[data-skin="graphite"] .update-primary,
-  :root.dark[data-skin="graphite"] .clarify-submit{color:#151614!important;}
+  :root.dark[data-skin="graphite"] .update-primary{color:#151614!important;}
   :root[data-skin="graphite"] .new-chat-btn:hover,
   :root[data-skin="graphite"] button.send-btn:not(:disabled):hover,
   :root[data-skin="graphite"] .btn.primary:hover,
-  :root[data-skin="graphite"] .update-primary:hover,
-  :root[data-skin="graphite"] .clarify-submit:hover{background:var(--accent-hover)!important;border-color:var(--accent-hover)!important;}
+  :root[data-skin="graphite"] .update-primary:hover{background:var(--accent-hover)!important;border-color:var(--accent-hover)!important;}
   /* ── Skin: Codex (OpenAI terminal IDE) ──
      Full palette rewrite with minimal editor surfaces, crisp contrast,
      and restrained OpenAI green action chrome. Uses native system fonts so it stays local,
@@ -345,18 +342,15 @@
   :root[data-skin="codex"] .new-chat-btn,
   :root[data-skin="codex"] button.send-btn:not(:disabled),
   :root[data-skin="codex"] .btn.primary,
-  :root[data-skin="codex"] .update-primary,
-  :root[data-skin="codex"] .clarify-submit{background:var(--accent)!important;border-color:var(--accent)!important;color:#fff!important;font-weight:600!important;box-shadow:none!important;}
+  :root[data-skin="codex"] .update-primary{background:var(--accent)!important;border-color:var(--accent)!important;color:#fff!important;font-weight:600!important;box-shadow:none!important;}
   :root.dark[data-skin="codex"] .new-chat-btn,
   :root.dark[data-skin="codex"] button.send-btn:not(:disabled),
   :root.dark[data-skin="codex"] .btn.primary,
-  :root.dark[data-skin="codex"] .update-primary,
-  :root.dark[data-skin="codex"] .clarify-submit{color:#0D0D0D!important;}
+  :root.dark[data-skin="codex"] .update-primary{color:#0D0D0D!important;}
   :root[data-skin="codex"] .new-chat-btn:hover,
   :root[data-skin="codex"] button.send-btn:not(:disabled):hover,
   :root[data-skin="codex"] .btn.primary:hover,
-  :root[data-skin="codex"] .update-primary:hover,
-  :root[data-skin="codex"] .clarify-submit:hover{background:var(--accent-hover)!important;border-color:var(--accent-hover)!important;}
+  :root[data-skin="codex"] .update-primary:hover{background:var(--accent-hover)!important;border-color:var(--accent-hover)!important;}
   /* ── Skin: Terracotta (warm IDE) ──
      Full palette rewrite with Anthropic-inspired warm neutrals, soft contrast,
      and muted Claude orange action chrome. Uses native system fonts so it stays local,
@@ -468,18 +462,15 @@
   :root[data-skin="terracotta"] .new-chat-btn,
   :root[data-skin="terracotta"] button.send-btn:not(:disabled),
   :root[data-skin="terracotta"] .btn.primary,
-  :root[data-skin="terracotta"] .update-primary,
-  :root[data-skin="terracotta"] .clarify-submit{background:var(--accent)!important;border-color:var(--accent)!important;color:#fff!important;font-weight:600!important;box-shadow:none!important;}
+  :root[data-skin="terracotta"] .update-primary{background:var(--accent)!important;border-color:var(--accent)!important;color:#fff!important;font-weight:600!important;box-shadow:none!important;}
   :root.dark[data-skin="terracotta"] .new-chat-btn,
   :root.dark[data-skin="terracotta"] button.send-btn:not(:disabled),
   :root.dark[data-skin="terracotta"] .btn.primary,
-  :root.dark[data-skin="terracotta"] .update-primary,
-  :root.dark[data-skin="terracotta"] .clarify-submit{color:#141413!important;}
+  :root.dark[data-skin="terracotta"] .update-primary{color:#141413!important;}
   :root[data-skin="terracotta"] .new-chat-btn:hover,
   :root[data-skin="terracotta"] button.send-btn:not(:disabled):hover,
   :root[data-skin="terracotta"] .btn.primary:hover,
-  :root[data-skin="terracotta"] .update-primary:hover,
-  :root[data-skin="terracotta"] .clarify-submit:hover{background:var(--accent-hover)!important;border-color:var(--accent-hover)!important;}
+  :root[data-skin="terracotta"] .update-primary:hover{background:var(--accent-hover)!important;border-color:var(--accent-hover)!important;}
 /* ── Skin: GitHub (Graphite with GitHub accents) ──
      Full palette rewrite with restrained graphite surfaces, soft contrast,
      and GitHub Primer-inspired action chrome. Uses native system fonts so it stays local,
@@ -591,18 +582,15 @@
   :root[data-skin="github"] .new-chat-btn,
   :root[data-skin="github"] button.send-btn:not(:disabled),
   :root[data-skin="github"] .btn.primary,
-  :root[data-skin="github"] .update-primary,
-  :root[data-skin="github"] .clarify-submit{background:var(--accent)!important;border-color:var(--accent)!important;color:#fff!important;font-weight:600!important;box-shadow:none!important;}
+  :root[data-skin="github"] .update-primary{background:var(--accent)!important;border-color:var(--accent)!important;color:#fff!important;font-weight:600!important;box-shadow:none!important;}
   :root.dark[data-skin="github"] .new-chat-btn,
   :root.dark[data-skin="github"] button.send-btn:not(:disabled),
   :root.dark[data-skin="github"] .btn.primary,
-  :root.dark[data-skin="github"] .update-primary,
-  :root.dark[data-skin="github"] .clarify-submit{color:#151614!important;}
+  :root.dark[data-skin="github"] .update-primary{color:#151614!important;}
   :root[data-skin="github"] .new-chat-btn:hover,
   :root[data-skin="github"] button.send-btn:not(:disabled):hover,
   :root[data-skin="github"] .btn.primary:hover,
-  :root[data-skin="github"] .update-primary:hover,
-  :root[data-skin="github"] .clarify-submit:hover{background:var(--accent-hover)!important;border-color:var(--accent-hover)!important;}
+  :root[data-skin="github"] .update-primary:hover{background:var(--accent-hover)!important;border-color:var(--accent-hover)!important;}
   /* ── Skin: Slate (blue-gray) ── */
   :root[data-skin="slate"]{--accent:#475569;--accent-hover:#334155;--accent-bg:rgba(71,85,105,0.08);--accent-bg-strong:rgba(71,85,105,0.15);--accent-text:#334155;}
   :root.dark[data-skin="slate"]{--accent:#94A3B8;--accent-hover:#64748B;--accent-bg:rgba(148,163,184,0.08);--accent-bg-strong:rgba(148,163,184,0.15);--accent-text:#94A3B8;}
@@ -965,22 +953,19 @@
   :root[data-skin="geist-contrast"] .btn.primary,
   :root[data-skin="geist-contrast"] .update-primary,
   :root[data-skin="geist-contrast"] .app-dialog-btn.confirm,
-  :root[data-skin="geist-contrast"] .approval-btn.once,
-  :root[data-skin="geist-contrast"] .clarify-submit{background:var(--accent)!important;border-color:var(--accent)!important;color:#050505!important;font-weight:600!important;box-shadow:none!important;}
+  :root[data-skin="geist-contrast"] .approval-btn.once{background:var(--accent)!important;border-color:var(--accent)!important;color:#050505!important;font-weight:600!important;box-shadow:none!important;}
   :root[data-skin="geist-contrast"]:not(.dark) .new-chat-btn,
   :root[data-skin="geist-contrast"]:not(.dark) button.send-btn:not(:disabled),
   :root[data-skin="geist-contrast"]:not(.dark) .btn.primary,
   :root[data-skin="geist-contrast"]:not(.dark) .update-primary,
   :root[data-skin="geist-contrast"]:not(.dark) .app-dialog-btn.confirm,
-  :root[data-skin="geist-contrast"]:not(.dark) .approval-btn.once,
-  :root[data-skin="geist-contrast"]:not(.dark) .clarify-submit{color:#ffffff!important;}
+  :root[data-skin="geist-contrast"]:not(.dark) .approval-btn.once{color:#ffffff!important;}
   :root[data-skin="geist-contrast"] .new-chat-btn:hover,
   :root[data-skin="geist-contrast"] button.send-btn:not(:disabled):hover,
   :root[data-skin="geist-contrast"] .btn.primary:hover,
   :root[data-skin="geist-contrast"] .update-primary:hover,
   :root[data-skin="geist-contrast"] .app-dialog-btn.confirm:hover,
-  :root[data-skin="geist-contrast"] .approval-btn.once:hover,
-  :root[data-skin="geist-contrast"] .clarify-submit:hover{background:var(--accent-hover)!important;border-color:var(--accent-hover)!important;transform:none!important;}
+  :root[data-skin="geist-contrast"] .approval-btn.once:hover{background:var(--accent-hover)!important;border-color:var(--accent-hover)!important;transform:none!important;}
   :root[data-skin="geist-contrast"] button.send-btn:disabled{background:var(--surface-subtle)!important;border-color:var(--border)!important;color:var(--muted)!important;opacity:1!important;}
   :root.dark[data-skin="geist-contrast"] button.send-btn:disabled svg,
   :root.dark[data-skin="geist-contrast"] button.send-btn:disabled [data-lucide]{color:var(--muted)!important;stroke:var(--muted)!important;}
@@ -1967,6 +1952,7 @@
   .approval-cmd{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-family:var(--font-mono);font-size:12px;color:var(--pre-text);white-space:pre-wrap;word-break:break-all;margin-bottom:14px;max-height:120px;overflow-y:auto;}
   .approval-counter{font-size:11px;color:var(--muted);margin:0 0 12px;font-variant-numeric:tabular-nums;letter-spacing:0.01em;}
   .clarify-counter{font-size:11px;color:var(--muted);margin:0 0 8px;font-variant-numeric:tabular-nums;letter-spacing:0.01em;}
+  .clarify-progress{font-size:11px;color:var(--muted);margin:0 0 8px;font-variant-numeric:tabular-nums;letter-spacing:0.01em;}
   .approval-btns{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
   .approval-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:8px;font-size:12px;font-weight:600;border:1px solid var(--border2);background:var(--hover-bg);color:var(--text);cursor:pointer;transition:all .15s;white-space:nowrap;}
   .approval-btn:hover{background:rgba(255,255,255,0.12);transform:translateY(-1px);box-shadow:0 2px 8px rgba(0,0,0,0.2);}
@@ -2054,25 +2040,13 @@
   .clarify-choice-text{flex:1;line-height:1.45;min-width:0;}
   .clarify-choice.other{border-color:var(--accent-bg-strong);color:var(--accent-text);background:var(--accent-bg);}
   .clarify-choice.other:hover{background:var(--accent-bg-strong);border-color:var(--accent);}
-  .clarify-questions{display:flex;flex-direction:column;gap:16px;margin-bottom:12px;}
-  .clarify-questions[hidden]{display:none;}
-  .clarify-q{display:flex;flex-direction:column;gap:8px;}
-  .clarify-q .clarify-question,.clarify-q .clarify-choices{margin-bottom:0;}
   .clarify-choice[aria-pressed="true"]{background:var(--accent-bg-strong);border-color:var(--accent);}
-  .clarify-input[hidden]{display:none;}
-  .clarify-response{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
-  .clarify-input{flex:1;min-width:220px;padding:10px 12px;border-radius:8px;border:1px solid var(--border2);background:var(--input-bg);color:var(--text);font:inherit;outline:none;transition:all .15s;}
-  .clarify-input:focus{border-color:var(--accent-bg);box-shadow:0 0 0 3px var(--accent-bg);background:var(--hover-bg);}
-  .clarify-submit{display:inline-flex;align-items:center;justify-content:center;min-width:92px;padding:10px 14px;border-radius:8px;border:1px solid var(--accent-bg-strong);background:var(--accent-bg);color:var(--accent-text);font-size:12px;font-weight:700;cursor:pointer;transition:all .15s;white-space:nowrap;}
-  .clarify-submit:hover{background:var(--accent-bg-strong);transform:translateY(-1px);}
-  .clarify-submit:disabled{opacity:.6;cursor:not-allowed;transform:none;}
-  .clarify-submit.loading{opacity:.75;cursor:wait;}
   .clarify-hint{margin-top:8px;font-size:11px;line-height:1.45;color:var(--muted);}
   .clarify-card.visible .clarify-question{padding-left:1px;}
   .clarify-card.collapsed{max-height:56px;bottom:8px;}
   .clarify-card.collapsed .clarify-inner{max-height:48px;overflow:hidden;padding:10px 14px;}
   .clarify-card.collapsed .clarify-header{margin-bottom:0;}
-  .clarify-card.collapsed .clarify-counter,.clarify-card.collapsed .clarify-question,.clarify-card.collapsed .clarify-choices,.clarify-card.collapsed .clarify-questions,.clarify-card.collapsed .clarify-response,.clarify-card.collapsed .clarify-hint{display:none;}
+  .clarify-card.collapsed .clarify-counter,.clarify-card.collapsed .clarify-progress,.clarify-card.collapsed .clarify-question,.clarify-card.collapsed .clarify-choices,.clarify-card.collapsed .clarify-hint{display:none;}
   /* Left rail (desktop primary navigation) */
   .rail{display:none;width:48px;flex-shrink:0;flex-direction:column;align-items:center;gap:4px;padding:8px 0;background:var(--sidebar);border-right:1px solid var(--border);}
   .rail-btn{width:36px;height:36px;border-radius:8px;border:none;background:none;color:var(--muted);cursor:pointer;display:flex;align-items:center;justify-content:center;position:relative;transition:color .15s,background .15s;flex-shrink:0;padding:0;}
@@ -2593,6 +2567,11 @@
   textarea#msg::placeholder{color:var(--muted);}
   .composer-footer{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 10px 10px;position:relative;container-type:inline-size;container-name:composer-footer;}
   .composer-left{display:flex;align-items:center;gap:4px;min-width:0;flex:1;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;}
+  /* HWEB-8: while a clarification is pending the textarea is its answer field. The
+     message-only controls (attach, dictation, profile, workspace, model, reasoning,
+     toolsets, staged files) leave the screen until the ordinary draft comes back. */
+  .composer-box.clarify-active .composer-left,.composer-box.clarify-active .attach-tray,.composer-box.clarify-active .mic-status,.composer-box.clarify-active .voice-mode-bar,.composer-box.clarify-active .composer-mobile-config-panel{display:none;}
+  .composer-box.clarify-active .composer-right{margin-left:auto;}
   .composer-left::-webkit-scrollbar{display:none;}
   .composer-divider{width:1px;height:16px;background:var(--border);margin:0 3px;flex-shrink:0;}
   /* Composer footer chip wraps share position:relative + flex:0 0 auto so
@@ -3341,9 +3320,7 @@
     .clarify-card{overflow:visible;max-height:clamp(180px,min(62vh,calc(100vh - 180px)),360px);}
     .clarify-card .clarify-inner{max-height:clamp(180px,min(62vh,calc(100vh - 180px)),360px);}
     @supports (height:100dvh){.clarify-card,.clarify-card .clarify-inner{max-height:clamp(180px,min(62dvh,calc(100dvh - 180px)),360px);}}
-    .clarify-inner{padding:12px 12px 13px;min-width:min(100%,280px);}
-    .clarify-response{flex-direction:column;align-items:stretch;}
-    .clarify-input,.clarify-submit{width:100%;min-height:44px;}
+    .clarify-inner{padding:12px 12px 36px;min-width:min(100%,280px);}
     .clarify-choice{min-height:44px;}
     .clarify-choice-badge{min-width:22px;height:22px;}
     .app-dialog-overlay{padding:12px;}
@@ -3617,7 +3594,7 @@ body:not(.tts-enabled) .msg-more:not(:has(.msg-more-item:not(.msg-tts-btn))){dis
 
 /* Approval buttons: tab stops */
 .approval-btn:focus{outline:2px solid var(--blue);outline-offset:2px;}
-.clarify-choice:focus,.clarify-submit:focus,.clarify-input:focus{outline:2px solid var(--blue);outline-offset:2px;}
+.clarify-choice:focus{outline:2px solid var(--blue);outline-offset:2px;}
 
 /* Message role: breathing room between icon and name */
 .msg-role > span{line-height:1;}

@@ -226,13 +226,13 @@ class TestRespondClarify409Terminal:
             "same-id arm); the different-id arm must leave the visible "
             "newer prompt alone (PR #4524 reviewer P1)."
         )
-        # Both arms (same-id and different-id) must call
-        # _clarifySetControlsDisabled(false, false) so the user can keep
-        # interacting with whichever prompt is now visible.
-        assert branch.count("_clarifySetControlsDisabled(false, false)") >= 2, (
-            "Both 409 arms (same-id and different-id) must call "
-            "_clarifySetControlsDisabled(false, false) so the user can keep "
-            "interacting with whichever prompt is now visible."
+        # Only the same-id arm may touch the controls. The visible newer
+        # prompt B was rendered with its controls enabled and may already have
+        # its own response in flight; A's late 409 re-enabling them would let
+        # B be submitted twice (HWEB-8 review, PR #95).
+        assert branch.count("_clarifySetControlsDisabled(false, false)") == 1, (
+            "Only the same-id 409 arm may call _clarifySetControlsDisabled(false, false); "
+            "the different-id arm must leave the newer prompt's controls alone."
         )
 
     def test_409_early_returns_before_network_fallback(self):

@@ -701,6 +701,10 @@ function _micToastKeyForRecognitionError(error){
   // _stopMic / onstop act on the backend that actually started, even if the
   // raw-audio toggle changes mid-recording (#3169 Codex review).
   let _activeCaptureMode = null;
+  // Session that owned the composer when the capture started. Transcription
+  // and raw-audio delivery finish asynchronously; if the user has since left
+  // that session the result must not land in the destination's textarea.
+  let _captureOwnerSid = null;
 
   const btn=$('btnMic');
   const status=$('micStatus');
@@ -777,11 +781,38 @@ function _micToastKeyForRecognitionError(error){
   }
   window._applyDictationAppendPreference=_applyDictationAppendPreference;
 
+  // HWEB-8: a clarification that arrives mid-dictation claims #msg. Every
+  // completion callback below finishes asynchronously after _stopMic(), so
+  // each one checks the claim (inline: the callbacks are extracted on their
+  // own by tests) before writing a transcript or honouring a pending send —
+  // otherwise the transcript would become the answer.
+  //
+  // The same callbacks can also finish after the user navigated away from the
+  // session that was dictating. That result is parked for its owner and
+  // applied when that session is loaded again (sessions.js, after the draft
+  // restore); it never touches another session's composer.
+  window._lateDictationBySession=window._lateDictationBySession||new Map();
+  function _captureOwnerIsCurrent(){
+    if(!_captureOwnerSid||typeof S==='undefined'||!S.session) return true;
+    return S.session.session_id===_captureOwnerSid;
+  }
+  function _parkLateDictation(text,file){
+    const entry=window._lateDictationBySession.get(_captureOwnerSid)||{text:'',files:[]};
+    if(text) entry.text=entry.text?entry.text+' '+text:text;
+    if(file) entry.files.push(file);
+    window._lateDictationBySession.set(_captureOwnerSid,entry);
+    window._micPendingSend=false;
+  }
+
   async function _sendRawAudio(blob){
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const file=new File([blob],`voice-input-${Date.now()}.${ext}`,{type:blob.type||`audio/${ext}`});
+    if(!_captureOwnerIsCurrent()){_parkLateDictation('',file);return;}
     S.pendingFiles.push(file);
     renderTray();
+    // The recording belongs to the message: it stays staged (the tray comes
+    // back with the draft) but must not be sent as the clarification answer.
+    if(typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()){window._micPendingSend=false;return;}
     // An explicit Send-button click while recording sets _micPendingSend — that
     // is an unambiguous send intent, so honor it even when the composer already
     // has text (mirrors the transcribe path). Otherwise (manual mic-stop): send
@@ -814,18 +845,33 @@ function _micToastKeyForRecognitionError(error){
     // Resolution: when prefixOverride IS provided (server-STT path), trust live
     // ta.value unconditionally — even when empty. Otherwise fall back to _prefix.
     const clean=(text||'').trim();
+    if(!_captureOwnerIsCurrent()){
+      if(clean) _parkLateDictation(clean);
+      else window._micPendingSend=false;
+      return;
+    }
+    const appendTo=(base)=>{
+      if(!base) return clean;
+      return (!base.endsWith(' ') && !base.endsWith('\n'))
+        ? base+' '+clean.trimStart()
+        : base+clean;
+    };
+    // With a clarification holding #msg, the message text is the parked
+    // draft: fold the transcript into that draft (same rules as below) so it
+    // comes back with it, and never send it as the answer.
+    if(typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()){
+      window._micPendingSend=false;
+      const parked=composerDraftText();
+      const parkedBase = prefixOverride !== undefined ? parked : (parked || _prefix);
+      setClarifyComposerDraft(!clean ? parked : (_dictationAppend ? appendTo(parkedBase) : clean));
+      return;
+    }
     let committed;
     if(!clean){
       committed = ta.value;
     }else if(_dictationAppend){
       const base = prefixOverride !== undefined ? ta.value : (ta.value || _prefix);
-      if(!base){
-        committed = clean;
-      }else{
-        committed = (!base.endsWith(' ') && !base.endsWith('\n'))
-          ? base+' '+clean.trimStart()
-          : base+clean;
-      }
+      committed = appendTo(base);
     }else{
       // Replace mode (explicit): dictated text overwrites the composer.
       committed = clean;
@@ -1009,23 +1055,35 @@ function _micToastKeyForRecognitionError(error){
         if(event.results[i].isFinal){ final+=t; _finalText=final; }
         else{ interim+=t; }
       }
+      if(typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()) return;
       ta.value=_prefix+(final||interim);
       autoResize();
     };
 
     sr.onend=()=>{
+      const claimed=typeof isClarifyComposerActive==='function'&&isClarifyComposerActive();
+      // Probed via typeof: tests extract this callback on its own.
+      const ownerLeft=typeof _captureOwnerIsCurrent==='function'&&!_captureOwnerIsCurrent();
       const committed=_finalText
         ? (_prefix&&!_prefix.endsWith(' ')&&!_prefix.endsWith('\n')
             ? _prefix+' '+_finalText.trimStart()
             : _prefix+_finalText)
         : ta.value;
-      ta.value=committed;
-      autoResize();
+      if(ownerLeft){
+        if(_finalText) _parkLateDictation(_finalText.trim());
+      }else if(claimed){
+        // _prefix is the message text captured at recording start; the
+        // finished utterance belongs with it, in the parked draft.
+        if(_finalText&&typeof setClarifyComposerDraft==='function') setClarifyComposerDraft(committed);
+      }else{
+        ta.value=committed;
+        autoResize();
+      }
       // Mobile / opt-in continuity: a natural pause ends this recognition run but
       // the user is still dictating, so restart to keep the session alive. Desktop
       // (one-shot) and intentional stops (_speechStopRequested) skip this and
       // finalize. Bounded by _micMaxRestarts so a stolen audio session can't loop.
-      if(_micShouldRestartDictation()){
+      if(!claimed&&_micShouldRestartDictation()){
         _prefix=committed&&!committed.endsWith(' ')&&!committed.endsWith('\n')
           ? committed+' '
           : committed;
@@ -1045,7 +1103,9 @@ function _micToastKeyForRecognitionError(error){
       _micRestartCount=0;
       void _releaseMicWakeLock();
       _setRecording(false);
-      if(window._micPendingSend){
+      if(claimed||ownerLeft){
+        window._micPendingSend=false;
+      }else if(window._micPendingSend){
         window._micPendingSend=false;
         send();
       }
@@ -1159,6 +1219,7 @@ function _micToastKeyForRecognitionError(error){
     _isRecording=true;
     _finalText='';
     _prefix=ta.value;
+    _captureOwnerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;
     if(_micOriginNeedsSecureContext()){
       _isRecording=false;
       window._micPendingSend=false;
@@ -2309,6 +2370,13 @@ $('modelSelect').onchange=async()=>{
 $('msg').addEventListener('input',()=>{
   updateSendBtn();
   scheduleComposerAutoResize();
+  // HWEB-8: the textarea is a clarification answer. It is not the session
+  // draft and slash/path autocomplete are message-only features.
+  if(typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()){
+    hideCmdDropdown();
+    if(typeof onClarifyComposerInput==='function') onClarifyComposerInput();
+    return;
+  }
   // Persist composer draft to server (debounced in _saveComposerDraft).
   const sid = S && S.session && S.session.session_id;
   if (sid && typeof _saveComposerDraft === 'function') {
@@ -2586,6 +2654,8 @@ function _attachLargePastedText(file){
   return file;
 }
 $('msg').addEventListener('paste',e=>{
+  // A clarification answer is plain text: no screenshot or large-text attachments.
+  if(typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()) return;
   const items=Array.from(e.clipboardData?.items||[]);
   // Extract image items (kind==='file' filter avoids misclassifying text/html
   // with embedded data URIs as images).

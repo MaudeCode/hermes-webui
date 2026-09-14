@@ -362,7 +362,17 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   if (targetSid && _loadingSessionId !== null && _loadingSessionId !== targetSid) return;
   const text = (draft && typeof draft.text === 'string') ? draft.text : '';
   const files = (draft && Array.isArray(draft.files)) ? draft.files : [];
-  const current = ta.value || '';
+  // HWEB-8: mid-clarification the textarea holds the answer; the ordinary
+  // draft lives in the composer lock and is what a restore must target.
+  const clarifyActive = typeof isClarifyComposerActive === 'function' && isClarifyComposerActive();
+  const current = clarifyActive ? String(clarifyComposerDraft() || '') : (ta.value || '');
+  const write = (value) => {
+    // Server state coming in: park it without persisting it straight back.
+    if (clarifyActive) { setClarifyComposerDraft(value, {persist: false}); return; }
+    ta.value = value;
+    if (typeof autoResize === 'function') autoResize();
+    if (typeof updateSendBtn === 'function') updateSendBtn();
+  };
   const preserveActiveInput = !!(opts && opts.preserveActiveInput);
   const restoreSid = targetSid || (S.session && S.session.session_id);
   const hasServerDraftPayload = _composerDraftHasPayload(text, files);
@@ -380,19 +390,11 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   // If there's no text and no files, clear the textarea (a previous session's
   // draft may still be sitting there from a cross-session switch).
   if (!text && !files.length) {
-    if (current) {
-      ta.value = '';
-      if (typeof autoResize === 'function') autoResize();
-      if (typeof updateSendBtn === 'function') updateSendBtn();
-    }
+    if (current) write('');
     return;
   }
   // Only update if different to avoid cursor jumps on unrelated session switches.
-  if (current !== text) {
-    ta.value = text;
-    if (typeof autoResize === 'function') autoResize();
-    if (typeof updateSendBtn === 'function') updateSendBtn();
-  }
+  if (current !== text) write(text);
   // Files restoration is skipped for now (requires S.pendingFiles plumbing).
 }
 
@@ -1518,7 +1520,7 @@ async function newSession(flash, options={}){
       }
       await _saveComposerDraftNow(
         departingSid,
-        ($('msg')||{}).value||'',
+        typeof composerDraftText==='function'?composerDraftText():(($('msg')||{}).value||''),
         S.pendingFiles?[...S.pendingFiles]:[]
       );
       // A sidebar navigation may have won while draft persistence yielded.
@@ -1982,6 +1984,10 @@ async function loadSession(sid){
   if(typeof stopSessionStream==='function') stopSessionStream();
   _yoloEnabled=false;_updateYoloPill();
   if(typeof stopClarifyPolling==='function') stopClarifyPolling();
+  // Leaving for another session releases the clarify composer lock now, not
+  // after the 30s minimum-visible timer: that timer would otherwise restore the
+  // departing session's parked draft into the destination's textarea (HWEB-8).
+  if(currentSid && currentSid !== sid && typeof hideClarifyCard==='function') hideClarifyCard(true,'session');
   if(typeof hideClarifyCard==='function') hideClarifyCard(forceReload, forceReload?'external-refresh':'dismissed');
   // #6572: clear stale compression state when switching sessions.
   // The compression UI state is per-session and must not leak across loads.
@@ -2019,7 +2025,7 @@ async function loadSession(sid){
     // from mutating a newer rapid-switch target after the save settles.
     const loadingInner=$('msgInner');
     if(loadingInner && (loadingInner.dataset||{}).bootSnapshot!==String(sid)) loadingInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
-    await _saveComposerDraftNow(currentSid, ($('msg') || {}).value || '', S.pendingFiles ? [...S.pendingFiles] : []);
+    await _saveComposerDraftNow(currentSid, typeof composerDraftText==='function'?composerDraftText():(($('msg') || {}).value || ''), S.pendingFiles ? [...S.pendingFiles] : []);
     // The awaited draft save above yields the event loop. If another
     // loadSession() started for a different session while we were waiting
     // (rapid switch B→C), _loadingSessionId now points at that newer load —
@@ -2191,6 +2197,16 @@ async function loadSession(sid){
     if (currentSid && !_selfHealedCurrent && _loadingSessionId === null
         && typeof startSessionStream === 'function') {
       startSessionStream(currentSid);
+    }
+    // The approval and clarify polls were stopped and their cards hidden at
+    // the top of this load, before the destination fetch. The session that
+    // stayed on screen still owns its pending prompt: re-arm both polls and
+    // paint the cached prompt back, or its run sits blocked with no card
+    // until the prompt times out (HWEB-8 review).
+    if (currentSid && !_selfHealedCurrent && _loadingSessionId === null) {
+      if (typeof startApprovalPolling === 'function') startApprovalPolling(currentSid);
+      if (typeof startClarifyPolling === 'function') startClarifyPolling(currentSid);
+      if (typeof _renderPendingPromptsForActiveSession === 'function') _renderPendingPromptsForActiveSession();
     }
     return;
   }
@@ -2617,6 +2633,17 @@ async function loadSession(sid){
   const _draft = S.session && S.session.composer_draft;
   if (_draft && (typeof _restoreComposerDraft === 'function')) {
     _restoreComposerDraft(_draft, sid, {preserveActiveInput:!!opts.preserveActiveInput || (currentSid===sid&&forceReload)});
+  }
+  // Dictation that finished after the user had left this session was parked
+  // for it (boot.js); it joins the draft now that the session is back.
+  const _late = typeof window !== 'undefined' && window._lateDictationBySession && window._lateDictationBySession.get(sid);
+  if (_late && _isCurrentLoad()) {
+    window._lateDictationBySession.delete(sid);
+    if (_late.text && typeof _appendComposerText === 'function') _appendComposerText(_late.text);
+    if (_late.files && _late.files.length) {
+      S.pendingFiles.push(..._late.files);
+      if (typeof renderTray === 'function') renderTray();
+    }
   }
 
   // Clear the in-flight session marker now that this load has completed (#1060).

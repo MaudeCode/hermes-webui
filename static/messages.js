@@ -948,8 +948,14 @@ function _formatSelectedTextReplyQuote(text, includeMarker=true){
 function _appendComposerText(text){
   const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
   if(!composer||!text)return;
-  const current=String(composer.value||'');
-  composer.value=current.trim()?`${current.replace(/\s+$/,'')}\n\n${text}`:String(text);
+  // A quote, saved prompt or refine seed is message text. While a
+  // clarification holds the textarea it goes into the parked draft and comes
+  // back with it; it must never become the answer (HWEB-8).
+  const locked=typeof isClarifyComposerActive==='function'&&isClarifyComposerActive();
+  const current=String((locked?composerDraftText():composer.value)||'');
+  const merged=current.trim()?`${current.replace(/\s+$/,'')}\n\n${text}`:String(text);
+  if(locked){setClarifyComposerDraft(merged);return;}
+  composer.value=merged;
   composer.focus();
   try{composer.setSelectionRange(composer.value.length, composer.value.length);}catch(_e){}
   composer.dispatchEvent(new Event('input',{bubbles:true}));
@@ -1587,6 +1593,13 @@ async function _createSessionForSendOwner(){
 }
 
 async function send(){
+  // HWEB-8: while a clarification is pending the textarea holds its answer, so
+  // submitting the composer means answering it. Nothing below this line — chat
+  // start, queue, steer, interrupt — can see that text.
+  if(typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()){
+    if(typeof respondClarify==='function') await respondClarify();
+    return;
+  }
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
   // _defaultMessageMode
@@ -9650,6 +9663,10 @@ let _clarifyMissingEndpointWarned = false;
 let _clarifyCountdownTimer = null;
 let _clarifyExpiresAt = 0;
 let _clarifyPendingBySession = new Map();
+// Answer progress parked when a session switch releases the card before the
+// destination has loaded; restored if that switch fails and the same prompt
+// is painted back. Keyed by session, matched by prompt signature.
+const _clarifyAnswerStateBySession = new Map();
 const CLARIFY_MIN_VISIBLE_MS = 30000;
 
 function _clarifyPromptBelongsToActiveSession(sid) {
@@ -9668,6 +9685,7 @@ function _rememberClarifyPending(pending) {
 function _clearClarifyPendingForSession(sid) {
   if (sid) {
     _clarifyPendingBySession.delete(sid);
+    _clarifyAnswerStateBySession.delete(sid);
     if (typeof syncTopbar === 'function') syncTopbar();
   }
 }
@@ -9720,22 +9738,16 @@ function _ensureClarifyCardDom() {
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 17h.01"/><path d="M9.09 9a3 3 0 1 1 5.82 1c0 2-3 2-3 4"/><circle cx="12" cy="12" r="10"/></svg>
         <span id="clarifyHeading" data-i18n="clarify_heading">Clarification needed</span>
         <span class="clarify-countdown" id="clarifyCountdown"></span>
-        <button type="button" class="clarify-collapse" id="clarifyCollapse" aria-expanded="true" aria-label="Collapse clarification" aria-controls="clarifyCounter clarifyQuestion clarifyChoices clarifyQuestions clarifyInput clarifyHint" onclick="toggleClarifyCardCollapsed()" title="Collapse clarification"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+        <button type="button" class="clarify-collapse" id="clarifyCollapse" aria-expanded="true" aria-label="Collapse clarification" aria-controls="clarifyCounter clarifyProgress clarifyQuestion clarifyChoices clarifyHint" onclick="toggleClarifyCardCollapsed()" title="Collapse clarification"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
       </div>
       <div class="clarify-counter" id="clarifyCounter" style="display:none;"></div>
+      <div class="clarify-progress" id="clarifyProgress" hidden></div>
       <div class="clarify-question" id="clarifyQuestion"></div>
       <div class="clarify-choices" id="clarifyChoices"></div>
-      <div class="clarify-questions" id="clarifyQuestions" hidden></div>
-      <div class="clarify-response">
-        <input class="clarify-input" id="clarifyInput" type="text" autocomplete="off" readonly onfocus="this.removeAttribute('readonly')" data-i18n-placeholder="clarify_input_placeholder" placeholder="Type your response…">
-        <button class="clarify-submit" id="clarifySubmit" data-i18n="clarify_send">Send</button>
-      </div>
-      <div class="clarify-hint" id="clarifyHint" data-i18n="clarify_hint">Please choose one option, or type your own response below.</div>
+      <div class="clarify-hint" id="clarifyHint" data-i18n="clarify_hint">Pick a choice, or type your own answer below.</div>
     </div>
   `;
   host.appendChild(card);
-  const submit = $("clarifySubmit");
-  if (submit) submit.onclick = () => respondClarify();
   const collapse = $("clarifyCollapse");
   if (collapse) collapse.onclick = () => toggleClarifyCardCollapsed();
   if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
@@ -9863,18 +9875,234 @@ function _startClarifyCountdown(pending) {
   _clarifyCountdownTimer = setInterval(_updateClarifyCountdown, 1000);
 }
 
+// ── Clarify answers live in the chat composer (HWEB-8) ─────────────────────
+// The card above the composer shows the question, its choices, queue position
+// and progress. The typed answer is #msg itself: lockComposerForClarify() parks
+// the ordinary draft, the composer's primary action becomes respondClarify(),
+// and unlockComposerForClarify() puts the draft back. Attachments and quoted
+// selections stay in S untouched; only the textarea text is ever submitted.
+//
+// A multi-question request (agent issue #18450) is answered one question at a
+// time. Answers are keyed by the wire `qid` (q0..qN), never by the
+// model-supplied `id`, and the whole `{"answers": {...}}` payload is sent once
+// after the last question. Every question is required: an empty answer never
+// advances.
+let _clarifyBatch = null;       // {questions, index, answers}
+let _clarifySubmitting = false;
+
+function _clarifyComposerActive() {
+  return typeof isClarifyComposerActive === 'function' && isClarifyComposerActive();
+}
+
+function _clarifyCurrent() {
+  if (!_clarifyBatch) return null;
+  const q = _clarifyBatch.questions[_clarifyBatch.index] || {};
+  return {
+    qid: String(q.qid || ('q' + _clarifyBatch.index)),
+    question: String(q.question || ''),
+    choices: Array.isArray(q.choices) ? q.choices : [],
+    multi: !!q.multi_select,
+    index: _clarifyBatch.index,
+    total: _clarifyBatch.questions.length,
+  };
+}
+
+function _clarifyPickedChoices() {
+  const choicesEl = $("clarifyChoices");
+  if (!choicesEl) return [];
+  return Array.from(choicesEl.querySelectorAll('.clarify-choice[aria-pressed="true"]'))
+    .map(btn => btn.dataset.choice);
+}
+
+function _clarifyClearPicks() {
+  const choicesEl = $("clarifyChoices");
+  if (!choicesEl) return;
+  choicesEl.querySelectorAll('.clarify-choice[aria-pressed="true"]')
+    .forEach(btn => btn.setAttribute('aria-pressed', 'false'));
+}
+
+// Read by ui.js: getComposerPrimaryAction() and updateSendBtn().
+function clarifyComposerState() {
+  const cur = _clarifyCurrent();
+  return {
+    submitting: _clarifySubmitting,
+    // A pressed pick is an answer: multi-select picks waiting for the action,
+    // or a single choice retained after a failed submit so it can be retried.
+    canAdvance: _clarifyPickedChoices().length > 0,
+    hasNext: !!(cur && cur.index + 1 < cur.total),
+  };
+}
+
+// Typing is the custom answer. It overrides any pressed choice, visibly, so
+// what gets submitted is always what is on screen.
+function onClarifyComposerInput() {
+  const msg = $('msg');
+  if (msg && String(msg.value || '').trim()) _clarifyClearPicks();
+}
+
+// Single-select: the pick is the whole answer, so it replaces a typed custom
+// answer the same way typing clears picks — a retry after a failed submit
+// then resends the pick that is on screen, not stale text.
+function _clarifyPressOnly(btn) {
+  _clarifyClearPicks();
+  btn.setAttribute('aria-pressed', 'true');
+  const msg = $('msg');
+  if (msg && msg.value && _clarifyComposerActive()) {
+    msg.value = '';
+    if (typeof autoResize === 'function') autoResize();
+  }
+}
+
+// Multi-select: picks stay editable until the composer action advances. A pick
+// replaces a typed custom answer for the same reason typing clears picks.
+function _clarifyToggleChoice(btn) {
+  const pressed = btn.getAttribute('aria-pressed') === 'true';
+  btn.setAttribute('aria-pressed', pressed ? 'false' : 'true');
+  const msg = $('msg');
+  if (msg && msg.value && _clarifyComposerActive()) {
+    msg.value = '';
+    if (typeof autoResize === 'function') autoResize();
+  }
+  if (typeof updateSendBtn === 'function') updateSendBtn();
+}
+
+function _clarifyChoiceButton(choice, idx) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'clarify-choice';
+  btn.dataset.choice = choice;
+  btn.setAttribute('aria-pressed', 'false');
+  const badge = document.createElement('span');
+  badge.className = 'clarify-choice-badge';
+  badge.textContent = String(idx + 1);
+  const text = document.createElement('span');
+  text.className = 'clarify-choice-text';
+  text.textContent = choice;
+  btn.appendChild(badge);
+  btn.appendChild(text);
+  return btn;
+}
+
+function _clarifyOtherButton() {
+  const other = document.createElement('button');
+  other.type = 'button';
+  other.className = 'clarify-choice other';
+  other.dataset.choice = 'other';
+  other.setAttribute('data-i18n', 'clarify_other');
+  const otherBadge = document.createElement('span');
+  otherBadge.className = 'clarify-choice-badge other';
+  otherBadge.textContent = '•';
+  const otherText = document.createElement('span');
+  otherText.className = 'clarify-choice-text';
+  otherText.textContent = (typeof t === 'function' && t('clarify_other')) || 'Other';
+  other.appendChild(otherBadge);
+  other.appendChild(otherText);
+  other.onclick = () => {
+    const msg = $('msg');
+    if (msg && typeof msg.focus === 'function') msg.focus();
+  };
+  return other;
+}
+
+// Paint one question — the single question, or the active one of a batch —
+// into the shared card slots and point the composer at it.
+function _renderClarifyQuestion(view) {
+  const questionEl = $("clarifyQuestion");
+  const choicesEl = $("clarifyChoices");
+  const progress = $("clarifyProgress");
+  if (questionEl) questionEl.textContent = view.question;
+  if (progress) {
+    const batch = view.total > 1;
+    progress.hidden = !batch;
+    progress.textContent = batch
+      ? ((typeof t === 'function' && t('clarify_progress', view.index + 1, view.total))
+        || `Question ${view.index + 1} of ${view.total}`)
+      : '';
+  }
+  if (choicesEl) {
+    choicesEl.innerHTML = '';
+    choicesEl.style.display = view.choices.length ? '' : 'none';
+    view.choices.forEach((choice, idx) => {
+      const btn = _clarifyChoiceButton(choice, idx);
+      if (view.multi) {
+        btn.onclick = () => _clarifyToggleChoice(btn);
+      } else {
+        // A single-select pick is the whole answer: it advances (or submits)
+        // at once. It stays pressed so a failed submit can be retried as-is.
+        btn.onclick = () => { _clarifyPressOnly(btn); respondClarify(choice); };
+      }
+      choicesEl.appendChild(btn);
+    });
+    if (view.choices.length) choicesEl.appendChild(_clarifyOtherButton());
+  }
+  const placeholderKey = view.choices.length ? 'clarify_composer_placeholder_choices' : 'clarify_composer_placeholder';
+  const placeholder = (typeof t === 'function' && t(placeholderKey))
+    || (view.choices.length ? 'Pick a choice above, or type your answer…' : 'Type your answer…');
+  const heading = (typeof t === 'function' && t('clarify_heading')) || 'Clarification needed';
+  if (typeof lockComposerForClarify === "function") {
+    lockComposerForClarify({placeholder, label: view.question ? `${heading}: ${view.question}` : heading});
+  }
+}
+
+function _clarifyShowNextQuestion() {
+  _clarifyBatch.index += 1;
+  const msg = $('msg');
+  if (msg) msg.value = '';
+  _renderClarifyQuestion(_clarifyCurrent());
+  const card = $("clarifyCard");
+  if (card) _syncClarifyTranscriptSpace(card, {immediate: true});
+  if (msg && typeof msg.focus === 'function') msg.focus({preventScroll: true});
+}
+
+// The answer for the question on screen: an explicit choice click, else the
+// typed text (which overrides picks), else the pressed choices. `null` means
+// there is nothing to submit.
+function _clarifyActiveAnswer(response) {
+  const cur = _clarifyCurrent();
+  const msg = $('msg');
+  const typed = String(typeof response === 'string'
+    ? response
+    : ((msg && _clarifyComposerActive()) ? msg.value : '')).trim();
+  const picked = _clarifyPickedChoices();
+  if (!cur) return typed || picked[0] || null;
+  if (typed) return cur.multi ? [typed] : typed;
+  if (cur.multi) return picked.length ? picked : null;
+  return picked.length ? picked[0] : null;
+}
+
+function _clarifyBatchSummary(answers) {
+  const lines = [];
+  (_clarifyBatch ? _clarifyBatch.questions : []).forEach((q, i) => {
+    const qid = String((q && q.qid) || ('q' + i));
+    if (!Object.prototype.hasOwnProperty.call(answers, qid)) return;
+    const value = answers[qid];
+    lines.push(String((q && q.question) || qid).trim()
+      + '\n' + (Array.isArray(value) ? value.join(', ') : String(value)));
+  });
+  return lines.join('\n\n');
+}
+
+// What the user had typed, picked, or already answered when the prompt went
+// away. Pressed choices on the open question count: they are on screen and
+// would have been the answer.
+function _clarifyRescueText() {
+  const msg = $('msg');
+  const typed = String((_clarifyComposerActive() && msg && msg.value) || '').trim();
+  const current = typed || _clarifyPickedChoices().join(', ');
+  if (!_clarifyBatch) return current;
+  // The open question may already be recorded (last question, failed submit)
+  // and edited since: what is on screen wins over the recorded attempt.
+  const answers = {..._clarifyBatch.answers};
+  const cur = _clarifyCurrent();
+  if (current && cur) answers[cur.qid] = current;
+  return _clarifyBatchSummary(answers);
+}
+
 function _stashClarifyDraft(reason) {
   if (reason !== "expired" && reason !== "terminal") return false;
-  const submit = $("clarifySubmit");
-  if (submit && submit.classList.contains("loading")) return false;
-  const input = $("clarifyInput");
-  let draft = String((input && input.value) || "").trim();
-  if (!draft) {
-    // A batch card keeps its answers in the per-question fields, not in the
-    // shared input — rescue those the same way rather than dropping them.
-    const batch = _collectClarifyBatchAnswers();
-    if (batch && Object.keys(batch).length) draft = _clarifyBatchSummary(batch);
-  }
+  // A response in flight owns the answer; never rescue under a submit (#3651).
+  if (_clarifySubmitting) return false;
+  const draft = _clarifyRescueText();
   if (!draft) return false;
   const sid = _clarifySessionId || (S.session && S.session.session_id) || "unknown";
   const key = `hermes-clarify-draft-${sid}-${_clarifySignature || "unknown"}`;
@@ -9885,6 +10113,9 @@ function _stashClarifyDraft(reason) {
       saved_at: Date.now(),
     }));
   } catch (_) {}
+  // Unlock first: that restores the ordinary draft the rescued answer is
+  // appended to. hideClarifyCard()'s later unlock is then a no-op.
+  if (typeof unlockComposerForClarify === "function") unlockComposerForClarify();
   const composer = $('msg');
   if (composer) {
     const current = String(composer.value || "");
@@ -9907,6 +10138,8 @@ function _resetClarifyCardState() {
   _clarifyVisibleSince = 0;
   _clarifySignature = '';
   _clarifyId = null;
+  _clarifyBatch = null;
+  _clarifySubmitting = false;
 }
 
 function hideClarifyCard(force=false, reason="dismissed") {
@@ -9931,6 +10164,15 @@ function hideClarifyCard(force=false, reason="dismissed") {
     }
   }
   _stashClarifyDraft(reason);
+  if (reason === 'session' && _clarifySessionId && _clarifyComposerActive()) {
+    const msg = $('msg');
+    _clarifyAnswerStateBySession.set(_clarifySessionId, {
+      sig: _clarifySignature,
+      text: String((msg && msg.value) || ''),
+      picks: _clarifyPickedChoices(),
+      batch: _clarifyBatch ? {index: _clarifyBatch.index, answers: {..._clarifyBatch.answers}} : null,
+    });
+  }
   _clarifySessionId = null;
   _resetClarifyCardState();
   card.classList.remove("visible");
@@ -9939,177 +10181,19 @@ function hideClarifyCard(force=false, reason="dismissed") {
   if (typeof unlockComposerForClarify === "function") unlockComposerForClarify();
   const _counter = $("clarifyCounter");
   if (_counter) { _counter.textContent = ""; _counter.style.display = "none"; }
+  const progress = $("clarifyProgress");
+  if (progress) { progress.textContent = ""; progress.hidden = true; }
   $("clarifyQuestion").textContent = "";
-  $("clarifyQuestion").hidden = false;
   $("clarifyChoices").innerHTML = "";
-  const questionsEl = $("clarifyQuestions");
-  if (questionsEl) { questionsEl.innerHTML = ""; questionsEl.hidden = true; }
-  $("clarifyInput").value = "";
-  $("clarifyInput").hidden = false;
-  $("clarifyInput").disabled = false;
-  $("clarifyInput").onkeydown = null;
-  const submit = $("clarifySubmit");
-  if (submit) { submit.disabled = false; submit.classList.remove("loading"); }
 }
 
 function _clarifySetControlsDisabled(disabled, loading=false) {
-  const input = $("clarifyInput");
-  const submit = $("clarifySubmit");
-  if (input) input.disabled = disabled;
-  if (submit) {
-    submit.disabled = disabled;
-    submit.classList.toggle("loading", !!loading);
-  }
+  _clarifySubmitting = !!loading;
   const choices = $("clarifyChoices");
   if (choices) {
-    choices.querySelectorAll("button").forEach(btn => {
-      btn.disabled = disabled;
-      if (loading && btn.dataset && btn.dataset.choice === "other") {
-        btn.classList.toggle("loading", false);
-      }
-    });
+    choices.querySelectorAll("button").forEach(btn => { btn.disabled = disabled; });
   }
-  const questionsEl = $("clarifyQuestions");
-  if (questionsEl) {
-    questionsEl.querySelectorAll("button,input").forEach(el => { el.disabled = disabled; });
-  }
-}
-
-// ── Multi-question clarify (agent issue #18450) ──────────────────────────
-// One form, one submit: the agent sends a normalized `questions` array and
-// expects `{"answers": {qid: value}}` back. Answers are keyed by the wire
-// `qid` (q0..qN), never by the model-supplied `id`, which is unvalidated text.
-
-function _clarifyBatchChoiceButton(choice, idx) {
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.className = 'clarify-choice';
-  btn.dataset.choice = choice;
-  btn.setAttribute('aria-pressed', 'false');
-  const badge = document.createElement('span');
-  badge.className = 'clarify-choice-badge';
-  badge.textContent = String(idx + 1);
-  const text = document.createElement('span');
-  text.className = 'clarify-choice-text';
-  text.textContent = choice;
-  btn.appendChild(badge);
-  btn.appendChild(text);
-  return btn;
-}
-
-function _clarifyClearBatchPicks(block) {
-  block.querySelectorAll('.clarify-choice').forEach(btn => btn.setAttribute('aria-pressed', 'false'));
-}
-
-function _toggleClarifyBatchChoice(block, btn) {
-  const pressed = btn.getAttribute('aria-pressed') === 'true';
-  if (!block.dataset.multi) {
-    _clarifyClearBatchPicks(block);
-    // A single-select question has one answer and two ways to give it. Last
-    // action wins, visibly: picking clears a typed override exactly as typing
-    // clears the pick, so what gets submitted is always what is on screen.
-    const field = block.querySelector('.clarify-q-input');
-    if (field && !pressed) field.value = '';
-  }
-  btn.setAttribute('aria-pressed', pressed ? 'false' : 'true');
-}
-
-function _renderClarifyBatch(container, questions) {
-  container.innerHTML = '';
-  questions.forEach((q, qi) => {
-    const entry = q || {};
-    const block = document.createElement('div');
-    block.className = 'clarify-q';
-    block.dataset.qid = String(entry.qid || ('q' + qi));
-    block.dataset.multi = entry.multi_select ? '1' : '';
-    const text = document.createElement('div');
-    text.className = 'clarify-question';
-    text.id = 'clarifyQ-' + block.dataset.qid + '-label';
-    text.textContent = String(entry.question || '');
-    // Name the whole question — choices included — so a screen reader tabbing
-    // between fields says which question it is answering, not just "edit text".
-    block.setAttribute('role', 'group');
-    block.setAttribute('aria-labelledby', text.id);
-    block.appendChild(text);
-    const choices = Array.isArray(entry.choices) ? entry.choices : [];
-    if (choices.length) {
-      const row = document.createElement('div');
-      row.className = 'clarify-choices';
-      choices.forEach((choice, idx) => {
-        const btn = _clarifyBatchChoiceButton(choice, idx);
-        btn.onclick = () => _toggleClarifyBatchChoice(block, btn);
-        row.appendChild(btn);
-      });
-      block.appendChild(row);
-    }
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.className = 'clarify-input clarify-q-input';
-    input.autocomplete = 'off';
-    input.setAttribute('data-i18n-placeholder', 'clarify_input_placeholder');
-    input.setAttribute('aria-labelledby', text.id);
-    input.placeholder = (typeof t === 'function' && t('clarify_input_placeholder')) || 'Type your response…';
-    input.oninput = () => {
-      if (!block.dataset.multi) _clarifyClearBatchPicks(block);
-    };
-    input.onkeydown = (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); respondClarify(); }
-    };
-    block.appendChild(input);
-    container.appendChild(block);
-  });
-}
-
-function _collectClarifyBatchAnswers() {
-  const container = $("clarifyQuestions");
-  if (!container || container.hidden) return null;
-  const blocks = Array.from(container.querySelectorAll('.clarify-q'));
-  if (!blocks.length) return null;
-  const answers = {};
-  blocks.forEach(block => {
-    const picked = Array.from(block.querySelectorAll('.clarify-choice[aria-pressed="true"]'))
-      .map(btn => btn.dataset.choice);
-    const field = block.querySelector('.clarify-q-input');
-    const typed = String((field && field.value) || '').trim();
-    // An unanswered question is left out of the payload entirely: the agent
-    // reports a missing qid as a blank response, which is a deliberate skip.
-    if (block.dataset.multi) {
-      const values = typed ? picked.concat([typed]) : picked;
-      if (values.length) answers[block.dataset.qid] = values;
-    } else {
-      const value = picked.length ? picked[0] : typed;
-      if (value) answers[block.dataset.qid] = value;
-    }
-  });
-  return answers;
-}
-
-function _clarifyBatchSummary(answers) {
-  const container = $("clarifyQuestions");
-  const blocks = container ? Array.from(container.querySelectorAll('.clarify-q')) : [];
-  const lines = [];
-  blocks.forEach(block => {
-    const qid = block.dataset.qid;
-    if (!Object.prototype.hasOwnProperty.call(answers, qid)) return;
-    const label = block.querySelector('.clarify-question');
-    const value = answers[qid];
-    lines.push(String((label && label.textContent) || qid).trim()
-      + '\n' + (Array.isArray(value) ? value.join(', ') : String(value)));
-  });
-  return lines.join('\n\n');
-}
-
-function _clarifyResolveSubmission(response) {
-  const batch = _collectClarifyBatchAnswers();
-  if (batch) {
-    if (!Object.keys(batch).length) return null;
-    return {value: JSON.stringify({answers: batch}), echo: _clarifyBatchSummary(batch)};
-  }
-  const input = $("clarifyInput");
-  const raw = typeof response === 'string' ? response : (input ? input.value : '');
-  const value = String(raw || '').trim();
-  if (!value) return null;
-  return {value, echo: value};
+  if (typeof updateSendBtn === "function") updateSendBtn();
 }
 
 function showClarifyCard(pending) {
@@ -10144,9 +10228,6 @@ function showClarifyCard(pending) {
       counter.style.display = "none";
     }
   }
-  const questionEl = $("clarifyQuestion");
-  const choicesEl = $("clarifyChoices");
-  const input = $("clarifyInput");
   const sameClarify = card.classList.contains("visible") && _clarifySignature === sig;
   _clarifySessionId = sid;
   _clarifyId = pending.clarify_id || null;
@@ -10156,121 +10237,84 @@ function showClarifyCard(pending) {
   } else {
     _clearClarifyCountdownTimer();
   }
+  // Re-render only for a genuinely new prompt, or a replaced queue head: the
+  // 3s poll re-shows the same card, and rebuilding it would wipe the picks
+  // and the answer the user has already typed. A new prompt starts its
+  // answers from scratch; the ordinary draft stays parked in the composer lock.
   if (!sameClarify) {
     _clarifyVisibleSince = Date.now();
     _clearClarifyHideTimer();
     card.classList.remove("collapsed");
-  }
-  if (questionEl) {
-    questionEl.textContent = isBatch ? '' : question;
-    questionEl.hidden = isBatch;
-  }
-  const questionsEl = $("clarifyQuestions");
-  if (questionsEl) {
-    questionsEl.hidden = !isBatch;
-    // Re-render only for a genuinely new prompt: the 3s poll re-shows the same
-    // card, and rebuilding it would wipe answers the user has already picked.
-    if (isBatch && !sameClarify) _renderClarifyBatch(questionsEl, batchQuestions);
-    if (!isBatch) questionsEl.innerHTML = '';
-  }
-  card.setAttribute("aria-describedby", isBatch ? "clarifyQuestions clarifyHint" : "clarifyQuestion clarifyHint");
-  if (choicesEl) {
-    choicesEl.innerHTML = '';
-    choicesEl.style.display = choices.length ? '' : 'none';
-    if (choices.length) {
-      choices.forEach((choice, idx) => {
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'clarify-choice';
-        btn.dataset.choice = choice;
-        btn.onclick = () => respondClarify(choice);
-        const badge = document.createElement('span');
-        badge.className = 'clarify-choice-badge';
-        badge.textContent = String(idx + 1);
-        const text = document.createElement('span');
-        text.className = 'clarify-choice-text';
-        text.textContent = choice;
-        btn.appendChild(badge);
-        btn.appendChild(text);
-        choicesEl.appendChild(btn);
-      });
-      const other = document.createElement('button');
-      other.type = 'button';
-      other.className = 'clarify-choice other';
-      other.dataset.choice = 'other';
-      other.setAttribute('data-i18n', 'clarify_other');
-      const otherBadge = document.createElement('span');
-      otherBadge.className = 'clarify-choice-badge other';
-      otherBadge.textContent = '•';
-      const otherText = document.createElement('span');
-      otherText.className = 'clarify-choice-text';
-      otherText.textContent = t('clarify_other') || 'Other';
-      other.appendChild(otherBadge);
-      other.appendChild(otherText);
-      other.onclick = () => {
-        const el = $("clarifyInput");
-        if (el) {
-          el.focus();
-          if (typeof el.select === 'function') el.select();
-        }
-      };
-      choicesEl.appendChild(other);
+    _clarifyBatch = isBatch ? {questions: batchQuestions, index: 0, answers: {}} : null;
+    _clarifySubmitting = false;
+    const msg = $('msg');
+    if (msg && _clarifyComposerActive()) msg.value = '';
+    // A switch away that failed to load brings the same prompt back: pick
+    // up where the user was instead of starting the answers over.
+    const saved = _clarifyAnswerStateBySession.get(sid);
+    _clarifyAnswerStateBySession.delete(sid);
+    const resume = saved && saved.sig === sig ? saved : null;
+    if (resume && resume.batch && _clarifyBatch) {
+      _clarifyBatch.index = Math.min(resume.batch.index, batchQuestions.length - 1);
+      _clarifyBatch.answers = {...resume.batch.answers};
     }
-  }
-  if (input) {
-    if (!sameClarify) input.value = '';
-    // A batch answers through its per-question fields; the shared input would
-    // be a second, ambiguous place to type.
-    input.hidden = isBatch;
-    input.disabled = false;
-    input.removeAttribute('readonly');
-    input.onkeydown = (e) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        respondClarify();
+    _renderClarifyQuestion(isBatch
+      ? _clarifyCurrent()
+      : {question, choices, multi: false, index: 0, total: 1});
+    if (resume) {
+      const choicesEl = $("clarifyChoices");
+      if (choicesEl) {
+        choicesEl.querySelectorAll('.clarify-choice').forEach(btn => {
+          if (resume.picks.includes(btn.dataset.choice)) btn.setAttribute('aria-pressed', 'true');
+        });
       }
-    };
+      if (msg && resume.text) msg.value = resume.text;
+      if (typeof updateSendBtn === 'function') updateSendBtn();
+    }
+    _clarifySetControlsDisabled(false, false);
   }
-  const lockQuestion = question || (isBatch ? String(batchQuestions[0].question || '') : '');
-  if (typeof lockComposerForClarify === "function") {
-    lockComposerForClarify(lockQuestion ? `Clarification needed: ${lockQuestion}` : "Clarification needed");
-  }
-  _clarifySetControlsDisabled(false, false);
   _ensureClarifyResizeListener();
   _setPromptFlyoutHidden(card, false);
   card.classList.add("visible");
   _syncClarifyCollapseButton(card);
   _syncClarifyTranscriptSpace(card, {immediate: true});
   if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
-  // Move focus to clarify input synchronously (not in setTimeout) and
-  // only if the user wasn't mid-type in the composer textarea.
-  const firstField = isBatch
-    ? (questionsEl && questionsEl.querySelector('.clarify-q-input'))
-    : input;
-  if (firstField && !sameClarify && document.activeElement !== $('msg')) {
-    firstField.focus({preventScroll: true});
+  // The composer is the answer field: move focus there for a new prompt,
+  // synchronously (not in setTimeout).
+  const msg = $('msg');
+  if (msg && !sameClarify && document.activeElement !== msg && typeof msg.focus === 'function') {
+    msg.focus({preventScroll: true});
   }
   if (typeof syncTopbar === 'function') syncTopbar();
 }
 
 async function respondClarify(response) {
   const sid = _clarifySessionId || (S.session && S.session.session_id);
-  if (!sid) return;
-  const input = $("clarifyInput");
-  const submission = _clarifyResolveSubmission(response);
-  if (!submission) {
-    const field = $("clarifyQuestions");
-    const first = field && !field.hidden ? field.querySelector('.clarify-q-input') : input;
-    if (first) first.focus();
+  if (!sid || _clarifySubmitting) return;
+  const msg = $('msg');
+  const answer = _clarifyActiveAnswer(response);
+  if (answer === null) {
+    // Every question is required: nothing typed or picked never advances.
+    if (msg && typeof msg.focus === 'function') msg.focus();
     return;
   }
-  // A batch submits every answer at once as {"answers": {qid: value}}; the
-  // single-question path still submits the plain answer string it always has.
-  const value = submission.value;
-  const echo = submission.echo;
+  let value, echo;
+  if (_clarifyBatch) {
+    const cur = _clarifyCurrent();
+    _clarifyBatch.answers[cur.qid] = answer;
+    if (cur.index + 1 < cur.total) { _clarifyShowNextQuestion(); return; }
+    // The last answer is in: submit every answer at once as {"answers": {qid: value}}.
+    value = JSON.stringify({answers: _clarifyBatch.answers});
+    echo = _clarifyBatchSummary(_clarifyBatch.answers);
+  } else {
+    // The single-question path still submits the plain answer string it always has.
+    value = answer;
+    echo = answer;
+  }
   const clarifyId = _clarifyId;
-  // Keep a draft copy so we can restore the input on failure (issue #2639).
-  const draft = value;
+  // A completion may land after a queued prompt B replaced A and was itself
+  // submitted; only the owner of the visible prompt may touch its controls.
+  const release = () => { if (_clarifyId === clarifyId) _clarifySetControlsDisabled(false, false); };
   _clarifySetControlsDisabled(true, true);
   try {
     const result = await api("/api/clarify/respond", {
@@ -10299,12 +10343,9 @@ async function respondClarify(response) {
         }
       }
     } else {
-      // Stale / expired / wrong session — keep the card and draft visible.
-      _clarifySetControlsDisabled(false, false);
-      if (input && !input.hidden) {
-        input.value = draft;
-        input.focus();
-      }
+      // Stale / expired / wrong session — keep the card and the typed answer.
+      release();
+      if (msg && typeof msg.focus === 'function') msg.focus();
       const errMsg = (result && result.error) || "Clarification response not accepted — the agent may have already proceeded.";
       if (typeof showToast === "function") showToast(errMsg, 5000);
       if (typeof setStatus === "function") setStatus(errMsg);
@@ -10326,9 +10367,9 @@ async function respondClarify(response) {
       if (_clarifyId === clarifyId) {
         // Same card still showing — dismiss it and rescue the typed draft.
         // Order matters: ``_stashClarifyDraft`` (called from
-        // ``hideClarifyCard``) bails when ``#clarifySubmit`` still carries
-        // the ``loading`` class set above. Clear loading first, otherwise
-        // the typed answer is silently dropped (reviewer P1).
+        // ``hideClarifyCard``) bails while ``_clarifySubmitting`` is still
+        // set above. Clear it first, otherwise the typed answer is silently
+        // dropped (reviewer P1).
         _clarifySetControlsDisabled(false, false);
         _clarifySessionId = null;
         _clarifyId = null;
@@ -10342,22 +10383,19 @@ async function respondClarify(response) {
         return;
       }
       // A newer prompt is showing (race between user click and SSE/poll).
-      // Don't dismiss it on this late 409 — just re-enable controls and
-      // surface the error. The user's draft for the now-stale prompt is
-      // dropped intentionally; the next prompt has its own input cycle.
-      _clarifySetControlsDisabled(false, false);
+      // Don't dismiss it on this late 409 and don't touch its controls (it
+      // may have its own response in flight) — just surface the error. The
+      // user's draft for the now-stale prompt is dropped intentionally; the
+      // next prompt has its own input cycle.
       if (typeof setStatus === "function") {
         setStatus("Clarify: previous prompt expired — a newer one is showing.");
       }
       return;
     }
-    // Network / other transient errors — keep the card and draft visible so
-    // the user can retry once connectivity returns.
-    _clarifySetControlsDisabled(false, false);
-    if (input && !input.hidden) {
-      input.value = draft;
-      input.focus();
-    }
+    // Network / other transient errors — keep the card and the typed answer
+    // visible so the user can retry once connectivity returns.
+    release();
+    if (msg && typeof msg.focus === 'function') msg.focus();
     const errMsg = (e && e.message) || "Failed to deliver clarification response.";
     if (typeof setStatus === "function") setStatus("Clarify: " + errMsg);
     if (typeof showToast === "function") showToast(errMsg, 5000);

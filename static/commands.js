@@ -1563,6 +1563,13 @@ function _showSteerRecovery(msg, explicitSteer, fallback) {
   retryBtn.addEventListener('click', () => {
     el.remove();
     if(_steerFallbackIsDeadRun(fallback)&&typeof send==='function'){
+      // With a clarification holding the composer, send() would answer it
+      // with whatever is in the textarea. Park the steer text as message
+      // text instead; the user sends it once the answer is in.
+      if(typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()){
+        if(explicitSteer) setClarifyComposerDraft(String(msg||'').trim());
+        return;
+      }
       if(explicitSteer){
         const inp=$('msg');
         if(inp){
@@ -1729,8 +1736,13 @@ async function _trySteer(msg, explicitSteer){
     if(_steerOwnerIsCurrent(ownerSid)){
       const inp=$('msg');
       if(inp){
-        inp.value=_steerRestoreText(originalMsg,explicitSteer);
-        if(typeof autoResize==='function')autoResize();
+        // A clarification holding the composer means the restored steer is
+        // message text: it goes to the parked draft, not the answer (HWEB-8).
+        if(typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()) setClarifyComposerDraft(_steerRestoreText(originalMsg,explicitSteer));
+        else{
+          inp.value=_steerRestoreText(originalMsg,explicitSteer);
+          if(typeof autoResize==='function')autoResize();
+        }
       }
       if(typeof renderTray==='function')renderTray();
     }else{
@@ -1744,8 +1756,13 @@ async function _trySteer(msg, explicitSteer){
     if(_steerOwnerIsCurrent(ownerSid)){
       const inp=$('msg');
       if(inp){
-        inp.value=_steerRestoreText(originalMsg,explicitSteer);
-        if(typeof autoResize==='function')autoResize();
+        // A clarification holding the composer means the restored steer is
+        // message text: it goes to the parked draft, not the answer (HWEB-8).
+        if(typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()) setClarifyComposerDraft(_steerRestoreText(originalMsg,explicitSteer));
+        else{
+          inp.value=_steerRestoreText(originalMsg,explicitSteer);
+          if(typeof autoResize==='function')autoResize();
+        }
       }
       if(typeof renderTray==='function')renderTray();
     }else{
@@ -1815,8 +1832,11 @@ async function _trySteer(msg, explicitSteer){
   if(_steerOwnerIsCurrent(ownerSid)&&applyCurrentFailure){
     const inp=$('msg');
     if(inp){
-      inp.value=_steerRestoreText(originalMsg,explicitSteer);
-      if(typeof autoResize==='function')autoResize();
+      if(typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()) setClarifyComposerDraft(_steerRestoreText(originalMsg,explicitSteer));
+      else{
+        inp.value=_steerRestoreText(originalMsg,explicitSteer);
+        if(typeof autoResize==='function')autoResize();
+      }
     }
     if(typeof renderTray==='function')renderTray();
   }else{
