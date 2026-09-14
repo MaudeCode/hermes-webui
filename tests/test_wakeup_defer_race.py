@@ -1059,6 +1059,96 @@ def test_failed_idle_wakeup_admission_is_retried_without_a_teardown(monkeypatch)
         _reset_cfg_state()
 
 
+def test_seen_entry_is_pending_before_reaper_can_prune_it(monkeypatch):
+    """Codex P2 (round 4) on PR #96: the reaper prunes seen-sets of sessions
+    that are not pending. A reaper tick interleaved between seen.add and
+    PENDING.add must not be able to sweep the in-flight entry, so a duplicate
+    enqueue (kill_process/reader race) still hits the dedupe gate."""
+    from api import background_process as bp, config as cfg
+
+    fake = _FakeProcessRegistry()
+    fake.register("proc-reap", "sess-reap")
+    _install_fake_registry(monkeypatch, fake)
+    _reset_cfg_state()
+    holder = _install_fake_start_session_turn(monkeypatch)
+    sid = "sess-reap"
+    stream_id = "stream-reap"
+    bp.register_process_session(sid, sid)
+
+    real_emit = bp._emit_bg_task_complete_events_coalesced
+    emits = []
+
+    def _emit_then_reap(session_id, payload):
+        # The first observable point after the seen/pending publication: a
+        # reaper prune here must be a no-op for this session.
+        emits.append(payload["task_id"])
+        with cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
+            for s_ in [s for s in cfg.BG_TASK_COMPLETE_EVENTS_SEEN if s not in cfg.PENDING_BG_TASK_COMPLETIONS]:
+                cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(s_, None)
+        return real_emit(session_id, payload)
+
+    monkeypatch.setattr(bp, "_emit_bg_task_complete_events_coalesced", _emit_then_reap)
+    try:
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS[stream_id] = {"session_id": sid}
+        bp._process_one(_completion_evt("proc-reap", sid))
+        bp._process_one(_completion_evt("proc-reap", sid))  # duplicate enqueue
+        assert emits == ["proc-reap"], "duplicate passed the seen gate after a reaper prune"
+        assert len(cfg.DEFERRED_PROCESS_WAKEUPS[sid]) == 1
+        assert holder["calls"] == []
+    finally:
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS.pop(stream_id, None)
+        bp.unregister_process_session(sid)
+        _reset_cfg_state()
+
+
+def test_batched_wakeup_prompt_is_capped_and_overflow_stays_deferred(monkeypatch):
+    """Codex P2 (round 4) on PR #96: a burst of large completions must not be
+    joined into one prompt beyond the size cap; overflow entries stay deferred
+    for the batched turn's own teardown and are delivered next."""
+    from api import background_process as bp, config as cfg
+
+    fake = _FakeProcessRegistry()
+    pids = [f"proc-big-{i}" for i in range(8)]
+    for pid in pids:
+        fake.register(pid, "sess-cap")
+    _install_fake_registry(monkeypatch, fake)
+    _reset_cfg_state()
+    holder = _install_fake_start_session_turn(monkeypatch)
+    monkeypatch.setattr(bp, "_WAKEUP_BATCH_MAX_CHARS", 3 * 4_100)
+    sid = "sess-cap"
+    stream_id = "stream-cap"
+    bp.register_process_session(sid, sid)
+    try:
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS[stream_id] = {"session_id": sid}
+        for pid in pids:
+            evt = _completion_evt(pid, sid)
+            evt["output"] = "x" * 4_000
+            bp._process_one(evt)
+        cfg.unregister_active_run(stream_id)
+        assert bp.drain_deferred_wakeups_for_session(sid) == 1
+        assert _wait_for_wakeup(holder)
+        first = holder["calls"][0]["message"]
+        assert len(first) <= 3 * 4_100 + 400  # header slack
+        delivered = [p for p in pids if f"Background process {p} completed" in first]
+        assert delivered == pids[:3]
+        assert _wait_for(lambda: len(cfg.DEFERRED_PROCESS_WAKEUPS.get(sid) or []) == 5)
+        assert sid in cfg.PENDING_BG_TASK_COMPLETIONS
+        # The batched turn's teardown delivers the next slice.
+        holder["event"].clear()
+        assert bp.drain_deferred_wakeups_for_session(sid) == 1
+        assert _wait_for_wakeup(holder)
+        second = holder["calls"][1]["message"]
+        assert [p for p in pids if f"Background process {p} completed" in second] == pids[3:6]
+    finally:
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS.pop(stream_id, None)
+        bp.unregister_process_session(sid)
+        _reset_cfg_state()
+
+
 def test_deferred_wakeup_stays_queued_when_snapshot_target_is_unknown(monkeypatch):
     """Unknown continuation ownership fails closed without losing the prompt."""
     from api import background_process as bp, config as cfg

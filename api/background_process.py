@@ -104,6 +104,10 @@ _WAKEUP_RETRY_SECONDS = 30.0
 _WAKEUP_RETRY_MAX_ATTEMPTS = 5
 _WAKEUP_RETRY_LOCK = threading.Lock()
 _WAKEUP_RETRY_ATTEMPTS: dict[str, int] = {}
+# Aggregate size cap for one batched wakeup prompt (each notification body is
+# already truncated to ~4k chars). Overflow stays deferred for the batched
+# turn's own teardown, so a burst never exceeds the model context in one turn.
+_WAKEUP_BATCH_MAX_CHARS = 24_000
 _EMIT_COALESCE_LOCK = threading.Lock()
 _LAST_EMIT_TS: dict[str, float] = {}
 _PENDING_EMIT_PAYLOADS: dict[str, dict] = {}
@@ -1583,9 +1587,12 @@ def _process_one(evt: dict) -> None:
             return
         if process_id:
             seen.add(process_id)
+        # Publish the pending state under the SAME lock the reaper prunes
+        # under, so it can never observe a seen entry for a not-yet-pending
+        # session and sweep it (HWEB-96 round-4 P2).
+        _cfg.PENDING_BG_TASK_COMPLETIONS.add(session_id)
     payload = _build_payload(evt, session_id)
     _emit_bg_task_complete_events_coalesced(session_id, payload)
-    _cfg.PENDING_BG_TASK_COMPLETIONS.add(session_id)
     # HWEB-96: the registry's ``_completion_consumed`` marker is stamped ONLY
     # once a wakeup turn is actually accepted (``_start_server_side_wakeup_turn``)
     # or the deferred entry is dropped because the agent already holds the
@@ -1842,12 +1849,31 @@ def drain_deferred_wakeups_for_session(session_id: str) -> int:
                 target_session_id,
                 ", ".join(consumed),
             )
-        if pending:
+        # Cap the aggregate prompt: take entries in order until the next one
+        # would exceed the budget (always at least one), re-defer the rest for
+        # this batched turn's own teardown.
+        batch: list[dict] = []
+        total = 0
+        for entry in pending:
+            size = len(entry["wakeup_prompt"])
+            if batch and total + size > _WAKEUP_BATCH_MAX_CHARS:
+                break
+            batch.append(entry)
+            total += size
+        overflow = pending[len(batch):]
+        for entry in overflow:
+            record_deferred_wakeup(
+                target_session_id, entry["process_id"], entry["wakeup_prompt"]
+            )
+        if overflow:
+            with _cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
+                _cfg.PENDING_BG_TASK_COMPLETIONS.add(target_session_id)
+        if batch:
             _start_server_side_wakeup_turn(
                 target_session_id,
-                _batch_wakeup_prompt([e["wakeup_prompt"] for e in pending]),
-                process_id=pending[0]["process_id"],
-                entries=pending,
+                _batch_wakeup_prompt([e["wakeup_prompt"] for e in batch]),
+                process_id=batch[0]["process_id"],
+                entries=batch,
             )
             started = 1
         if started:
@@ -1929,12 +1955,18 @@ def _start_server_side_wakeup_turn(
     ]
 
     def _redefer(target: str) -> None:
+        from api import config as _cfg
+
         for entry in batched:
             prompt = str((entry or {}).get("wakeup_prompt") or "").strip()
             if prompt:
                 record_deferred_wakeup(
                     target, str((entry or {}).get("process_id") or ""), prompt
                 )
+        # Re-deferred entries are pending again: keep the reaper from pruning
+        # their seen-set while they wait for the next delivery.
+        with _cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
+            _cfg.PENDING_BG_TASK_COMPLETIONS.add(target)
 
     def _schedule_retry(target: str) -> None:
         with _WAKEUP_RETRY_LOCK:
