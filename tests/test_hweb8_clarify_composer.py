@@ -502,8 +502,9 @@ def test_failed_steer_restore_and_dead_run_retry_park_message_text_while_locked(
     commands = (ROOT / "static" / "commands.js").read_text(encoding="utf-8")
     guarded = "isClarifyComposerActive()) setClarifyComposerDraft(_steerRestoreText(originalMsg,explicitSteer));"
     assert commands.count(guarded) == 3, "all three failed-steer restores route through the lock"
-    for i in range(3):
-        site = commands.index(guarded, 0 if i == 0 else site + 1)
+    site = -1
+    for _ in range(3):
+        site = commands.index(guarded, site + 1)
         assert commands.index("inp.value=_steerRestoreText(originalMsg,explicitSteer);", site) - site < 200, "the unlocked path still writes the textarea"
     retry = block(commands, "if(_steerFallbackIsDeadRun(fallback)&&typeof send==='function'){", "void _trySteer(msg, explicitSteer)")
     assert retry.index("isClarifyComposerActive()){") < retry.index("void send({literalSlash:true})")
