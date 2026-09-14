@@ -654,6 +654,87 @@ def test_batched_wakeup_409_redefers_every_entry(monkeypatch):
         _reset_cfg_state()
 
 
+def test_idle_start_409_redefer_is_still_delivered_at_next_teardown(monkeypatch):
+    """Codex P1 on PR #96: an IDLE completion whose wakeup thread loses the
+    admission race to a freshly started user turn (409 → re-defer) must still
+    reach the agent at that turn's teardown. The WebUI's own bookkeeping must
+    never be mistaken for "the agent already read it"."""
+    from api import background_process as bp, config as cfg
+
+    fake = _FakeProcessRegistry()
+    fake.register("proc-idle-race", "sess-idle-race")
+    _install_fake_registry(monkeypatch, fake)
+    _reset_cfg_state()
+    holder = _install_fake_start_session_turn(monkeypatch, status=409)
+
+    sid = "sess-idle-race"
+    bp.register_process_session(sid, sid)
+    try:
+        assert bp._session_has_active_turn(sid) is False
+        bp._process_one(_completion_evt("proc-idle-race", sid))  # idle branch
+        assert _wait_for_wakeup(holder)
+        assert _wait_for(lambda: bool(cfg.DEFERRED_PROCESS_WAKEUPS.get(sid)))
+        # Nothing was delivered, so nothing may claim the agent has it.
+        assert not fake.is_completion_consumed("proc-idle-race")
+
+        # The racing user turn ends → teardown must deliver, not drop.
+        holder["event"].clear()
+        _install_fake_start_session_turn(monkeypatch, status=200)
+        import api.routes as _routes
+        ok = _routes.start_session_turn
+        holder2 = {"calls": [], "event": __import__("threading").Event()}
+
+        def _accept(session_id, message, *, source="process_wakeup"):
+            holder2["calls"].append({"session_id": session_id, "message": message})
+            holder2["event"].set()
+            return ok(session_id, message, source=source)
+
+        monkeypatch.setattr(_routes, "start_session_turn", _accept)
+        assert bp.drain_deferred_wakeups_for_session(sid) == 1
+        assert holder2["event"].wait(timeout=3.0)
+        assert "proc-idle-race" in holder2["calls"][0]["message"]
+        assert _wait_for(lambda: fake.is_completion_consumed("proc-idle-race"))
+    finally:
+        bp.unregister_process_session(sid)
+        _reset_cfg_state()
+
+
+def test_batched_wakeup_admission_error_redefers_every_entry(monkeypatch):
+    """Codex P2 on PR #96: a non-409 admission failure (e.g. a persistence 500)
+    must re-defer every batched entry instead of dropping the whole batch."""
+    from api import background_process as bp, config as cfg
+
+    fake = _FakeProcessRegistry()
+    for pid in ("proc-500-1", "proc-500-2"):
+        fake.register(pid, "sess-500")
+    _install_fake_registry(monkeypatch, fake)
+    _reset_cfg_state()
+    holder = _install_fake_start_session_turn(monkeypatch, status=500)
+
+    sid = "sess-500"
+    stream_id = "stream-500"
+    bp.register_process_session(sid, sid)
+    try:
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS[stream_id] = {"session_id": sid}
+        for pid in ("proc-500-1", "proc-500-2"):
+            bp._process_one(_completion_evt(pid, sid))
+        cfg.unregister_active_run(stream_id)
+        assert bp.drain_deferred_wakeups_for_session(sid) == 1
+        assert _wait_for_wakeup(holder)
+        assert _wait_for(
+            lambda: sorted(
+                e["process_id"] for e in (cfg.DEFERRED_PROCESS_WAKEUPS.get(sid) or [])
+            ) == ["proc-500-1", "proc-500-2"]
+        )
+        assert not fake.is_completion_consumed("proc-500-1")
+    finally:
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS.pop(stream_id, None)
+        bp.unregister_process_session(sid)
+        _reset_cfg_state()
+
+
 # --------------------------------------------------------------------------
 # HWEB-96 — results the agent already consumed in its own turn must NOT come
 # back as a synthetic wakeup after the final summary.

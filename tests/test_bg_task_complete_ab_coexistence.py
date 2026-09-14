@@ -78,13 +78,17 @@ def test_b_sse_first_then_a_drain_skips_same_process_id(monkeypatch):
     # B path: process the event
     bp._process_one(evt)
 
-    # B must have marked the (session, process) seen and registry-consumed
+    # B must have marked the (session, process) seen. HWEB-96: the registry
+    # consumed-marker is NOT stamped until the wakeup turn is actually accepted
+    # (its provenance must stay "the agent read it"); here the fake session has
+    # no live turn to accept, so it stays unset and A's skip below must come
+    # from B's own SEEN set.
     assert "p1" in _cfg.BG_TASK_COMPLETE_EVENTS_SEEN["sess-1"]
-    assert fake.is_completion_consumed("p1")
+    assert not fake.is_completion_consumed("p1")
 
     # Now simulate A's next-turn drain. Put a *new* event onto the queue for the
     # same process_id (e.g. a kill_process race). A must skip because B already
-    # delivered.
+    # routed it.
     fake.completion_queue.put(evt)
     notifications = st._drain_webui_process_notifications("sess-1")
     assert notifications == [], "A must NOT re-fire when B already woke the agent for p1"

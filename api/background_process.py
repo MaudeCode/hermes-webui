@@ -1576,21 +1576,16 @@ def _process_one(evt: dict) -> None:
     payload = _build_payload(evt, session_id)
     _emit_bg_task_complete_events_coalesced(session_id, payload)
     _cfg.PENDING_BG_TASK_COMPLETIONS.add(session_id)
-    # Mark the event consumed in the agent's process registry so the REAL
-    # merged PR #2279's next-turn drain
-    # (api/streaming._drain_webui_process_notifications) treats this process_id
-    # as already-delivered and does not re-fire a wakeup (B-first order).
-    # This is the SHARED upstream dedupe key (see _mark_registry_completion_
-    # consumed for the coupling contract + why a future rename now fails loud).
-    #
-    # HWEB-96: only the IDLE branch marks here. When a turn is active the
-    # agent may still ``wait``/``read_log`` this very process, and that is the
-    # only signal telling us the result is already in the transcript — so the
-    # deferred branch leaves the marker to the agent and stamps it itself at
-    # delivery time (``_start_server_side_wakeup_turn``). The next-turn drain
-    # is kept out via ``is_bg_task_completion_seen`` instead.
-    if process_id and not _session_has_active_turn(session_id):
-        _mark_registry_completion_consumed(process_id)
+    # HWEB-96: the registry's ``_completion_consumed`` marker is stamped ONLY
+    # once a wakeup turn is actually accepted (``_start_server_side_wakeup_turn``)
+    # or the deferred entry is dropped because the agent already holds the
+    # result. Until then the marker's provenance is authoritative: it can only
+    # mean the agent read the process via ``wait``/``read_log`` in its own turn.
+    # Stamping it earlier (the old B-first dedupe) made a 409 re-deferred
+    # wakeup look "already consumed" at the next teardown and silently dropped
+    # it. The next-turn drain (api/streaming._drain_webui_process_notifications)
+    # is kept from re-firing an event this drain already routed via
+    # ``is_bg_task_completion_seen`` instead.
 
     # ── Option Z (PRIMARY): server-side wakeup, NO browser round-trip ──────
     # The SSE emit above is now demoted to a pure live-view layer (an open tab
@@ -1967,8 +1962,13 @@ def _start_server_side_wakeup_turn(
                     target_session_id,
                 )
             elif status >= 400:
+                # Retryable admission failure (e.g. a workspace-persistence
+                # 500): keep every entry so a later teardown/next-turn drain
+                # can redeliver the batch instead of losing it.
+                _redefer(target_session_id)
                 logger.warning(
-                    "server-side wakeup failed for session %s: status=%s err=%r",
+                    "server-side wakeup failed for session %s: status=%s err=%r; "
+                    "re-deferred for redelivery",
                     target_session_id,
                     status,
                     (resp or {}).get("error"),
@@ -1987,8 +1987,9 @@ def _start_server_side_wakeup_turn(
                     (resp or {}).get("stream_id"),
                 )
         except Exception:
+            _redefer(session_id)
             logger.warning(
-                "server-side wakeup turn raised for session %s",
+                "server-side wakeup turn raised for session %s; re-deferred for redelivery",
                 session_id,
                 exc_info=True,
             )
