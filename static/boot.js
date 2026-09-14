@@ -701,6 +701,10 @@ function _micToastKeyForRecognitionError(error){
   // _stopMic / onstop act on the backend that actually started, even if the
   // raw-audio toggle changes mid-recording (#3169 Codex review).
   let _activeCaptureMode = null;
+  // Session that owned the composer when the capture started. Transcription
+  // and raw-audio delivery finish asynchronously; if the user has since left
+  // that session the result must not land in the destination's textarea.
+  let _captureOwnerSid = null;
 
   const btn=$('btnMic');
   const status=$('micStatus');
@@ -782,9 +786,28 @@ function _micToastKeyForRecognitionError(error){
   // each one checks the claim (inline: the callbacks are extracted on their
   // own by tests) before writing a transcript or honouring a pending send —
   // otherwise the transcript would become the answer.
+  //
+  // The same callbacks can also finish after the user navigated away from the
+  // session that was dictating. That result is parked for its owner and
+  // applied when that session is loaded again (sessions.js, after the draft
+  // restore); it never touches another session's composer.
+  window._lateDictationBySession=window._lateDictationBySession||new Map();
+  function _captureOwnerIsCurrent(){
+    if(!_captureOwnerSid||typeof S==='undefined'||!S.session) return true;
+    return S.session.session_id===_captureOwnerSid;
+  }
+  function _parkLateDictation(text,file){
+    const entry=window._lateDictationBySession.get(_captureOwnerSid)||{text:'',files:[]};
+    if(text) entry.text=entry.text?entry.text+' '+text:text;
+    if(file) entry.files.push(file);
+    window._lateDictationBySession.set(_captureOwnerSid,entry);
+    window._micPendingSend=false;
+  }
+
   async function _sendRawAudio(blob){
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const file=new File([blob],`voice-input-${Date.now()}.${ext}`,{type:blob.type||`audio/${ext}`});
+    if(!_captureOwnerIsCurrent()){_parkLateDictation('',file);return;}
     S.pendingFiles.push(file);
     renderTray();
     // The recording belongs to the message: it stays staged (the tray comes
@@ -822,6 +845,11 @@ function _micToastKeyForRecognitionError(error){
     // Resolution: when prefixOverride IS provided (server-STT path), trust live
     // ta.value unconditionally — even when empty. Otherwise fall back to _prefix.
     const clean=(text||'').trim();
+    if(!_captureOwnerIsCurrent()){
+      if(clean) _parkLateDictation(clean);
+      else window._micPendingSend=false;
+      return;
+    }
     const appendTo=(base)=>{
       if(!base) return clean;
       return (!base.endsWith(' ') && !base.endsWith('\n'))
@@ -1034,12 +1062,16 @@ function _micToastKeyForRecognitionError(error){
 
     sr.onend=()=>{
       const claimed=typeof isClarifyComposerActive==='function'&&isClarifyComposerActive();
+      // Probed via typeof: tests extract this callback on its own.
+      const ownerLeft=typeof _captureOwnerIsCurrent==='function'&&!_captureOwnerIsCurrent();
       const committed=_finalText
         ? (_prefix&&!_prefix.endsWith(' ')&&!_prefix.endsWith('\n')
             ? _prefix+' '+_finalText.trimStart()
             : _prefix+_finalText)
         : ta.value;
-      if(claimed){
+      if(ownerLeft){
+        if(_finalText) _parkLateDictation(_finalText.trim());
+      }else if(claimed){
         // _prefix is the message text captured at recording start; the
         // finished utterance belongs with it, in the parked draft.
         if(_finalText&&typeof setClarifyComposerDraft==='function') setClarifyComposerDraft(committed);
@@ -1071,7 +1103,7 @@ function _micToastKeyForRecognitionError(error){
       _micRestartCount=0;
       void _releaseMicWakeLock();
       _setRecording(false);
-      if(claimed){
+      if(claimed||ownerLeft){
         window._micPendingSend=false;
       }else if(window._micPendingSend){
         window._micPendingSend=false;
@@ -1187,6 +1219,7 @@ function _micToastKeyForRecognitionError(error){
     _isRecording=true;
     _finalText='';
     _prefix=ta.value;
+    _captureOwnerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;
     if(_micOriginNeedsSecureContext()){
       _isRecording=false;
       window._micPendingSend=false;

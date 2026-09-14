@@ -399,11 +399,11 @@ def test_dictation_completion_never_writes_into_or_submits_a_locked_composer():
     assert "if(_finalText&&typeof setClarifyComposerDraft==='function') setClarifyComposerDraft(committed);" in onend
     assert "}else{\n        ta.value=committed;" in onend
     assert "if(!claimed&&_micShouldRestartDictation())" in onend
-    assert "if(claimed){\n        window._micPendingSend=false;\n      }else if(window._micPendingSend){" in onend
+    assert "if(claimed||ownerLeft){\n        window._micPendingSend=false;\n      }else if(window._micPendingSend){" in onend
     onresult = block(BOOT_JS, "sr.onresult=(event)=>{", "sr.onend=()=>{")
     assert "if(" + probe + ") return;" in onresult
-    commit = block(BOOT_JS, "  function _commitTranscript(text, prefixOverride){", "  function _isServerSttUnavailable(err){")
-    result = run_clarify_harness(commit + """
+    commit = block(BOOT_JS, "  window._lateDictationBySession=window._lateDictationBySession||new Map();", "  function _isServerSttUnavailable(err){")
+    result = run_clarify_harness("let _captureOwnerSid = null; class File {} function renderTray() {}\n" + commit + """
     const ta = $('msg');
     const _dictationAppend = true;
     const _prefix = '';
@@ -573,6 +573,56 @@ def test_retained_single_choice_keeps_the_primary_action_usable_after_a_failure(
     """)
     assert result["afterFailure"] == "clarify"
     assert result["sent"] == ["dev", "dev"]
+
+
+def test_parked_draft_mutations_are_persisted_but_restores_are_not():
+    """Codex round 7 P2: text parked during a clarification (refine quote, late
+    transcript, failed steer) was in-memory only, so a reload lost it."""
+    append = block(MESSAGES_JS, "function _appendComposerText(text){", "function insertSavedPromptIntoComposer(text){")
+    result = run_clarify_harness(append + """
+    const msg = $('msg');
+    msg.value = 'ordinary draft';
+    showClarifyCard({question: 'Which branch?', clarify_id: 'c1'});
+    setClarifyComposerDraft('ordinary draft plus a failed steer');
+    _appendComposerText('and a quote');
+    _restoreComposerDraft({text: 'from another tab', files: []}, 's1');
+    console.log(JSON.stringify({saves: draftSaves, parked: clarifyComposerDraft()}));
+    """)
+    assert result["saves"] == [
+        {"sid": "s1", "text": "ordinary draft plus a failed steer", "files": 0},
+        {"sid": "s1", "text": "ordinary draft plus a failed steer\n\nand a quote", "files": 0},
+    ], "mutations persist for the lock owner; the server restore is not written straight back"
+    assert result["parked"] == "from another tab"
+
+
+def test_late_dictation_is_parked_for_its_owner_session_and_applied_on_return():
+    """Codex round 7 P2: a server transcript finishing after navigation wrote
+    session A's speech into session B's textarea."""
+    mic = block(BOOT_JS, "  window._lateDictationBySession=window._lateDictationBySession||new Map();", "  function _isServerSttUnavailable(err){")
+    result = run_clarify_harness("let _captureOwnerSid = 'a'; const _dictationAppend = true; const _prefix = ''; const ta = $('msg');\n"
+                                 "class File { constructor(parts, name) { this.name = name; } }\n"
+                                 "function renderTray() {}\n" + mic + """
+    S.session = {session_id: 'b'};
+    ta.value = 'draft in b';
+    window._micPendingSend = true;
+    _commitTranscript('spoken in a', 'draft in a');
+    await _sendRawAudio({type: 'audio/webm', size: 3});
+    const parked = window._lateDictationBySession.get('a');
+    console.log(JSON.stringify({value: ta.value, pending: window._micPendingSend, text: parked.text, files: parked.files.map(f => f.name.split('-')[0]), staged: S.pendingFiles.length, chat: sendCalls}));
+    """)
+    assert result["value"] == "draft in b", "another session's textarea is never written"
+    assert result["pending"] is False
+    assert result["text"] == "spoken in a"
+    assert result["files"] == ["voice"]
+    assert result["staged"] == 0
+    assert result["chat"] == []
+    sessions = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    apply = block(sessions, "const _late = typeof window !== 'undefined' && window._lateDictationBySession", "// Clear the in-flight session marker")
+    assert "window._lateDictationBySession.delete(sid);" in apply
+    assert "_appendComposerText(_late.text);" in apply
+    assert "S.pendingFiles.push(..._late.files);" in apply
+    onend = block(BOOT_JS, "sr.onend=()=>{", "sr.onerror=(event)=>{")
+    assert "if(ownerLeft){\n        if(_finalText) _parkLateDictation(_finalText.trim());" in onend
 
 
 def test_expiry_rescues_pressed_multi_select_picks_on_the_open_question():

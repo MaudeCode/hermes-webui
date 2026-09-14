@@ -367,7 +367,8 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   const clarifyActive = typeof isClarifyComposerActive === 'function' && isClarifyComposerActive();
   const current = clarifyActive ? String(clarifyComposerDraft() || '') : (ta.value || '');
   const write = (value) => {
-    if (clarifyActive) { setClarifyComposerDraft(value); return; }
+    // Server state coming in: park it without persisting it straight back.
+    if (clarifyActive) { setClarifyComposerDraft(value, {persist: false}); return; }
     ta.value = value;
     if (typeof autoResize === 'function') autoResize();
     if (typeof updateSendBtn === 'function') updateSendBtn();
@@ -2625,6 +2626,17 @@ async function loadSession(sid){
   const _draft = S.session && S.session.composer_draft;
   if (_draft && (typeof _restoreComposerDraft === 'function')) {
     _restoreComposerDraft(_draft, sid, {preserveActiveInput:!!opts.preserveActiveInput || (currentSid===sid&&forceReload)});
+  }
+  // Dictation that finished after the user had left this session was parked
+  // for it (boot.js); it joins the draft now that the session is back.
+  const _late = typeof window !== 'undefined' && window._lateDictationBySession && window._lateDictationBySession.get(sid);
+  if (_late && _isCurrentLoad()) {
+    window._lateDictationBySession.delete(sid);
+    if (_late.text && typeof _appendComposerText === 'function') _appendComposerText(_late.text);
+    if (_late.files && _late.files.length) {
+      S.pendingFiles.push(..._late.files);
+      if (typeof renderTray === 'function') renderTray();
+    }
   }
 
   // Clear the in-flight session marker now that this load has completed (#1060).

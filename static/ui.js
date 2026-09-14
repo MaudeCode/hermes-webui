@@ -9157,11 +9157,19 @@ function composerDraftText(){
   return _composerLockState?_composerLockState.draft:((input&&input.value)||'');
 }
 
-// A draft restore that lands mid-clarification must update the parked draft,
-// not the answer the user is typing.
-function setClarifyComposerDraft(text){
+// Update the parked draft (a restore landing mid-clarification, a refine
+// quote, a late transcript, a failed steer). Real message text is persisted
+// for the lock owner the same way typing is, so a reload while the
+// clarification is open keeps it; server state being restored passes
+// {persist:false} so it is not written straight back.
+function setClarifyComposerDraft(text,opts){
   if(!_composerLockState) return false;
-  _composerLockState.draft=String(text||'');
+  const value=String(text||'');
+  _composerLockState.draft=value;
+  const persist=!(opts&&opts.persist===false);
+  if(persist&&_composerLockState.sid&&typeof _saveComposerDraft==='function'){
+    _saveComposerDraft(_composerLockState.sid, value, S.pendingFiles?[...S.pendingFiles]:[]);
+  }
   return true;
 }
 
@@ -9187,6 +9195,7 @@ function lockComposerForClarify(opts){
       _saveComposerDraftNow(sid, draft, S.pendingFiles ? [...S.pendingFiles] : []);
     }
     _composerLockState={
+      sid: sid||null,
       disabled: input.disabled,
       placeholder: input.placeholder,
       ariaLabel: input.getAttribute('aria-label'),

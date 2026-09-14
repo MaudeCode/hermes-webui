@@ -126,6 +126,8 @@ function _promptActiveSessionId() { return S.session && S.session.session_id; }
 function _renderPendingApprovalForActiveSession() {}
 function activeSessionHasPendingPromptAttention() { return false; }
 function _saveComposerDraftNow() {}
+const draftSaves = [];
+function _saveComposerDraft(sid, text, files) { draftSaves.push({sid, text, files: (files || []).length}); }
 let _loadingSessionId = null;
 function _isComposerDraftRestoreSuppressed() { return false; }
 function _clearComposerDraftRestoreSuppression() {}
