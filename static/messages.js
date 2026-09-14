@@ -9663,6 +9663,10 @@ let _clarifyMissingEndpointWarned = false;
 let _clarifyCountdownTimer = null;
 let _clarifyExpiresAt = 0;
 let _clarifyPendingBySession = new Map();
+// Answer progress parked when a session switch releases the card before the
+// destination has loaded; restored if that switch fails and the same prompt
+// is painted back. Keyed by session, matched by prompt signature.
+const _clarifyAnswerStateBySession = new Map();
 const CLARIFY_MIN_VISIBLE_MS = 30000;
 
 function _clarifyPromptBelongsToActiveSession(sid) {
@@ -9681,6 +9685,7 @@ function _rememberClarifyPending(pending) {
 function _clearClarifyPendingForSession(sid) {
   if (sid) {
     _clarifyPendingBySession.delete(sid);
+    _clarifyAnswerStateBySession.delete(sid);
     if (typeof syncTopbar === 'function') syncTopbar();
   }
 }
@@ -9921,7 +9926,9 @@ function clarifyComposerState() {
   const cur = _clarifyCurrent();
   return {
     submitting: _clarifySubmitting,
-    canAdvance: !!(cur && cur.multi && _clarifyPickedChoices().length),
+    // A pressed pick is an answer: multi-select picks waiting for the action,
+    // or a single choice retained after a failed submit so it can be retried.
+    canAdvance: _clarifyPickedChoices().length > 0,
     hasNext: !!(cur && cur.index + 1 < cur.total),
   };
 }
@@ -10083,14 +10090,12 @@ function _clarifyRescueText() {
   const typed = String((_clarifyComposerActive() && msg && msg.value) || '').trim();
   const current = typed || _clarifyPickedChoices().join(', ');
   if (!_clarifyBatch) return current;
-  const parts = [];
-  const summary = _clarifyBatchSummary(_clarifyBatch.answers);
-  if (summary) parts.push(summary);
+  // The open question may already be recorded (last question, failed submit)
+  // and edited since: what is on screen wins over the recorded attempt.
+  const answers = {..._clarifyBatch.answers};
   const cur = _clarifyCurrent();
-  if (current && cur && !Object.prototype.hasOwnProperty.call(_clarifyBatch.answers, cur.qid)) {
-    parts.push(cur.question + '\n' + current);
-  }
-  return parts.join('\n\n');
+  if (current && cur) answers[cur.qid] = current;
+  return _clarifyBatchSummary(answers);
 }
 
 function _stashClarifyDraft(reason) {
@@ -10159,6 +10164,15 @@ function hideClarifyCard(force=false, reason="dismissed") {
     }
   }
   _stashClarifyDraft(reason);
+  if (reason === 'session' && _clarifySessionId && _clarifyComposerActive()) {
+    const msg = $('msg');
+    _clarifyAnswerStateBySession.set(_clarifySessionId, {
+      sig: _clarifySignature,
+      text: String((msg && msg.value) || ''),
+      picks: _clarifyPickedChoices(),
+      batch: _clarifyBatch ? {index: _clarifyBatch.index, answers: {..._clarifyBatch.answers}} : null,
+    });
+  }
   _clarifySessionId = null;
   _resetClarifyCardState();
   card.classList.remove("visible");
@@ -10235,9 +10249,28 @@ function showClarifyCard(pending) {
     _clarifySubmitting = false;
     const msg = $('msg');
     if (msg && _clarifyComposerActive()) msg.value = '';
+    // A switch away that failed to load brings the same prompt back: pick
+    // up where the user was instead of starting the answers over.
+    const saved = _clarifyAnswerStateBySession.get(sid);
+    _clarifyAnswerStateBySession.delete(sid);
+    const resume = saved && saved.sig === sig ? saved : null;
+    if (resume && resume.batch && _clarifyBatch) {
+      _clarifyBatch.index = Math.min(resume.batch.index, batchQuestions.length - 1);
+      _clarifyBatch.answers = {...resume.batch.answers};
+    }
     _renderClarifyQuestion(isBatch
       ? _clarifyCurrent()
       : {question, choices, multi: false, index: 0, total: 1});
+    if (resume) {
+      const choicesEl = $("clarifyChoices");
+      if (choicesEl) {
+        choicesEl.querySelectorAll('.clarify-choice').forEach(btn => {
+          if (resume.picks.includes(btn.dataset.choice)) btn.setAttribute('aria-pressed', 'true');
+        });
+      }
+      if (msg && resume.text) msg.value = resume.text;
+      if (typeof updateSendBtn === 'function') updateSendBtn();
+    }
     _clarifySetControlsDisabled(false, false);
   }
   _ensureClarifyResizeListener();

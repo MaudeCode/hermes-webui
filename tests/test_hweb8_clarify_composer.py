@@ -496,6 +496,84 @@ def test_message_only_insertions_go_to_the_parked_draft_while_locked():
     assert "isClarifyComposerActive()) return;" in compress
 
 
+def test_failed_steer_restore_and_dead_run_retry_park_message_text_while_locked():
+    """Codex round 6 P2: the failed-steer restore paths write #msg directly and
+    the dead-run recovery button then calls send()."""
+    commands = (ROOT / "static" / "commands.js").read_text(encoding="utf-8")
+    guarded = "isClarifyComposerActive()) setClarifyComposerDraft(_steerRestoreText(originalMsg,explicitSteer));"
+    assert commands.count(guarded) == 3, "all three failed-steer restores route through the lock"
+    for i in range(3):
+        site = commands.index(guarded, 0 if i == 0 else site + 1)
+        assert commands.index("inp.value=_steerRestoreText(originalMsg,explicitSteer);", site) - site < 200, "the unlocked path still writes the textarea"
+    retry = block(commands, "if(_steerFallbackIsDeadRun(fallback)&&typeof send==='function'){", "void _trySteer(msg, explicitSteer)")
+    assert retry.index("isClarifyComposerActive()){") < retry.index("void send({literalSlash:true})")
+    assert "if(explicitSteer) setClarifyComposerDraft(String(msg||'').trim());\n        return;" in retry
+
+
+def test_answer_progress_survives_a_session_switch_that_fails_to_load():
+    """Codex round 6 P2: the forced 'session' hide dropped typed text, picks and
+    recorded batch answers before the destination had loaded."""
+    result = run_clarify_harness(BATCH + """
+    $('clarifyChoices').querySelectorAll('.clarify-choice')[0].onclick();
+    await tick();
+    msg.value = 'next week';
+    await send();
+    const who = $('clarifyChoices').querySelectorAll('.clarify-choice');
+    who[1].onclick();
+    msg.value = 'and maybe cy';
+    onClarifyComposerInput();
+    // Leaving for another session releases the card; the destination fails
+    // and the failure exit paints the cached prompt back.
+    hideClarifyCard(true, 'session');
+    const between = {value: msg.value, active: isClarifyComposerActive()};
+    _renderPendingClarifyForActiveSession();
+    const resumed = {...snap(), answers: _clarifyBatch.answers};
+    // A different prompt does not inherit the parked progress.
+    hideClarifyCard(true, 'session');
+    showClarifyCard({clarify_id: 'b2', questions: [{qid: 'q0', question: 'Other?'}]});
+    console.log(JSON.stringify({between, resumed, fresh: {...snap(), answers: _clarifyBatch.answers}}));
+    """)
+    assert result["between"] == {"value": "", "active": False}
+    assert result["resumed"]["question"] == "Who?"
+    assert result["resumed"]["value"] == "and maybe cy"
+    assert result["resumed"]["answers"] == {"q0": "500", "q1": "next week"}
+    assert result["fresh"]["question"] == "Other?" and result["fresh"]["value"] == "" and result["fresh"]["answers"] == {}
+
+
+def test_expiry_rescue_prefers_the_edited_answer_over_a_recorded_failed_attempt():
+    """Codex round 6 P2: after a failed final submit the recorded answer was
+    rescued instead of the edit on screen."""
+    result = run_clarify_harness("""
+    const msg = $('msg');
+    showClarifyCard({clarify_id: 'b1', questions: [{qid: 'q0', question: 'When?'}]});
+    msg.value = 'first attempt';
+    apiImpl = async () => { throw new Error('network down'); };
+    await send();
+    msg.value = 'second attempt';
+    hideClarifyCard(true, 'expired');
+    console.log(JSON.stringify({value: msg.value}));
+    """)
+    assert result["value"] == "When?\nsecond attempt"
+
+
+def test_retained_single_choice_keeps_the_primary_action_usable_after_a_failure():
+    """Codex round 6 P2: the choice stayed pressed after a failed submit but the
+    send button stayed disabled with an empty textarea."""
+    result = run_clarify_harness("""
+    showClarifyCard({question: 'Which branch?', choices_offered: ['main', 'dev'], clarify_id: 'c1'});
+    apiImpl = async () => { throw new Error('network down'); };
+    $('clarifyChoices').querySelectorAll('.clarify-choice')[1].onclick();
+    await tick();
+    updateSendBtn();
+    const afterFailure = $('btnSend').dataset.action;
+    apiImpl = async () => ({ok: true});
+    await handleComposerPrimaryAction();
+    console.log(JSON.stringify({afterFailure, sent: apiCalls.map(c => c.body.response)}));
+    """)
+    assert result["afterFailure"] == "clarify"
+    assert result["sent"] == ["dev", "dev"]
+
+
 def test_expiry_rescues_pressed_multi_select_picks_on_the_open_question():
     """Codex P2: picks that were pressed but not yet advanced are on screen and
     must be rescued like typed text."""

@@ -359,7 +359,7 @@ def test_clarify_card_renders_the_queue_position_it_was_handed():
         "const _startClarifyCountdown=()=>{}; const _clearClarifyCountdownTimer=()=>{};",
         "const _renderClarifyQuestion=()=>{}; const _clarifySetControlsDisabled=()=>{};",
         "const _clarifyCurrent=()=>null; const _clarifyComposerActive=()=>false;",
-        "let _clarifyBatch=null,_clarifySubmitting=false;",
+        "let _clarifyBatch=null,_clarifySubmitting=false; const _clarifyAnswerStateBySession=new Map();",
         "const _ensureClarifyResizeListener=()=>{}; const _setPromptFlyoutHidden=()=>{};",
         "const _syncClarifyCollapseButton=()=>{}; const _syncClarifyTranscriptSpace=()=>{};",
         "const lockComposerForClarify=()=>{}; const applyLocaleToDOM=()=>{}; const syncTopbar=()=>{};",
