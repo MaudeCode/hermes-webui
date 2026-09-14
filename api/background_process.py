@@ -94,6 +94,28 @@ _THREAD_LIFECYCLE_LOCK = threading.Lock()
 # open tab. The first emit for a session fires immediately, then any further
 # emits inside the 1s window are payload-replaced and flushed after 1s of quiet.
 _EMIT_COALESCE_WINDOW_SECS = 1.0
+
+# HWEB-96: a wakeup that fails admission (non-409 error or exception) is
+# re-deferred; with no turn active nothing else would drain it until the next
+# teardown, so schedule a bounded timed retry. Per-session attempt counter,
+# reset on acceptance; past the cap the entries stay deferred for the next
+# teardown / next-turn drain.
+_WAKEUP_RETRY_SECONDS = 30.0
+_WAKEUP_RETRY_MAX_ATTEMPTS = 5
+_WAKEUP_RETRY_LOCK = threading.Lock()
+_WAKEUP_RETRY_ATTEMPTS: dict[str, int] = {}
+# Aggregate size cap for one batched wakeup prompt (each notification body is
+# already truncated to ~4k chars). Overflow stays deferred for the batched
+# turn's own teardown, so a burst never exceeds the model context in one turn.
+_WAKEUP_BATCH_MAX_CHARS = 24_000
+
+
+def _clear_wakeup_retry_budget(session_id: str) -> None:
+    """Forget a session's failed-admission count once nothing is pending for it."""
+    if not session_id:
+        return
+    with _WAKEUP_RETRY_LOCK:
+        _WAKEUP_RETRY_ATTEMPTS.pop(session_id, None)
 _EMIT_COALESCE_LOCK = threading.Lock()
 _LAST_EMIT_TS: dict[str, float] = {}
 _PENDING_EMIT_PAYLOADS: dict[str, dict] = {}
@@ -1380,6 +1402,56 @@ def _retry_or_quarantine_unroutable_async_delegation(
     _retry_unclaimed_async_delegation_event(process_registry, evt)
 
 
+def _agent_already_has_completion(process_id: str) -> bool:
+    """True when the agent already holds this process result from its own turn.
+
+    HWEB-96: the registry marks ``_completion_consumed`` when the agent reads
+    the exit via ``wait``/``read_log`` and ``_poll_observed`` when it saw the
+    exit inline via ``poll`` (same signals the CLI drain skips on). A wakeup for
+    such a completion would only make the agent repeat a summary it already
+    wrote, so the deferred path re-checks these markers at DELIVERY time — the
+    process usually exits (and the completion event is drained) seconds before
+    the agent's ``wait`` returns, so a drain-time check is always too early.
+    """
+    if not process_id:
+        return False
+    try:
+        from tools.process_registry import process_registry as _pr
+    except ImportError:
+        return False
+    try:
+        if _pr.is_completion_consumed(process_id):
+            return True
+        return process_id in (getattr(_pr, "_poll_observed", None) or ())
+    except Exception:
+        logger.debug(
+            "agent completion-consumed check failed for %r", process_id, exc_info=True
+        )
+        return False
+
+
+def is_bg_task_completion_seen(session_id: str, process_id: str) -> bool:
+    """Read-only view of this module's per-session dedupe set."""
+    if not session_id or not process_id:
+        return False
+    from api import config as _cfg
+
+    with _cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
+        return process_id in (_cfg.BG_TASK_COMPLETE_EVENTS_SEEN.get(session_id) or ())
+
+
+def _batch_wakeup_prompt(prompts: list[str]) -> str:
+    """Join N deferred wakeups into ONE turn (mirrors the agent's own batch header)."""
+    if len(prompts) == 1:
+        return prompts[0]
+    header = (
+        f"[IMPORTANT: {len(prompts)} background process notifications arrived "
+        "while you were busy. Treat these results as one batch and give one "
+        "consolidated response; preserve failures and actionable results.]"
+    )
+    return "\n\n".join([header, *prompts])
+
+
 def _process_one(evt: dict) -> None:
     """Route a single completion_queue event to the matching WebUI session."""
     from api import config as _cfg
@@ -1523,17 +1595,22 @@ def _process_one(evt: dict) -> None:
             return
         if process_id:
             seen.add(process_id)
+        # Publish the pending state under the SAME lock the reaper prunes
+        # under, so it can never observe a seen entry for a not-yet-pending
+        # session and sweep it (HWEB-96 round-4 P2).
+        _cfg.PENDING_BG_TASK_COMPLETIONS.add(session_id)
     payload = _build_payload(evt, session_id)
     _emit_bg_task_complete_events_coalesced(session_id, payload)
-    _cfg.PENDING_BG_TASK_COMPLETIONS.add(session_id)
-    # Mark the event consumed in the agent's process registry so the REAL
-    # merged PR #2279's next-turn drain
-    # (api/streaming._drain_webui_process_notifications) treats this process_id
-    # as already-delivered and does not re-fire a wakeup (B-first order).
-    # This is the SHARED upstream dedupe key (see _mark_registry_completion_
-    # consumed for the coupling contract + why a future rename now fails loud).
-    if process_id:
-        _mark_registry_completion_consumed(process_id)
+    # HWEB-96: the registry's ``_completion_consumed`` marker is stamped ONLY
+    # once a wakeup turn is actually accepted (``_start_server_side_wakeup_turn``)
+    # or the deferred entry is dropped because the agent already holds the
+    # result. Until then the marker's provenance is authoritative: it can only
+    # mean the agent read the process via ``wait``/``read_log`` in its own turn.
+    # Stamping it earlier (the old B-first dedupe) made a 409 re-deferred
+    # wakeup look "already consumed" at the next teardown and silently dropped
+    # it. The next-turn drain (api/streaming._drain_webui_process_notifications)
+    # is kept from re-firing an event this drain already routed via
+    # ``is_bg_task_completion_seen`` instead.
 
     # ── Option Z (PRIMARY): server-side wakeup, NO browser round-trip ──────
     # The SSE emit above is now demoted to a pure live-view layer (an open tab
@@ -1752,32 +1829,63 @@ def drain_deferred_wakeups_for_session(session_id: str) -> int:
                 "PENDING discard failed for session %s", session_id, exc_info=True
             )
         started = 0
-        # Greptile P1 fix: do NOT fire one daemon-threaded wakeup per entry in
-        # a tight loop. Each ``_start_server_side_wakeup_turn`` spawns a daemon
-        # thread that races for the per-session agent lock; only ONE can win,
-        # the rest 409. Since we already claimed + popped every entry (line
-        # ~938) and discarded the PENDING marker, the losers' prompts would be
-        # permanently lost. Instead: start exactly the FIRST prompt, and
-        # re-defer the remaining entries so each subsequent turn-teardown
-        # (or next-turn drain) delivers the next one — one wakeup per turn,
-        # which matches the single-prompt-per-turn design and the
-        # BG_TASK_COMPLETE_EVENTS_SEEN dedup (no double-fire).
-        leftover = [e for e in entries if str((e or {}).get("wakeup_prompt") or "").strip()]
-        if leftover:
-            first = leftover[0]
-            # Re-defer entries 2..N BEFORE starting the first turn, so they are
-            # already persisted if the first wakeup's own teardown re-runs this
-            # hook and tries to claim them.
-            for entry in leftover[1:]:
-                record_deferred_wakeup(
-                    target_session_id,
-                    str((entry or {}).get("process_id") or ""),
-                    str((entry or {}).get("wakeup_prompt") or "").strip(),
-                )
+        # HWEB-96: the turn that just ended may already have consumed some of
+        # these results (``wait``/``read_log``/``poll`` on the process). Waking
+        # the agent for those only produces a redundant "already incorporated"
+        # reply plus another completion notification, so drop them here — with
+        # an audit line — and stamp the shared marker so the next-turn drain
+        # agrees. Everything still unseen goes into ONE batched wakeup turn
+        # (one consolidated reply, one notification) instead of one turn per
+        # teardown; a 409 re-defers the whole batch, never loses an entry.
+        pending: list[dict] = []
+        consumed: list[str] = []
+        for entry in entries:
+            prompt = str((entry or {}).get("wakeup_prompt") or "").strip()
+            if not prompt:
+                continue
+            pid = str((entry or {}).get("process_id") or "")
+            if _agent_already_has_completion(pid):
+                consumed.append(pid)
+                _mark_registry_completion_consumed(pid)
+                continue
+            pending.append({"process_id": pid, "wakeup_prompt": prompt})
+        if consumed:
+            logger.info(
+                "dropped %d deferred wakeup(s) already consumed by the agent's "
+                "own turn for session %s: %s",
+                len(consumed),
+                target_session_id,
+                ", ".join(consumed),
+            )
+        if not pending:
+            # Queue reached a terminal empty state without an accepted wakeup:
+            # a later, independent completion must start with a fresh budget.
+            _clear_wakeup_retry_budget(target_session_id)
+        # Cap the aggregate prompt: take entries in order until the next one
+        # would exceed the budget (always at least one), re-defer the rest for
+        # this batched turn's own teardown.
+        batch: list[dict] = []
+        total = 0
+        for entry in pending:
+            size = len(entry["wakeup_prompt"])
+            if batch and total + size > _WAKEUP_BATCH_MAX_CHARS:
+                break
+            batch.append(entry)
+            total += size
+        overflow = pending[len(batch):]
+        for entry in overflow:
+            record_deferred_wakeup(
+                target_session_id, entry["process_id"], entry["wakeup_prompt"]
+            )
+        if overflow:
+            with _cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
+                _cfg.PENDING_BG_TASK_COMPLETIONS.add(target_session_id)
+        if batch:
             _start_server_side_wakeup_turn(
                 target_session_id,
-                str((first or {}).get("wakeup_prompt") or "").strip(),
-                process_id=str((first or {}).get("process_id") or ""),
+                _batch_wakeup_prompt([e["wakeup_prompt"] for e in batch]),
+                process_id=batch[0]["process_id"],
+                entries=batch,
             )
             started = 1
         if started:
@@ -1816,7 +1924,11 @@ def _session_has_active_turn(session_id: str) -> bool:
 
 
 def _start_server_side_wakeup_turn(
-    session_id: str, wakeup_prompt: str, *, process_id: str = ""
+    session_id: str,
+    wakeup_prompt: str,
+    *,
+    process_id: str = "",
+    entries: list[dict] | None = None,
 ) -> None:
     """Start an agent turn server-side for a process_complete wakeup (Option Z).
 
@@ -1847,14 +1959,52 @@ def _start_server_side_wakeup_turn(
     a double delivery.
     """
 
+    # ``entries`` (HWEB-96): the deferred wakeups batched into ``wakeup_prompt``.
+    # A 409 re-defers each original entry (not the joined text) so the next
+    # teardown re-batches them; acceptance stamps every process_id consumed.
+    batched = list(entries) if entries else [
+        {"process_id": process_id, "wakeup_prompt": wakeup_prompt}
+    ]
+
+    def _redefer(target: str) -> None:
+        from api import config as _cfg
+
+        for entry in batched:
+            prompt = str((entry or {}).get("wakeup_prompt") or "").strip()
+            if prompt:
+                record_deferred_wakeup(
+                    target, str((entry or {}).get("process_id") or ""), prompt
+                )
+        # Re-deferred entries are pending again: keep the reaper from pruning
+        # their seen-set while they wait for the next delivery.
+        with _cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
+            _cfg.PENDING_BG_TASK_COMPLETIONS.add(target)
+
+    def _schedule_retry(target: str) -> None:
+        with _WAKEUP_RETRY_LOCK:
+            attempts = _WAKEUP_RETRY_ATTEMPTS.get(target, 0) + 1
+            _WAKEUP_RETRY_ATTEMPTS[target] = attempts
+        if attempts > _WAKEUP_RETRY_MAX_ATTEMPTS:
+            logger.warning(
+                "server-side wakeup retry budget exhausted for session %s; "
+                "deferred entries wait for the next turn teardown",
+                target,
+            )
+            return
+        timer = threading.Timer(
+            _WAKEUP_RETRY_SECONDS, drain_deferred_wakeups_for_session, args=(target,)
+        )
+        timer.daemon = True
+        timer.start()
+
     def _runner() -> None:
+        target_session_id = ""
         try:
             from api.routes import start_session_turn
 
             target_session_id = _resolve_startable_wakeup_target(session_id)
             if not target_session_id:
-                if wakeup_prompt:
-                    record_deferred_wakeup(session_id, process_id, wakeup_prompt)
+                _redefer(session_id)
                 logger.warning(
                     "server-side wakeup retained for session %s: no verified live continuation",
                     session_id,
@@ -1865,6 +2015,7 @@ def _start_server_side_wakeup_turn(
             )
             status = int((resp or {}).get("_status", 200) or 200)
             if status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
+                _clear_wakeup_retry_budget(target_session_id)
                 logger.info(
                     "server-side wakeup suppressed for session %s: provider credential state is paused",
                     target_session_id,
@@ -1877,30 +2028,47 @@ def _start_server_side_wakeup_turn(
                 # ``claim_deferred_wakeups`` still guarantees exactly-once
                 # delivery, and BG_TASK_COMPLETE_EVENTS_SEEN already deduped
                 # this process_id, so re-recording cannot double-fire.
-                if wakeup_prompt:
-                    record_deferred_wakeup(target_session_id, process_id, wakeup_prompt)
+                _redefer(target_session_id)
                 logger.debug(
                     "server-side wakeup raced an active turn for session %s; "
                     "re-deferred for redelivery on next teardown/turn",
                     target_session_id,
                 )
             elif status >= 400:
+                # Retryable admission failure (e.g. a workspace-persistence
+                # 500): keep every entry and arrange a bounded timed retry —
+                # with no turn active, no teardown would otherwise drain it.
+                _redefer(target_session_id)
+                _schedule_retry(target_session_id)
                 logger.warning(
-                    "server-side wakeup failed for session %s: status=%s err=%r",
+                    "server-side wakeup failed for session %s: status=%s err=%r; "
+                    "re-deferred for redelivery",
                     target_session_id,
                     status,
                     (resp or {}).get("error"),
                 )
             else:
+                _clear_wakeup_retry_budget(target_session_id)
+                # The agent now owns these results: stamp the shared dedupe
+                # marker for the deferred entries.
+                for entry in batched:
+                    pid = str((entry or {}).get("process_id") or "")
+                    if pid:
+                        _mark_registry_completion_consumed(pid)
                 logger.info(
                     "server-side wakeup turn started for session %s (stream_id=%s)",
                     target_session_id,
                     (resp or {}).get("stream_id"),
                 )
         except Exception:
+            # Re-defer under the resolved continuation when lineage was
+            # already followed: the sealed parent's teardown never runs again,
+            # so entries keyed on it would strand.
+            _redefer(target_session_id or session_id)
+            _schedule_retry(target_session_id or session_id)
             logger.warning(
-                "server-side wakeup turn raised for session %s",
-                session_id,
+                "server-side wakeup turn raised for session %s; re-deferred for redelivery",
+                target_session_id or session_id,
                 exc_info=True,
             )
 
@@ -2041,6 +2209,7 @@ def forget_bg_task_completion_dedup(session_id: str) -> None:
 
     with _cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
         _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(str(session_id), None)
+    _clear_wakeup_retry_budget(str(session_id))
 
 
 def start_drain_thread() -> bool:
