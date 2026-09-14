@@ -1927,6 +1927,7 @@ def _start_server_side_wakeup_turn(
                 )
 
     def _runner() -> None:
+        target_session_id = ""
         try:
             from api.routes import start_session_turn
 
@@ -1987,10 +1988,13 @@ def _start_server_side_wakeup_turn(
                     (resp or {}).get("stream_id"),
                 )
         except Exception:
-            _redefer(session_id)
+            # Re-defer under the resolved continuation when lineage was
+            # already followed: the sealed parent's teardown never runs again,
+            # so entries keyed on it would strand.
+            _redefer(target_session_id or session_id)
             logger.warning(
                 "server-side wakeup turn raised for session %s; re-deferred for redelivery",
-                session_id,
+                target_session_id or session_id,
                 exc_info=True,
             )
 

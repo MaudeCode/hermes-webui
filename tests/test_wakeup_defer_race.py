@@ -974,6 +974,48 @@ def test_deferred_wakeup_retargets_compressed_parent_to_continuation(monkeypatch
     _reset_cfg_state()
 
 
+def test_idle_wakeup_exception_redefers_under_resolved_continuation(monkeypatch):
+    """Codex P2 (round 2) on PR #96: an IDLE completion addressed to a sealed
+    pre-compression parent resolves to its live continuation inside the wakeup
+    runner. When ``start_session_turn`` then raises, the entry must be
+    re-deferred under that continuation, not the parent whose teardown never
+    runs again (the teardown drain path already passes the resolved id)."""
+    from api import background_process as bp, config as cfg
+    import api.routes as routes
+
+    fake = _FakeProcessRegistry()
+    fake.register("proc-raise", "snapshot-parent-raise")
+    _install_fake_registry(monkeypatch, fake)
+    _reset_cfg_state()
+    parent = "snapshot-parent-raise"
+    child = "live-continuation-raise"
+    event = threading.Event()
+    monkeypatch.setattr(
+        bp,
+        "_resolve_startable_wakeup_target",
+        lambda sid: child if sid in {parent, child} else "",
+    )
+
+    def _raise(session_id, message, *, source="process_wakeup"):
+        event.set()
+        raise RuntimeError("admission blew up")
+
+    monkeypatch.setattr(routes, "start_session_turn", _raise)
+    bp.register_process_session(parent, parent)
+    try:
+        assert bp._session_has_active_turn(parent) is False
+        bp._process_one(_completion_evt("proc-raise", parent))  # idle branch
+        assert event.wait(timeout=1.0)
+        assert _wait_for(lambda: bool(cfg.DEFERRED_PROCESS_WAKEUPS.get(child)))
+        with cfg.DEFERRED_PROCESS_WAKEUPS_LOCK:
+            assert parent not in cfg.DEFERRED_PROCESS_WAKEUPS
+            assert [e["process_id"] for e in cfg.DEFERRED_PROCESS_WAKEUPS[child]] == ["proc-raise"]
+        assert not fake.is_completion_consumed("proc-raise")
+    finally:
+        bp.unregister_process_session(parent)
+        _reset_cfg_state()
+
+
 def test_deferred_wakeup_stays_queued_when_snapshot_target_is_unknown(monkeypatch):
     """Unknown continuation ownership fails closed without losing the prompt."""
     from api import background_process as bp, config as cfg
