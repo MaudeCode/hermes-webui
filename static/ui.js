@@ -7640,6 +7640,9 @@ function _setCtxCompressButton(btn,text){
     btn.onclick=function(e){
       if(e)e.stopPropagation();
       const ta=$('msg');
+      // The textarea is a clarification answer while the lock is held; the
+      // run is blocked on that answer anyway, so the action waits.
+      if(typeof isClarifyComposerActive==='function'&&isClarifyComposerActive()) return;
       if(ta){ta.value='/compress ';ta.focus();autoResize();}
     };
   }else{

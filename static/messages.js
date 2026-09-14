@@ -948,8 +948,14 @@ function _formatSelectedTextReplyQuote(text, includeMarker=true){
 function _appendComposerText(text){
   const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
   if(!composer||!text)return;
-  const current=String(composer.value||'');
-  composer.value=current.trim()?`${current.replace(/\s+$/,'')}\n\n${text}`:String(text);
+  // A quote, saved prompt or refine seed is message text. While a
+  // clarification holds the textarea it goes into the parked draft and comes
+  // back with it; it must never become the answer (HWEB-8).
+  const locked=typeof isClarifyComposerActive==='function'&&isClarifyComposerActive();
+  const current=String((locked?composerDraftText():composer.value)||'');
+  const merged=current.trim()?`${current.replace(/\s+$/,'')}\n\n${text}`:String(text);
+  if(locked){setClarifyComposerDraft(merged);return;}
+  composer.value=merged;
   composer.focus();
   try{composer.setSelectionRange(composer.value.length, composer.value.length);}catch(_e){}
   composer.dispatchEvent(new Event('input',{bubbles:true}));
@@ -9927,9 +9933,17 @@ function onClarifyComposerInput() {
   if (msg && String(msg.value || '').trim()) _clarifyClearPicks();
 }
 
+// Single-select: the pick is the whole answer, so it replaces a typed custom
+// answer the same way typing clears picks — a retry after a failed submit
+// then resends the pick that is on screen, not stale text.
 function _clarifyPressOnly(btn) {
   _clarifyClearPicks();
   btn.setAttribute('aria-pressed', 'true');
+  const msg = $('msg');
+  if (msg && msg.value && _clarifyComposerActive()) {
+    msg.value = '';
+    if (typeof autoResize === 'function') autoResize();
+  }
 }
 
 // Multi-select: picks stay editable until the composer action advances. A pick
@@ -10265,6 +10279,9 @@ async function respondClarify(response) {
     echo = answer;
   }
   const clarifyId = _clarifyId;
+  // A completion may land after a queued prompt B replaced A and was itself
+  // submitted; only the owner of the visible prompt may touch its controls.
+  const release = () => { if (_clarifyId === clarifyId) _clarifySetControlsDisabled(false, false); };
   _clarifySetControlsDisabled(true, true);
   try {
     const result = await api("/api/clarify/respond", {
@@ -10291,12 +10308,10 @@ async function respondClarify(response) {
           });
           if (typeof renderMessages === 'function') renderMessages({preserveScroll: true});
         }
-      } else {
-        _clarifySetControlsDisabled(false, false);
       }
     } else {
       // Stale / expired / wrong session — keep the card and the typed answer.
-      _clarifySetControlsDisabled(false, false);
+      release();
       if (msg && typeof msg.focus === 'function') msg.focus();
       const errMsg = (result && result.error) || "Clarification response not accepted — the agent may have already proceeded.";
       if (typeof showToast === "function") showToast(errMsg, 5000);
@@ -10335,10 +10350,10 @@ async function respondClarify(response) {
         return;
       }
       // A newer prompt is showing (race between user click and SSE/poll).
-      // Don't dismiss it on this late 409 — just re-enable controls and
-      // surface the error. The user's draft for the now-stale prompt is
-      // dropped intentionally; the next prompt has its own input cycle.
-      _clarifySetControlsDisabled(false, false);
+      // Don't dismiss it on this late 409 and don't touch its controls (it
+      // may have its own response in flight) — just surface the error. The
+      // user's draft for the now-stale prompt is dropped intentionally; the
+      // next prompt has its own input cycle.
       if (typeof setStatus === "function") {
         setStatus("Clarify: previous prompt expired — a newer one is showing.");
       }
@@ -10346,7 +10361,7 @@ async function respondClarify(response) {
     }
     // Network / other transient errors — keep the card and the typed answer
     // visible so the user can retry once connectivity returns.
-    _clarifySetControlsDisabled(false, false);
+    release();
     if (msg && typeof msg.focus === 'function') msg.focus();
     const errMsg = (e && e.message) || "Failed to deliver clarification response.";
     if (typeof setStatus === "function") setStatus("Clarify: " + errMsg);

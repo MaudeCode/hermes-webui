@@ -425,6 +425,77 @@ def test_dictation_completion_never_writes_into_or_submits_a_locked_composer():
     assert result["chat"] == [] and result["api"] == 0
 
 
+def test_single_select_pick_replaces_typed_text_so_a_retry_resends_the_pick():
+    """Codex round 5 P2: after a failed submit both the pressed choice and the
+    stale typed text were on screen and Enter retried with the text."""
+    result = run_clarify_harness("""
+    const msg = $('msg');
+    showClarifyCard({question: 'Which branch?', choices_offered: ['main', 'dev'], clarify_id: 'c1'});
+    msg.value = 'a release tag';
+    apiImpl = async () => { throw new Error('network down'); };
+    $('clarifyChoices').querySelectorAll('.clarify-choice')[1].onclick();
+    await tick();
+    const afterFailedPick = {value: msg.value, pressed: $('clarifyChoices').querySelectorAll('.clarify-choice[aria-pressed="true"]').map(b => b.dataset.choice)};
+    apiImpl = async () => ({ok: true});
+    await send();
+    console.log(JSON.stringify({afterFailedPick, sent: apiCalls.map(c => c.body.response)}));
+    """)
+    assert result["afterFailedPick"] == {"value": "", "pressed": ["dev"]}
+    assert result["sent"] == ["dev", "dev"], "the retry resends the pick on screen, not the stale typed text"
+
+
+def test_late_completion_of_a_replaced_prompt_leaves_the_new_submission_alone():
+    """Codex round 5 P2: A's response settles after queued prompt B replaced it
+    and was submitted; A's completion must not re-enable B mid-flight."""
+    result = run_clarify_harness("""
+    const msg = $('msg');
+    let resolveA;
+    apiImpl = () => new Promise(r => { resolveA = r; });
+    showClarifyCard({question: 'A?', clarify_id: 'a'});
+    msg.value = 'answer a';
+    const pA = respondClarify();
+    // Queue head replaced by B while A is in flight; the user answers B.
+    showClarifyCard({question: 'B?', clarify_id: 'b'});
+    msg.value = 'answer b';
+    let resolveB;
+    apiImpl = () => new Promise(r => { resolveB = r; });
+    const pB = respondClarify();
+    const bInFlight = _clarifySubmitting;
+    resolveA({ok: true});
+    await pA;
+    const afterA = {submitting: _clarifySubmitting, action: (updateSendBtn(), $('btnSend').dataset.action), card: $('clarifyCard').classList.contains('visible')};
+    await respondClarify();
+    const doubleSubmit = apiCalls.length;
+    resolveB({ok: true});
+    await pB;
+    console.log(JSON.stringify({bInFlight, afterA, doubleSubmit, calls: apiCalls.map(c => c.body.clarify_id), restored: msg.value}));
+    """)
+    assert result["bInFlight"] is True
+    assert result["afterA"] == {"submitting": True, "action": "disabled", "card": True}
+    assert result["doubleSubmit"] == 2, "B could not be submitted a second time while its request was in flight"
+    assert result["calls"] == ["a", "b"]
+
+
+def test_message_only_insertions_go_to_the_parked_draft_while_locked():
+    """Codex round 5 P2: Refine, saved prompts and the compress action write
+    into #msg programmatically; those are message text, never the answer."""
+    append = block(MESSAGES_JS, "function _appendComposerText(text){", "function insertSavedPromptIntoComposer(text){")
+    result = run_clarify_harness(append + """
+    const msg = $('msg');
+    msg.value = 'ordinary draft';
+    showClarifyCard({question: 'Which branch?', clarify_id: 'c1'});
+    msg.value = 'my answer';
+    _appendComposerText('> quoted text\\n\\nRefine instruction: ');
+    const during = {value: msg.value, parked: clarifyComposerDraft()};
+    hideClarifyCard(true, 'cancelled');
+    console.log(JSON.stringify({during, restored: msg.value}));
+    """)
+    assert result["during"] == {"value": "my answer", "parked": "ordinary draft\n\n> quoted text\n\nRefine instruction: "}
+    assert result["restored"] == "ordinary draft\n\n> quoted text\n\nRefine instruction: "
+    compress = block(UI_JS, "btn.onclick=function(e){\n      if(e)e.stopPropagation();\n      const ta=$('msg');", "ta.value='/compress ';")
+    assert "isClarifyComposerActive()) return;" in compress
+
+
 def test_expiry_rescues_pressed_multi_select_picks_on_the_open_question():
     """Codex P2: picks that were pressed but not yet advanced are on screen and
     must be rescued like typed text."""
