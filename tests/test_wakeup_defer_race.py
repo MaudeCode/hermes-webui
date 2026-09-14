@@ -62,6 +62,7 @@ class _FakeProcessRegistry:
     def __init__(self):
         self._lock = threading.Lock()
         self._completion_consumed: set[str] = set()
+        self._poll_observed: set[str] = set()
         self.completion_queue: queue.Queue = queue.Queue()
         self._procs: dict[str, types.SimpleNamespace] = {}
 
@@ -293,10 +294,12 @@ def test_next_user_turn_drain_and_teardown_hook_dont_double_fire(monkeypatch):
             cfg.ACTIVE_RUNS[stream_id] = {"session_id": sid}
 
         bp._process_one(_completion_evt("proc-shared-1", sid))
-        # Shared dedupe contract: _process_one marked it seen + registry-
-        # consumed before deferring.
+        # Shared dedupe contract: _process_one marked it seen before deferring.
+        # HWEB-96: the registry marker is left to the AGENT while the turn is
+        # active (its wait/log is the only "already incorporated" signal); the
+        # next-turn drain is kept out via the SEEN set instead.
         assert "proc-shared-1" in cfg.BG_TASK_COMPLETE_EVENTS_SEEN[sid]
-        assert fake.is_completion_consumed("proc-shared-1")
+        assert not fake.is_completion_consumed("proc-shared-1")
         assert sid in cfg.DEFERRED_PROCESS_WAKEUPS
 
         # A user turn comes: the next-turn drain runs. Even if a duplicate
@@ -317,6 +320,8 @@ def test_next_user_turn_drain_and_teardown_hook_dont_double_fire(monkeypatch):
             "deferred wakeup delivered more than once across next-turn drain "
             "+ teardown hook"
         )
+        # Delivery stamps the shared marker (the agent now owns the result).
+        assert _wait_for(lambda: fake.is_completion_consumed("proc-shared-1"))
     finally:
         with cfg.ACTIVE_RUNS_LOCK:
             cfg.ACTIVE_RUNS.pop(stream_id, None)
@@ -561,13 +566,12 @@ def test_paused_process_wakeup_409_does_not_requeue(monkeypatch):
 # --------------------------------------------------------------------------
 
 
-def test_multiple_deferred_wakeups_each_survive_across_teardowns(monkeypatch):
-    """N>=2 bg tasks complete during one active turn → all deferred. A single
-    teardown drain must NOT fire N racing daemon threads (only one wins the
-    agent lock; the losers 409 and, since the entries were already popped,
-    their prompts would be lost forever). The fix starts exactly one wakeup
-    and re-defers the remainder, so each subsequent teardown delivers the
-    next — every prompt is eventually delivered exactly once.
+def test_multiple_deferred_wakeups_batch_into_one_turn(monkeypatch):
+    """N>=2 bg tasks complete during one active turn → all deferred. HWEB-96:
+    a single teardown drain delivers them as ONE batched wakeup turn (one
+    consolidated reply, one completion notification) instead of one turn per
+    teardown — the per-turn chain is what buried a final summary under six
+    "already incorporated" replies. Every prompt is delivered exactly once.
     """
     from api import background_process as bp, config as cfg
 
@@ -582,40 +586,201 @@ def test_multiple_deferred_wakeups_each_survive_across_teardowns(monkeypatch):
     stream_id = "stream-multi-defer"
     bp.register_process_session(sid, sid)
     try:
-        # A turn is active; three fast bg tasks all complete inside it → defer.
         with cfg.ACTIVE_RUNS_LOCK:
             cfg.ACTIVE_RUNS[stream_id] = {"session_id": sid}
         for pid in ("proc-A", "proc-B", "proc-C"):
             bp._process_one(_completion_evt(pid, sid))
         assert len(cfg.DEFERRED_PROCESS_WAKEUPS.get(sid, [])) == 3
 
-        # Turn teardown → idle. Drain reports exactly ONE wakeup started, and
-        # the other two are re-deferred (not popped-and-lost).
         cfg.unregister_active_run(stream_id)
         assert bp._session_has_active_turn(sid) is False
         assert bp.drain_deferred_wakeups_for_session(sid) == 1
         assert _wait_for_wakeup(holder)
         assert len(holder["calls"]) == 1
-        assert len(cfg.DEFERRED_PROCESS_WAKEUPS.get(sid, [])) == 2
-
-        # Second teardown delivers the next, third delivers the last.
-        holder["event"].clear()
-        assert bp.drain_deferred_wakeups_for_session(sid) == 1
-        assert _wait_for_wakeup(holder)
-        assert len(holder["calls"]) == 2
-        assert len(cfg.DEFERRED_PROCESS_WAKEUPS.get(sid, [])) == 1
-
-        holder["event"].clear()
-        assert bp.drain_deferred_wakeups_for_session(sid) == 1
-        assert _wait_for_wakeup(holder)
-        assert len(holder["calls"]) == 3
-        assert sid not in cfg.DEFERRED_PROCESS_WAKEUPS
-
-        # All three distinct prompts delivered exactly once, no duplicates.
-        delivered = {c["message"] for c in holder["calls"]}
-        assert len(delivered) == 3
+        message = holder["calls"][0]["message"]
+        assert message.startswith("[IMPORTANT: 3 background process notifications")
+        for pid in ("proc-A", "proc-B", "proc-C"):
+            assert message.count(f"Background process {pid} completed") == 1
+        # Nothing re-deferred: the batch owns every entry.
+        assert _wait_for(lambda: sid not in cfg.DEFERRED_PROCESS_WAKEUPS)
+        assert _wait_for(
+            lambda: all(fake.is_completion_consumed(p) for p in ("proc-A", "proc-B", "proc-C"))
+        )
         # Nothing left → a final drain is a no-op (no wakeup loop).
         assert bp.drain_deferred_wakeups_for_session(sid) == 0
+        assert len(holder["calls"]) == 1
+    finally:
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS.pop(stream_id, None)
+        bp.unregister_process_session(sid)
+        _reset_cfg_state()
+
+
+def test_batched_wakeup_409_redefers_every_entry(monkeypatch):
+    """A batched teardown wakeup that loses the per-session lock race must
+    re-defer each ORIGINAL entry (not the joined text) so the next teardown
+    re-batches all of them; no prompt is lost and none is duplicated."""
+    from api import background_process as bp, config as cfg
+
+    fake = _FakeProcessRegistry()
+    for pid in ("proc-b409-1", "proc-b409-2"):
+        fake.register(pid, "sess-b409")
+    _install_fake_registry(monkeypatch, fake)
+    _reset_cfg_state()
+    holder = _install_fake_start_session_turn(monkeypatch, status=409)
+
+    sid = "sess-b409"
+    stream_id = "stream-b409"
+    bp.register_process_session(sid, sid)
+    try:
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS[stream_id] = {"session_id": sid}
+        for pid in ("proc-b409-1", "proc-b409-2"):
+            bp._process_one(_completion_evt(pid, sid))
+        cfg.unregister_active_run(stream_id)
+        assert bp.drain_deferred_wakeups_for_session(sid) == 1
+        assert _wait_for_wakeup(holder)
+        assert _wait_for(
+            lambda: len(cfg.DEFERRED_PROCESS_WAKEUPS.get(sid) or []) == 2
+        )
+        requeued = sorted(e["process_id"] for e in cfg.DEFERRED_PROCESS_WAKEUPS[sid])
+        assert requeued == ["proc-b409-1", "proc-b409-2"]
+        # A 409 is not a delivery: the agent never saw these.
+        assert not fake.is_completion_consumed("proc-b409-1")
+    finally:
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS.pop(stream_id, None)
+        bp.unregister_process_session(sid)
+        _reset_cfg_state()
+
+
+# --------------------------------------------------------------------------
+# HWEB-96 — results the agent already consumed in its own turn must NOT come
+# back as a synthetic wakeup after the final summary.
+# --------------------------------------------------------------------------
+
+
+def test_hweb96_consumed_deferred_wakeups_are_dropped_not_replayed(monkeypatch):
+    """Replay of the incident: four background commands exit while the turn
+    is active (drain thread defers them), the agent then ``wait``s on each
+    (registry marks them consumed) and writes its final summary. Teardown must
+    start ZERO wakeup turns, leave nothing deferred, and a duplicate enqueue
+    seen by the next user turn's drain must stay silent too.
+    """
+    from api import background_process as bp, config as cfg
+    from api import streaming as st
+
+    fake = _FakeProcessRegistry()
+    pids = ["proc-done-1", "proc-done-2", "proc-done-3", "proc-done-4"]
+    for pid in pids:
+        fake.register(pid, "sess-hweb96")
+    _install_fake_registry(monkeypatch, fake)
+    _reset_cfg_state()
+    holder = _install_fake_start_session_turn(monkeypatch)
+
+    sid = "sess-hweb96"
+    stream_id = "stream-hweb96"
+    bp.register_process_session(sid, sid)
+    try:
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS[stream_id] = {"session_id": sid}
+        for pid in pids:
+            bp._process_one(_completion_evt(pid, sid))
+        assert len(cfg.DEFERRED_PROCESS_WAKEUPS[sid]) == 4
+        # The agent's process(wait)/read_log during the same turn.
+        with fake._lock:
+            fake._completion_consumed.update(pids)
+
+        cfg.unregister_active_run(stream_id)
+        assert bp.drain_deferred_wakeups_for_session(sid) == 0
+        assert holder["event"].wait(timeout=0.5) is False
+        assert holder["calls"] == []
+        assert sid not in cfg.DEFERRED_PROCESS_WAKEUPS
+        assert sid not in cfg.PENDING_BG_TASK_COMPLETIONS
+
+        # Event duplication + next user turn: silent.
+        for pid in pids:
+            fake.completion_queue.put(_completion_evt(pid, sid))
+        assert st._drain_webui_process_notifications(sid) == []
+        assert bp.drain_deferred_wakeups_for_session(sid) == 0
+        assert holder["calls"] == []
+    finally:
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS.pop(stream_id, None)
+        bp.unregister_process_session(sid)
+        _reset_cfg_state()
+
+
+def test_hweb96_awaited_result_still_wakes_without_consumed_siblings(monkeypatch):
+    """Two results the agent already read plus one it is genuinely waiting on:
+    exactly one wakeup turn, carrying ONLY the awaited prompt (no batch header,
+    no already-handled siblings)."""
+    from api import background_process as bp, config as cfg
+
+    fake = _FakeProcessRegistry()
+    for pid in ("proc-read-1", "proc-read-2", "proc-await"):
+        fake.register(pid, "sess-mixed")
+    _install_fake_registry(monkeypatch, fake)
+    _reset_cfg_state()
+    holder = _install_fake_start_session_turn(monkeypatch)
+
+    sid = "sess-mixed"
+    stream_id = "stream-mixed"
+    bp.register_process_session(sid, sid)
+    try:
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS[stream_id] = {"session_id": sid}
+        for pid in ("proc-read-1", "proc-read-2", "proc-await"):
+            bp._process_one(_completion_evt(pid, sid))
+        with fake._lock:
+            fake._completion_consumed.add("proc-read-1")
+        fake._poll_observed.add("proc-read-2")  # poll() saw the exit inline
+
+        cfg.unregister_active_run(stream_id)
+        assert bp.drain_deferred_wakeups_for_session(sid) == 1
+        assert _wait_for_wakeup(holder)
+        assert len(holder["calls"]) == 1
+        message = holder["calls"][0]["message"]
+        assert message.startswith("[IMPORTANT: Background process proc-await completed")
+        assert "proc-read-1" not in message
+        assert "proc-read-2" not in message
+        assert _wait_for(lambda: fake.is_completion_consumed("proc-await"))
+        assert fake.is_completion_consumed("proc-read-2")
+        assert sid not in cfg.DEFERRED_PROCESS_WAKEUPS
+    finally:
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS.pop(stream_id, None)
+        bp.unregister_process_session(sid)
+        _reset_cfg_state()
+
+
+def test_hweb96_next_turn_drain_skips_deferred_completion_owned_by_teardown(monkeypatch):
+    """A duplicate enqueue of a deferred (not yet delivered) completion must
+    not be prepended to an unrelated user turn; the originating request's
+    teardown owns it."""
+    from api import background_process as bp, config as cfg
+    from api import streaming as st
+
+    fake = _FakeProcessRegistry()
+    fake.register("proc-owned", "sess-owned")
+    _install_fake_registry(monkeypatch, fake)
+    _reset_cfg_state()
+    _install_fake_start_session_turn(monkeypatch)
+
+    sid = "sess-owned"
+    stream_id = "stream-owned"
+    bp.register_process_session(sid, sid)
+    try:
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS[stream_id] = {"session_id": sid}
+        bp._process_one(_completion_evt("proc-owned", sid))
+        assert not fake.is_completion_consumed("proc-owned")
+        fake.completion_queue.put(_completion_evt("proc-owned", sid))
+        assert st._drain_webui_process_notifications(sid) == []
+        # Another session's drain is unaffected (cross-session isolation).
+        fake.completion_queue.put(_completion_evt("proc-owned", sid))
+        assert st._drain_webui_process_notifications("sess-other") == []
+        assert fake.completion_queue.qsize() == 1  # requeued for its owner
     finally:
         with cfg.ACTIVE_RUNS_LOCK:
             cfg.ACTIVE_RUNS.pop(stream_id, None)

@@ -3286,6 +3286,16 @@ def _format_process_notification(evt: dict) -> str:
     )
 
 
+def _bg_task_completion_seen(session_id: str, process_id: str) -> bool:
+    try:
+        from api.background_process import is_bg_task_completion_seen
+
+        return is_bg_task_completion_seen(session_id, process_id)
+    except Exception:
+        logger.debug("bg-task seen lookup failed", exc_info=True)
+        return False
+
+
 def _mark_process_completion_consumed(process_registry, process_id: str) -> None:
     """Best-effort bridge to the agent registry's private completion marker."""
     try:
@@ -3365,6 +3375,11 @@ def _drain_webui_process_notifications(
                 not is_async_delegation
                 and process_registry.is_completion_consumed(evt_sid)
             ):
+                continue
+            # HWEB-96: a completion the background drain already routed (and
+            # deferred to the owning request's turn-teardown) must not ALSO be
+            # prepended to an unrelated later user turn.
+            if not is_async_delegation and _bg_task_completion_seen(session_id, evt_sid):
                 continue
             evt_session_key = str(evt.get('session_key') or '') if isinstance(evt, dict) else ''
             evt_origin_ui_session_id = (
