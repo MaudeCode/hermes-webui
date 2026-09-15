@@ -21,8 +21,16 @@ function hermesTheme(): Plugin {
 // (workbox injectManifest) after the app build, because the Start builder does
 // not run vite-plugin-pwa's closeBundle for the client environment. Relative base keeps hashed asset URLs valid
 // under any subpath mount; the shell's <base href> is filled per request.
+// `HERMES_WEBUI_DEV_PROXY=http://host:port npm run dev` serves the app from source with HMR and forwards
+// `api/` and `static/` (at any mount depth) to a running Python server, which keeps state and auth.
+const devProxy = process.env.HERMES_WEBUI_DEV_PROXY
+const PROXIED = /^(?:\/[^/]+)*?(?=\/(?:api|static)(?:\/|$))/
+
 export default defineConfig({
   base: './',
+  ...(devProxy
+    ? { server: { host: true, proxy: { '^(?!/(?:src|@|node_modules)/)(?:/[^/]+)*/(?:api|static)(?:/|$)': { target: devProxy, changeOrigin: true, rewrite: (path: string) => path.replace(PROXIED, '') } } } }
+    : {}),
   resolve: { alias: { '~': new URL('./src', import.meta.url).pathname } },
   plugins: [
     paraglideVitePlugin({

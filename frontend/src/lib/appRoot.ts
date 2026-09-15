@@ -14,6 +14,8 @@ export function freezeAppRoot(): URL {
   root.hash = ''
   if (!root.pathname.endsWith('/')) root.pathname = root.pathname.replace(/[^/]*$/, '')
   const base = document.querySelector('base')
+  // The Vite dev server renders no <base>; there the app is mounted at the origin root.
+  if (!base && import.meta.env.DEV) root.pathname = '/'
   if (base) base.href = root.href
   frozen = root
   return root

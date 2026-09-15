@@ -90,6 +90,14 @@ owner's scope amendment).
   do not move it, exposes it as `appRoot`, and gives TanStack Router
   `basepath = appRoot.pathname`. All API and asset URLs derive from `appRoot`.
 
+### Development server
+
+`HERMES_WEBUI_DEV_PROXY=http://127.0.0.1:8797 npm run dev -- --host 0.0.0.0 --port 8798` (from `frontend/`) serves
+the app from source with hot module replacement. The Vite dev server forwards `api/` and `static/` requests at any
+mount depth to the Python server named in the variable, which keeps state, sessions and auth; everything else is
+served by Vite. The dev document has no Python-injected `<base>`, so `freezeAppRoot` treats the origin root as the
+mount in development (`import.meta.env.DEV`). Without the variable, `npm run dev` runs the bare Start dev server.
+
 ## 4. Routing contract
 
 TanStack Router owns canonical URLs, path and search parsing, navigation,
