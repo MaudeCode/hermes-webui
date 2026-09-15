@@ -23,7 +23,7 @@ export function ProfileMenu({ row }: { row?: boolean } = {}) {
           <span className="composer-mobile-config-copy"><span className="composer-mobile-config-kicker">{m.composer_control_profile()}</span><span className="composer-mobile-config-value">{active}</span></span>
         </button>
       ) : (
-        <button type="button" className="inline-flex h-7 shrink-0 items-center gap-1 whitespace-nowrap rounded-md border border-border2 bg-transparent px-2 text-[11px] font-medium text-muted hover:bg-hover" aria-label={m.profile_switch_title()}>
+        <button type="button" className="composer-chip inline-flex h-7 shrink-0 items-center gap-1 whitespace-nowrap rounded-md border border-border2 bg-transparent px-2 text-[11px] font-medium text-muted hover:bg-hover" aria-label={m.profile_switch_title()}>
           <UserRound size={14} aria-hidden="true" />
           <span>{active}</span>
           <ChevronDown size={8} aria-hidden="true" />

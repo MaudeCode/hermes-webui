@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Mic, Paperclip, Square, ArrowUp, TerminalSquare, SlidersHorizontal } from 'lucide-react'
 import { m } from '../../paraglide/messages.js'
@@ -76,6 +76,37 @@ export function Composer(props: ComposerProps) {
   const [dragOver, setDragOver] = useState(false)
   const [configOpen, setConfigOpen] = useState(false)
   const [focusWithin, setFocusWithin] = useState(false)
+  const [stage, setStage] = useState<'full' | 'icons' | 'burger'>('full')
+  const footer = useRef<HTMLDivElement>(null)
+  // Fit pass (legacy _fitComposerFooter): try full labels, then icon-only chips, then move the chips into the panel.
+  const fitFooter = useCallback(() => {
+    const f = footer.current
+    const left = f?.querySelector<HTMLElement>('.composer-left')
+    if (!f || !left?.clientWidth) return
+    // Sum the in-flow children: scrollWidth also counts tooltip pseudo-elements that hang off the buttons.
+    const overflows = () => {
+      const kids = Array.from(left.children).filter((e) => getComputedStyle(e).position !== 'absolute')
+      const gap = parseFloat(getComputedStyle(left).columnGap) || 0
+      const need = kids.reduce((sum, e) => sum + e.getBoundingClientRect().width, 0) + gap * Math.max(0, kids.length - 1)
+      return need > left.clientWidth + 1
+    }
+    f.classList.remove('cf-icons', 'cf-burger')
+    let next: 'full' | 'icons' | 'burger' = 'full'
+    if (window.matchMedia(PHONE).matches) next = 'burger'
+    else if (overflows()) { f.classList.add('cf-icons'); next = 'icons'; if (overflows()) next = 'burger' }
+    // Restore the classes here: React only re-renders when the stage actually changes.
+    f.classList.toggle('cf-icons', next !== 'full')
+    f.classList.toggle('cf-burger', next === 'burger')
+    setStage(next)
+  }, [])
+  useLayoutEffect(() => { fitFooter() })
+  useEffect(() => {
+    const f = footer.current
+    if (!f) return
+    const ro = new ResizeObserver(() => fitFooter())
+    ro.observe(f)
+    return () => ro.disconnect()
+  }, [fitFooter])
   const phone = usePhone()
   const box = useRef<HTMLDivElement>(null)
   // The overflow panel closes on any pointer-down outside the composer box.
@@ -262,7 +293,7 @@ export function Composer(props: ComposerProps) {
           role={palette.open ? 'combobox' : undefined}
           aria-expanded={palette.open ? true : undefined}
         />
-        <div className={cn('composer-footer', phone && 'cf-icons cf-burger', phone && !text && files.length === 0 && !busy && !focusWithin && !configOpen && !dragOver && 'cf-collapsed')}>
+        <div ref={footer} className={cn('composer-footer', stage !== 'full' && 'cf-icons', stage === 'burger' && 'cf-burger', phone && !text && files.length === 0 && !busy && !focusWithin && !configOpen && !dragOver && 'cf-collapsed')}>
           <div className="composer-left flex items-center gap-1 min-w-0 flex-1 overflow-x-auto overflow-y-hidden [scrollbar-width:none] max-[641px]:flex-[1_1_auto] max-[641px]:w-auto max-[641px]:flex-nowrap max-[641px]:items-center max-[641px]:gap-x-2.5 max-[641px]:gap-y-0 max-[641px]:max-h-none max-[641px]:[-webkit-overflow-scrolling:touch] max-[341px]:gap-x-0.5">
             {!hide('hide_composer_attach') && (
               <>
@@ -272,6 +303,11 @@ export function Composer(props: ComposerProps) {
             )}
             {!hide('hide_composer_mic') && dictationSupported() && <button type="button" className={cn('icon-btn mic-btn has-tooltip', dictating && 'active')} id="btnMic" data-tooltip={dictating ? m.voice_dictate_active() : m.voice_dictate()} aria-label={dictating ? m.voice_dictate_active() : m.voice_dictate()} aria-pressed={dictating} onClick={toggleDictation}><Mic size={16} aria-hidden="true" /></button>}
             {yolo && !hide('hide_composer_yolo') && <button type="button" onClick={onToggleYolo} className="yolo-pill" id="yoloPill" title={m.yolo_pill_title_active()}><span className="yolo-pill-icon" aria-hidden="true">⚡</span><span className="yolo-pill-label">{m.yolo_pill_label()}</span></button>}
+            {!hide('hide_composer_profile') && <div className="composer-profile-wrap" id="profileChipWrap"><ProfileMenu /></div>}
+            {!hide('hide_composer_workspace') && <div className="composer-ws-wrap"><WorkspaceChip value={session?.workspace ?? settings?.default_workspace} onChange={onWorkspaceChange} /></div>}
+            {!hide('hide_composer_model') && <div className="composer-model-wrap"><ModelChip value={session?.model ?? null} defaultModel={settings?.default_model} onChange={onModelChange} /></div>}
+            {!hide('hide_composer_reasoning') && <div className="composer-reasoning-wrap"><ReasoningChip value={reasoning} levels={reasoningLevels} onChange={onReasoningChange} /></div>}
+            {!hide('hide_composer_toolsets') && <div className="composer-toolsets-wrap"><ToolsetsChip value={session?.enabled_toolsets ?? null} onChange={onToolsetsChange} /></div>}
             <button className="icon-btn composer-mobile-config-btn has-tooltip" id="composerMobileConfigBtn" type="button" data-tooltip={m.composer_config_title()} aria-label={m.composer_config_title()} aria-expanded={configOpen} aria-controls="composerMobileConfigPanel" onClick={() => setConfigOpen((o) => !o)}>
               <SlidersHorizontal size={16} aria-hidden="true" />
             </button>
@@ -289,13 +325,13 @@ export function Composer(props: ComposerProps) {
             )}
           </div>
           <div className={cn('composer-mobile-config-panel', configOpen && 'open')} id="composerMobileConfigPanel" role="group" aria-label={m.composer_config_title()}>
-            {!hide('hide_composer_profile') && <ProfileMenu row />}
-            {!hide('hide_composer_workspace') && <WorkspaceChip row value={session?.workspace ?? settings?.default_workspace} onChange={onWorkspaceChange} />}
-            {phone && !hide('hide_composer_model') && <ModelChip row value={session?.model ?? null} defaultModel={settings?.default_model} onChange={onModelChange} />}
-            {phone && !hide('hide_composer_reasoning') && <ReasoningChip row value={reasoning} levels={reasoningLevels} onChange={onReasoningChange} />}
+            {stage === 'burger' && !hide('hide_composer_profile') && <ProfileMenu row />}
+            {stage === 'burger' && !hide('hide_composer_workspace') && <WorkspaceChip row value={session?.workspace ?? settings?.default_workspace} onChange={onWorkspaceChange} />}
+            {stage === 'burger' && !hide('hide_composer_model') && <ModelChip row value={session?.model ?? null} defaultModel={settings?.default_model} onChange={onModelChange} />}
+            {stage === 'burger' && !hide('hide_composer_reasoning') && <ReasoningChip row value={reasoning} levels={reasoningLevels} onChange={onReasoningChange} />}
             <button type="button" className={cn('icon-btn', terminalOpen && 'active')} id="btnTerminal" title={m.composer_terminal_toggle()} aria-label={m.composer_terminal_toggle()} aria-pressed={terminalOpen} onClick={() => { setConfigOpen(false); onToggleTerminal() }}><TerminalSquare size={16} aria-hidden="true" /><span className="composer-mobile-config-value">{m.composer_terminal_toggle()}</span></button>
-            {!hide('hide_composer_toolsets') && <ToolsetsChip row value={session?.enabled_toolsets ?? null} onChange={onToolsetsChange} />}
-            {phone && !hide('hide_composer_context') && <ContextRow used={contextUsed} total={contextTotal} threshold={session?.threshold_tokens} />}
+            {stage === 'burger' && !hide('hide_composer_toolsets') && <ToolsetsChip row value={session?.enabled_toolsets ?? null} onChange={onToolsetsChange} />}
+            {stage === 'burger' && !hide('hide_composer_context') && <ContextRow used={contextUsed} total={contextTotal} threshold={session?.threshold_tokens} />}
           </div>
         </div>
       </div>

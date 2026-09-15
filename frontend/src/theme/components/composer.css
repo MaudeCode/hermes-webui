@@ -34,7 +34,6 @@
 .composer-reasoning-chip{display:inline-flex;align-items:center;gap:5px;max-width:none;padding:8px 10px;border-radius:999px;border:1px solid transparent;background-color:transparent;color:var(--muted);font-weight:500;cursor:pointer;transition:color .15s,background-color .15s,border-color .15s}
 .composer-reasoning-chip:hover{color:var(--text);background-color:var(--hover-bg)}
 .composer-reasoning-chip.active{color:var(--text);background:var(--accent-bg);border-color:var(--accent-bg)}
-.composer-toolsets-wrap{display:none}
 .composer-toolsets-chip{display:inline-flex;align-items:center;gap:8px;max-width:180px;padding:8px 10px 8px 12px;border-radius:999px;border:1px solid transparent;background-color:transparent;color:var(--muted);font-weight:500;cursor:pointer;transition:color .15s,background-color .15s,border-color .15s}
 .composer-toolsets-chip:hover{color:var(--text);background-color:var(--hover-bg)}
 .composer-toolsets-chip.active{color:var(--text);background:var(--accent-bg);border-color:var(--accent-bg)}
@@ -42,7 +41,6 @@
 .composer-model-chip:hover{color:var(--chip-hover-fg);background-color:var(--chip-hover-bg);border-color:var(--chip-hover-border)}
 .composer-model-chip.active{color:var(--text);background:var(--accent-bg);border-color:var(--accent-bg)}
 .composer-mobile-config-btn.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--text);opacity:1}
-.composer-left > #profileChipWrap,.composer-left > .composer-ws-wrap,.composer-left > .composer-toolsets-wrap{display:none !important}
 .composer-mobile-config-panel{display:none;position:absolute;left:8px;right:auto;width:min(360px,calc(100% - 16px));bottom:calc(100% + 6px);z-index:180;padding:8px;gap:8px;align-items:stretch;justify-content:flex-start;flex-wrap:wrap;background:var(--surface);border:1px solid var(--border2);border-radius:12px;box-shadow:0 -6px 28px rgba(0,0,0,.35);overflow:visible}
 .composer-mobile-config-panel.open{display:flex}
 .composer-mobile-config-panel .icon-btn{box-sizing:border-box;flex:1 1 100%;justify-content:flex-start;text-align:left;gap:10px;width:auto;height:auto;min-width:0;min-height:44px;padding:8px 10px;background:var(--input-bg);border:1px solid var(--border);border-radius:10px;opacity:1}
@@ -78,12 +76,11 @@
 .composer-footer.cf-burger .composer-workspace-group{box-sizing:border-box;flex:0 0 44px;width:44px;min-width:44px;max-width:44px;min-height:44px;overflow:hidden;border:none;background:transparent;border-radius:8px}
 .composer-footer.cf-burger .composer-workspace-files-btn{box-sizing:border-box;width:44px;min-width:44px;max-width:44px;padding:0;border-radius:8px}
 .composer-footer.cf-burger .composer-workspace-chip{display:none !important}
-.composer-footer.cf-burger .composer-left > .composer-model-wrap,.composer-footer.cf-burger .composer-left > .composer-reasoning-wrap,.composer-footer.cf-burger .composer-left > .composer-toolsets-wrap{display:none !important}
+.composer-footer.cf-burger .composer-left > .composer-profile-wrap,.composer-footer.cf-burger .composer-left > .composer-ws-wrap,.composer-footer.cf-burger .composer-left > .composer-model-wrap,.composer-footer.cf-burger .composer-left > .composer-reasoning-wrap,.composer-footer.cf-burger .composer-left > .composer-toolsets-wrap{display:none !important}
 .composer-footer.cf-burger .composer-mobile-config-btn{box-sizing:border-box;position:relative;display:inline-flex !important;width:44px;height:44px;min-width:44px;min-height:44px;flex-shrink:0}
 .composer-footer.cf-burger .composer-mobile-config-panel.open{display:flex}
 .composer-footer.cf-burger .composer-mobile-config-panel .icon-btn{flex:0 0 44px;width:44px;justify-content:center;padding:0}
 .composer-footer.cf-burger .ctx-indicator-wrap{display:none !important}
-@container composer-footer (min-width: 1100px){.composer-toolsets-wrap{display:block}}
 @media (max-width:640px){.composer-wrap{padding:8px 10px calc(12px + var(--keyboard-bottom-inset, 0px)) !important;padding-left:max(10px,env(safe-area-inset-left,0)) !important;padding-right:max(10px,env(safe-area-inset-right,0)) !important;border-top:var(--composer-wrap-border-top);backdrop-filter:var(--chrome-backdrop)}}
 @media (max-width:640px){.composer-box textarea{min-height:40px}}
 @media (max-width:640px){.composer-footer{padding:6px 8px 8px !important;gap:6px;flex-wrap:nowrap;align-items:center}}
@@ -93,7 +90,6 @@
 @media (max-width:640px){.composer-workspace-group{box-sizing:border-box;flex:0 0 44px;width:44px;min-width:44px;max-width:44px;min-height:44px;overflow:hidden;border:none;background:transparent;border-radius:8px}}
 @media (max-width:640px){.composer-workspace-files-btn{box-sizing:border-box;width:44px;min-width:44px;max-width:44px;padding:0;border-radius:8px}}
 @media (max-width:640px){.composer-workspace-chip{display:none !important}}
-@media (max-width:640px){.composer-left > .composer-model-wrap,.composer-left > .composer-reasoning-wrap,.composer-left > .composer-toolsets-wrap{display:none !important}}
 @media (max-width:640px){.composer-mobile-config-btn{box-sizing:border-box;position:relative;display:inline-flex !important;width:44px;height:44px;min-width:44px;min-height:44px;flex-shrink:0}}
 @media (max-width:640px){.composer-mobile-config-panel{right:8px;width:auto}}
 @media (max-width:640px){.composer-mobile-config-panel.open{display:flex}}
@@ -138,9 +134,7 @@
 .composer-model-chip:hover,.composer-reasoning-chip:hover{background:var(--chip-hover-bg);border-color:var(--chip-hover-border)}
 .send-btn{width:30px;height:30px;border-radius:7px;font-weight:var(--send-weight)}
 @media (max-width:768px){.send-btn{width:44px;height:44px;font-weight:var(--send-weight)}}
-@media (min-width:769px){.composer-model-wrap,.composer-reasoning-wrap,.composer-divider{position:absolute;width:1px;height:1px;visibility:hidden;pointer-events:none;left:12px;bottom:44px}}
 #ctxIndicatorWrap[style*="display:none"],#ctxIndicatorWrap[style*="display: none"]{display:flex !important;visibility:hidden}
-@media (max-width:640px){#btnMic,.composer-reasoning-wrap{display:none !important}}
 .composer-mobile-config-action{box-sizing:border-box;display:inline-flex;align-items:center;gap:10px;flex:1 1 100%;min-width:0;min-height:44px;padding:8px 10px;border-radius:10px;border:1px solid var(--border);background:var(--input-bg);color:var(--muted);font:inherit;text-align:left;cursor:pointer;overflow:hidden}
 .composer-mobile-config-action:hover{background:var(--hover-bg);color:var(--text)}
 .composer-mobile-config-action.active,.composer-mobile-config-action[data-popup-open]{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--text)}
@@ -157,4 +151,9 @@
 .composer-footer.cf-burger .composer-mobile-config-panel .icon-btn .composer-mobile-config-value{display:none}
 .composer-footer.cf-burger .composer-mobile-config-action:not(.composer-mobile-context-action) .composer-mobile-config-kicker{display:none}
 .composer-footer.cf-burger .composer-mobile-context-action{flex:1 0 100%}
+/* Fit stages (legacy _fitComposerFooter): full labels → cf-icons (icon-only chips) → cf-burger (chips move into the panel). */
+.composer-footer.cf-icons .composer-chip > span,.composer-footer.cf-icons .composer-chip > svg:last-child{display:none}
+.composer-footer.cf-icons .composer-chip{width:32px;padding:0;justify-content:center;gap:0}
+@media (max-width:640px){#btnMic{display:none !important}}
+.composer-mobile-config-btn[aria-expanded="true"]::before,.composer-mobile-config-btn[aria-expanded="true"]::after{display:none}
 }
