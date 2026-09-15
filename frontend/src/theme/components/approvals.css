@@ -64,4 +64,5 @@
 @media (max-width: 640px){@supports (height:100dvh){.clarify-card,.clarify-card .clarify-inner{max-height:clamp(180px,min(62dvh,calc(100dvh - 180px)),360px)}}}
 @media (max-width: 640px){.clarify-inner{padding:12px 12px 36px;min-width:min(100%,280px)}}
 .approval-btn:focus{outline:2px solid var(--blue);outline-offset:2px}
+.approval-card,.clarify-card{bottom:8px}
 }

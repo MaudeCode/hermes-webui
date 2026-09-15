@@ -44,7 +44,7 @@ export function ClarifyCard({ sessionId, pending, onResolved }: { sessionId: str
   }
   const choices = (pending.choices ?? []).map(choiceText).filter(Boolean)
   return (
-    <div className="clarify-card mx-auto mb-2 w-full max-w-[var(--msg-max)] rounded-xl border border-info bg-surface shadow-md" role="dialog" aria-labelledby="clarifyHeading" aria-describedby="clarifyQuestion" id="clarifyCard">
+    <div className={cn('visible', collapsed && 'collapsed', "clarify-card mx-auto mb-2 w-full max-w-[var(--msg-max)] rounded-xl border border-info bg-surface shadow-md")} role="dialog" aria-labelledby="clarifyHeading" aria-describedby="clarifyQuestion" id="clarifyCard">
       <div className="clarify-inner p-3">
         <div className="clarify-header flex items-center gap-2 text-sm font-semibold text-text">
           <HelpCircle size={14} className="text-info" aria-hidden="true" />

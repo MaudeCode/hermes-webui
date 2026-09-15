@@ -60,3 +60,19 @@ export function openSessionListStream(cb: { onEvent: (event: SessionListEvent) =
 export const SSE_CONNECTING = 0
 export const SSE_OPEN = 1
 export const SSE_CLOSED = 2
+
+export interface TerminalStreamCallbacks {
+  onOutput: (text: string) => void
+  onClosed: () => void
+  onError: (message: string | null) => void
+}
+
+/** Workspace terminal output: `output` frames carry `{text}`, `terminal_closed` / `terminal_error` end the stream. */
+export function openTerminalStream(sessionId: string, cb: TerminalStreamCallbacks): SseHandle {
+  const source = new EventSource(resolveApiUrl(`api/terminal/output?session_id=${encodeURIComponent(sessionId)}`).href, { withCredentials: true })
+  const data = (ev: Event): Record<string, unknown> => { try { return JSON.parse((ev as MessageEvent<string>).data) as Record<string, unknown> } catch { return {} } }
+  source.addEventListener('output', (ev) => { const text = data(ev).text; if (typeof text === 'string' && text) cb.onOutput(text) })
+  source.addEventListener('terminal_closed', () => { source.close(); cb.onClosed() })
+  source.addEventListener('terminal_error', (ev) => { const err = data(ev).error; source.close(); cb.onError(typeof err === 'string' ? err : null) })
+  return { close: () => source.close(), readyState: () => source.readyState }
+}

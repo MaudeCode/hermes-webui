@@ -45,7 +45,7 @@ export function ApprovalCard({ sessionId, pending, onResolved }: { sessionId: st
   if (dismissed) return null
   const command = pending.command ?? pending.action ?? ''
   return (
-    <div className="approval-card mx-auto mb-2 w-full max-w-[var(--msg-max)] rounded-xl border border-warning bg-surface shadow-md" role="alertdialog" aria-labelledby="approvalHeading" aria-describedby="approvalDesc" id="approvalCard">
+    <div className={cn('visible', collapsed && 'collapsed', "approval-card mx-auto mb-2 w-full max-w-[var(--msg-max)] rounded-xl border border-warning bg-surface shadow-md")} role="alertdialog" aria-labelledby="approvalHeading" aria-describedby="approvalDesc" id="approvalCard">
       <div className="approval-inner p-3">
         <div className="approval-header flex items-center gap-2 text-sm font-semibold text-text">
           <AlertTriangle size={14} className="text-warning" aria-hidden="true" />
