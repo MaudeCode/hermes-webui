@@ -189,10 +189,6 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         run: npm run build:fast
 
-      - name: Committed static/dist matches the clean build
-        if: needs.changes.outputs.docs_only != 'true'
-        run: npm run check-dist
-
       - name: Install Playwright Chromium
         if: needs.changes.outputs.docs_only != 'true'
         run: npx playwright install --with-deps chromium

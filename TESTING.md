@@ -41,7 +41,7 @@ npm run typecheck         # tsc --noEmit, strict + exactOptionalPropertyTypes
 npm run lint              # ESLint: typescript-eslint strict, React hooks/compiler, contract rules
 npm test                  # Vitest: contracts (live fixtures), stream reducer, client, host protocol, components
 npm run build             # gate + compile + deterministic build + service worker
-npm run check-dist        # committed static/dist matches the clean build byte for byte
+npm run check-dist        # optional: committed static/dist matches a clean build byte for byte
 npm run e2e               # Playwright against server.py (desktop 1280x800 + mobile 390x844, screenshot baselines)
 ```
 

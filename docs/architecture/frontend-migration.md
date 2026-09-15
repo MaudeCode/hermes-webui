@@ -14,9 +14,10 @@ for the frontend half of the system; the Python half is unchanged in ownership.
   strict TypeScript, TanStack Start in SPA mode, TanStack Router, TanStack
   Query, TanStack Form, TanStack Virtual, Zod 4, Base UI, Tailwind CSS,
   Paraglide JS, Streamdown, `vite-plugin-pwa`.
-- TanStack Start server functions and server routes are not used. The Start
-  plugin runs in SPA mode only to produce the prerendered shell and the client
-  bundle. No Node process runs in production.
+- The Start plugin runs in SPA mode to produce the prerendered shell and the
+  client bundle. No Node process runs in production, so server functions and
+  server routes are not used today; the ticket owner lifted the ban on them, so
+  a future Node runtime may adopt them.
 - Same-origin REST and SSE contracts are preserved. Zod schemas under
   `frontend/src/contracts/` describe them so a future TypeScript handler can
   implement an endpoint without changing React callers.
@@ -57,9 +58,10 @@ static/brand/                   brand artwork (SVG/PNG favicons, apple touch ico
 ```
 
 `static/dist/` is generated. It is committed so `git clone && python3 bootstrap.py`,
-`pip install`, and the container image work without Node. CI runs a clean
-`npm ci && npm run build` and fails when the committed output differs
-(`frontend/scripts/check-dist.mjs`).
+`pip install`, and the container image work without Node. CI rebuilds from a
+clean `npm ci`; `frontend/scripts/check-dist.mjs` verifies the committed output
+against a clean build on demand (the CI diff gate was removed by the ticket
+owner's scope amendment).
 
 ## 3. Build and serving
 
@@ -257,8 +259,17 @@ through the Python-owned consented proxy. Legacy injection and globals are gone.
   actions.
 - Dependencies are pinned by `frontend/package-lock.json`. Update and audit
   with `npm --prefix frontend outdated`, `npm --prefix frontend audit`, then
-  `npm --prefix frontend update <pkg>` followed by `npm run build` and the
-  `check-dist` gate.
+  `npm --prefix frontend update <pkg>` followed by `npm run build` and,
+  optionally, `npm run check-dist`.
+
+## 13a. Scope amendments
+
+Recorded on the ticket on 2026-09-15 by the ticket owner. Removed restrictions:
+no global state library; TanStack Virtual only where already required; no Start
+server functions or routes; the CI committed-output diff gate; the legacy theme
+and skin custom properties as the authoritative design tokens. The legacy
+stylesheet remains the visual parity baseline until the chrome is restyled with
+Tailwind against the screenshot baselines.
 
 ## 14. Testing
 

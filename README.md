@@ -687,7 +687,7 @@ static/brand/     Icons
 ```
 
 Build and verify the frontend with `npm ci && npm run build` in `frontend/`
-(CI rebuilds from the lockfile and fails if `static/dist` differs). See
+(`npm run check-dist` diffs the committed output against a clean build when you want to verify it). See
 [`docs/architecture/frontend-migration.md`](docs/architecture/frontend-migration.md).
 
 **Tests + packaging**

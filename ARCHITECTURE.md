@@ -527,7 +527,7 @@ than a second WebUI implementation.
 The browser app is a TanStack Start single-page app (React 19, TypeScript
 strict) under `frontend/`. Its production build is committed under
 `static/dist` and served by the Python server; there is no Node.js at runtime,
-no server-side rendering, and no server functions. The shell (`index.html`) is
+no server-side rendering, and no Node process at runtime. The shell (`index.html`) is
 prerendered once at build time with placeholders (`__BASE_HREF__`, `__LANG__`,
 `__WEBUI_VERSION__`) that `api/spa_shell.py` substitutes per request. It
 contains no inline scripts, so the CSP `script-src` has no `'unsafe-inline'`.
@@ -600,7 +600,8 @@ it. The server refuses `/api/*` requests with `Origin: null` before auth.
 TypeScript, ESLint, the Vite/TanStack Start prerender, `finalize-dist` (strips
 inline framework scripts, makes asset URLs relative, injects the placeholders,
 copies to `static/dist`), and `build-sw` (Workbox injectManifest). CI runs
-`npm ci && npm run build:fast && npm run check-dist` and fails on any diff.
+`npm ci && npm run build:fast`; `npm run check-dist` is available to verify the
+committed output locally.
 Python serves `static/dist/index.html` for allowlisted routes with a
 depth-relative `<base href>` so subpath mounts need no configuration, hashed
 assets at `<mount>/assets/*` with immutable caching, `/sw.js` with
