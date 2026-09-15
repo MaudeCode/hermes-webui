@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowUp, Download, Eye, EyeOff, File as FileIcon, Folder, RefreshCw, X } from 'lucide-react'
 import { m } from '../../paraglide/messages.js'
@@ -10,7 +10,7 @@ import { ErrorState, LoadingState, formatBytes } from '../../ui/States'
 import { showToast } from '../toast/toast'
 import { cn } from '../../ui/cn'
 import { Markdown } from '../chat/render/Markdown'
-import { writePersisted } from '../../lib/persisted'
+import { writePersisted, readPersisted } from '../../lib/persisted'
 
 function joinPath(dir: string, name: string): string {
   return dir === '.' || dir === '' ? name : `${dir.replace(/\/$/, '')}/${name}`
@@ -28,6 +28,19 @@ export function WorkspacePanel({ workspace, sessionId, onClose }: { workspace: s
   const [showHidden, setShowHidden] = useState(false)
   const [file, setFile] = useState<string | null>(null)
   const [draft, setDraft] = useState<string | null>(null)
+  // Drag the left edge to resize (legacy initResize on #rightpanelResize: 180..1200px, persisted).
+  const panel = useRef<HTMLElement>(null)
+  const [width, setWidth] = useState(() => Number(readPersisted('hermes-webui-workspace-panel-width')) || 300)
+  const startResize = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    const startX = e.clientX
+    const startW = panel.current?.getBoundingClientRect().width ?? width
+    let next = startW
+    const move = (ev: PointerEvent) => { next = Math.min(1200, Math.max(180, startW - (ev.clientX - startX))); setWidth(next) }
+    const up = () => { writePersisted('hermes-webui-workspace-panel-width', String(Math.round(next))); window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up) }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
   useEffect(() => { writePersisted('hermes-webui-workspace-panel', 'open'); document.documentElement.dataset.workspacePanel = 'open'; return () => { writePersisted('hermes-webui-workspace-panel', 'closed'); document.documentElement.dataset.workspacePanel = 'closed' } }, [])
   const listing = useQuery({ queryKey: keys.files.list(workspace, dir, showHidden), queryFn: () => api.listDir(sessionId, dir, showHidden), staleTime: 10_000 })
   const git = useQuery({ queryKey: keys.files.git(sessionId), queryFn: () => api.fetchGitInfo(sessionId), staleTime: 30_000, retry: false })
@@ -38,7 +51,8 @@ export function WorkspacePanel({ workspace, sessionId, onClose }: { workspace: s
   const isMarkdown = !!file && /\.(md|markdown)$/i.test(file)
   const text = draft ?? content.data?.content ?? ''
   return (
-    <aside className="rightpanel flex w-[300px] shrink-0 flex-col border-l border-border bg-sidebar max-[768px]:absolute max-[768px]:inset-y-0 max-[768px]:right-0 max-[768px]:z-[150] max-[768px]:w-[min(100vw,360px)] max-[768px]:shadow-md" aria-label={m.ws_panel_title()} data-panel="workspace">
+    <aside ref={panel} style={{ width }} className="rightpanel flex w-[300px] shrink-0 flex-col border-l border-border bg-sidebar max-[768px]:absolute max-[768px]:inset-y-0 max-[768px]:right-0 max-[768px]:z-[150] max-[768px]:w-[min(100vw,360px)] max-[768px]:shadow-md" aria-label={m.ws_panel_title()} data-panel="workspace">
+      <div className="resize-handle absolute top-0 bottom-0 w-[5px] cursor-col-resize z-10 transition-[background] duration-150 hover:bg-accent" id="rightpanelResize" role="separator" aria-orientation="vertical" aria-label={m.ws_panel_title()} onPointerDown={startResize} />
       <div className="flex min-h-12 items-center justify-between gap-2 border-b border-border px-3 py-2">
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold text-text">{m.ws_panel_title()}</div>

@@ -1,1 +1,0 @@
-import{t as e}from"./jsx-runtime-eu92a5pu.js";import{t}from"./HubRoute-eu9q701j.js";var n=e(),r=()=>(0,n.jsx)(t,{panel:`tasks`});export{r as component};
