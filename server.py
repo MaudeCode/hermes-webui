@@ -269,6 +269,27 @@ class QuietHTTPServer(HTTPWorkerBudgetMixin, ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
+
+def _reject_sandboxed_api_request(handler, parsed) -> bool:
+    """HWEB-100: extension panels run in sandboxed iframes with an opaque origin.
+
+    Such documents send ``Origin: null``. They must reach the server only through
+    the host bridge (the main page), never directly, so every ``/api/`` request
+    carrying a null origin is refused before authentication runs.
+    """
+    if not parsed.path.startswith("/api/"):
+        return False
+    if (handler.headers.get("Origin") or "").strip().lower() != "null":
+        return False
+    body = b'{"error":"Sandboxed documents cannot call the API directly"}'
+    handler.send_response(403)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+    return True
+
+
 class Handler(BaseHTTPRequestHandler):
     # HTTP/1.1 keep-alive stays on, so every response must declare framing.
     protocol_version = "HTTP/1.1"
@@ -362,6 +383,7 @@ class Handler(BaseHTTPRequestHandler):
             set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
+            if _reject_sandboxed_api_request(self, parsed): return
             if not check_auth(self, parsed): return
             if not await_startup_ready(self, parsed): return
             result = handle_get(self, parsed)
@@ -391,6 +413,7 @@ class Handler(BaseHTTPRequestHandler):
             _is_csp_report_post = (
                 parsed.path == "/api/csp-report" and self.command == "POST"
             )
+            if _reject_sandboxed_api_request(self, parsed): return
             if not _is_csp_report_post and not check_auth(self, parsed): return
             if not await_startup_ready(self, parsed): return
             result = route_func(self, parsed)

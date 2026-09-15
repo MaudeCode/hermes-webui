@@ -8,6 +8,8 @@ import { DASHBOARD_ICON, orderedNav, panelForPath } from './nav'
 import { readHiddenTabs, readTabOrder } from './useShellState'
 import { useNewChat } from '../features/sessions/useNewChat'
 import { useLocale } from '../i18n/useLocale'
+import { useExtensionManifests } from '../extensions/registry'
+import { Puzzle } from 'lucide-react'
 
 /** Desktop primary navigation (>= 641px). */
 export function Rail() {
@@ -17,6 +19,8 @@ export function Rail() {
   const bootstrap = useBootstrap()
   const dashboard = useDashboardStatusQuery(bootstrap.features.dashboard)
   const newChat = useNewChat()
+  const manifests = useExtensionManifests(bootstrap.features.extensions || true)
+  const extNav = (manifests.data?.manifests ?? []).filter((e) => e.enabled && e.panel && e.nav)
   const hidden = settings.data?.hidden_tabs ?? readHiddenTabs()
   const { visible } = orderedNav(readTabOrder(), hidden)
   const current = panelForPath(location.pathname)
@@ -44,6 +48,16 @@ export function Rail() {
               </Link>
             </Tooltip>
           </div>
+        )
+      })}
+      {extNav.map((e) => {
+        const active = location.pathname.startsWith(`/ext/${e.id}`)
+        return (
+          <Tooltip key={e.id} label={e.nav?.label ?? e.name}>
+            <Link to="/ext/$extensionId" params={{ extensionId: e.id }} className={cn('rail-btn relative flex h-9 w-9 items-center justify-center rounded-lg text-muted transition-colors hover:bg-hover hover:text-text', active && 'active bg-accent-bg text-accent-text')} aria-label={e.nav?.label ?? e.name} aria-current={active ? 'page' : undefined} data-extension={e.id}>
+              <Puzzle size={20} strokeWidth={1.5} aria-hidden="true" />
+            </Link>
+          </Tooltip>
         )
       })}
       {dashboard.data?.running && (dashboard.data.browser_url ?? dashboard.data.url) && (

@@ -15041,6 +15041,63 @@ def _handle_spa_get(handler, parsed):
     return None
 
 
+_DASHBOARD_PLUGIN_PANEL_RE = _re.compile(r"^/dashboard-plugins/(?P<name>[a-z][a-z0-9_-]{0,63})/index\.html$")
+
+# Sandbox directive applied to every HTML document served for an extension or
+# plugin panel (HWEB-100). Without allow-same-origin the document runs with an
+# opaque origin: no cookies, no same-origin API reads, no access to the host DOM.
+from api.extensions import EXTENSION_PANEL_SANDBOX_CSP  # noqa: E402
+
+
+def _dashboard_plugin_panel_name(path: str) -> str | None:
+    match = _DASHBOARD_PLUGIN_PANEL_RE.match(path or "")
+    return match.group("name") if match else None
+
+
+def _serve_dashboard_plugin_panel(handler, plugin_name: str) -> bool:
+    """Serve the sandboxed panel document for a dashboard plugin.
+
+    A plugin that ships ``dashboard/dist/index.html`` is served as-is. A legacy
+    IIFE plugin (``dist/index.js`` plus optional ``dist/style.css``) gets a
+    generated wrapper that loads those assets and the extension SDK inside the
+    sandbox, so the unified protocol replaces the old in-page injection.
+    """
+    if not _dashboard_plugin_enabled(plugin_name):
+        return j(handler, {"error": "not found"}, status=404)
+    from api.plugins import PLUGIN_MANIFESTS, serve_plugin_static
+
+    if plugin_name not in PLUGIN_MANIFESTS:
+        return j(handler, {"error": "not found"}, status=404)
+    served = serve_plugin_static(plugin_name, "dist/index.html")
+    if served:
+        data = served[0]
+    else:
+        has_js = serve_plugin_static(plugin_name, "dist/index.js") is not None
+        if not has_js:
+            return j(handler, {"error": "not found"}, status=404)
+        has_css = serve_plugin_static(plugin_name, "dist/style.css") is not None
+        label = _html.escape(str(PLUGIN_MANIFESTS[plugin_name].get("label") or plugin_name))
+        css_tag = '<link rel="stylesheet" href="dist/style.css">' if has_css else ""
+        data = (
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            f"<title>{label}</title>{css_tag}</head><body>"
+            "<div id=\"root\"></div><div id=\"app\"></div>"
+            "<script src=\"../../static/dist/extension-sdk.js\"></script>"
+            "<script src=\"dist/index.js\"></script></body></html>"
+        ).encode("utf-8")
+    handler.send_response(200)
+    _security_headers(handler)
+    handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Content-Security-Policy", EXTENSION_PANEL_SANDBOX_CSP)
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    handler.wfile.write(data)
+    return True
+
+
 def _auth_status_payload(handler) -> dict:
     """The public authentication state for this request (``/api/auth/status``, ``/api/bootstrap``)."""
     from api.auth import (
@@ -15173,6 +15230,21 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/bootstrap":
         return j(handler, _bootstrap_payload(handler), extra_headers={"Cache-Control": "no-store"})
+
+    if parsed.path == "/api/extensions/manifests":
+        from api.extension_manifests import build_manifests
+        from api.extensions import get_extension_status
+        from api.plugins import PLUGIN_MANIFESTS
+
+        return j(
+            handler,
+            build_manifests(extension_status=get_extension_status(), plugin_manifests=PLUGIN_MANIFESTS, plugin_enabled=_dashboard_plugin_enabled),
+            extra_headers={"Cache-Control": "no-store"},
+        )
+
+    plugin_panel = _dashboard_plugin_panel_name(parsed.path)
+    if plugin_panel is not None:
+        return _serve_dashboard_plugin_panel(handler, plugin_panel)
 
     if parsed.path.startswith("/session/static/"):
         # Strip the leading "/session" so _serve_static() sees a path that

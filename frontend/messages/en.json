@@ -2124,5 +2124,14 @@
 	"approval_expand": "Expand approval",
 	"approval_collapse": "Collapse approval",
 	"approval_dismiss": "Dismiss approval",
-	"drop_files_to_attach": "Drop files to attach"
+	"drop_files_to_attach": "Drop files to attach",
+	"extensions_no_panel": "This extension has no panel.",
+	"extensions_connecting": "Connecting to the extension…",
+	"extensions_handshake_failed": "The extension did not complete the protocol handshake ({detail}).",
+	"extensions_unknown": "No extension with this id is installed.",
+	"extensions_disabled_panel": "This extension is disabled.",
+	"extensions_sidecar_consent": "Allow the proxied sidecar",
+	"extensions_legacy_notice": "This extension still uses injected scripts, which the sandboxed platform no longer runs.",
+	"extensions_migration_guide": "Read the migration guide",
+	"extensions_skin_from": "from {name}"
 }

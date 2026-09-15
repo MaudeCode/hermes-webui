@@ -8,6 +8,7 @@ import { FontSizeSchema, type FontSize, type Skin, type Theme } from '../contrac
 import { applyAppearance, resolveAppearance } from '../theme/boot'
 import { applyLocale } from '../i18n/runtime'
 import { useSyncExternalStore } from 'react'
+import { applyExtensionSkin, extensionSkin } from '../extensions/registry'
 
 const listeners = new Set<() => void>()
 let version = 0
@@ -17,9 +18,16 @@ export interface AppearanceState { theme: Theme; skin: Skin; fontSize: FontSize;
 
 export function readAppearance(): AppearanceState {
   const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
-  const r = resolveAppearance(readPersisted('hermes-theme'), readPersisted('hermes-skin'), prefersDark)
+  const rawSkin = readPersisted('hermes-skin')
+  const ext = rawSkin ? extensionSkin(rawSkin.toLowerCase()) : undefined
+  const r = resolveAppearance(readPersisted('hermes-theme'), ext ? 'default' : rawSkin, prefersDark)
+  if (ext) return { theme: r.theme, skin: ext.key as Skin, fontSize: fontSizeOf(), fullWidth: readPersisted('hermes-full-width-chat') === 'true', rtl: readPersisted('hermes-rtl') === 'true' }
+  return { theme: r.theme, skin: r.skin, fontSize: fontSizeOf(), fullWidth: readPersisted('hermes-full-width-chat') === 'true', rtl: readPersisted('hermes-rtl') === 'true' }
+}
+
+function fontSizeOf(): FontSize {
   const fs = FontSizeSchema.safeParse(readPersisted('hermes-font-size'))
-  return { theme: r.theme, skin: r.skin, fontSize: fs.success ? fs.data : 'default', fullWidth: readPersisted('hermes-full-width-chat') === 'true', rtl: readPersisted('hermes-rtl') === 'true' }
+  return fs.success ? fs.data : 'default'
 }
 
 export function setTheme(theme: Theme): void {
@@ -27,10 +35,25 @@ export function setTheme(theme: Theme): void {
   applyAppearance(resolveAppearance(theme, readPersisted('hermes-skin'), window.matchMedia('(prefers-color-scheme: dark)').matches))
   bump()
 }
-export function setSkin(skin: Skin): void {
+export function setSkin(skin: string): void {
+  const ext = extensionSkin(skin)
   writePersisted('hermes-skin', skin)
-  applyAppearance(resolveAppearance(readPersisted('hermes-theme'), skin, window.matchMedia('(prefers-color-scheme: dark)').matches))
+  if (ext) {
+    applyAppearance(resolveAppearance(readPersisted('hermes-theme'), 'default', window.matchMedia('(prefers-color-scheme: dark)').matches))
+    applyExtensionSkin(ext)
+    document.documentElement.dataset.skin = ext.key
+  } else {
+    applyExtensionSkin(null)
+    applyAppearance(resolveAppearance(readPersisted('hermes-theme'), skin, window.matchMedia('(prefers-color-scheme: dark)').matches))
+  }
   bump()
+}
+
+/** Re-apply a persisted extension skin once manifests are known (boot order: manifests load after first paint). */
+export function reapplyExtensionSkin(): void {
+  const key = (readPersisted('hermes-skin') ?? '').toLowerCase()
+  const ext = extensionSkin(key)
+  if (ext) { applyExtensionSkin(ext); document.documentElement.dataset.skin = ext.key; bump() }
 }
 export function setFontSize(size: FontSize): void {
   writePersisted('hermes-font-size', size)

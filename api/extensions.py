@@ -75,6 +75,8 @@ class ExtensionSidecarProxyError(Exception):
 
 
 EXTENSION_ROUTE_PREFIX = "/extensions/"
+# Sandbox directive for extension panel documents (HWEB-100); mirrored by api.routes for plugin panels.
+EXTENSION_PANEL_SANDBOX_CSP = "sandbox allow-scripts allow-forms allow-popups allow-downloads allow-modals; frame-ancestors 'self'"
 _EXTENSION_DIR_ENV = "HERMES_WEBUI_EXTENSION_DIR"
 _EXTENSION_SCRIPT_URLS_ENV = "HERMES_WEBUI_EXTENSION_SCRIPT_URLS"
 _EXTENSION_STYLESHEET_URLS_ENV = "HERMES_WEBUI_EXTENSION_STYLESHEET_URLS"
@@ -2161,6 +2163,12 @@ def serve_extension_static(handler, parsed) -> bool:
     handler.send_header("Cache-Control", "no-store")
     handler.send_header("Content-Length", str(len(raw)))
     _security_headers(handler)
+    if ct == "text/html":
+        # HWEB-100: every extension document is a sandboxed panel. The second
+        # CSP header adds the sandbox restriction on top of the page policy so
+        # a panel opened directly (outside the host iframe) is still isolated.
+        handler.send_header("Content-Security-Policy", EXTENSION_PANEL_SANDBOX_CSP)
+        handler.send_header("X-Frame-Options", "SAMEORIGIN")
     handler.end_headers()
     handler.wfile.write(raw)
     return True

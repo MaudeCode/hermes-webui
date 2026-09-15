@@ -19,6 +19,7 @@ import { cleanupOutdatedCaches, precacheAndRoute, matchPrecache } from 'workbox-
 import { registerRoute } from 'workbox-routing'
 import { CacheFirst } from 'workbox-strategies'
 import { ExpirationPlugin } from 'workbox-expiration'
+import type { WorkboxPlugin } from 'workbox-core'
 
 declare const self: ServiceWorkerGlobalScope & { __WB_MANIFEST: { url: string; revision: string | null }[] }
 
@@ -31,7 +32,7 @@ cleanupOutdatedCaches()
 // Hashed, immutable chunks under the mount root: cache on first use, keep a bounded set.
 registerRoute(
   ({ url, request }) => request.method === 'GET' && url.origin === self.location.origin && url.pathname.startsWith(new URL('./assets/', self.registration.scope).pathname),
-  new CacheFirst({ cacheName: ASSET_CACHE, plugins: [new ExpirationPlugin({ maxEntries: 400, maxAgeSeconds: 60 * 60 * 24 * 30, purgeOnQuotaError: true })] }),
+  new CacheFirst({ cacheName: ASSET_CACHE, plugins: [new ExpirationPlugin({ maxEntries: 400, maxAgeSeconds: 60 * 60 * 24 * 30, purgeOnQuotaError: true }) as unknown as WorkboxPlugin] }),
 )
 
 self.addEventListener('message', (event: ExtendableMessageEvent) => {

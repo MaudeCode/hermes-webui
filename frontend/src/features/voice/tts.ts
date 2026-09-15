@@ -5,6 +5,7 @@
  */
 import { readPersisted } from '../../lib/persisted'
 import { resolveApiUrl, csrfToken } from '../../api/client'
+import { ttsEngine } from '../../extensions/registry'
 
 let current: HTMLAudioElement | null = null
 
@@ -18,6 +19,18 @@ export async function speak(text: string): Promise<void> {
   if (!clean) return
   stopSpeaking()
   const engine = readPersisted('hermes-tts-engine') ?? 'browser'
+  const ext = ttsEngine(engine)
+  if (ext) {
+    const rate = parseFloat(readPersisted('hermes-tts-rate') ?? '')
+    const pitch = parseFloat(readPersisted('hermes-tts-pitch') ?? '')
+    const audioBuf = await ext.synthesize(clean.slice(0, 4000), { voice: readPersisted('hermes-tts-voice'), rate: Number.isNaN(rate) ? null : rate, pitch: Number.isNaN(pitch) ? null : pitch })
+    const url = URL.createObjectURL(new Blob([audioBuf]))
+    const audio = new Audio(url)
+    current = audio
+    audio.onended = () => { URL.revokeObjectURL(url); if (current === audio) current = null }
+    await audio.play()
+    return
+  }
   if (engine === 'edge') {
     const voice = readPersisted('hermes-tts-voice') ?? 'en-US-JennyNeural'
     const savedRate = parseFloat(readPersisted('hermes-tts-rate') ?? '')

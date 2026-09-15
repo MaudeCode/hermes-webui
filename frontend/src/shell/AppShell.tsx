@@ -5,10 +5,17 @@ import { Sidebar } from './Sidebar'
 import { useShortcuts } from './useShortcuts'
 import { Toaster } from '../features/toast/Toaster'
 import { TooltipProvider } from '../ui/Tooltip'
+import { useEffect } from 'react'
+import { registerExtensionSkins, useExtensionManifests } from '../extensions/registry'
+import { reapplyExtensionSkin } from '../app/appearance'
 
 /** Titlebar + rail + sidebar + main. Routes supply `sidebar` and render into `children`. */
 export function AppShell({ sidebar, children, title, subtitle }: { sidebar: ReactNode; children: ReactNode; title?: string; subtitle?: string }) {
   useShortcuts()
+  const manifests = useExtensionManifests()
+  useEffect(() => {
+    if (manifests.data) { registerExtensionSkins(manifests.data.manifests); reapplyExtensionSkin() }
+  }, [manifests.data])
   return (
     <TooltipProvider>
       <div className="flex h-full min-h-0 flex-col bg-bg text-text">

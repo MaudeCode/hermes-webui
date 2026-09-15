@@ -37,6 +37,18 @@ await build({
   define: { 'process.env.NODE_ENV': JSON.stringify('production') },
 })
 
+// Extension SDK (protocol v1), loaded by sandboxed panel documents.
+const sdkTmp = resolve(here, '../dist/sdk')
+await build({
+  configFile: false,
+  logLevel: 'warn',
+  root: resolve(here, '..'),
+  build: { outDir: sdkTmp, emptyOutDir: true, sourcemap: false, minify: 'oxc', target: 'es2022', lib: { entry: resolve(here, '../src/extensions/sdk.ts'), formats: ['iife'], name: 'HermesExtensionSdk', fileName: () => 'extension-sdk.js' } },
+  define: { 'process.env.NODE_ENV': JSON.stringify('production') },
+})
+writeFileSync(resolve(distRoot, 'extension-sdk.js'), readFileSync(resolve(sdkTmp, 'extension-sdk.js')))
+rmSync(sdkTmp, { recursive: true, force: true })
+
 const shell = readFileSync(resolve(distRoot, 'index.html'), 'utf8')
 const shellAssets = [...shell.matchAll(/(?:href|src)="\.\/(assets\/[^"]+)"/g)].map((m) => m[1])
 const wanted = new Set(['index.html', 'manifest.webmanifest', ...shellAssets])
@@ -64,5 +76,6 @@ rmSync(swTmp, { recursive: true, force: true })
 
 const filesPath = resolve(distRoot, 'FILES.txt')
 const files = readFileSync(filesPath, 'utf8').split('\n').filter(Boolean)
-if (!files.includes('sw.js')) writeFileSync(filesPath, [...files, 'sw.js'].sort().join('\n') + '\n')
+const extra = ['sw.js', 'extension-sdk.js'].filter((f) => !files.includes(f))
+if (extra.length) writeFileSync(filesPath, [...files, ...extra].sort().join('\n') + '\n')
 console.log(`build-sw: precached ${count} shell files (${size} bytes)`)
