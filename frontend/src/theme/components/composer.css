@@ -141,4 +141,20 @@
 @media (min-width:769px){.composer-model-wrap,.composer-reasoning-wrap,.composer-divider{position:absolute;width:1px;height:1px;visibility:hidden;pointer-events:none;left:12px;bottom:44px}}
 #ctxIndicatorWrap[style*="display:none"],#ctxIndicatorWrap[style*="display: none"]{display:flex !important;visibility:hidden}
 @media (max-width:640px){#btnMic,.composer-reasoning-wrap{display:none !important}}
+.composer-mobile-config-action{box-sizing:border-box;display:inline-flex;align-items:center;gap:10px;flex:1 1 100%;min-width:0;min-height:44px;padding:8px 10px;border-radius:10px;border:1px solid var(--border);background:var(--input-bg);color:var(--muted);font:inherit;text-align:left;cursor:pointer;overflow:hidden}
+.composer-mobile-config-action:hover{background:var(--hover-bg);color:var(--text)}
+.composer-mobile-config-action.active,.composer-mobile-config-action[data-popup-open]{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--text)}
+.composer-mobile-config-action > svg{flex:0 0 auto}
+.composer-mobile-config-copy{display:flex;flex-direction:column;gap:1px;min-width:0;line-height:1.2}
+.composer-mobile-config-kicker{font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
+.composer-mobile-config-value{font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.composer-mobile-context-action{flex:1 0 100%;align-items:flex-start;cursor:default;overflow:visible}
+.composer-mobile-context-copy{flex:1 1 auto;gap:2px}
+.composer-mobile-context-detail{font-size:11px;color:var(--muted);white-space:normal;line-height:1.25}
+.composer-mobile-context-action.ctx-mid .composer-mobile-config-value{color:var(--warning)}
+.composer-mobile-context-action.ctx-high .composer-mobile-config-value{color:var(--error)}
+.composer-footer.cf-burger .composer-mobile-config-action{flex:1 1 calc(50% - 4px)}
+.composer-footer.cf-burger .composer-mobile-config-panel .icon-btn .composer-mobile-config-value{display:none}
+.composer-footer.cf-burger .composer-mobile-config-action:not(.composer-mobile-context-action) .composer-mobile-config-kicker{display:none}
+.composer-footer.cf-burger .composer-mobile-context-action{flex:1 0 100%}
 }

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Mic, Paperclip, Square, ArrowUp, TerminalSquare, PanelRight, SlidersHorizontal } from 'lucide-react'
+import { Mic, Paperclip, Square, ArrowUp, TerminalSquare, SlidersHorizontal } from 'lucide-react'
 import { m } from '../../paraglide/messages.js'
 import * as api from '../../api/endpoints'
 import { keys } from '../../api/queryKeys'
@@ -14,7 +14,7 @@ import { showToast } from '../toast/toast'
 import { AttachmentTray, type PendingFile } from './Attachments'
 import { CommandPaletteList, useCommandPalette } from './CommandPalette'
 import { parseCommand, type CommandSuggestion } from './commands'
-import { ContextRing, ModelChip, ReasoningChip, ToolsetsChip, WorkspaceChip } from './chips'
+import { ContextRing, ContextRow, ModelChip, ReasoningChip, ToolsetsChip, WorkspaceChip } from './chips'
 import { clearDraft, readLocalDraft, useDraftPersistence } from './useDraft'
 import { createRecognition, dictationSupported, classifyDictationError } from '../voice/dictation'
 import { ProfileMenu } from '../../shell/ProfileMenu'
@@ -32,8 +32,6 @@ export interface ComposerProps {
   onLocalCommand: (name: string, args: string) => Promise<boolean>
   terminalOpen: boolean
   onToggleTerminal: () => void
-  workspaceOpen: boolean
-  onToggleWorkspace: () => void
   onModelChange: (model: string, provider: string | null) => void
   onWorkspaceChange: (path: string) => void
   onToolsetsChange: (toolsets: string[] | null) => void
@@ -43,6 +41,19 @@ export interface ComposerProps {
   onToggleYolo: () => void
   queued: string[]
   onQueue: (text: string) => void
+}
+
+const PHONE = '(max-width: 640px)'
+/** Phone-width viewport: the footer runs the icon/burger stage and collapses when idle (legacy _isPhoneWidthViewport). */
+function usePhone(): boolean {
+  const [phone, setPhone] = useState(() => typeof window !== 'undefined' && window.matchMedia(PHONE).matches)
+  useEffect(() => {
+    const mq = window.matchMedia(PHONE)
+    const on = () => setPhone(mq.matches)
+    mq.addEventListener('change', on)
+    return () => mq.removeEventListener('change', on)
+  }, [])
+  return phone
 }
 
 function fileKey(f: File): string {
@@ -55,7 +66,7 @@ function fileKey(f: File): string {
  * and the model, reasoning, toolsets, workspace and profile chips.
  */
 export function Composer(props: ComposerProps) {
-  const { sessionId, session, live, settings, onEnsureSession, onLocalCommand, terminalOpen, onToggleTerminal, workspaceOpen, onToggleWorkspace, onModelChange, onWorkspaceChange, onToolsetsChange, onReasoningChange, reasoning, yolo, onToggleYolo, queued, onQueue } = props
+  const { sessionId, session, live, settings, onEnsureSession, onLocalCommand, terminalOpen, onToggleTerminal, onModelChange, onWorkspaceChange, onToolsetsChange, onReasoningChange, reasoning, yolo, onToggleYolo, queued, onQueue } = props
   const bootstrap = useBootstrap()
   const qc = useQueryClient()
   const [text, setText] = useState(() => (sessionId ? readLocalDraft(sessionId) : ''))
@@ -64,6 +75,16 @@ export function Composer(props: ComposerProps) {
   const [dictating, setDictating] = useState(false)
   const [dragOver, setDragOver] = useState(false)
   const [configOpen, setConfigOpen] = useState(false)
+  const [focusWithin, setFocusWithin] = useState(false)
+  const phone = usePhone()
+  const box = useRef<HTMLDivElement>(null)
+  // The overflow panel closes on any pointer-down outside the composer box.
+  useEffect(() => {
+    if (!configOpen) return
+    const on = (e: PointerEvent) => { if (!box.current?.contains(e.target as Node)) setConfigOpen(false) }
+    document.addEventListener('pointerdown', on)
+    return () => document.removeEventListener('pointerdown', on)
+  }, [configOpen])
   const textarea = useRef<HTMLTextAreaElement>(null)
   const recognition = useRef<ReturnType<typeof createRecognition>>(null)
   const busy = !!live && !isTerminal(live.status)
@@ -197,7 +218,8 @@ export function Composer(props: ComposerProps) {
 
   const hide = (k: string) => !!(settings as Record<string, unknown> | undefined)?.[k]
   const placeholder = busy ? (busyMode === 'queue' ? m.composer_placeholder_busy_queue() : busyMode === 'interrupt' ? m.composer_placeholder_busy_interrupt() : m.composer_placeholder_busy_steer()) : m.composer_placeholder()
-  const contextUsed = session?.last_prompt_tokens ?? null
+  const compressedEstimate = session?.post_compression_context_tokens_estimate
+  const contextUsed = compressedEstimate && compressedEstimate > 0 ? compressedEstimate : (session?.last_prompt_tokens ?? null)
   const contextTotal = session?.context_length ?? null
   const canSend = (text.trim() !== '' || files.some((f) => f.status === 'done')) && !sending
   const reasoningLevels = useMemo(() => undefined, [])
@@ -213,6 +235,9 @@ export function Composer(props: ComposerProps) {
       <div
         className={cn('composer-box relative z-[2] flex flex-col mx-auto max-w-(--msg-max) bg-(--composer-bg) border-(length:--composer-border-width) border-(--composer-border-color) rounded-(--composer-radius) shadow-(--composer-shadow) transition-[border-color,box-shadow] duration-(--dur) ease-(--ease) focus-within:border-(--composer-focus-border) focus-within:shadow-(--composer-focus-shadow) focus-within:outline-none max-[641px]:rounded-[12px]', dragOver && 'drag-over')}
         id="composerBox"
+        ref={box}
+        onFocus={() => setFocusWithin(true)}
+        onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setFocusWithin(false) }}
         onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
         onDragLeave={() => setDragOver(false)}
         onDrop={onDrop}
@@ -237,7 +262,7 @@ export function Composer(props: ComposerProps) {
           role={palette.open ? 'combobox' : undefined}
           aria-expanded={palette.open ? true : undefined}
         />
-        <div className={cn('composer-footer cf-burger', !text && files.length === 0 && !busy && 'cf-collapsed')}>
+        <div className={cn('composer-footer', phone && 'cf-icons cf-burger', phone && !text && files.length === 0 && !busy && !focusWithin && !configOpen && !dragOver && 'cf-collapsed')}>
           <div className="composer-left flex items-center gap-1 min-w-0 flex-1 overflow-x-auto overflow-y-hidden [scrollbar-width:none] max-[641px]:flex-[1_1_auto] max-[641px]:w-auto max-[641px]:flex-nowrap max-[641px]:items-center max-[641px]:gap-x-2.5 max-[641px]:gap-y-0 max-[641px]:max-h-none max-[641px]:[-webkit-overflow-scrolling:touch] max-[341px]:gap-x-0.5">
             {!hide('hide_composer_attach') && (
               <>
@@ -246,24 +271,10 @@ export function Composer(props: ComposerProps) {
               </>
             )}
             {!hide('hide_composer_mic') && dictationSupported() && <button type="button" className={cn('icon-btn mic-btn has-tooltip', dictating && 'active')} id="btnMic" data-tooltip={dictating ? m.voice_dictate_active() : m.voice_dictate()} aria-label={dictating ? m.voice_dictate_active() : m.voice_dictate()} aria-pressed={dictating} onClick={toggleDictation}><Mic size={16} aria-hidden="true" /></button>}
-            <button type="button" className={cn('icon-btn has-tooltip', terminalOpen && 'active')} id="btnTerminal" data-tooltip={m.composer_terminal_toggle()} aria-label={m.composer_terminal_toggle()} aria-pressed={terminalOpen} onClick={onToggleTerminal}><TerminalSquare size={16} aria-hidden="true" /></button>
-            <div className="composer-divider" aria-hidden="true" />
             {yolo && !hide('hide_composer_yolo') && <button type="button" onClick={onToggleYolo} className="yolo-pill" id="yoloPill" title={m.yolo_pill_title_active()}><span className="yolo-pill-icon" aria-hidden="true">⚡</span><span className="yolo-pill-label">{m.yolo_pill_label()}</span></button>}
-            <div className="composer-ws-wrap">
-              <div className="composer-workspace-group ws-chip" id="composerWorkspaceGroup" role="group">
-                <button className={cn('composer-workspace-files-btn', workspaceOpen && 'active')} id="btnWorkspacePanelToggle" type="button" title={m.composer_files_toggle()} aria-label={m.composer_files_toggle()} aria-pressed={workspaceOpen} onClick={onToggleWorkspace}><span className="composer-workspace-icon" aria-hidden="true"><PanelRight size={14} /></span></button>
-              </div>
-            </div>
             <button className="icon-btn composer-mobile-config-btn has-tooltip" id="composerMobileConfigBtn" type="button" data-tooltip={m.composer_config_title()} aria-label={m.composer_config_title()} aria-expanded={configOpen} aria-controls="composerMobileConfigPanel" onClick={() => setConfigOpen((o) => !o)}>
               <SlidersHorizontal size={16} aria-hidden="true" />
             </button>
-            <div className={cn('composer-mobile-config-panel', configOpen && 'open')} id="composerMobileConfigPanel" role="group" aria-label={m.composer_config_title()}>
-              {!hide('hide_composer_profile') && <div id="profileChipWrap" className="composer-profile-wrap"><ProfileMenu /></div>}
-              {!hide('hide_composer_workspace') && <div className="composer-config-row"><WorkspaceChip value={session?.workspace ?? settings?.default_workspace} onChange={onWorkspaceChange} /></div>}
-              {!hide('hide_composer_model') && <div className="composer-config-row composer-model-wrap"><ModelChip value={session?.model ?? null} defaultModel={settings?.default_model} onChange={onModelChange} /></div>}
-              {!hide('hide_composer_reasoning') && <div className="composer-config-row composer-reasoning-wrap" id="composerReasoningWrap"><ReasoningChip value={reasoning} levels={reasoningLevels} onChange={onReasoningChange} /></div>}
-              {!hide('hide_composer_toolsets') && <div className="composer-config-row composer-toolsets-wrap" id="composerToolsetsWrap"><ToolsetsChip value={session?.enabled_toolsets ?? null} onChange={onToolsetsChange} /></div>}
-            </div>
           </div>
           <div className="composer-right flex gap-2 items-center shrink-0 max-[641px]:flex-none max-[641px]:w-auto max-[641px]:justify-end max-[641px]:gap-1.5 max-[641px]:min-w-0">
             {!hide('hide_composer_context') && <ContextRing used={contextUsed} total={contextTotal} threshold={session?.threshold_tokens} />}
@@ -276,6 +287,15 @@ export function Composer(props: ComposerProps) {
                 <ArrowUp size={16} aria-hidden="true" />
               </button>
             )}
+          </div>
+          <div className={cn('composer-mobile-config-panel', configOpen && 'open')} id="composerMobileConfigPanel" role="group" aria-label={m.composer_config_title()}>
+            {!hide('hide_composer_profile') && <ProfileMenu row />}
+            {!hide('hide_composer_workspace') && <WorkspaceChip row value={session?.workspace ?? settings?.default_workspace} onChange={onWorkspaceChange} />}
+            {phone && !hide('hide_composer_model') && <ModelChip row value={session?.model ?? null} defaultModel={settings?.default_model} onChange={onModelChange} />}
+            {phone && !hide('hide_composer_reasoning') && <ReasoningChip row value={reasoning} levels={reasoningLevels} onChange={onReasoningChange} />}
+            <button type="button" className={cn('icon-btn', terminalOpen && 'active')} id="btnTerminal" title={m.composer_terminal_toggle()} aria-label={m.composer_terminal_toggle()} aria-pressed={terminalOpen} onClick={() => { setConfigOpen(false); onToggleTerminal() }}><TerminalSquare size={16} aria-hidden="true" /><span className="composer-mobile-config-value">{m.composer_terminal_toggle()}</span></button>
+            {!hide('hide_composer_toolsets') && <ToolsetsChip row value={session?.enabled_toolsets ?? null} onChange={onToolsetsChange} />}
+            {phone && !hide('hide_composer_context') && <ContextRow used={contextUsed} total={contextTotal} threshold={session?.threshold_tokens} />}
           </div>
         </div>
       </div>

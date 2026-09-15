@@ -210,8 +210,6 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
           onLocalCommand={onLocalCommand}
           terminalOpen={terminalOpen}
           onToggleTerminal={() => setTerminalOpen((t) => !t)}
-          workspaceOpen={workspaceOpen}
-          onToggleWorkspace={() => setWorkspaceOpen((w) => !w)}
           onModelChange={onModelChange}
           onWorkspaceChange={onWorkspaceChange}
           onToolsetsChange={onToolsetsChange}
