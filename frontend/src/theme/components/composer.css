@@ -156,4 +156,6 @@
 .composer-footer.cf-icons .composer-chip{width:32px;padding:0;justify-content:center;gap:0}
 @media (max-width:640px){#btnMic{display:none !important}}
 .composer-mobile-config-btn[aria-expanded="true"]::before,.composer-mobile-config-btn[aria-expanded="true"]::after{display:none}
+.composer-footer:not(.cf-burger) .composer-mobile-config-btn{display:none !important}
+.composer-footer.cf-burger .composer-left > #btnTerminalInline{display:none !important}
 }

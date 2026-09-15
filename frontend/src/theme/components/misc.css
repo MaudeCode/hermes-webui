@@ -10,5 +10,4 @@
 #sessionSearch{height:32px;font-size:13px;background:var(--input-bg);border-color:transparent}
 #sessionSearch:hover{border-color:var(--border)}
 #sessionSearch{height:30px;background:var(--input-bg);border-color:var(--border);padding-left:34px !important}
-@media (min-width:769px){#composerMobileConfigBtn{display:inline-flex !important}}
 }

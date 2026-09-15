@@ -302,6 +302,7 @@ export function Composer(props: ComposerProps) {
               </>
             )}
             {!hide('hide_composer_mic') && dictationSupported() && <button type="button" className={cn('icon-btn mic-btn has-tooltip', dictating && 'active')} id="btnMic" data-tooltip={dictating ? m.voice_dictate_active() : m.voice_dictate()} aria-label={dictating ? m.voice_dictate_active() : m.voice_dictate()} aria-pressed={dictating} onClick={toggleDictation}><Mic size={16} aria-hidden="true" /></button>}
+            <button type="button" className={cn('icon-btn has-tooltip', terminalOpen && 'active')} id="btnTerminalInline" data-tooltip={m.composer_terminal_toggle()} aria-label={m.composer_terminal_toggle()} aria-pressed={terminalOpen} onClick={onToggleTerminal}><TerminalSquare size={16} aria-hidden="true" /></button>
             {yolo && !hide('hide_composer_yolo') && <button type="button" onClick={onToggleYolo} className="yolo-pill" id="yoloPill" title={m.yolo_pill_title_active()}><span className="yolo-pill-icon" aria-hidden="true">⚡</span><span className="yolo-pill-label">{m.yolo_pill_label()}</span></button>}
             {!hide('hide_composer_profile') && <div className="composer-profile-wrap" id="profileChipWrap"><ProfileMenu /></div>}
             {!hide('hide_composer_workspace') && <div className="composer-ws-wrap"><WorkspaceChip value={session?.workspace ?? settings?.default_workspace} onChange={onWorkspaceChange} /></div>}
@@ -329,7 +330,7 @@ export function Composer(props: ComposerProps) {
             {stage === 'burger' && !hide('hide_composer_workspace') && <WorkspaceChip row value={session?.workspace ?? settings?.default_workspace} onChange={onWorkspaceChange} />}
             {stage === 'burger' && !hide('hide_composer_model') && <ModelChip row value={session?.model ?? null} defaultModel={settings?.default_model} onChange={onModelChange} />}
             {stage === 'burger' && !hide('hide_composer_reasoning') && <ReasoningChip row value={reasoning} levels={reasoningLevels} onChange={onReasoningChange} />}
-            <button type="button" className={cn('icon-btn', terminalOpen && 'active')} id="btnTerminal" title={m.composer_terminal_toggle()} aria-label={m.composer_terminal_toggle()} aria-pressed={terminalOpen} onClick={() => { setConfigOpen(false); onToggleTerminal() }}><TerminalSquare size={16} aria-hidden="true" /><span className="composer-mobile-config-value">{m.composer_terminal_toggle()}</span></button>
+            {stage === 'burger' && <button type="button" className={cn('icon-btn', terminalOpen && 'active')} id="btnTerminal" title={m.composer_terminal_toggle()} aria-label={m.composer_terminal_toggle()} aria-pressed={terminalOpen} onClick={() => { setConfigOpen(false); onToggleTerminal() }}><TerminalSquare size={16} aria-hidden="true" /><span className="composer-mobile-config-value">{m.composer_terminal_toggle()}</span></button>}
             {stage === 'burger' && !hide('hide_composer_toolsets') && <ToolsetsChip row value={session?.enabled_toolsets ?? null} onChange={onToolsetsChange} />}
             {stage === 'burger' && !hide('hide_composer_context') && <ContextRow used={contextUsed} total={contextTotal} threshold={session?.threshold_tokens} />}
           </div>
