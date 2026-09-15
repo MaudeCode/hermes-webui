@@ -2,7 +2,7 @@ import { Moon, Monitor, Sun } from 'lucide-react'
 import { m } from '../../paraglide/messages.js'
 import { FieldRow, NativeSelect, Checkbox } from '../../ui/Field'
 import { setFontSize, setFullWidthChat, setLanguage, setRtl, setSkin, setTheme, useAppearance } from '../../app/appearance'
-import { SKINS } from '../../theme/boot'
+import { SKINS } from '../../theme/skins'
 import { FontSizeSchema, SkinSchema } from '../../contracts/persisted'
 import { LOCALE_INFO } from '../../i18n/locales'
 import { useLocale } from '../../i18n/useLocale'
@@ -11,29 +11,6 @@ import { useExtensionSkins } from '../../extensions/registry'
 import { cn } from '../../ui/cn'
 
 /** Swatch colours per skin, carried forward from the legacy picker catalogue. */
-const SKIN_SWATCHES: Record<string, { label: string; colors: string[] }> = {
-  default: { label: 'Default', colors: ['#FFD700', '#FFBF00', '#CD7F32'] },
-  ares: { label: 'Ares', colors: ['#FF4444', '#CC3333', '#992222'] },
-  mono: { label: 'Mono', colors: ['#CCCCCC', '#999999', '#666666'] },
-  graphite: { label: 'Graphite', colors: ['#FFFFFF', '#D6D6D6', '#242424'] },
-  github: { label: 'GitHub', colors: ['#0969DA', '#1F883D', '#242424'] },
-  codex: { label: 'Codex', colors: ['#72B39A', '#242624', '#ECEBE4'] },
-  terracotta: { label: 'Terracotta', colors: ['#D97757', '#F0EEE6', '#141413'] },
-  slate: { label: 'Slate', colors: ['#334155', '#475569', '#64748b'] },
-  poseidon: { label: 'Poseidon', colors: ['#0EA5E9', '#0284C7', '#0369A1'] },
-  sisyphus: { label: 'Sisyphus', colors: ['#A78BFA', '#8B5CF6', '#7C3AED'] },
-  charizard: { label: 'Charizard', colors: ['#FB923C', '#F97316', '#EA580C'] },
-  sienna: { label: 'Sienna', colors: ['#D97757', '#C06A49', '#9A523A'] },
-  catppuccin: { label: 'Catppuccin', colors: ['#CBA6F7', '#B4BEFE', '#8839EF'] },
-  hepburn: { label: 'Hepburn', colors: ['#c6246a', '#ec5597', '#f2abca'] },
-  nous: { label: 'Nous', colors: ['#4682B4', '#3A6E9A', '#2C5F88'] },
-  neon: { label: 'Neon', colors: ['#B347FF', '#C76BFF', '#00DDFF'] },
-  'neon-soft': { label: 'Neon Soft', colors: ['#B347FF', '#C76BFF', '#00DDFF'] },
-  'neon-paint': { label: 'Neon Paint', colors: ['#FF2D95', '#00E5FF', '#FFB800'] },
-  'geist-contrast': { label: 'Geist Contrast', colors: ['#000000', '#ffffff', '#FFF175'] },
-  zeus: { label: 'Zeus', colors: ['#FFD700', '#FFBF00', '#1A1A00'] },
-  verdigris: { label: 'Verdigris', colors: ['#C89A5A', '#0F1714', '#22342C'] },
-}
 
 const PICK_PREVIEW = 'flex w-full h-10 rounded-[6px] mb-1.5 items-center justify-center'
 
@@ -74,14 +51,11 @@ export function AppearanceSection() {
       <div className="settings-field">
         <label>{m.settings_label_skin()}</label>
         <div id="skinPickerGrid" className="grid gap-1.5 mt-1 grid-cols-4">
-          {SKINS.map((key) => {
-            const sw = SKIN_SWATCHES[key] ?? { label: key, colors: [] }
-            return (
-              <PickButton key={key} className="skin-pick-btn" data-skin-val={key} active={appearance.skin === key} onClick={() => pickSkin(key)} label={sw.label}>
-                <div className="flex gap-[3px] justify-center mb-1">{sw.colors.map((c, i) => <span key={i} className="inline-block size-2.5 rounded-full" style={{ background: c }} />)}</div>
-              </PickButton>
-            )
-          })}
+          {SKINS.map((sk) => (
+            <PickButton key={sk.key} className="skin-pick-btn" data-skin-val={sk.key} active={appearance.skin === sk.key} onClick={() => pickSkin(sk.key)} label={sk.name}>
+              <div className="flex gap-[3px] justify-center mb-1">{sk.colors.map((c, i) => <span key={i} className="inline-block size-2.5 rounded-full" style={{ background: c }} />)}</div>
+            </PickButton>
+          ))}
           {extSkins.map((s) => (
             <PickButton key={s.key} className="skin-pick-btn" data-skin-val={s.key} active={appearance.skin === s.key} onClick={() => pickSkin(s.key)} label={`${s.name} (${m.extensions_skin_from({ name: s.extensionId })})`}>
               <div className="flex gap-[3px] justify-center mb-1">{(s.colors ?? []).slice(0, 3).map((c, i) => <span key={i} className="inline-block size-2.5 rounded-full" style={{ background: c }} />)}</div>

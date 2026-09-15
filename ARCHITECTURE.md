@@ -82,8 +82,9 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       src/features/        Chat, composer, sessions, settings, hubs, extensions, voice, terminal, share
       src/extensions/      Sandboxed extension host, SDK source, registry (protocol v1)
       src/i18n/            Paraglide runtime helpers; messages/<locale>.json hold the catalog
-      src/theme/           tailwind.css (theme map, layer order), tokens.css + keyframes.css + components/*.css (generated
-                           from the legacy stylesheet by scripts/css-convert.mjs), boot.ts, fonts/
+      src/theme/           skins.ts (token vocabulary, 21 skins as data, renderThemeCss), theme.css (root typography,
+                           preferences, skin traits), tailwind.css (@theme map, px spacing, layer order), keyframes.css,
+                           components/*.css (component rules on tokens, @layer app), boot.ts, fonts/
       src/sw.ts            Service worker source (Workbox)
       scripts/             finalize-dist, build-sw, check-dist, i18n-gate, generate-routes, css-convert (legacy CSS -> layers + ledger),
                            css-computed-diff (compare computed styles between two builds)
@@ -553,27 +554,46 @@ contains no inline scripts, so the CSP `script-src` has no `'unsafe-inline'`.
       extensions/        ExtensionHost (MessageChannel protocol v1), sdk.ts (built to static/dist/extension-sdk.js),
                          registry (manifests, skins, TTS engines, lifecycle bridge)
       i18n/              Paraglide runtime (locale switch, hermes-lang persistence), locale metadata, tool text
-      theme/             tokens.css (21 skins, theme and preference tokens), keyframes.css, components/*.css (live legacy rules per
-                         feature in @layer legacy), tailwind.css (@theme mapping, px spacing scale, layer order), boot.ts
+      theme/             skins.ts (BASE tokens + 21 SkinSpec entries + renderThemeCss), theme.css, keyframes.css, components/*.css
+                         (component rules on tokens, @layer app), tailwind.css (@theme mapping, px spacing scale, layer order), boot.ts
       ui/                Base UI wrappers: Button, Dialog, Field, Menu, Tooltip, States
 
 Layout: rail (desktop) + sidebar (sessions or hub navigation) + main on the
 legacy island shell. Mobile uses a drawer and the bottom tab bar.
 
-Styling is Tailwind v4 on the legacy design tokens. `scripts/css-convert.mjs`
-splits the legacy stylesheet into `tokens.css` (every `:root`/skin custom
-property), `keyframes.css`, and per-feature sheets under `theme/components/`
-that keep only the rules whose classes the React app still renders; every
-legacy rule has a disposition in `scripts/css-ledger.json` and
-`docs/architecture/css-conversion-ledger.md`. The shell chrome (layout, rail,
-sidebar, panel heads, titlebar, tab bar, chat header, transcript containers,
-composer box, settings frame, pickers) carries its base declarations as
-utilities in JSX while keeping the legacy class names as hooks. The generated
-sheets sit in `@layer legacy`, ordered after `utilities`, so theme, skin and
-state overrides keep beating the structural utilities exactly as they beat the
-base rules in the legacy cascade; extension skins stay unlayered and win over
-everything. The spacing scale is px-based (`--spacing: 4px`) because the legacy
-design is specified in px on a 14px root. No component hardcodes colours.
+Styling is Tailwind v4 on a real theme system (`src/theme/skins.ts`):
+
+- One token vocabulary in three tiers sharing the `--name` namespace: palette
+  (`--bg`, `--accent`, `--border`, ...), semantic (`--accent-fg`, `--link-color`,
+  `--selection-bg`, ...), and component knobs (`--composer-bg`,
+  `--session-active-fg`, `--rail-active-bg`, ...). `BASE` gives every token its
+  light value plus dark overrides.
+- Skins are data: each `SkinSpec` has a key, name, picker swatch, `tokens`
+  (both schemes) and `dark` overrides, and may opt into a structural trait
+  (`square-controls`, `card-sessions`, rules in `theme.css`). No component rule
+  mentions a skin or a theme; the unit test in `skins.test.ts` fails if a sheet
+  scopes a rule to `[data-skin]`/`.dark` or carries a colour of its own (black
+  and white alpha shadows are ink, not palette).
+- `renderThemeCss` produces the `:root` / `:root.dark` / `[data-skin]` cascade;
+  the `hermesTheme` Vite plugin serves it as `virtual:hermes-theme.css`, imported
+  by the client entry next to `tailwind.css`. `tailwind.css` maps the same
+  names into utilities (`bg-surface`, `text-muted`, `bg-(--rail-bg)`).
+- Extension skins use the same vocabulary (`SKIN_TOKEN_NAMES`), with the
+  protocol-v1 names kept as aliases (`SKIN_TOKEN_ALIASES`); they are applied as
+  inline custom properties on `<html>`, which beats every layer.
+
+The shell chrome (layout, rail, sidebar, panel heads, titlebar, tab bar, chat
+header, transcript containers, composer box, settings frame, pickers) carries
+its structural declarations as utilities in JSX and keeps the legacy class
+names as hooks. The component sheets under `theme/components/` sit in
+`@layer app`, ordered after `utilities`, so state and descendant rules keep
+winning over the structural utilities. The spacing scale is px-based
+(`--spacing: 4px`) because the design is specified in px on a 14px root.
+`docs/architecture/css-conversion-ledger.md` records how the legacy stylesheet
+was converted (every legacy rule has a disposition); `scripts/css-convert.mjs`
+is the history tool that produced the first cut of those sheets.
+`e2e/skins.spec.ts` screenshots every skin in both schemes on a seeded
+transcript.
 
 ### 5.2 State
 

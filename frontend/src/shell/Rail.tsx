@@ -18,7 +18,7 @@ import { Brandmark } from './Brandmark'
  */
 // Legacy rail buttons also carried `.nav-tab`; `.rail .nav-tab` then zeroed the padding and unhid overflow. Those
 // effective values are the utilities here, so the class is no longer needed on the rail.
-const RAIL_BTN = 'rail-btn has-tooltip relative flex w-[54px] h-auto min-h-12 flex-none flex-col items-center justify-center gap-[3px] rounded-(--r-md) border-0 bg-transparent text-muted cursor-pointer p-0 overflow-visible whitespace-nowrap text-center transition-[color,background] duration-(--dur) ease-(--ease) hover:text-text hover:bg-hover [&.active]:text-accent-text [&.active]:bg-accent-bg [&_svg]:size-[18px]'
+const RAIL_BTN = 'rail-btn has-tooltip relative flex w-[54px] h-auto min-h-12 flex-none flex-col items-center justify-center gap-[3px] rounded-(--rail-btn-radius) border-0 bg-transparent text-muted cursor-pointer p-0 overflow-visible whitespace-nowrap text-center transition-[color,background] duration-(--dur) ease-(--ease) hover:text-text hover:bg-hover [&.active]:text-(--rail-active-fg) [&.active]:bg-(--rail-active-bg) [&.active]:shadow-(--rail-active-shadow) [&.active]:[font-weight:var(--rail-active-weight)] [&.active_svg]:text-(--rail-active-icon-fg) [&_svg]:size-[18px]'
 
 export function Rail() {
   useLocale()
@@ -36,7 +36,7 @@ export function Rail() {
   const settingsItem = visible.find((i) => i.id === 'settings')
   const mainItems = visible.filter((i) => i.id !== 'settings')
   return (
-    <nav className="rail hidden min-[641px]:flex w-16 shrink-0 flex-col items-center gap-0.5 py-2 px-0 bg-transparent border-0" aria-label="Primary navigation">
+    <nav className="rail hidden min-[641px]:flex w-16 shrink-0 flex-col items-center gap-0.5 py-2 px-0 bg-(--rail-bg) [backdrop-filter:var(--chrome-backdrop)] border-0" aria-label="Primary navigation">
       <button type="button" className="rail-brand flex w-[52px] h-11 items-center justify-center mb-1.5 border-0 bg-transparent rounded-(--r-md) cursor-pointer transition-[background] duration-(--dur) ease-(--ease) hover:bg-hover" aria-label={m.new_conversation()} onClick={() => { void newChat() }}>
         <Brandmark className="brandmark rail-brandmark" />
       </button>

@@ -211,7 +211,7 @@ export function Composer(props: ComposerProps) {
         </div>
       )}
       <div
-        className={cn('composer-box relative z-[2] flex flex-col mx-auto max-w-(--msg-max) bg-surface border border-border rounded-(--r-lg) shadow-[0_1px_2px_rgba(0,0,0,.04)] transition-[border-color,box-shadow] duration-(--dur) ease-(--ease) focus-within:border-[rgba(255,215,0,.5)] focus-within:shadow-[0_0_0_1px_rgba(255,215,0,.25)] max-[641px]:rounded-[12px]', dragOver && 'drag-over')}
+        className={cn('composer-box relative z-[2] flex flex-col mx-auto max-w-(--msg-max) bg-(--composer-bg) border-(length:--composer-border-width) border-(--composer-border-color) rounded-(--composer-radius) shadow-(--composer-shadow) transition-[border-color,box-shadow] duration-(--dur) ease-(--ease) focus-within:border-(--composer-focus-border) focus-within:shadow-(--composer-focus-shadow) focus-within:outline-none max-[641px]:rounded-[12px]', dragOver && 'drag-over')}
         id="composerBox"
         onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
         onDragLeave={() => setDragOver(false)}

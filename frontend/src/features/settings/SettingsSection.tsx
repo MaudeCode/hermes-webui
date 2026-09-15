@@ -35,7 +35,7 @@ export function SettingsSection({ section }: { section: Section }) {
       <div className="settings-main w-full max-w-[820px] mx-auto min-w-0 pt-6 px-7 pb-12 max-[769px]:pt-4 max-[769px]:px-3.5 max-[769px]:pb-10">
         <div className="settings-section-head flex items-start justify-between gap-4 mb-5 pb-3.5 border-b border-border max-[769px]:flex-col">
           <div>
-            <h1 className="settings-section-title text-[18px] font-semibold tracking-[-.015em] text-text leading-[1.3] mb-1">{SECTION_LABEL[section]()}</h1>
+            <h1 className="settings-section-title text-[18px] font-semibold tracking-(--heading-tracking) text-text leading-[1.3] mb-1">{SECTION_LABEL[section]()}</h1>
           </div>
         </div>
         {render ? render() : <p className="text-sm text-muted">{m.loading()}</p>}

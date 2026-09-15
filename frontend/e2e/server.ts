@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdtempSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdtempSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -14,6 +14,10 @@ export async function bootServer(baseUrl: string, extraEnv: Record<string, strin
   const state = mkdtempSync(join(tmpdir(), 'hermes-e2e-'))
   mkdirSync(join(state, 'workspace'))
   mkdirSync(join(state, 'claude-projects'))
+  // Seed committed transcripts (e2e/fixtures/session-<id>.json) so screenshot tests have a rendered conversation.
+  mkdirSync(join(state, 'sessions'))
+  const fixtures = join(import.meta.dirname, 'fixtures')
+  for (const f of readdirSync(fixtures)) if (/^session-.*\.json$/.test(f)) copyFileSync(join(fixtures, f), join(state, 'sessions', f.replace(/^session-/, '')))
   const env: Record<string, string> = {}
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith('HERMES_')) env[k] = v
   Object.assign(env, {

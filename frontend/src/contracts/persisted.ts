@@ -1,8 +1,9 @@
 import { z } from 'zod'
+import { SKIN_KEYS } from '../theme/skins'
 
 export const ThemeSchema = z.enum(['light', 'dark', 'system'])
 export type Theme = z.infer<typeof ThemeSchema>
-export const SkinSchema = z.enum(['codex', 'terracotta', 'default', 'ares', 'mono', 'graphite', 'github', 'slate', 'poseidon', 'sisyphus', 'charizard', 'sienna', 'catppuccin', 'hepburn', 'nous', 'geist-contrast', 'neon', 'neon-soft', 'neon-paint', 'zeus', 'verdigris'])
+export const SkinSchema = z.enum(SKIN_KEYS)
 export type Skin = z.infer<typeof SkinSchema>
 export const FontSizeSchema = z.enum(['default', 'small', 'large', 'xlarge'])
 export type FontSize = z.infer<typeof FontSizeSchema>

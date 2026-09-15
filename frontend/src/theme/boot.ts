@@ -7,8 +7,7 @@
  */
 import { readPersisted, writePersisted } from '../lib/persisted'
 import { ThemeSchema, SkinSchema, FontSizeSchema, type Theme, type Skin } from '../contracts/persisted'
-
-export const SKINS = ['codex', 'terracotta', 'default', 'ares', 'mono', 'graphite', 'github', 'slate', 'poseidon', 'sisyphus', 'charizard', 'sienna', 'catppuccin', 'hepburn', 'nous', 'geist-contrast', 'neon', 'neon-soft', 'neon-paint', 'zeus', 'verdigris'] as const
+import { skinByKey } from './skins'
 const LEGACY_THEME_ALIASES: Record<string, [Theme, Skin]> = {
   slate: ['dark', 'slate'],
   solarized: ['dark', 'poseidon'],
@@ -41,6 +40,9 @@ export function applyAppearance(a: ResolvedAppearance, root: HTMLElement = docum
   root.classList.toggle('dark', a.effectiveDark)
   if (a.skin !== 'default') root.dataset.skin = a.skin
   else delete root.dataset.skin
+  const traits = skinByKey(a.skin)?.traits
+  if (traits?.length) root.dataset.skinTraits = traits.join(' ')
+  else delete root.dataset.skinTraits
   root.style.colorScheme = a.effectiveDark ? 'dark' : 'light'
   const color = a.effectiveDark ? THEME_COLOR.dark : THEME_COLOR.light
   for (const meta of document.querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]')) {

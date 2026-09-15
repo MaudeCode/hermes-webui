@@ -30,7 +30,7 @@ export function AppShell({ sidebar, children, title, subtitle, hub, showing }: {
       <div className={cn('layout flex w-full flex-[1_1_auto] min-h-0 gap-(--island-gap) pt-0 pr-(--island-gap) pb-(--island-gap) pl-0 bg-(--canvas) max-[769px]:gap-0 max-[769px]:p-0 max-[641px]:overflow-x-clip max-[641px]:box-border max-[641px]:pb-[calc(56px+env(safe-area-inset-bottom,0px))]', collapsed && 'sidebar-collapsed')}>
         <Rail />
         <Sidebar panel={sidebar} />
-        <main className={cn('main flex flex-1 flex-col overflow-hidden min-w-0 min-h-0 bg-bg border border-(--island-ring) rounded-(--island-radius) min-[901px]:flex-[1_1_420px] min-[901px]:min-w-[420px] max-[769px]:rounded-none max-[769px]:border-0', showing && `showing-${showing}`)} id="main">
+        <main className={cn('main flex flex-1 flex-col overflow-hidden min-w-0 min-h-0 bg-(--main-surface) border-(length:--island-ring-width) border-(--island-ring) rounded-(--island-radius) min-[901px]:flex-[1_1_420px] min-[901px]:min-w-[420px] max-[769px]:rounded-none max-[769px]:border-0', showing && `showing-${showing}`)} id="main">
           {children}
         </main>
       </div>
@@ -48,7 +48,7 @@ export function HubPage({ title, actions, toolbar, children, id }: { title: stri
   return (
     <div className={MAIN_VIEW + ' hub-page active'} id={id}>
       <header className="main-view-header relative z-10 flex items-center justify-start gap-3 min-h-14 px-8 py-3 border-b border-border shrink-0 bg-bg max-[769px]:px-3.5 max-[769px]:py-2.5 max-[769px]:min-h-12">
-        <h1 className="main-view-title flex-1 min-w-0 text-[20px] font-semibold tracking-[-.015em] text-text leading-[1.3] overflow-hidden text-ellipsis whitespace-nowrap text-left max-[769px]:text-[17px]">{title}</h1>
+        <h1 className="main-view-title flex-1 min-w-0 text-[20px] font-semibold tracking-(--heading-tracking) text-text leading-[1.3] overflow-hidden text-ellipsis whitespace-nowrap text-left max-[769px]:text-[17px]">{title}</h1>
         {actions && <div className="main-view-actions flex items-center gap-1.5 shrink-0 ml-auto">{actions}</div>}
       </header>
       {toolbar && <div className="hub-toolbar px-7 py-2.5 border-b border-border max-[769px]:px-3.5 max-[769px]:py-2">{toolbar}</div>}

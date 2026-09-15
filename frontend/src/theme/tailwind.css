@@ -1,9 +1,9 @@
 @import 'tailwindcss';
-/* `legacy` holds the generated feature sheets (scripts/css-convert.mjs). It is ordered after utilities so
-   theme, skin and state overrides keep winning over the structural utilities in JSX, exactly as they beat
-   the base rules in the legacy stylesheet. Extension skins stay unlayered and win over everything. */
-@layer theme, base, components, utilities, legacy;
-@import './tokens.css';
+/* `app` holds the component sheets (src/theme/components). It is ordered after utilities so state and
+   descendant rules keep winning over the structural utilities in JSX. Token values come from
+   `virtual:hermes-theme.css` (src/theme/skins.ts); extension skins set tokens inline on <html>. */
+@layer theme, base, components, utilities, app;
+@import './theme.css';
 @import './keyframes.css';
 @import './components/index.css';
 

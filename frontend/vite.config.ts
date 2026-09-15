@@ -2,7 +2,19 @@ import { paraglideVitePlugin } from '@inlang/paraglide-js'
 import tailwindcss from '@tailwindcss/vite'
 import { tanstackStart } from '@tanstack/react-start/plugin/vite'
 import viteReact from '@vitejs/plugin-react'
-import { defineConfig } from 'vite'
+import { defineConfig, type Plugin } from 'vite'
+import { renderThemeCss } from './src/theme/skins'
+
+/** Serves the token stylesheet rendered from src/theme/skins.ts as `virtual:hermes-theme.css`. */
+function hermesTheme(): Plugin {
+  const id = 'virtual:hermes-theme.css'
+  const resolved = '\0' + id
+  return {
+    name: 'hermes-theme',
+    resolveId: (source) => (source === id ? resolved : undefined),
+    load: (file) => (file === resolved ? renderThemeCss() : undefined),
+  }
+}
 
 // The Python server serves the committed output from ../static/dist (see
 // scripts/finalize-dist.mjs). The service worker is built by scripts/build-sw.mjs
@@ -23,6 +35,7 @@ export default defineConfig({
       disableAsyncLocalStorage: true,
       isServer: 'false',
     }),
+    hermesTheme(),
     tailwindcss(),
     tanstackStart({
       srcDirectory: 'src',

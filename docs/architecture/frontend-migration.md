@@ -189,19 +189,19 @@ replay, session replacement, profile change, and unmount. Invariants from
 
 ## 9. UI, styling, accessibility
 
-- The legacy stylesheet is converted, not carried: `frontend/scripts/css-convert.mjs`
-  reads it from git history and emits `theme/tokens.css` (every `:root`,
-  `:root.dark` and `[data-skin]` custom property, in source order),
-  `theme/keyframes.css`, and `theme/components/*.css` holding only the rules
-  whose classes the React app renders, in `@layer legacy` after Tailwind's
-  utilities. `frontend/scripts/css-ledger.json` and
-  `docs/architecture/css-conversion-ledger.md` give every one of the 4166 legacy
-  rules a disposition (tokens, converted to utilities, live, overridden, dead).
-  `tailwind.css` maps the tokens into `@theme` so utilities such as
-  `bg-surface`, `text-muted`, `border-border` consume tokens rather than literal
-  colours, and pins `--spacing: 4px` so spacing utilities match the px design.
-  Shell chrome components carry their base declarations as utilities and keep
-  the legacy class names as hooks for skin and state rules.
+- Theme system: `frontend/src/theme/skins.ts` is the single source of truth
+  for tokens and skins (palette, semantic and component tiers; 21 `SkinSpec`
+  entries as data; `renderThemeCss`). The `hermesTheme` Vite plugin serves the
+  rendered cascade as `virtual:hermes-theme.css`; `tailwind.css` maps the same
+  names into `@theme` so utilities consume tokens; component sheets under
+  `theme/components/` (in `@layer app`, after utilities) never mention a skin
+  or a theme and carry no colour literals (enforced by `skins.test.ts`). The
+  per-skin overrides the legacy sheet expressed as `!important` rules became
+  component tokens or one of two traits (`square-controls`, `card-sessions`).
+  The legacy stylesheet was converted with `frontend/scripts/css-convert.mjs`
+  (now a history tool); `docs/architecture/css-conversion-ledger.md` gives every
+  one of its 4166 rules a disposition. `e2e/skins.spec.ts` screenshots each skin
+  in both schemes on a seeded transcript (`e2e/fixtures/`).
 - Base UI provides dialogs, alert dialogs, menus, popovers, tooltips, tabs,
   selects, comboboxes, and focus management. The composer command palette uses
   Base UI Combobox; the approval card keeps its inline placement but uses the

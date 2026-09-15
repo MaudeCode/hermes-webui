@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { TOKEN_NAMES, type TokenName } from '../theme/skins'
 
 /**
  * Unified extension platform, protocol version 1 (HWEB-100).
@@ -24,8 +25,12 @@ export const SettingsFieldSchema = z.object({
 })
 export type SettingsField = z.infer<typeof SettingsFieldSchema>
 
-/** Declarative skin: validated token map, same allowlist and value shapes as the legacy core sanitizer. */
-export const SKIN_TOKEN_NAMES = ['--bg', '--surface', '--surface2', '--surface-subtle', '--text', '--text2', '--muted', '--accent', '--accent2', '--accent3', '--accent-contrast', '--accent-hover', '--accent-text', '--accent-bg', '--accent-bg-strong', '--accent-rgb', '--border', '--border2', '--hover-bg', '--code-bg', '--code-text', '--sidebar', '--sidebar-text', '--user-bubble', '--assistant-bubble', '--success', '--warning', '--danger', '--info', '--link'] as const
+/**
+ * Declarative skin: a validated token map over the theme vocabulary (src/theme/skins.ts), plus the
+ * legacy protocol-v1 names, which map onto their current equivalents (SKIN_TOKEN_ALIASES).
+ */
+export const SKIN_TOKEN_ALIASES: Record<string, TokenName> = { '--surface2': '--surface-subtle', '--text2': '--muted', '--accent2': '--accent-hover', '--accent3': '--accent-text', '--accent-contrast': '--accent-fg', '--sidebar-text': '--text', '--user-bubble': '--user-bubble-bg', '--assistant-bubble': '--assistant-msg-bg', '--link': '--link-color' }
+export const SKIN_TOKEN_NAMES = [...TOKEN_NAMES, ...Object.keys(SKIN_TOKEN_ALIASES), '--accent-rgb'] as [string, ...string[]]
 export const SKIN_VALUE_RE = /^(#(?:[0-9a-fA-F]{3,8})|rg(?:b|ba)\(\s*[0-9.,%\s/]+\)|hsl(?:a)?\(\s*[0-9.,%\s/deg]+\)|[0-9]{1,3}\s*,\s*[0-9]{1,3}\s*,\s*[0-9]{1,3}|[a-zA-Z]{3,20}|[0-9.]+(?:px|em|rem|%)?)$/
 export const ThemeDeclarationSchema = z.object({
   key: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,31}$/),

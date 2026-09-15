@@ -6,7 +6,7 @@ import { useSyncExternalStore } from 'react'
 import * as api from '../api/endpoints'
 import { keys } from '../api/queryKeys'
 import { useQuery } from '@tanstack/react-query'
-import { ExtensionManifestsSchema, type ExtensionManifest, type LifecyclePayload, type ThemeDeclaration } from '../contracts/extension'
+import { ExtensionManifestsSchema, type ExtensionManifest, type LifecyclePayload, type ThemeDeclaration, SKIN_TOKEN_ALIASES } from '../contracts/extension'
 import { get } from '../api/client'
 import { subscribe as subscribeStream, getStreamState } from '../stream/store'
 import type { LiveTurn } from '../stream/reducer'
@@ -39,7 +39,7 @@ export function applyExtensionSkin(decl: ThemeDeclaration | null, root: HTMLElem
   for (const name of Array.from(root.style)) if (name.startsWith('--') && root.dataset.extSkinTokens?.split(' ').includes(name)) root.style.removeProperty(name)
   if (!decl) { delete root.dataset.extSkinTokens; delete root.dataset.extSkin; return }
   const names: string[] = []
-  for (const [name, value] of Object.entries(decl.tokens)) { root.style.setProperty(name, value); names.push(name) }
+  for (const [rawName, value] of Object.entries(decl.tokens)) { const name = SKIN_TOKEN_ALIASES[rawName] ?? rawName; root.style.setProperty(name, value); names.push(name) }
   root.dataset.extSkinTokens = names.join(' ')
   root.dataset.extSkin = decl.key
   if (decl.scheme) root.classList.toggle('dark', decl.scheme === 'dark')

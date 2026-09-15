@@ -36,7 +36,7 @@ export function Sidebar({ panel }: { panel: ReactNode }) {
       {mobileOpen && !isDesktop && <div className="fixed inset-0 z-[190] bg-black/40 min-[641px]:hidden" aria-hidden="true" onClick={closeMobileSidebar} />}
       <aside
         ref={ref}
-        className={cn('sidebar flex w-[300px] shrink-0 flex-col overflow-visible bg-sidebar border border-(--island-ring) rounded-(--island-radius) transition-[width_.24s_ease,opacity_.18s_ease,transform_.24s_ease,margin_.24s_ease] min-[641px]:relative min-[901px]:shrink min-[901px]:min-w-[180px] max-[769px]:rounded-none max-[769px]:border-0 max-[769px]:border-r max-[769px]:border-r-border max-[641px]:fixed max-[641px]:inset-y-0 max-[641px]:left-0 max-[641px]:w-screen max-[641px]:max-w-none max-[641px]:z-[200] max-[641px]:box-border max-[641px]:[transform:translateX(-100%)] max-[641px]:transition-[transform_.25s_ease] max-[641px]:will-change-transform max-[641px]:pb-[calc(56px+env(safe-area-inset-bottom,0px))] max-[641px]:[&.mobile-open]:[transform:translateX(0)]', mobileOpen && !isDesktop && 'mobile-open')}
+        className={cn('sidebar flex w-[300px] shrink-0 flex-col overflow-visible bg-(--sidebar-bg) border border-(--sidebar-border) [border-right-style:var(--sidebar-border-style)] shadow-(--sidebar-shadow) [backdrop-filter:var(--chrome-backdrop)] rounded-(--island-radius) transition-[width_.24s_ease,opacity_.18s_ease,transform_.24s_ease,margin_.24s_ease] min-[641px]:relative min-[901px]:shrink min-[901px]:min-w-[180px] max-[769px]:rounded-none max-[769px]:border-0 max-[769px]:border-r max-[769px]:border-r-border max-[641px]:fixed max-[641px]:inset-y-0 max-[641px]:left-0 max-[641px]:w-screen max-[641px]:max-w-none max-[641px]:z-[200] max-[641px]:box-border max-[641px]:[transform:translateX(-100%)] max-[641px]:transition-[transform_.25s_ease] max-[641px]:will-change-transform max-[641px]:pb-[calc(56px+env(safe-area-inset-bottom,0px))] max-[641px]:[&.mobile-open]:[transform:translateX(0)]', mobileOpen && !isDesktop && 'mobile-open')}
         style={isDesktop && !collapsed ? { width: sidebarWidth } : undefined}
         aria-hidden={!isDesktop && !mobileOpen ? true : undefined}
         data-mobile-open={mobileOpen ? '1' : undefined}
@@ -69,7 +69,7 @@ export function PanelHead({ title, actions, children }: { title: ReactNode; acti
 }
 
 /** Legacy `.panel-head-btn`: a 24px icon button whose label doubles as the CSS tooltip. Toolbar (`.main-view-actions`) and mobile-close variants keep their legacy rules. */
-export const PANEL_HEAD_BTN = 'panel-head-btn has-tooltip inline-flex size-6 p-0 items-center justify-center border-0 bg-transparent rounded-(--r-sm) text-muted cursor-pointer shrink-0 transition-[background,color] duration-(--dur) ease-(--ease) hover:bg-accent-bg hover:text-accent-text [&_svg]:block [&_svg]:size-3.5'
+export const PANEL_HEAD_BTN = 'panel-head-btn has-tooltip inline-flex size-6 p-0 items-center justify-center border-0 bg-transparent rounded-(--btn-radius) text-muted cursor-pointer shrink-0 transition-[background,color] duration-(--dur) ease-(--ease) hover:bg-(--panel-btn-hover-bg) hover:text-(--panel-btn-hover-fg) [&_svg]:block [&_svg]:size-3.5'
 
 export function PanelHeadButton({ label, onClick, id, active, children, tooltipSide = 'bottom', className }: { label: string; onClick?: () => void; id?: string; active?: boolean; children: ReactNode; tooltipSide?: 'bottom' | 'bottom-right' | 'left'; className?: string }) {
   return (
