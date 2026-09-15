@@ -51,7 +51,7 @@ export function HubPage({ title, actions, toolbar, children, id }: { title: stri
         <h1 className="main-view-title flex-1 min-w-0 text-[20px] font-semibold tracking-(--heading-tracking) text-text leading-[1.3] overflow-hidden text-ellipsis whitespace-nowrap text-left max-[769px]:text-[17px]">{title}</h1>
         {actions && <div className="main-view-actions flex items-center gap-1.5 shrink-0 ml-auto">{actions}</div>}
       </header>
-      {toolbar && <div className="hub-toolbar px-7 py-2.5 border-b border-border max-[769px]:px-3.5 max-[769px]:py-2">{toolbar}</div>}
+      {toolbar && <div className="hub-toolbar flex flex-wrap items-center gap-x-3.5 gap-y-2 px-7 py-2.5 border-b border-border max-[769px]:px-3.5 max-[769px]:py-2">{toolbar}</div>}
       <div className="main-view-body flex-1 min-h-0 overflow-y-auto pt-6 px-8 pb-12 max-[769px]:pt-4 max-[769px]:px-3.5 max-[769px]:pb-8">{children}</div>
     </div>
   )

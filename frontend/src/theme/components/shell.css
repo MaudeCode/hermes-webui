@@ -115,7 +115,7 @@ html.hub-active .layout .sidebar .resize-handle{display:none}
 .hub-toolbar .panel-view.active{display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;gap:8px 14px}
 .hub-toolbar .panel-head > span,.hub-toolbar .panel-head > [data-i18n]{display:none}
 .hub-toolbar .panel-head-actions{order:99;margin-left:auto;display:flex;gap:4px}
-.hub-toolbar label{display:inline-flex;align-items:center;font-size:12px;font-weight:500;letter-spacing:0;text-transform:none;color:var(--muted);margin:0 -6px 0 0}
+.hub-toolbar label{display:inline-flex;align-items:center;font-size:12px;font-weight:500;letter-spacing:0;text-transform:none;color:var(--muted);margin:0}
 .hub-toolbar select,.hub-toolbar input[type="text"],.hub-toolbar input[type="number"]{width:auto !important;min-width:110px;margin:0;height:30px;padding:0 26px 0 10px;font-size:12.5px}
 .hub-toolbar button{height:30px;padding:0 12px}
 .hub-toolbar > .panel-view > *{margin:0}
