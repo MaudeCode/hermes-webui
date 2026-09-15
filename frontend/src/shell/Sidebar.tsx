@@ -2,7 +2,6 @@ import { useEffect, useRef, type ReactNode } from 'react'
 import { X } from 'lucide-react'
 import { m } from '../paraglide/messages.js'
 import { cn } from '../ui/cn'
-import { IconButton } from '../ui/Button'
 import { MobileNav } from './MobileNav'
 import { closeMobileSidebar, setSidebarWidth, useIsDesktop, useShellState } from './useShellState'
 
@@ -37,27 +36,22 @@ export function Sidebar({ panel }: { panel: ReactNode }) {
       {mobileOpen && !isDesktop && <div className="fixed inset-0 z-[190] bg-black/40 min-[641px]:hidden" aria-hidden="true" onClick={closeMobileSidebar} />}
       <aside
         ref={ref}
-        className={cn(
-          'sidebar relative flex shrink-0 flex-col border-r border-border bg-sidebar transition-[width,opacity,transform] duration-200',
-          'max-[640px]:fixed max-[640px]:inset-y-0 max-[640px]:left-0 max-[640px]:z-[200] max-[640px]:w-screen max-[640px]:max-w-none max-[640px]:pl-[52px]',
-          !isDesktop && !mobileOpen && 'max-[640px]:-translate-x-full',
-          isDesktop && collapsed && 'pointer-events-none w-0! min-w-0 overflow-hidden border-transparent opacity-0',
-        )}
-        style={isDesktop && !collapsed ? { width: sidebarWidth, minWidth: 180 } : undefined}
+        className={cn('sidebar', mobileOpen && !isDesktop && 'mobile-open')}
+        style={isDesktop && !collapsed ? { width: sidebarWidth } : undefined}
         aria-hidden={!isDesktop && !mobileOpen ? true : undefined}
         data-mobile-open={mobileOpen ? '1' : undefined}
       >
         {!isDesktop && (
           <>
-            <IconButton label={m.close_menu()} className="absolute right-1 z-[4] h-11 w-11 border border-border bg-surface" style={{ top: 'calc(4px + var(--app-titlebar-safe-top, 0px))' }} onClick={closeMobileSidebar}>
+            <button type="button" className="panel-head-btn mobile-sidebar-close has-tooltip has-tooltip--bottom-right" data-tooltip={m.close_menu()} aria-label={m.close_menu()} onClick={closeMobileSidebar}>
               <X size={18} aria-hidden="true" />
-            </IconButton>
+            </button>
             <MobileNav />
           </>
         )}
-        <div className="flex min-h-0 flex-1 flex-col">{panel}</div>
+        {panel}
         {isDesktop && !collapsed && (
-          <div className="resize-handle absolute inset-y-0 -right-[3px] z-10 w-[5px] cursor-col-resize hover:bg-accent-bg-strong" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" onPointerDown={startResize} />
+          <div className="resize-handle" id="sidebarResize" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" onPointerDown={startResize} />
         )}
       </aside>
     </>
@@ -66,10 +60,19 @@ export function Sidebar({ panel }: { panel: ReactNode }) {
 
 export function PanelHead({ title, actions, children }: { title: ReactNode; actions?: ReactNode; children?: ReactNode }) {
   return (
-    <div className="panel-head flex min-h-12 shrink-0 items-center justify-between gap-2 border-b border-border px-3.5 py-2.5 text-sm font-semibold text-text">
-      <div className="min-w-0 truncate">{title}</div>
-      {actions && <div className="flex shrink-0 items-center gap-1">{actions}</div>}
+    <div className="panel-head">
+      <span>{title}</span>
+      {actions && <div className="panel-head-actions">{actions}</div>}
       {children}
     </div>
+  )
+}
+
+/** Legacy `.panel-head-btn`: a 28px icon button whose label doubles as the CSS tooltip. */
+export function PanelHeadButton({ label, onClick, id, active, children, tooltipSide = 'bottom', className }: { label: string; onClick?: () => void; id?: string; active?: boolean; children: ReactNode; tooltipSide?: 'bottom' | 'bottom-right' | 'left'; className?: string }) {
+  return (
+    <button type="button" id={id} className={cn('panel-head-btn has-tooltip', `has-tooltip--${tooltipSide}`, active && 'active', className)} data-tooltip={label} aria-label={label} onClick={onClick}>
+      {children}
+    </button>
   )
 }

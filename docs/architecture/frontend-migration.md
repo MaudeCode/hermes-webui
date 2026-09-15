@@ -187,7 +187,9 @@ replay, session replacement, profile change, and unmount. Invariants from
 
 ## 9. UI, styling, accessibility
 
-- `frontend/src/theme/tokens.css` carries the legacy `:root`, `:root.dark`, and
+- `frontend/src/theme/legacy.css` carries the legacy stylesheet verbatim (the
+  final cascade of tokens, skins and chrome); `tokens.css` keeps the early
+  `:root`, `:root.dark`, and
   `[data-skin]` custom properties forward verbatim as the authoritative design
   tokens. `tailwind.css` maps them into Tailwind's `@theme` so utilities such as
   `bg-surface`, `text-muted`, `border-border` consume tokens rather than

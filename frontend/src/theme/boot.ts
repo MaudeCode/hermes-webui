@@ -69,6 +69,9 @@ export function applyBootAppearance(): void {
   root.dataset.workspacePanel = readPersisted('hermes-webui-workspace-panel') === 'open' ? 'open' : 'closed'
   if (readPersisted('hermes-webui-sidebar-collapsed') === '1') root.dataset.sidebarCollapsed = '1'
   if (!('SpeechRecognition' in window || 'webkitSpeechRecognition' in window)) root.classList.add('no-speech')
+  const standalone = (navigator as Navigator & { standalone?: boolean }).standalone === true || window.matchMedia('(display-mode: standalone)').matches || window.matchMedia('(display-mode: fullscreen)').matches
+  root.classList.toggle('pwa-standalone', standalone)
+  root.classList.toggle('pwa-browser', !standalone)
 
   if (resolved.theme === 'system') {
     const mql = window.matchMedia('(prefers-color-scheme: dark)')

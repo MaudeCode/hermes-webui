@@ -1,37 +1,41 @@
-import { Link, useNavigate } from '@tanstack/react-router'
+import { Link, useLocation, useNavigate } from '@tanstack/react-router'
+import { NAV_ITEMS, panelForPath } from './nav'
 import { Menu as MenuIcon, Plus, RotateCw } from 'lucide-react'
 import { m } from '../paraglide/messages.js'
 import { useBootstrap } from '../app/bootstrap'
 import { ProfileMenu } from './ProfileMenu'
 import { toggleMobileSidebar } from './useShellState'
-import { IconButton } from '../ui/Button'
 import { useNewChat } from '../features/sessions/useNewChat'
+import { Brandmark } from './Brandmark'
 
+/** Legacy `.app-titlebar`: hidden in desktop browsers, visible on mobile and in installed PWAs. */
 export function Titlebar({ title, subtitle }: { title?: string; subtitle?: string }) {
   const bootstrap = useBootstrap()
   const navigate = useNavigate()
   const newChat = useNewChat()
+  const location = useLocation()
+  const panel = panelForPath(location.pathname)
+  const panelLabel = NAV_ITEMS.find((n) => n.id === panel)?.label() ?? bootstrap.bot_name
   return (
-    <header className="app-titlebar relative flex h-[38px] shrink-0 select-none items-center justify-between border-b border-border bg-sidebar px-3 text-xs text-muted max-[640px]:h-[52px]" role="banner" style={{ paddingTop: 'var(--app-titlebar-safe-top, 0px)' }}>
-      <div className="flex items-center gap-1">
+    <header className="app-titlebar" role="banner">
+      <div className="app-titlebar-left">
         <ProfileMenu />
-        <IconButton label={m.tab_more()} className="hidden h-11 w-11 max-[640px]:inline-flex" onClick={toggleMobileSidebar}>
+        <button className="app-titlebar-hamburger has-tooltip has-tooltip--bottom" id="btnHamburger" type="button" data-tooltip={m.tab_more()} aria-label={m.tab_more()} onClick={toggleMobileSidebar}>
           <MenuIcon size={22} aria-hidden="true" />
-        </IconButton>
+        </button>
       </div>
-      <div className="flex min-w-0 flex-1 items-center justify-center gap-2">
-        <Link to="/" className="brandmark app-titlebar-icon inline-block h-4 w-4 shrink-0" aria-hidden="true" tabIndex={-1} />
-        <span className="truncate font-medium text-text">{title ?? bootstrap.bot_name}</span>
-        {subtitle && <span className="truncate text-muted">{subtitle}</span>}
+      <div className="app-titlebar-inner">
+        <Link to="/" className="app-titlebar-icon" aria-hidden="true" tabIndex={-1}><Brandmark className="brandmark" size={16} /></Link>
+        <span className="app-titlebar-title" id="appTitlebarTitle">{title ?? panelLabel}</span>
+        {subtitle && <span className="app-titlebar-sub" id="appTitlebarSub">{subtitle}</span>}
       </div>
-      <div className="flex items-center gap-1">
-        <IconButton label={m.new_conversation()} className="hidden h-11 w-11 max-[640px]:inline-flex" onClick={() => { void newChat() }}>
-          <Plus size={16} aria-hidden="true" />
-        </IconButton>
-        <IconButton label={m.reload()} className="hidden h-11 w-11 max-[640px]:inline-flex" onClick={() => { void navigate({ to: '.' }); window.location.reload() }}>
-          <RotateCw size={16} aria-hidden="true" />
-        </IconButton>
-      </div>
+      <div className="app-titlebar-spacer" aria-hidden="true" />
+      <button className="app-titlebar-new-chat" id="btnTitlebarNewChat" type="button" aria-label={m.new_conversation()} title={m.new_conversation()} onClick={() => { void newChat() }}>
+        <Plus size={16} aria-hidden="true" />
+      </button>
+      <button className="app-titlebar-reload" id="btnReload" type="button" aria-label={m.reload()} title={m.reload()} onClick={() => { void navigate({ to: '.' }); window.location.reload() }}>
+        <RotateCw size={16} aria-hidden="true" />
+      </button>
     </header>
   )
 }

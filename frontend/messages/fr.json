@@ -1900,5 +1900,12 @@
 	"outline_minimap_label": "Chronologie de la conversation",
 	"outline_minimap_mark": "Question {a0} : {a1}",
 	"outline_empty": "Pas encore de questions.",
-	"outline_loading": "Chargement…"
+	"outline_loading": "Chargement…",
+	"project_all": "All",
+	"project_unassigned": "Unassigned",
+	"project_unassigned_hint": "Show conversations not yet assigned to a project",
+	"project_new": "New project",
+	"project_new_prompt": "Project name",
+	"project_filter_label": "Project filter",
+	"composer_config_title": "Composer settings"
 }

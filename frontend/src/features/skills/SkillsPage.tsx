@@ -33,9 +33,9 @@ export function SkillsPage() {
       title={m.tab_skills()}
       toolbar={
         <>
-          <div className="relative flex items-center">
-            <Search size={14} className="pointer-events-none absolute left-2.5 text-muted" aria-hidden="true" />
-            <input id="skillsSearch" type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder={m.search_skills()} aria-label={m.search_skills()} className="h-8 w-56 rounded-md border border-border bg-input pl-8 pr-2 text-[13px] text-text" />
+          <div className="sidebar-search hub-search">
+            <Search size={14} className="sidebar-search-icon" aria-hidden="true" />
+            <input id="skillsSearch" type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder={m.search_skills()} aria-label={m.search_skills()} />
           </div>
           {categories.length > 0 && (
             <NativeSelect value={category} onChange={(e) => setCategory(e.target.value)} aria-label={m.skill_category_all()}>

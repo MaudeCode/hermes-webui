@@ -154,7 +154,7 @@ export const FileContentSchema = z.looseObject({ path: z.string().optional(), co
 export const GitInfoSchema = z.looseObject({ git: z.looseObject({ is_git: z.boolean().optional(), branch: NullableString.optional(), dirty: z.number().optional(), modified: z.number().optional(), untracked: z.number().optional(), ahead: z.number().optional(), behind: z.number().optional() }).nullable().optional() })
 
 // ── Skills, memory, tasks ─────────────────────────────────────────────────────
-export const SkillSchema = z.looseObject({ name: z.string(), description: z.string().optional(), category: z.string().optional(), disabled: z.boolean().optional() })
+export const SkillSchema = z.looseObject({ name: z.string(), description: NullableString.optional(), category: NullableString.optional(), disabled: z.boolean().optional() })
 export const SkillsSchema = z.looseObject({ skills: z.array(SkillSchema), categories: z.array(z.unknown()).optional() })
 export const SkillContentSchema = z.looseObject({ name: z.string().optional(), content: z.string().optional(), path: z.string().optional(), success: z.boolean().optional(), message: z.string().optional() })
 export const SkillsUsageSchema = z.looseObject({ usage: z.record(z.string(), z.looseObject({ use_count: z.number().optional(), view_count: z.number().optional(), patch_count: z.number().optional() })), total_invocations: z.number().optional(), unique_skills_used: z.number().optional() })

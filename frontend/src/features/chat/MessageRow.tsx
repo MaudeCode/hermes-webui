@@ -51,12 +51,10 @@ export function toolCardsFor(message: Message, toolResults: Record<string, Messa
 export const UserMessageRow = memo(function UserMessageRow({ row, renderMarkdown, workspace, actions }: { row: VisibleMessage; renderMarkdown: boolean; workspace: string | undefined; actions: RowActions }) {
   const text = messageText(row.message.content)
   return (
-    <div className="msg-row group flex flex-col items-end py-3" data-role="user" data-msg-idx={row.index} data-message-key={row.key}>
-      <div className="max-w-[80%] rounded-2xl border border-border bg-surface px-3.5 py-2.5 text-[var(--message-body-font-size)] leading-[var(--message-body-line-height)] text-text max-[768px]:max-w-[86%] max-[600px]:max-w-[90%]">
-        <div className="msg-body break-words">{renderMarkdown ? <Markdown text={text} /> : <div className="whitespace-pre-wrap">{text}</div>}</div>
-        <AttachmentList message={row.message} workspace={workspace} />
-      </div>
-      <div className="msg-foot mt-1 flex items-center gap-1 text-[11px] text-muted opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 max-[640px]:opacity-100">
+    <div className="msg-row" data-role="user" data-msg-idx={row.index} data-message-key={row.key}>
+      <AttachmentList message={row.message} workspace={workspace} />
+      <div className="msg-body">{renderMarkdown ? <Markdown text={text} /> : <div className="whitespace-pre-wrap">{text}</div>}</div>
+      <div className="msg-foot">
         {row.message.timestamp ? <span className="msg-time">{formatDate(row.message.timestamp)}</span> : null}
         <IconButton label={m.copy()} className="h-6 w-6" onClick={() => { void navigator.clipboard.writeText(text).then(() => showToast(m.copied())) }}><Copy size={12} aria-hidden="true" /></IconButton>
         {actions.onEdit && <IconButton label={m.edit_message()} className="h-6 w-6" onClick={() => actions.onEdit?.(row, text)}><Pencil size={12} aria-hidden="true" /></IconButton>}
@@ -72,21 +70,22 @@ export const AssistantMessageRow = memo(function AssistantMessageRow({ row, name
   const reasoning = [row.message.reasoning_content, typeof row.message.reasoning === 'string' ? row.message.reasoning : '', row.message.thinking, split.reasoning].filter((x): x is string => !!x && x.trim() !== '').join('\n')
   const calls = useMemo(() => toolCardsFor(row.message, row.toolResults), [row])
   return (
-    <div className="msg-row assistant-turn py-3" data-role="assistant" data-msg-idx={row.index} data-message-key={row.key}>
-      <div className="msg-role assistant mb-2 flex items-center gap-2 text-xs font-medium text-muted"><span className="msg-role-name">{name}</span>{row.message.badge && <span className="rounded-full border border-border px-1.5 text-[10px]">{row.message.badge}</span>}</div>
+    <div className="msg-row assistant-turn" data-role="assistant" data-msg-idx={row.index} data-message-key={row.key}>
+      <div className="msg-role assistant"><span className="msg-role-name">{name}</span>{row.message.badge && <span className="msg-badge">{row.message.badge}</span>}</div>
       <div className="assistant-turn-blocks">
-        {reasoning && <ReasoningBlock text={reasoning} />}
-        <Worklog mode={mode} calls={calls} live={false}>
+        <Worklog mode={mode} calls={calls} live={false} hasReasoning={!!reasoning}>
+          {reasoning && <ReasoningBlock text={reasoning} />}
           {calls.map((c) => <ToolCard key={c.id} call={c} />)}
         </Worklog>
-        {split.content.trim() && <div className="msg-body max-w-[var(--msg-max)] text-[var(--message-body-font-size)] leading-[var(--message-body-line-height)] text-text"><Markdown text={split.content} /></div>}
+        {split.content.trim() && <div className="msg-body"><Markdown text={split.content} /></div>}
         <AttachmentList message={row.message} workspace={undefined} />
       </div>
-      <div className={cn('msg-foot mt-1 flex items-center gap-1 text-[11px] text-muted transition-opacity max-[640px]:opacity-100', isLast ? 'opacity-100' : 'opacity-0 hover:opacity-100 focus-within:opacity-100')}>
+      <div className={cn('msg-foot', isLast && 'msg-foot-latest')}>
         {row.message.timestamp ? <span className="msg-time">{formatDate(row.message.timestamp)}</span> : null}
         <IconButton label={m.copy()} className="h-6 w-6" onClick={() => { void navigator.clipboard.writeText(split.content).then(() => showToast(m.copied())) }}><Copy size={12} aria-hidden="true" /></IconButton>
         {tts && split.content.trim() && <IconButton label={m.speak_message()} className="h-6 w-6" onClick={() => { void speak(split.content) }}><Volume2 size={12} aria-hidden="true" /></IconButton>}
         {actions.onRegenerate && isLast && <IconButton label={m.regenerate_response()} className="h-6 w-6" onClick={() => actions.onRegenerate?.(row)}><RotateCcw size={12} aria-hidden="true" /></IconButton>}
+        <button type="button" className="msg-question-jump-btn session-jump-btn session-jump-btn--inline" title={m.jump_to_question_label()} aria-label={m.jump_to_question_label()} onClick={(e) => { const rowEl = (e.currentTarget as HTMLElement).closest('.msg-row'); let prev = rowEl?.previousElementSibling; while (prev && !(prev instanceof HTMLElement && prev.dataset.role === 'user')) prev = prev.previousElementSibling; prev?.scrollIntoView({ block: 'start', behavior: 'smooth' }) }}><span aria-hidden="true">↑</span><span>{m.jump_to_question()}</span></button>
       </div>
     </div>
   )

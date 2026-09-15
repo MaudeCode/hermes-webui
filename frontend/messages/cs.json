@@ -1909,5 +1909,12 @@
 	"outline_minimap_label": "Časová osa konverzace",
 	"outline_minimap_mark": "Otázka {a0}: {a1}",
 	"outline_empty": "Zatím žádné otázky.",
-	"outline_loading": "Načítám…"
+	"outline_loading": "Načítám…",
+	"project_all": "All",
+	"project_unassigned": "Unassigned",
+	"project_unassigned_hint": "Show conversations not yet assigned to a project",
+	"project_new": "New project",
+	"project_new_prompt": "Project name",
+	"project_filter_label": "Project filter",
+	"composer_config_title": "Composer settings"
 }

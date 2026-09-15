@@ -65,7 +65,7 @@ export function SessionContextMenu({ row, active }: { row: SessionRow; active: b
         label={m.session_menu()}
         align="end"
         trigger={
-          <IconButton label={m.session_menu()} className="session-menu-btn h-7 w-7 opacity-0 group-hover:opacity-100 focus:opacity-100 data-[popup-open]:opacity-100" onClick={(e) => { e.preventDefault(); e.stopPropagation() }}>
+          <IconButton label={m.session_menu()} className="session-actions-trigger" onClick={(e) => { e.preventDefault(); e.stopPropagation() }}>
             <MoreHorizontal size={16} aria-hidden="true" />
           </IconButton>
         }

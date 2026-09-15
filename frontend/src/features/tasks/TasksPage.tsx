@@ -9,7 +9,8 @@ import { keys } from '../../api/queryKeys'
 import type { z as Z } from 'zod'
 import { CronJobSchema } from '../../contracts'
 import { HubPage } from '../../shell/AppShell'
-import { Button, IconButton } from '../../ui/Button'
+import { Button } from '../../ui/Button'
+import { PanelHeadButton } from '../../shell/Sidebar'
 import { Checkbox, FieldRow, NativeSelect, TextInput } from '../../ui/Field'
 import { ConfirmDialog, Dialog } from '../../ui/Dialog'
 import { EmptyState, ErrorState, LoadingState, formatDate } from '../../ui/States'
@@ -71,8 +72,8 @@ export function TasksPage() {
       actions={
         <>
           <label className="flex items-center gap-1.5 text-xs text-muted"><Checkbox checked={allProfiles} onChange={(e) => setAllProfiles(e.target.checked)} /> {m.all_profiles()}</label>
-          <IconButton label={m.refresh()} onClick={() => { void crons.refetch() }}><RefreshCw size={16} aria-hidden="true" /></IconButton>
-          <Button variant="primary" size="sm" onClick={() => setEditing('new')}><Plus size={14} aria-hidden="true" /> {m.cron_new_job()}</Button>
+          <PanelHeadButton label={m.refresh()} onClick={() => { void crons.refetch() }}><RefreshCw size={16} aria-hidden="true" /></PanelHeadButton>
+          <PanelHeadButton label={m.cron_new_job()} className="primary" onClick={() => setEditing('new')}><Plus size={16} aria-hidden="true" /></PanelHeadButton>
         </>
       }
     >

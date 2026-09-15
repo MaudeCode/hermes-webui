@@ -36,6 +36,6 @@ export { expect }
 
 export async function settle(page: Page): Promise<void> {
   await page.waitForLoadState('networkidle')
-  // Wait for the router to render something under the mount node.
-  await expect(page.locator('#app > *').first()).toBeVisible()
+  // Wait for the router to render the shell (the titlebar is hidden in desktop browsers, so wait for the layout or a full-page route).
+  await expect(page.locator('#app :visible').first()).toBeVisible()
 }

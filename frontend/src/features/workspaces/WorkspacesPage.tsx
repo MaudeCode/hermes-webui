@@ -6,6 +6,7 @@ import * as api from '../../api/endpoints'
 import { keys } from '../../api/queryKeys'
 import { useWorkspacesQuery } from '../../app/queries'
 import { HubPage } from '../../shell/AppShell'
+import { PanelHeadButton } from '../../shell/Sidebar'
 import { Button, IconButton } from '../../ui/Button'
 import { TextInput } from '../../ui/Field'
 import { ConfirmDialog, Dialog } from '../../ui/Dialog'
@@ -37,7 +38,7 @@ export function WorkspacesPage() {
     reorder.mutate(next.map((w) => w.path))
   }
   return (
-    <HubPage title={m.tab_workspaces()} actions={<Button variant="primary" size="sm" onClick={() => setAdding(true)}><Plus size={14} aria-hidden="true" /> {m.workspace_add()}</Button>}>
+    <HubPage title={m.tab_workspaces()} actions={<PanelHeadButton label={m.workspace_add()} className="primary" onClick={() => setAdding(true)}><Plus size={16} aria-hidden="true" /></PanelHeadButton>}>
       <p className="mb-3 text-sm text-muted">{m.workspace_desc()}</p>
       {ws.isPending && <LoadingState />}
       {ws.isError && <ErrorState error={ws.error} onRetry={() => { void ws.refetch() }} />}

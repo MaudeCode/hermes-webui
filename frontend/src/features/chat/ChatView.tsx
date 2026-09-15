@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { m } from '../../paraglide/messages.js'
+import { cn } from '../../ui/cn'
+import { ChevronLeft } from 'lucide-react'
 import * as api from '../../api/endpoints'
 import { keys } from '../../api/queryKeys'
 import { useBootstrap } from '../../app/bootstrap'
@@ -143,22 +145,28 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
   const otherProfile = query.isError && isApiError(query.error) && query.error.status === 409
 
   const emptyState = (
-    <div className="empty-state flex flex-col items-center px-5 pb-4 pt-6 text-muted" id="emptyState">
-      <h2 className="empty-hero-title text-center text-[26px] font-semibold leading-tight tracking-tight text-text" id="emptyHeroTitle">{workspace ? m.empty_hero_title_workspace({ a0: workspace.split('/').filter(Boolean).pop() ?? workspace }) : m.empty_hero_title()}</h2>
+    <div className="empty-state" id="emptyState">
+      <h2 className="empty-hero-title ready" id="emptyHeroTitle">{workspace ? m.empty_hero_title_workspace({ a0: workspace.split('/').filter(Boolean).pop() ?? workspace }) : m.empty_hero_title()}</h2>
     </div>
   )
+  const wsLabel = workspace ? (workspace.split('/').filter(Boolean).pop() ?? workspace) : ''
+  const openChip = (id: string) => { const el = document.getElementById(id); if (el instanceof HTMLElement) el.click() }
 
   return (
-    <div className="flex min-h-0 flex-1">
-      <div id="mainChat" className={`main-view flex min-h-0 min-w-0 flex-1 flex-col bg-bg ${rows.length === 0 && !live ? 'composer-hero' : ''}`}>
-        {session && (
-          <div className="chat-header flex min-h-12 items-center gap-3 border-b border-border px-5 py-2 max-[768px]:min-h-11 max-[768px]:px-3.5">
-            <div className="chat-header-text min-w-0">
-              <h1 className="chat-header-title truncate text-sm font-semibold text-text" id="topbarTitle">{title || m.untitled()}</h1>
-              <div className="chat-header-meta truncate text-[11px] text-muted" id="topbarMeta">{meta}</div>
+    <>
+      <div id="mainChat" className={cn('main-view active', rows.length === 0 && !live && 'composer-hero')}>
+        <div className="chat-header">
+          <div className="chat-header-text">
+            <h1 className="chat-header-title" id="topbarTitle">{session ? (title || m.untitled()) : bootstrap.bot_name}</h1>
+            {session && meta && <div className="chat-header-meta" id="topbarMeta">{meta}</div>}
+            <div className="chat-context">
+              <button type="button" className="chat-context-item chat-context-profile" onClick={() => openChip('profileChip')}>{bootstrap.profile?.name ?? 'default'}</button>
+              {(session?.model ?? settings.data?.default_model) && <button type="button" className="chat-context-item chat-context-model" onClick={() => openChip('composerModelChip')}>{session?.model ?? settings.data?.default_model}</button>}
+              {reasoning && <button type="button" className="chat-context-item chat-context-effort" onClick={() => openChip('composerReasoningChip')}>{reasoning}</button>}
+              {wsLabel && <button type="button" className="chat-context-item chat-context-workspace" onClick={() => openChip('composerWorkspaceChip')}>{wsLabel}</button>}
             </div>
           </div>
-        )}
+        </div>
         <RuntimeNoticeStack live={live} onRetry={() => { void onRegenerate() }} />
         {query.isPending && sessionId && <div className="p-4 text-sm text-muted" role="status">{m.transcript_loading()}</div>}
         {notFound && <div className="p-4"><ErrorState error={new Error(m.transcript_not_found())} onRetry={() => { void navigate({ to: '/', search: { action: 'new-chat' } }) }} /></div>}
@@ -182,7 +190,7 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
             showJumpButtons={(settings.data as Record<string, unknown> | undefined)?.session_jump_buttons !== false}
           />
         )}
-        <div className="composer-flyout mx-auto w-full max-w-[var(--msg-max)] px-5 max-[768px]:px-3">
+        <div className="composer-flyout">
           {sessionId && live?.approval && <ApprovalCard sessionId={sessionId} pending={live.approval} onResolved={() => dispatch({ type: 'clear_approval', sessionId })} />}
           {sessionId && live?.clarify && <ClarifyCard sessionId={sessionId} pending={live.clarify} onResolved={() => dispatch({ type: 'clear_clarify', sessionId })} />}
           {terminalOpen && sessionId && <TerminalPanel sessionId={sessionId} workspace={workspace} onClose={() => setTerminalOpen(false)} />}
@@ -211,6 +219,11 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
         <span className="sr-only" aria-live="polite" id="a11yAnnouncer">{live?.status === 'done' ? m.done() : ''}</span>
       </div>
       {workspaceOpen && workspace && sessionId && <WorkspacePanel key={workspace} workspace={workspace} sessionId={sessionId} onClose={() => setWorkspaceOpen(false)} />}
-    </div>
+      {!workspaceOpen && sessionId && workspace && (
+        <button type="button" className="workspace-panel-edge-toggle has-tooltip has-tooltip--left" id="btnWorkspacePanelEdgeToggle" data-tooltip={m.composer_files_toggle()} aria-label={m.composer_files_toggle()} onClick={() => setWorkspaceOpen(true)}>
+          <ChevronLeft size={14} aria-hidden="true" />
+        </button>
+      )}
+    </>
   )
 }

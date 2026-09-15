@@ -6,6 +6,7 @@ import * as api from '../../api/endpoints'
 import { keys } from '../../api/queryKeys'
 import { useProfilesQuery, useSwitchProfile } from '../../app/queries'
 import { HubPage } from '../../shell/AppShell'
+import { PanelHeadButton } from '../../shell/Sidebar'
 import { Button, IconButton } from '../../ui/Button'
 import { FieldRow, NativeSelect, TextInput } from '../../ui/Field'
 import { ConfirmDialog, Dialog } from '../../ui/Dialog'
@@ -23,7 +24,7 @@ export function ProfilesPage() {
   const list = profiles.data?.profiles ?? []
   const active = profiles.data?.active
   return (
-    <HubPage title={m.tab_profiles()} actions={!profiles.data?.single_profile_mode && <Button variant="primary" size="sm" onClick={() => setCreating(true)}><Plus size={14} aria-hidden="true" /> {m.profile_create()}</Button>}>
+    <HubPage title={m.tab_profiles()} actions={!profiles.data?.single_profile_mode && <PanelHeadButton label={m.profile_create()} className="primary" onClick={() => setCreating(true)}><Plus size={16} aria-hidden="true" /></PanelHeadButton>}>
       <div className="mb-4 rounded-lg border border-border bg-surface p-3 text-sm">
         <div className="font-medium text-text">{m.profile_concept_title()}</div>
         <div className="mt-1 text-xs text-muted">{m.profile_concept_subtitle()}</div>

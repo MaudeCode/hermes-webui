@@ -91,10 +91,10 @@ export function Transcript(props: TranscriptProps) {
 
   const empty = rows.length === 0 && !showLive && !showLiveUser
   return (
-    <div className="messages-shell relative flex min-h-0 flex-1 flex-col">
-      <div ref={scrollRef} onScroll={onScroll} className={cn('messages flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden px-5 [overflow-anchor:none] max-[768px]:px-3.5', empty && 'justify-end')} id="messages" role="log" aria-live="off" aria-relevant="additions">
+    <div className="messages-shell">
+      <div ref={scrollRef} onScroll={onScroll} className={cn('messages', empty && 'messages-empty')} id="messages" role="log" aria-live="off" aria-relevant="additions">
         {empty ? emptyState : (
-          <div className="messages-inner mx-auto flex w-full max-w-[var(--msg-max)] flex-col px-0 pb-5 pt-3 [overflow-wrap:anywhere]" id="msgInner" style={{ ['--msg-max' as string]: 'var(--msg-max, 820px)' }}>
+          <div className="messages-inner" id="msgInner">
             {truncated && (
               <div className="flex justify-center py-2">
                 <Button size="sm" variant="ghost" onClick={onLoadOlder} disabled={loadingOlder}>{loadingOlder ? m.loading() : m.load_older()}</Button>
@@ -114,8 +114,8 @@ export function Transcript(props: TranscriptProps) {
               </div>
             ) : rows.map((row, i) => renderRow(row, i))}
             {showLiveUser && (
-              <div className="msg-row group flex flex-col items-end py-3" data-role="user" data-live-user="1">
-                <div className="max-w-[80%] rounded-2xl border border-border bg-surface px-3.5 py-2.5 text-[var(--message-body-font-size)] leading-[var(--message-body-line-height)] text-text"><div className="msg-body whitespace-pre-wrap break-words">{liveUserText}</div></div>
+              <div className="msg-row" data-role="user" data-live-user="1">
+                <div><div className="msg-body whitespace-pre-wrap break-words">{liveUserText}</div></div>
               </div>
             )}
             {showLive && live && <LiveTurnView turn={live} name={assistantName} mode={mode} userVisible />}
@@ -123,12 +123,12 @@ export function Transcript(props: TranscriptProps) {
         )}
       </div>
       {showJumpButtons && !atTop && rows.length > 3 && (
-        <button type="button" className="session-jump-btn absolute right-5 top-3 z-[11] flex h-8 items-center gap-1 rounded-full border border-border bg-surface px-3 text-xs font-medium text-muted shadow-md hover:text-text" onClick={() => scrollRef.current?.scrollTo({ top: 0 })} aria-label={m.jump_to_start()}>
+        <button type="button" className="session-jump-btn session-jump-btn--start" onClick={() => scrollRef.current?.scrollTo({ top: 0 })} aria-label={m.jump_to_start()}>
           <ArrowUp size={12} aria-hidden="true" /> <span className="max-[640px]:hidden">{m.jump_to_start()}</span>
         </button>
       )}
       {!pinned && !empty && (
-        <button type="button" className="scroll-to-bottom-btn absolute bottom-4 left-1/2 z-10 flex h-8 -translate-x-1/2 items-center gap-1 rounded-full border border-border bg-surface px-3 text-xs font-medium text-muted shadow-md hover:text-text" onClick={() => scrollToBottom(true)} aria-label={m.scroll_to_bottom()}>
+        <button type="button" className="scroll-to-bottom-btn" onClick={() => scrollToBottom(true)} aria-label={m.scroll_to_bottom()}>
           <ArrowDown size={12} aria-hidden="true" /> <span className="max-[640px]:hidden">{m.scroll_to_bottom()}</span>
         </button>
       )}

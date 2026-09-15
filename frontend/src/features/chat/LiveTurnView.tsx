@@ -18,7 +18,7 @@ export function LiveTurnView({ turn, name, mode, userVisible }: { turn: LiveTurn
     if (!textBuffer.trim()) { textBuffer = ''; return }
     const split = extractInlineThinking(textBuffer, streaming && last)
     if (split.reasoning) blocks.push(<ReasoningBlock key={`${key}-think`} text={split.reasoning} live={split.inThinking} />)
-    if (split.content.trim()) blocks.push(<div key={key} className="msg-body max-w-[var(--msg-max)] text-[var(--message-body-font-size)] leading-[var(--message-body-line-height)] text-text"><Markdown text={split.content} streaming={streaming && last} /></div>)
+    if (split.content.trim()) blocks.push(<div key={key} className="msg-body"><Markdown text={split.content} streaming={streaming && last} /></div>)
     textBuffer = ''
   }
   const toolBlocks: ReactElement[] = []
@@ -32,8 +32,8 @@ export function LiveTurnView({ turn, name, mode, userVisible }: { turn: LiveTurn
   })
   const worklog = calls.length > 0 ? <Worklog key="worklog" mode={mode} calls={calls} live={streaming} defaultOpen={mode !== 'compact_worklog'}>{toolBlocks}</Worklog> : null
   return (
-    <div className="msg-row assistant-turn live-turn py-3" data-role="assistant" data-live="1" data-stream-id={turn.streamId} data-status={turn.status} aria-busy={streaming}>
-      <div className="msg-role assistant mb-2 flex items-center gap-2 text-xs font-medium text-muted">
+    <div className="msg-row assistant-turn live-turn" data-role="assistant" data-live="1" data-stream-id={turn.streamId} data-status={turn.status} aria-busy={streaming}>
+      <div className="msg-role assistant">
         <span className="msg-role-name">{name}</span>
         {turn.tps !== null && <span className="msg-tps-inline tabular-nums" title="Tokens per second">{turn.tps.toFixed(1)} tok/s</span>}
       </div>

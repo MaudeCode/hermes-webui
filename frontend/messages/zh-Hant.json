@@ -1809,5 +1809,12 @@
 	"outline_minimap_label": "對話時間軸",
 	"outline_minimap_mark": "問題 {a0}: {a1}",
 	"outline_empty": "尚無問題。",
-	"outline_loading": "載入中…"
+	"outline_loading": "載入中…",
+	"project_all": "All",
+	"project_unassigned": "Unassigned",
+	"project_unassigned_hint": "Show conversations not yet assigned to a project",
+	"project_new": "New project",
+	"project_new_prompt": "Project name",
+	"project_filter_label": "Project filter",
+	"composer_config_title": "Composer settings"
 }

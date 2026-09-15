@@ -1842,5 +1842,12 @@
 	"outline_minimap_label": "Cronología de la conversación",
 	"outline_minimap_mark": "Pregunta {a0}: {a1}",
 	"outline_empty": "Aún no hay preguntas.",
-	"outline_loading": "Cargando…"
+	"outline_loading": "Cargando…",
+	"project_all": "All",
+	"project_unassigned": "Unassigned",
+	"project_unassigned_hint": "Show conversations not yet assigned to a project",
+	"project_new": "New project",
+	"project_new_prompt": "Project name",
+	"project_filter_label": "Project filter",
+	"composer_config_title": "Composer settings"
 }

@@ -2133,5 +2133,12 @@
 	"extensions_sidecar_consent": "Allow the proxied sidecar",
 	"extensions_legacy_notice": "This extension still uses injected scripts, which the sandboxed platform no longer runs.",
 	"extensions_migration_guide": "Read the migration guide",
-	"extensions_skin_from": "from {name}"
+	"extensions_skin_from": "from {name}",
+	"project_all": "All",
+	"project_unassigned": "Unassigned",
+	"project_unassigned_hint": "Show conversations not yet assigned to a project",
+	"project_new": "New project",
+	"project_new_prompt": "Project name",
+	"project_filter_label": "Project filter",
+	"composer_config_title": "Composer settings"
 }

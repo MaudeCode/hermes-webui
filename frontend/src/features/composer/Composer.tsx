@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Mic, Paperclip, Square, ArrowUp, TerminalSquare, PanelRight, Zap } from 'lucide-react'
+import { Mic, Paperclip, Square, ArrowUp, TerminalSquare, PanelRight, SlidersHorizontal } from 'lucide-react'
 import { m } from '../../paraglide/messages.js'
 import * as api from '../../api/endpoints'
 import { keys } from '../../api/queryKeys'
@@ -9,7 +9,6 @@ import type { LiveTurn } from '../../stream/reducer'
 import { isTerminal } from '../../stream/reducer'
 import { cancelTurn, startTurn } from '../../stream/connection'
 import { useBootstrap } from '../../app/bootstrap'
-import { IconButton } from '../../ui/Button'
 import { cn } from '../../ui/cn'
 import { showToast } from '../toast/toast'
 import { AttachmentTray, type PendingFile } from './Attachments'
@@ -64,6 +63,7 @@ export function Composer(props: ComposerProps) {
   const [sending, setSending] = useState(false)
   const [dictating, setDictating] = useState(false)
   const [dragOver, setDragOver] = useState(false)
+  const [configOpen, setConfigOpen] = useState(false)
   const textarea = useRef<HTMLTextAreaElement>(null)
   const recognition = useRef<ReturnType<typeof createRecognition>>(null)
   const busy = !!live && !isTerminal(live.status)
@@ -203,24 +203,24 @@ export function Composer(props: ComposerProps) {
   const reasoningLevels = useMemo(() => undefined, [])
 
   return (
-    <div className="composer-wrap shrink-0 bg-bg px-5 pb-4 pt-3 max-[768px]:px-3 max-[768px]:pb-3" id="composerWrap" style={{ paddingBottom: 'max(16px, env(safe-area-inset-bottom, 0px))' }}>
+    <div className="composer-wrap" id="composerWrap">
       {queued.length > 0 && (
-        <div className="queue-card mx-auto mb-2 w-full max-w-[var(--msg-max)] rounded-lg border border-border bg-surface px-3 py-2 text-xs text-muted" role="region" aria-label={m.queued_count({ n: queued.length })} aria-live="polite">
-          <div className="mb-1 font-medium text-text">{m.queued_count({ n: queued.length })}</div>
-          <ul className="flex flex-col gap-1">{queued.map((q, i) => <li key={i} className="truncate">{q}</li>)}</ul>
+        <div className="queue-card" role="region" aria-label={m.queued_count({ n: queued.length })} aria-live="polite">
+          <div className="queue-card-title">{m.queued_count({ n: queued.length })}</div>
+          <ul className="queue-card-list">{queued.map((q, i) => <li key={i}>{q}</li>)}</ul>
         </div>
       )}
       <div
-        className={cn('composer-box relative mx-auto flex w-full max-w-[var(--msg-max)] flex-col rounded-2xl border border-border2 bg-input transition-colors focus-within:border-accent', dragOver && 'border-accent bg-accent-bg')}
+        className={cn('composer-box', dragOver && 'drag-over')}
         id="composerBox"
         onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
         onDragLeave={() => setDragOver(false)}
         onDrop={onDrop}
       >
         {palette.open && <CommandPaletteList items={palette.items} active={palette.active} listId={palette.listId} onPick={applySuggestion} onHover={palette.setActive} />}
-        {dragOver && <div className="drop-hint pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-2xl bg-accent-bg text-sm text-accent-text" aria-hidden="true">{m.drop_files_to_attach()}</div>}
+        {dragOver && <div className="drop-hint active" id="dropHint" aria-hidden="true">{m.drop_files_to_attach()}</div>}
         <AttachmentTray files={files} onRemove={removeFile} />
-        {dictating && <div className="mic-status flex items-center gap-2 px-3.5 pt-2 text-xs text-accent-text" role="status"><span className="h-2 w-2 animate-pulse rounded-full bg-error" aria-hidden="true" /> {m.voice_listening()}</div>}
+        {dictating && <div className="mic-status active" id="micStatus" role="status"><span className="mic-dot" aria-hidden="true" /> {m.voice_listening()}</div>}
         <textarea
           ref={textarea}
           id="msg"
@@ -236,35 +236,43 @@ export function Composer(props: ComposerProps) {
           aria-activedescendant={palette.activeId}
           role={palette.open ? 'combobox' : undefined}
           aria-expanded={palette.open ? true : undefined}
-          className="max-h-80 min-h-11 resize-none bg-transparent px-3.5 pb-1.5 pt-3 text-base text-text outline-none placeholder:text-muted max-[768px]:text-[14.5px]"
         />
-        <div className="composer-footer flex items-center justify-between gap-2 px-2 pb-2 pt-1">
-          <div className="composer-left flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [scrollbar-width:none]">
+        <div className={cn('composer-footer cf-burger', !text && files.length === 0 && !busy && 'cf-collapsed')}>
+          <div className="composer-left">
             {!hide('hide_composer_attach') && (
               <>
-                <input type="file" id="fileInput" multiple className="sr-only" onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = '' }} accept="image/*,text/*,application/pdf,application/json,.csv,.md,.docx,.xlsx,.pptx" />
-                <IconButton label={m.composer_control_attach()} onClick={() => document.getElementById('fileInput')?.click()}><Paperclip size={16} aria-hidden="true" /></IconButton>
+                <input type="file" id="fileInput" multiple className="file-input-visually-hidden" onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = '' }} accept="image/*,text/*,application/pdf,application/json,.csv,.md,.docx,.xlsx,.pptx" />
+                <button type="button" className="icon-btn has-tooltip" id="btnAttach" data-tooltip={m.composer_control_attach()} aria-label={m.composer_control_attach()} onClick={() => document.getElementById('fileInput')?.click()}><Paperclip size={16} aria-hidden="true" /></button>
               </>
             )}
-            {!hide('hide_composer_mic') && dictationSupported() && <IconButton label={dictating ? m.voice_dictate_active() : m.voice_dictate()} active={dictating} onClick={toggleDictation}><Mic size={16} aria-hidden="true" /></IconButton>}
-            <IconButton label={m.composer_terminal_toggle()} active={terminalOpen} onClick={onToggleTerminal}><TerminalSquare size={16} aria-hidden="true" /></IconButton>
-            <IconButton label={m.composer_files_toggle()} active={workspaceOpen} onClick={onToggleWorkspace} aria-pressed={workspaceOpen}><PanelRight size={16} aria-hidden="true" /></IconButton>
-            <span className="composer-divider mx-1 h-5 w-px bg-border" aria-hidden="true" />
-            {yolo && !hide('hide_composer_yolo') && <button type="button" onClick={onToggleYolo} className="yolo-pill inline-flex h-7 items-center gap-1 rounded-full border border-warning px-2 text-[11px] font-semibold text-warning" title={m.yolo_pill_title_active()}><Zap size={12} aria-hidden="true" /> {m.yolo_pill_label()}</button>}
-            {!hide('hide_composer_profile') && <ProfileMenu />}
-            {!hide('hide_composer_workspace') && <WorkspaceChip value={session?.workspace ?? settings?.default_workspace} onChange={onWorkspaceChange} />}
-            {!hide('hide_composer_model') && <ModelChip value={session?.model ?? null} defaultModel={settings?.default_model} onChange={onModelChange} />}
-            {!hide('hide_composer_reasoning') && <ReasoningChip value={reasoning} levels={reasoningLevels} onChange={onReasoningChange} />}
-            {!hide('hide_composer_toolsets') && <ToolsetsChip value={session?.enabled_toolsets ?? null} onChange={onToolsetsChange} />}
+            {!hide('hide_composer_mic') && dictationSupported() && <button type="button" className={cn('icon-btn mic-btn has-tooltip', dictating && 'active')} id="btnMic" data-tooltip={dictating ? m.voice_dictate_active() : m.voice_dictate()} aria-label={dictating ? m.voice_dictate_active() : m.voice_dictate()} aria-pressed={dictating} onClick={toggleDictation}><Mic size={16} aria-hidden="true" /></button>}
+            <button type="button" className={cn('icon-btn has-tooltip', terminalOpen && 'active')} id="btnTerminal" data-tooltip={m.composer_terminal_toggle()} aria-label={m.composer_terminal_toggle()} aria-pressed={terminalOpen} onClick={onToggleTerminal}><TerminalSquare size={16} aria-hidden="true" /></button>
+            <div className="composer-divider" aria-hidden="true" />
+            {yolo && !hide('hide_composer_yolo') && <button type="button" onClick={onToggleYolo} className="yolo-pill" id="yoloPill" title={m.yolo_pill_title_active()}><span className="yolo-pill-icon" aria-hidden="true">⚡</span><span className="yolo-pill-label">{m.yolo_pill_label()}</span></button>}
+            <div className="composer-ws-wrap">
+              <div className="composer-workspace-group ws-chip" id="composerWorkspaceGroup" role="group">
+                <button className={cn('composer-workspace-files-btn', workspaceOpen && 'active')} id="btnWorkspacePanelToggle" type="button" title={m.composer_files_toggle()} aria-label={m.composer_files_toggle()} aria-pressed={workspaceOpen} onClick={onToggleWorkspace}><span className="composer-workspace-icon" aria-hidden="true"><PanelRight size={14} /></span></button>
+              </div>
+            </div>
+            <button className="icon-btn composer-mobile-config-btn has-tooltip" id="composerMobileConfigBtn" type="button" data-tooltip={m.composer_config_title()} aria-label={m.composer_config_title()} aria-expanded={configOpen} aria-controls="composerMobileConfigPanel" onClick={() => setConfigOpen((o) => !o)}>
+              <SlidersHorizontal size={16} aria-hidden="true" />
+            </button>
+            <div className={cn('composer-mobile-config-panel', configOpen && 'open')} id="composerMobileConfigPanel" role="group" aria-label={m.composer_config_title()}>
+              {!hide('hide_composer_profile') && <div id="profileChipWrap" className="composer-profile-wrap"><ProfileMenu /></div>}
+              {!hide('hide_composer_workspace') && <div className="composer-config-row"><WorkspaceChip value={session?.workspace ?? settings?.default_workspace} onChange={onWorkspaceChange} /></div>}
+              {!hide('hide_composer_model') && <div className="composer-config-row composer-model-wrap"><ModelChip value={session?.model ?? null} defaultModel={settings?.default_model} onChange={onModelChange} /></div>}
+              {!hide('hide_composer_reasoning') && <div className="composer-config-row composer-reasoning-wrap" id="composerReasoningWrap"><ReasoningChip value={reasoning} levels={reasoningLevels} onChange={onReasoningChange} /></div>}
+              {!hide('hide_composer_toolsets') && <div className="composer-config-row composer-toolsets-wrap" id="composerToolsetsWrap"><ToolsetsChip value={session?.enabled_toolsets ?? null} onChange={onToolsetsChange} /></div>}
+            </div>
           </div>
-          <div className="composer-right flex shrink-0 items-center gap-2">
+          <div className="composer-right">
             {!hide('hide_composer_context') && <ContextRing used={contextUsed} total={contextTotal} threshold={session?.threshold_tokens} />}
             {busy ? (
-              <button type="button" onClick={() => { if (sessionId) void cancelTurn(sessionId) }} className="send-btn stop flex h-[34px] w-[34px] items-center justify-center rounded-full bg-error text-white shadow-md max-[768px]:h-11 max-[768px]:w-11" aria-label={m.composer_stop()} title={m.composer_stop()} id="btnStop">
+              <button type="button" onClick={() => { if (sessionId) void cancelTurn(sessionId) }} className="send-btn stop has-tooltip has-tooltip--left" id="btnStop" data-tooltip={m.composer_stop()} aria-label={m.composer_stop()} title={m.composer_stop()}>
                 <Square size={14} aria-hidden="true" />
               </button>
             ) : (
-              <button type="button" onClick={() => { void send() }} disabled={!canSend} className="send-btn flex h-[34px] w-[34px] items-center justify-center rounded-full bg-accent text-white shadow-md transition-transform disabled:opacity-40 max-[768px]:h-11 max-[768px]:w-11" aria-label={m.composer_send()} title={m.composer_send()} id="btnSend">
+              <button type="button" onClick={() => { void send() }} disabled={!canSend} className="send-btn has-tooltip has-tooltip--left" id="btnSend" data-tooltip={m.composer_send()} aria-label={m.composer_send()} title={m.composer_send()}>
                 <ArrowUp size={16} aria-hidden="true" />
               </button>
             )}

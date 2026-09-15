@@ -1,5 +1,6 @@
 @import 'tailwindcss';
 @import './tokens.css';
+@import './legacy.css';
 
 /* Tailwind consumes the legacy design tokens as its theme. Utilities such as
    bg-surface, text-muted, border-border, rounded-card resolve to the same
@@ -56,8 +57,8 @@
 
 @layer base {
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body, #app { height: 100%; }
-  body { background: var(--bg); color: var(--text); font-family: var(--font-ui); font-size: 14px; line-height: 1.6; -webkit-font-smoothing: antialiased; }
+  html, body { height: 100%; }
+  #app { display: flex; flex-direction: column; height: 100%; min-height: 0; }
   button, input, select, textarea { font-family: var(--font-ui); color: inherit; }
   :focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
@@ -65,3 +66,21 @@
     *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
   }
 }
+
+/* Legacy pickers carried their layout as inline styles; the equivalents live here. */
+.pick-grid{display:grid;gap:8px;margin-top:4px;}
+.pick-grid-3{grid-template-columns:repeat(3,1fr);}
+.pick-grid-4{grid-template-columns:repeat(4,1fr);gap:6px;}
+.pick-grid-auto{grid-template-columns:repeat(auto-fit,minmax(96px,1fr));}
+.theme-pick-btn,.skin-pick-btn,.font-size-pick-btn{display:flex;flex-direction:column;align-items:center;padding:10px 8px;text-align:center;cursor:pointer;background:none;border:1px solid var(--border2);border-radius:10px;transition:all .15s;}
+.skin-pick-btn{padding:8px 4px;}
+.pick-preview{width:100%;height:40px;border-radius:6px;margin-bottom:6px;display:flex;align-items:center;justify-content:center;}
+.pick-preview-surface{background:var(--surface);border:1px solid var(--border);}
+.pick-aa{font-weight:600;color:var(--muted);}
+.pick-label{font-size:12px;font-weight:500;color:var(--text);}
+.skin-pick-btn .pick-label{font-size:11px;}
+.skin-dots{display:flex;gap:3px;justify-content:center;margin-bottom:4px;}
+.skin-dot{display:inline-block;width:10px;height:10px;border-radius:50%;}
+.settings-scroll{flex:1;min-height:0;overflow-y:auto;}
+.composer-config-row{display:flex;}
+.composer-mobile-config-panel .composer-profile-wrap{display:flex;}

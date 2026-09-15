@@ -8,6 +8,7 @@ import { keys } from '../../api/queryKeys'
 import type { z } from 'zod'
 import type { KanbanTaskSchema } from '../../contracts'
 import { HubPage } from '../../shell/AppShell'
+import { PanelHeadButton } from '../../shell/Sidebar'
 import { Button, IconButton } from '../../ui/Button'
 import { Checkbox, FieldRow, NativeSelect, TextInput } from '../../ui/Field'
 import { Dialog } from '../../ui/Dialog'
@@ -36,7 +37,7 @@ export function KanbanPage() {
       actions={
         <>
           <IconButton label={m.refresh()} onClick={() => { void invalidate() }}><RefreshCw size={16} aria-hidden="true" /></IconButton>
-          {!readOnly && <Button variant="primary" size="sm" onClick={() => setCreating(true)}><Plus size={14} aria-hidden="true" /> {m.kanban_new_task()}</Button>}
+          {!readOnly && <PanelHeadButton label={m.kanban_new_task()} className="primary" onClick={() => setCreating(true)}><Plus size={16} aria-hidden="true" /></PanelHeadButton>}
         </>
       }
       toolbar={

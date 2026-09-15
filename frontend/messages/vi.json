@@ -1809,5 +1809,12 @@
 	"outline_minimap_label": "Dòng thời gian cuộc trò chuyện",
 	"outline_minimap_mark": "Câu hỏi {a0}: {a1}",
 	"outline_empty": "Chưa có câu hỏi nào.",
-	"outline_loading": "Đang tải…"
+	"outline_loading": "Đang tải…",
+	"project_all": "All",
+	"project_unassigned": "Unassigned",
+	"project_unassigned_hint": "Show conversations not yet assigned to a project",
+	"project_new": "New project",
+	"project_new_prompt": "Project name",
+	"project_filter_label": "Project filter",
+	"composer_config_title": "Composer settings"
 }

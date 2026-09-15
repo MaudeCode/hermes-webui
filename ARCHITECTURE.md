@@ -82,7 +82,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       src/features/        Chat, composer, sessions, settings, hubs, extensions, voice, terminal, share
       src/extensions/      Sandboxed extension host, SDK source, registry (protocol v1)
       src/i18n/            Paraglide runtime helpers; messages/<locale>.json hold the catalog
-      src/theme/           tokens.css (design tokens + skins), tailwind.css, boot.ts
+      src/theme/           legacy.css (the legacy stylesheet carried forward: tokens, skins, chrome), tailwind.css, boot.ts, fonts/
       src/sw.ts            Service worker source (Workbox)
       scripts/             finalize-dist, build-sw, check-dist, i18n-gate, generate-routes
       e2e/                 Playwright suite + screenshot baselines
@@ -551,12 +551,14 @@ contains no inline scripts, so the CSP `script-src` has no `'unsafe-inline'`.
       extensions/        ExtensionHost (MessageChannel protocol v1), sdk.ts (built to static/dist/extension-sdk.js),
                          registry (manifests, skins, TTS engines, lifecycle bridge)
       i18n/              Paraglide runtime (locale switch, hermes-lang persistence), locale metadata, tool text
-      theme/             tokens.css (CSS custom properties, 21 skins), tailwind.css (@theme mapping), boot.ts
+      theme/             legacy.css (the legacy stylesheet: tokens, 21 skins, shell/transcript/composer chrome), tailwind.css (@theme mapping), boot.ts
       ui/                Base UI wrappers: Button, Dialog, Field, Menu, Tooltip, States
 
-Layout: rail (desktop) + sidebar (sessions or hub navigation) + main. Mobile
-uses a drawer and bottom navigation. All chrome uses Tailwind utilities that
-resolve to the design tokens; no component hardcodes colours.
+Layout: rail (desktop) + sidebar (sessions or hub navigation) + main on the
+legacy island shell. Mobile uses a drawer and the bottom tab bar. Components
+render the legacy class structure so `legacy.css` styles them exactly as
+before; Tailwind utilities (mapped to the same tokens) cover layout-only
+concerns in feature pages. No component hardcodes colours.
 
 ### 5.2 State
 

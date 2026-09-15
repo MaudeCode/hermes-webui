@@ -1916,5 +1916,12 @@
 	"outline_minimap_label": "Oś czasu rozmowy",
 	"outline_minimap_mark": "Pytanie {a0}: {a1}",
 	"outline_empty": "Nie ma jeszcze pytań.",
-	"outline_loading": "Ładowanie…"
+	"outline_loading": "Ładowanie…",
+	"project_all": "All",
+	"project_unassigned": "Unassigned",
+	"project_unassigned_hint": "Show conversations not yet assigned to a project",
+	"project_new": "New project",
+	"project_new_prompt": "Project name",
+	"project_filter_label": "Project filter",
+	"composer_config_title": "Composer settings"
 }
