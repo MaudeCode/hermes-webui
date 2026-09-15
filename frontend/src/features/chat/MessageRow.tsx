@@ -1,5 +1,5 @@
 import { memo, useMemo } from 'react'
-import { Copy, GitBranch, Pencil, RotateCcw, Volume2 } from 'lucide-react'
+import { ArrowUp, Copy, GitBranch, Pencil, RotateCcw, Volume2 } from 'lucide-react'
 import { m } from '../../paraglide/messages.js'
 import type { Message } from '../../contracts'
 import { Markdown } from './render/Markdown'
@@ -15,6 +15,7 @@ import { formatDate } from '../../ui/States'
 import { rawFileUrl } from '../../api/endpoints'
 import { appUrl } from '../../lib/appRoot'
 import { speak } from '../voice/tts'
+import { Brandmark } from '../../shell/Brandmark'
 
 export interface RowActions {
   onEdit?: (row: VisibleMessage, text: string) => void
@@ -69,9 +70,11 @@ export const AssistantMessageRow = memo(function AssistantMessageRow({ row, name
   const split = useMemo(() => extractInlineThinking(raw), [raw])
   const reasoning = [row.message.reasoning_content, typeof row.message.reasoning === 'string' ? row.message.reasoning : '', row.message.thinking, split.reasoning].filter((x): x is string => !!x && x.trim() !== '').join('\n')
   const calls = useMemo(() => toolCardsFor(row.message, row.toolResults), [row])
+  const run = row.message as { _turnDuration?: number | null; _usedModel?: string | null }
+  const meta = [typeof run._turnDuration === 'number' && run._turnDuration >= 0.5 ? `${run._turnDuration < 10 ? run._turnDuration.toFixed(1) : Math.round(run._turnDuration)}s` : null, run._usedModel || null].filter(Boolean).join(' · ')
   return (
-    <div className="msg-row assistant-turn" data-role="assistant" data-msg-idx={row.index} data-message-key={row.key}>
-      <div className="msg-role assistant"><span className="msg-role-name">{name}</span>{row.message.badge && <span className="msg-badge">{row.message.badge}</span>}</div>
+    <div className="msg-row assistant-turn" data-role="assistant" data-msg-idx={row.index} data-message-key={row.key} data-latest={isLast ? '1' : undefined}>
+      <div className="msg-role assistant"><Brandmark className="brandmark" size={14} /><span className="msg-role-name">{name}</span>{row.message.badge && <span className="msg-badge">{row.message.badge}</span>}</div>
       <div className="assistant-turn-blocks">
         <Worklog mode={mode} calls={calls} live={false} hasReasoning={!!reasoning}>
           {reasoning && <ReasoningBlock text={reasoning} />}
@@ -82,10 +85,12 @@ export const AssistantMessageRow = memo(function AssistantMessageRow({ row, name
       </div>
       <div className={cn('msg-foot', isLast && 'msg-foot-latest')}>
         {row.message.timestamp ? <span className="msg-time">{formatDate(row.message.timestamp)}</span> : null}
+        {meta && <span className="msg-run-meta font-mono text-[11px] tabular-nums text-muted opacity-75">{meta}</span>}
+        <span className="ml-auto" aria-hidden="true" />
         <IconButton label={m.copy()} className="h-6 w-6" onClick={() => { void navigator.clipboard.writeText(split.content).then(() => showToast(m.copied())) }}><Copy size={12} aria-hidden="true" /></IconButton>
         {tts && split.content.trim() && <IconButton label={m.speak_message()} className="h-6 w-6" onClick={() => { void speak(split.content) }}><Volume2 size={12} aria-hidden="true" /></IconButton>}
         {actions.onRegenerate && isLast && <IconButton label={m.regenerate_response()} className="h-6 w-6" onClick={() => actions.onRegenerate?.(row)}><RotateCcw size={12} aria-hidden="true" /></IconButton>}
-        <button type="button" className="msg-question-jump-btn session-jump-btn session-jump-btn--inline" title={m.jump_to_question_label()} aria-label={m.jump_to_question_label()} onClick={(e) => { const rowEl = (e.currentTarget as HTMLElement).closest('.msg-row'); let prev = rowEl?.previousElementSibling; while (prev && !(prev instanceof HTMLElement && prev.dataset.role === 'user')) prev = prev.previousElementSibling; prev?.scrollIntoView({ block: 'start', behavior: 'smooth' }) }}><span aria-hidden="true">↑</span><span>{m.jump_to_question()}</span></button>
+        <IconButton label={m.jump_to_question_label()} className="msg-question-jump-btn h-6 w-6" onClick={(e) => { const rowEl = (e.currentTarget as HTMLElement).closest('.msg-row'); let prev = rowEl?.previousElementSibling; while (prev && !(prev instanceof HTMLElement && prev.dataset.role === 'user')) prev = prev.previousElementSibling; prev?.scrollIntoView({ block: 'start', behavior: 'smooth' }) }}><ArrowUp size={12} aria-hidden="true" /></IconButton>
       </div>
     </div>
   )
