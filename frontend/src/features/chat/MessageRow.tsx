@@ -1,5 +1,7 @@
 import { memo, useMemo } from 'react'
-import { ArrowUp, Copy, GitBranch, Pencil, RotateCcw, Volume2 } from 'lucide-react'
+import { ArrowUp, Copy, GitBranch, Pencil, RotateCcw, User, Volume2 } from 'lucide-react'
+import { Brandmark } from '../../shell/Brandmark'
+import { useBootstrap } from '../../app/bootstrap'
 import { m } from '../../paraglide/messages.js'
 import type { Message } from '../../contracts'
 import { Markdown } from './render/Markdown'
@@ -48,12 +50,21 @@ export function toolCardsFor(message: Message, toolResults: Record<string, Messa
   })
 }
 
+/** The user's identity disc: the profile initial, or a generic figure for the default profile. */
+export function UserMarker() {
+  const profile = useBootstrap().profile?.name
+  const initial = profile && profile !== 'default' ? profile.trim().charAt(0).toUpperCase() : ''
+  return <span className="msg-marker" aria-hidden="true">{initial || <User size={13} strokeWidth={2.2} />}</span>
+}
+
 export const UserMessageRow = memo(function UserMessageRow({ row, renderMarkdown, workspace, actions }: { row: VisibleMessage; renderMarkdown: boolean; workspace: string | undefined; actions: RowActions }) {
   const text = messageText(row.message.content)
   return (
     <div className="msg-row" data-role="user" data-msg-idx={row.index} data-message-key={row.key}>
-      <AttachmentList message={row.message} workspace={workspace} />
-      <div className="msg-body">{renderMarkdown ? <Markdown text={text} /> : <div className="whitespace-pre-wrap">{text}</div>}</div>
+      <div className="msg-user-band">
+        <UserMarker />
+        <div className="msg-body"><AttachmentList message={row.message} workspace={workspace} />{renderMarkdown ? <Markdown text={text} /> : <div className="whitespace-pre-wrap">{text}</div>}</div>
+      </div>
       <div className="msg-foot">
         {row.message.timestamp ? <span className="msg-time">{formatDate(row.message.timestamp)}</span> : null}
         <IconButton label={m.copy()} className="h-6 w-6" onClick={() => { void navigator.clipboard.writeText(text).then(() => showToast(m.copied())) }}><Copy size={12} aria-hidden="true" /></IconButton>
@@ -73,7 +84,7 @@ export const AssistantMessageRow = memo(function AssistantMessageRow({ row, name
   const meta = [typeof run._turnDuration === 'number' && run._turnDuration >= 0.5 ? `${run._turnDuration < 10 ? run._turnDuration.toFixed(1) : Math.round(run._turnDuration)}s` : null, run._usedModel || null].filter(Boolean).join(' · ')
   return (
     <div className="msg-row assistant-turn" data-role="assistant" data-msg-idx={row.index} data-message-key={row.key} data-latest={isLast ? '1' : undefined}>
-      <div className="msg-role assistant"><span className="msg-role-name">{name}</span>{row.message.badge && <span className="msg-badge">{row.message.badge}</span>}</div>
+      <div className="msg-role assistant"><Brandmark className="brandmark" size={16} /><span className="msg-role-name">{name}</span>{row.message.badge && <span className="msg-badge">{row.message.badge}</span>}</div>
       <div className="assistant-turn-blocks">
         {calls.length > 0 ? (
           <Worklog mode={mode} calls={calls} live={false} hasReasoning={!!reasoning}>
