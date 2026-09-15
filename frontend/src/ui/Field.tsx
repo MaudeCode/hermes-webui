@@ -1,4 +1,4 @@
-import type { ReactNode, SelectHTMLAttributes, InputHTMLAttributes } from 'react'
+import type { ReactNode, InputHTMLAttributes } from 'react'
 import { Switch as BaseSwitch } from '@base-ui/react/switch'
 import { cn } from './cn'
 
@@ -14,9 +14,6 @@ export function FieldRow({ label, hint, htmlFor, children, inline }: { label: Re
   )
 }
 
-export function NativeSelect({ className, ...props }: SelectHTMLAttributes<HTMLSelectElement>) {
-  return <select {...props} className={cn('h-8 rounded-md border border-border bg-input px-2 text-sm text-text', className)} />
-}
 
 export function TextInput({ className, ...props }: InputHTMLAttributes<HTMLInputElement>) {
   return <input {...props} className={cn('h-9 w-full rounded-md border border-border bg-input px-3 text-sm text-text placeholder:text-muted focus:border-accent', className)} />

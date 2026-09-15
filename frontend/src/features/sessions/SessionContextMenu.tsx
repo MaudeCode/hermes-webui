@@ -10,7 +10,8 @@ import { appUrl } from '../../lib/appRoot'
 import { Menu, MenuItem, MenuSeparator } from '../../ui/Menu'
 import { ConfirmDialog, Dialog } from '../../ui/Dialog'
 import { Button, IconButton } from '../../ui/Button'
-import { NativeSelect, TextInput } from '../../ui/Field'
+import { TextInput } from '../../ui/Field'
+import { Select } from '../../ui/Select'
 import { showToast } from '../toast/toast'
 import { useQuery } from '@tanstack/react-query'
 
@@ -95,10 +96,10 @@ export function SessionContextMenu({ row, active }: { row: SessionRow; active: b
       {dialog?.kind === 'move' && (
         <Dialog open onOpenChange={(o) => { if (!o) setDialog(null) }} title={m.session_move_project()} description={row.project_id ? m.session_move_project_desc_has() : m.session_move_project_desc_none()}>
           <form onSubmit={(e) => { e.preventDefault(); move.mutate() }} className="flex flex-col gap-3">
-            <NativeSelect value={projectId} onChange={(e) => setProjectId(e.target.value)} aria-label={m.session_move_project()} className="w-full">
+            <Select value={projectId} onValueChange={(v) => setProjectId(v)} aria-label={m.session_move_project()} className="w-full">
               <option value="">—</option>
               {(projects.data?.projects ?? []).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-            </NativeSelect>
+            </Select>
             <div className="flex justify-end gap-2"><Button onClick={() => setDialog(null)}>{m.cancel()}</Button><Button type="submit" variant="primary" disabled={move.isPending}>{m.save()}</Button></div>
           </form>
         </Dialog>

@@ -1,6 +1,7 @@
 import { Moon, Monitor, Sun } from 'lucide-react'
 import { m } from '../../paraglide/messages.js'
-import { FieldRow, NativeSelect, Switch } from '../../ui/Field'
+import { FieldRow, Switch } from '../../ui/Field'
+import { Select } from '../../ui/Select'
 import { setFontSize, setFullWidthChat, setLanguage, setRtl, setSkin, setTheme, useAppearance } from '../../app/appearance'
 import { SKINS } from '../../theme/skins'
 import { FontSizeSchema, SkinSchema } from '../../contracts/persisted'
@@ -85,9 +86,9 @@ export function AppearanceSection() {
       </div>
       <div className="settings-field">
         <FieldRow label={m.settings_label_language()} htmlFor="settingsLanguage" inline>
-          <NativeSelect id="settingsLanguage" value={locale} onChange={(e) => { setLanguage(e.target.value); save.mutate({ language: e.target.value }) }}>
+          <Select id="settingsLanguage" value={locale} onValueChange={(v) => { setLanguage(v); save.mutate({ language: v }) }}>
             {LOCALE_INFO.map((l) => <option key={l.code} value={l.code}>{l.label}</option>)}
-          </NativeSelect>
+          </Select>
         </FieldRow>
       </div>
       {settings.data?.webui_version && <div className="settings-version-badge inline-flex items-center px-2 py-[3px] rounded-(--r-sm) bg-surface-subtle text-muted text-[11px] font-semibold font-mono shrink-0 self-start tracking-[.02em] border border-border max-[769px]:whitespace-nowrap max-[769px]:max-w-full max-[769px]:overflow-hidden max-[769px]:text-ellipsis" data-testid="webui-version">v{settings.data.webui_version}</div>}

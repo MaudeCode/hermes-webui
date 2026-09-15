@@ -8,7 +8,8 @@ import { useProfilesQuery, useSwitchProfile } from '../../app/queries'
 import { HubPage } from '../../shell/AppShell'
 import { PanelHeadButton } from '../../shell/Sidebar'
 import { Button, IconButton } from '../../ui/Button'
-import { FieldRow, NativeSelect, TextInput } from '../../ui/Field'
+import { FieldRow, TextInput } from '../../ui/Field'
+import { Select } from '../../ui/Select'
 import { ConfirmDialog, Dialog } from '../../ui/Dialog'
 import { EmptyState, ErrorState, LoadingState } from '../../ui/States'
 import { showToast } from '../toast/toast'
@@ -83,10 +84,10 @@ function CreateProfileDialog({ existing, onClose, onCreated }: { existing: strin
       <form onSubmit={(e) => { e.preventDefault(); if (valid) create.mutate() }} className="flex flex-col gap-1">
         <FieldRow label={m.profile_name_label()} htmlFor="profileName"><TextInput id="profileName" autoFocus value={name} onChange={(e) => setName(e.target.value.toLowerCase())} placeholder={m.profile_name_placeholder()} aria-invalid={name !== '' && !valid} /></FieldRow>
         <FieldRow label={m.profile_clone_from()} htmlFor="profileClone">
-          <NativeSelect id="profileClone" value={cloneFrom} onChange={(e) => setCloneFrom(e.target.value)} className="w-full">
+          <Select id="profileClone" value={cloneFrom} onValueChange={(v) => setCloneFrom(v)} className="w-full">
             <option value="">{m.profile_no_clone()}</option>
             {existing.map((n) => <option key={n} value={n}>{n}</option>)}
-          </NativeSelect>
+          </Select>
         </FieldRow>
         <FieldRow label={m.profile_default_model_label()} htmlFor="profileModel"><TextInput id="profileModel" value={model} onChange={(e) => setModel(e.target.value)} placeholder={m.model_custom_placeholder()} /></FieldRow>
         {error && <div role="alert" className="text-sm text-error">{error}</div>}

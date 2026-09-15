@@ -11,7 +11,8 @@ import { CronJobSchema } from '../../contracts'
 import { HubPage } from '../../shell/AppShell'
 import { Button } from '../../ui/Button'
 import { PanelHeadButton } from '../../shell/Sidebar'
-import { Switch, FieldRow, NativeSelect, TextInput } from '../../ui/Field'
+import { Switch, FieldRow, TextInput } from '../../ui/Field'
+import { Select } from '../../ui/Select'
 import { ConfirmDialog, Dialog } from '../../ui/Dialog'
 import { EmptyState, ErrorState, LoadingState, formatDate } from '../../ui/States'
 import { showToast } from '../toast/toast'
@@ -202,10 +203,10 @@ function JobDialog({ job, onClose, onSaved }: { job: CronJob | null; onClose: ()
           <form.Field name="repeat">{(f) => <FieldRow label={m.cron_repeat_label()} htmlFor="cronRepeat"><TextInput id="cronRepeat" inputMode="numeric" value={f.state.value} onChange={(e) => f.handleChange(e.target.value)} placeholder={m.cron_repeat_placeholder()} /></FieldRow>}</form.Field>
           <form.Field name="profile">{(f) => (
             <FieldRow label={m.tab_profiles()} htmlFor="cronProfile">
-              <NativeSelect id="cronProfile" value={f.state.value} onChange={(e) => f.handleChange(e.target.value)} className="w-full">
+              <Select id="cronProfile" value={f.state.value} onValueChange={(v) => f.handleChange(v)} className="w-full">
                 <option value="">{m.cron_profile_default()}</option>
                 {(profiles.data?.profiles ?? []).map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
-              </NativeSelect>
+              </Select>
             </FieldRow>
           )}</form.Field>
         </div>

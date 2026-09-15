@@ -5,7 +5,8 @@ import * as api from '../../api/endpoints'
 import { keys } from '../../api/queryKeys'
 import { useBootstrap } from '../../app/bootstrap'
 import { Button } from '../../ui/Button'
-import { Switch, FieldRow, NativeSelect, TextInput } from '../../ui/Field'
+import { Switch, FieldRow, TextInput } from '../../ui/Field'
+import { Select } from '../../ui/Select'
 import { ConfirmDialog } from '../../ui/Dialog'
 import { ErrorState, LoadingState, formatDate } from '../../ui/States'
 import { showToast } from '../toast/toast'
@@ -60,10 +61,10 @@ export function SystemSection() {
         <h2 className="mb-1 text-sm font-semibold text-text">{m.system_updates()}</h2>
         <FieldRow label={m.settings_label_check_updates()} htmlFor="settingsCheckUpdates" inline><Switch id="settingsCheckUpdates" checked={bool('check_for_updates', true)} onCheckedChange={(checked) => set({ check_for_updates: checked })} /></FieldRow>
         <FieldRow label={m.settings_label_update_channel()} htmlFor="settingsUpdateChannel" inline>
-          <NativeSelect id="settingsUpdateChannel" value={str('update_channel', 'stable')} onChange={(e) => set({ update_channel: e.target.value })}>
+          <Select id="settingsUpdateChannel" value={str('update_channel', 'stable')} onValueChange={(v) => set({ update_channel: v })}>
             <option value="stable">{m.settings_update_channel_stable()}</option>
             <option value="experimental">{m.settings_update_channel_experimental()}</option>
-          </NativeSelect>
+          </Select>
         </FieldRow>
         <FieldRow label={m.settings_label_ignore_agent_updates()} htmlFor="settingsIgnoreAgentUpdates" inline><Switch id="settingsIgnoreAgentUpdates" checked={bool('ignore_agent_updates')} onCheckedChange={(checked) => set({ ignore_agent_updates: checked })} /></FieldRow>
         <FieldRow label={m.settings_label_whats_new_summary()} htmlFor="settingsWhatsNew" inline><Switch id="settingsWhatsNew" checked={bool('whats_new_summary_enabled')} onCheckedChange={(checked) => set({ whats_new_summary_enabled: checked })} /></FieldRow>

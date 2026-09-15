@@ -6,7 +6,8 @@ import * as api from '../../api/endpoints'
 import { keys } from '../../api/queryKeys'
 import { HubPage } from '../../shell/AppShell'
 import { Button } from '../../ui/Button'
-import { NativeSelect, Switch } from '../../ui/Field'
+import { Switch } from '../../ui/Field'
+import { Select } from '../../ui/Select'
 import { ConfirmDialog } from '../../ui/Dialog'
 import { EmptyState, ErrorState, LoadingState } from '../../ui/States'
 import { showToast } from '../toast/toast'
@@ -38,10 +39,10 @@ export function SkillsPage() {
             <input id="skillsSearch" type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder={m.search_skills()} aria-label={m.search_skills()} />
           </div>
           {categories.length > 0 && (
-            <NativeSelect value={category} onChange={(e) => setCategory(e.target.value)} aria-label={m.skill_category_all()}>
+            <Select value={category} onValueChange={(v) => setCategory(v)} aria-label={m.skill_category_all()}>
               <option value="">{m.skill_category_all()}</option>
               {categories.map((c) => <option key={c} value={c}>{c}</option>)}
-            </NativeSelect>
+            </Select>
           )}
         </>
       }

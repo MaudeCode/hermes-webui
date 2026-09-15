@@ -1,5 +1,6 @@
 import { m } from '../../paraglide/messages.js'
-import { Switch, FieldRow, NativeSelect, TextInput } from '../../ui/Field'
+import { Switch, FieldRow, TextInput } from '../../ui/Field'
+import { Select } from '../../ui/Select'
 import { useSettingField } from './useSettingField'
 import { useModelsQuery } from '../../app/queries'
 import { LoadingState, ErrorState } from '../../ui/States'
@@ -26,20 +27,20 @@ export function PreferencesSection() {
   return (
     <div className="flex flex-col divide-y divide-border-subtle" data-section="preferences">
       <FieldRow label={m.settings_label_model()} hint={m.settings_default_model_hint()} htmlFor="settingsModel" inline>
-        <NativeSelect id="settingsModel" value={str('default_model')} onChange={(e) => set({ default_model: e.target.value })}>
+        <Select id="settingsModel" value={str('default_model')} onValueChange={(v) => set({ default_model: v })}>
           {(models.data?.groups ?? []).map((g) => (
             <optgroup key={g.provider} label={g.provider}>
               {g.models.map((mm) => <option key={mm.id} value={mm.id}>{mm.label ?? mm.id}</option>)}
             </optgroup>
           ))}
           {!models.data?.groups.some((g) => g.models.some((mm) => mm.id === str('default_model'))) && str('default_model') && <option value={str('default_model')}>{str('default_model')}</option>}
-        </NativeSelect>
+        </Select>
       </FieldRow>
       <FieldRow label={m.settings_label_send_key()} htmlFor="settingsSendKey" inline>
-        <NativeSelect id="settingsSendKey" value={str('send_key', 'enter')} onChange={(e) => set({ send_key: e.target.value })}>
+        <Select id="settingsSendKey" value={str('send_key', 'enter')} onValueChange={(v) => set({ send_key: v })}>
           <option value="enter">{m.settings_send_key_enter()}</option>
           <option value="ctrl+enter">{m.settings_send_key_ctrl_enter()}</option>
-        </NativeSelect>
+        </Select>
       </FieldRow>
       <FieldRow label={m.settings_label_bot_name()} htmlFor="settingsBotName">
         <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (botName !== null) { set({ bot_name: botName.trim() || 'Hermes' }); setBotName(null) } }}>
@@ -62,10 +63,10 @@ export function PreferencesSection() {
       <Toggle label={m.settings_label_notifications()} settingKey="notifications_enabled" />
       <Toggle label={m.settings_label_sound()} settingKey="sound_enabled" />
       <FieldRow label={m.settings_label_sidebar_density()} htmlFor="settingsSidebarDensity" inline>
-        <NativeSelect id="settingsSidebarDensity" value={str('sidebar_density', 'compact')} onChange={(e) => set({ sidebar_density: e.target.value })}>
+        <Select id="settingsSidebarDensity" value={str('sidebar_density', 'compact')} onValueChange={(v) => set({ sidebar_density: v })}>
           <option value="compact">{m.settings_sidebar_density_compact()}</option>
           <option value="detailed">{m.settings_sidebar_density_detailed()}</option>
-        </NativeSelect>
+        </Select>
       </FieldRow>
       <FieldRow label={m.settings_label_pinned_limit()} hint={m.settings_desc_pinned_limit()} htmlFor="settingsPinnedLimit" inline>
         <TextInput id="settingsPinnedLimit" type="number" min={1} max={50} className="w-20" value={num('pinned_sessions_limit', 3)} onChange={(e) => { const n = Number(e.target.value); if (Number.isInteger(n) && n > 0) set({ pinned_sessions_limit: n }) }} />

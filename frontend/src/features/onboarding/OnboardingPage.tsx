@@ -8,7 +8,8 @@ import * as api from '../../api/endpoints'
 import { useOnboardingQuery } from '../../app/queries'
 import type { OnboardingStatus } from '../../contracts'
 import { Button } from '../../ui/Button'
-import { NativeSelect, TextInput } from '../../ui/Field'
+import { TextInput } from '../../ui/Field'
+import { Select } from '../../ui/Select'
 import { cn } from '../../ui/cn'
 import { showToast } from '../toast/toast'
 import { Toaster } from '../toast/Toaster'
@@ -215,10 +216,10 @@ export function OnboardingPage() {
                     {(field) => (
                       <label className="onboarding-field flex flex-col gap-1 text-sm">
                         <span>{m.onboarding_provider_label()}</span>
-                        <NativeSelect id="onboardingProviderSelect" value={field.state.value} onChange={(e) => field.handleChange(e.target.value)}>
+                        <Select id="onboardingProviderSelect" value={field.state.value} onValueChange={(v) => field.handleChange(v)}>
                           {providers.map((p) => <option key={p.id} value={p.id}>{p.label ?? p.name ?? p.id}</option>)}
                           {providers.length === 0 && <option value={field.state.value}>{field.state.value}</option>}
-                        </NativeSelect>
+                        </Select>
                       </label>
                     )}
                   </form.Field>
@@ -248,10 +249,10 @@ export function OnboardingPage() {
                       <>
                         <label className="onboarding-field flex flex-col gap-1 text-sm">
                           <span>{m.onboarding_workspace_label()}</span>
-                          <NativeSelect id="onboardingWorkspaceSelect" value={workspaces.some((w) => w.path === field.state.value) ? field.state.value : ''} onChange={(e) => field.handleChange(e.target.value)}>
+                          <Select id="onboardingWorkspaceSelect" value={workspaces.some((w) => w.path === field.state.value) ? field.state.value : ''} onValueChange={(v) => field.handleChange(v)}>
                             <option value="">—</option>
                             {workspaces.map((w) => <option key={w.path} value={w.path}>{w.name ?? w.path} — {w.path}</option>)}
-                          </NativeSelect>
+                          </Select>
                         </label>
                         <label className="onboarding-field flex flex-col gap-1 text-sm">
                           <span>{m.onboarding_workspace_or_path()}</span>

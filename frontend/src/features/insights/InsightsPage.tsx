@@ -4,7 +4,7 @@ import { m } from '../../paraglide/messages.js'
 import * as api from '../../api/endpoints'
 import { keys } from '../../api/queryKeys'
 import { HubPage } from '../../shell/AppShell'
-import { NativeSelect } from '../../ui/Field'
+import { Select } from '../../ui/Select'
 import { EmptyState, ErrorState, LoadingState } from '../../ui/States'
 
 const PERIODS = [7, 30, 90, 365]
@@ -41,7 +41,7 @@ export function InsightsPage() {
   return (
     <HubPage
       title={m.tab_insights()}
-      toolbar={<label className="flex items-center gap-2 text-xs text-muted">{m.insights_period()} <NativeSelect value={days} onChange={(e) => setDays(Number(e.target.value))}>{PERIODS.map((p) => <option key={p} value={p}>{m.insights_days({ n: p })}</option>)}</NativeSelect></label>}
+      toolbar={<label className="flex items-center gap-2 text-xs text-muted">{m.insights_period()} <Select value={days} onValueChange={(v) => setDays(Number(v))}>{PERIODS.map((p) => <option key={p} value={p}>{m.insights_days({ n: p })}</option>)}</Select></label>}
     >
       {insights.isPending && <LoadingState />}
       {insights.isError && <ErrorState error={insights.error} onRetry={() => { void insights.refetch() }} />}

@@ -10,7 +10,8 @@ import type { KanbanTaskSchema } from '../../contracts'
 import { HubPage } from '../../shell/AppShell'
 import { PanelHeadButton } from '../../shell/Sidebar'
 import { Button, IconButton } from '../../ui/Button'
-import { Switch, FieldRow, NativeSelect, TextInput } from '../../ui/Field'
+import { Switch, FieldRow, TextInput } from '../../ui/Field'
+import { Select } from '../../ui/Select'
 import { Dialog } from '../../ui/Dialog'
 import { EmptyState, ErrorState, LoadingState, formatDate } from '../../ui/States'
 import { showToast } from '../toast/toast'
@@ -45,9 +46,9 @@ export function KanbanPage() {
           {boards.data && boards.data.boards.length > 0 && (
             <label className="flex items-center gap-2 text-xs text-muted">
               {m.kanban_board_label()}
-              <NativeSelect value={boards.data.current ?? ''} onChange={(e) => switchBoard.mutate(e.target.value)} aria-label={m.kanban_board_label()}>
+              <Select value={boards.data.current ?? ''} onValueChange={(v) => switchBoard.mutate(v)} aria-label={m.kanban_board_label()}>
                 {boards.data.boards.map((b) => <option key={b.slug} value={b.slug}>{b.name ?? b.slug}{b.total !== undefined ? ` (${b.total})` : ''}</option>)}
-              </NativeSelect>
+              </Select>
             </label>
           )}
           <label className="flex items-center gap-1.5 text-xs text-muted"><Switch checked={includeArchived} onCheckedChange={(checked) => setIncludeArchived(checked)} /> {m.kanban_include_archived()}</label>
@@ -103,9 +104,9 @@ function TaskDialog({ task, columns, readOnly, onClose, onChanged }: { task: Kan
       <div className="flex flex-col gap-3 text-sm">
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
           <span>{m.kanban_column_label()}:</span>
-          <NativeSelect value={task.status ?? ''} disabled={readOnly} onChange={(e) => act.mutate({ action: 'patch', body: { status: e.target.value } })} aria-label={m.kanban_column_label()}>
+          <Select value={task.status ?? ''} disabled={readOnly} onValueChange={(v) => act.mutate({ action: 'patch', body: { status: v } })} aria-label={m.kanban_column_label()}>
             {columns.map((c) => <option key={c} value={c}>{c}</option>)}
-          </NativeSelect>
+          </Select>
           {task.assignee && <span>{task.assignee}</span>}
           {task.session_id && <Link to="/session/$sessionId" params={{ sessionId: task.session_id }} className="text-accent-text underline">{m.kanban_open_session()}</Link>}
         </div>
@@ -157,7 +158,7 @@ function CreateTaskDialog({ columns, onClose, onCreated }: { columns: string[]; 
       <form onSubmit={(e) => { e.preventDefault(); if (title.trim()) create.mutate() }} className="flex flex-col gap-1">
         <FieldRow label={m.kanban_task_title()} htmlFor="kanbanTitle"><TextInput id="kanbanTitle" required value={title} onChange={(e) => setTitle(e.target.value)} /></FieldRow>
         <FieldRow label={m.kanban_description_placeholder()} htmlFor="kanbanDesc"><textarea id="kanbanDesc" rows={3} value={description} onChange={(e) => setDescription(e.target.value)} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-text" /></FieldRow>
-        <FieldRow label={m.kanban_column_label()} htmlFor="kanbanStatus"><NativeSelect id="kanbanStatus" value={status} onChange={(e) => setStatus(e.target.value)} className="w-full">{columns.map((c) => <option key={c} value={c}>{c}</option>)}</NativeSelect></FieldRow>
+        <FieldRow label={m.kanban_column_label()} htmlFor="kanbanStatus"><Select id="kanbanStatus" value={status} onValueChange={(v) => setStatus(v)} className="w-full">{columns.map((c) => <option key={c} value={c}>{c}</option>)}</Select></FieldRow>
         {error && <div role="alert" className="text-sm text-error">{error}</div>}
         <div className="mt-3 flex justify-end gap-2"><Button onClick={onClose}>{m.cancel()}</Button><Button variant="primary" type="submit" disabled={create.isPending}>{m.create()}</Button></div>
       </form>

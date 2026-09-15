@@ -6,7 +6,7 @@ import * as api from '../../api/endpoints'
 import { keys } from '../../api/queryKeys'
 import { HubPage } from '../../shell/AppShell'
 import { IconButton } from '../../ui/Button'
-import { NativeSelect } from '../../ui/Field'
+import { Select } from '../../ui/Select'
 import { EmptyState, ErrorState, LoadingState, formatBytes, formatDate } from '../../ui/States'
 
 const FILES = ['agent', 'webui', 'gateway', 'bootstrap'] as const
@@ -24,8 +24,8 @@ export function LogsPage() {
       actions={<IconButton label={m.refresh()} onClick={() => { void logs.refetch() }}><RefreshCw size={16} aria-hidden="true" /></IconButton>}
       toolbar={
         <>
-          <label className="flex items-center gap-2 text-xs text-muted">{m.logs_file_label()} <NativeSelect value={file} onChange={(e) => setFile(e.target.value)}>{FILES.map((f) => <option key={f} value={f}>{f}</option>)}</NativeSelect></label>
-          <label className="flex items-center gap-2 text-xs text-muted">{m.logs_tail_label()} <NativeSelect value={tail} onChange={(e) => setTail(Number(e.target.value))}>{TAILS.map((t) => <option key={t} value={t}>{t}</option>)}</NativeSelect></label>
+          <label className="flex items-center gap-2 text-xs text-muted">{m.logs_file_label()} <Select value={file} onValueChange={(v) => setFile(v)}>{FILES.map((f) => <option key={f} value={f}>{f}</option>)}</Select></label>
+          <label className="flex items-center gap-2 text-xs text-muted">{m.logs_tail_label()} <Select value={tail} onValueChange={(v) => setTail(Number(v))}>{TAILS.map((t) => <option key={t} value={t}>{t}</option>)}</Select></label>
           {logs.data?.total_bytes !== undefined && <span className="text-[11px] text-muted">{`${m.logs_size()}: ${formatBytes(logs.data.total_bytes)}`}{logs.data.mtime ? ` · ${m.logs_updated()}: ${formatDate(logs.data.mtime)}` : ''}</span>}
         </>
       }
