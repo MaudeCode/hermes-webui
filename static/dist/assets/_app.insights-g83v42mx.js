@@ -1,1 +1,0 @@
-import{t as e}from"./jsx-runtime-oxv8l9pt.js";import{t}from"./HubRoute-dz08iail.js";var n=e(),r=()=>(0,n.jsx)(t,{panel:`insights`});export{r as component};

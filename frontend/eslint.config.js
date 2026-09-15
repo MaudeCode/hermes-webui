@@ -17,6 +17,7 @@ export default tseslint.config(
       '@typescript-eslint/no-unnecessary-condition': 'off',
       '@typescript-eslint/restrict-template-expressions': ['error', { allowNumber: true, allowBoolean: true }],
       '@typescript-eslint/no-confusing-void-expression': 'off',
+      '@typescript-eslint/prefer-nullish-coalescing': ['error', { ignorePrimitives: { string: true, boolean: true } }],
       '@typescript-eslint/no-non-null-assertion': 'error',
       'no-restricted-properties': ['error',
         { object: 'window', property: 'fetch', message: 'Use the typed client in src/api/client.ts' },

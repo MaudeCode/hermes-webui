@@ -11,6 +11,7 @@ import { PanelHead } from '../../shell/Sidebar'
 import { IconButton } from '../../ui/Button'
 import { cn } from '../../ui/cn'
 import { useNewChat } from './useNewChat'
+import { SessionContextMenu } from './SessionContextMenu'
 import { closeMobileSidebar } from '../../shell/useShellState'
 import { useLocale } from '../../i18n/useLocale'
 
@@ -142,7 +143,7 @@ export function SessionListPanel() {
                   role="listitem"
                   data-sid={row.session_id}
                   aria-current={active ? 'page' : undefined}
-                  className={cn('session-item relative mb-0.5 flex min-h-11 items-start gap-2 rounded-lg px-3 py-2.5 text-[13px] text-muted no-underline transition-colors hover:bg-hover', active && 'active bg-accent-bg text-accent')}
+                  className={cn('session-item group relative mb-0.5 flex min-h-11 items-start gap-2 rounded-lg px-3 py-2.5 text-[13px] text-muted no-underline transition-colors hover:bg-hover', active && 'active bg-accent-bg text-accent')}
                 >
                   <div className="min-w-0 flex-1">
                     <div className={cn('session-title truncate', active ? 'text-accent-text' : 'text-text')}>{row.title || m.untitled()}</div>
@@ -154,6 +155,7 @@ export function SessionListPanel() {
                     </div>
                   </div>
                   {row.attention && <span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-warning" aria-label={m.session_attention_generic({ n: row.attention.count ?? 1 })} />}
+                  <SessionContextMenu row={row} active={active} />
                 </Link>
               )
             })}

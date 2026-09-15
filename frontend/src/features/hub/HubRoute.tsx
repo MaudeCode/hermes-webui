@@ -1,31 +1,42 @@
 import type { ReactNode } from 'react'
-import { AppShell, HubPage } from '../../shell/AppShell'
+import { AppShell } from '../../shell/AppShell'
 import { PanelHead } from '../../shell/Sidebar'
 import { NAV_ITEMS, type PanelId } from '../../shell/nav'
-import { m } from '../../paraglide/messages.js'
 import { useLocale } from '../../i18n/useLocale'
+import { TasksPage } from '../tasks/TasksPage'
+import { KanbanPage } from '../kanban/KanbanPage'
+import { SkillsPage } from '../skills/SkillsPage'
+import { MemoryPage } from '../memory/MemoryPage'
+import { WorkspacesPage } from '../workspaces/WorkspacesPage'
+import { ProfilesPage } from '../profiles/ProfilesPage'
+import { TodosPage } from '../todos/TodosPage'
+import { InsightsPage } from '../insights/InsightsPage'
+import { LogsPage } from '../logs/LogsPage'
+import { SessionListPanel } from '../sessions/SessionListPanel'
 
 export type HubPanel = Exclude<PanelId, 'chat' | 'settings'>
 
-const PAGES: Partial<Record<HubPanel, () => ReactNode>> = {}
-
-/** Registry so each panel's page module can register itself (filled in checkpoint 5). */
-export function registerHubPage(panel: HubPanel, render: () => ReactNode): void {
-  PAGES[panel] = render
+const PAGES: Record<HubPanel, () => ReactNode> = {
+  tasks: () => <TasksPage />,
+  kanban: () => <KanbanPage />,
+  skills: () => <SkillsPage />,
+  memory: () => <MemoryPage />,
+  workspaces: () => <WorkspacesPage />,
+  profiles: () => <ProfilesPage />,
+  todos: () => <TodosPage />,
+  insights: () => <InsightsPage />,
+  logs: () => <LogsPage />,
 }
 
-export function HubRoute({ panel, sidebar }: { panel: HubPanel; sidebar?: ReactNode }) {
+/** Hub layout: the collection is the main view; the sidebar keeps the conversation list so chat stays one click away. */
+export function HubRoute({ panel }: { panel: HubPanel }) {
   useLocale()
   const item = NAV_ITEMS.find((n) => n.id === panel)
   const title = item ? item.label() : panel
-  const render = PAGES[panel]
   return (
-    <AppShell sidebar={sidebar ?? <div className="panel-view active flex min-h-0 flex-1 flex-col"><PanelHead title={title} /></div>}>
-      {render ? render() : (
-        <HubPage title={title}>
-          <p className="text-sm text-muted">{m.loading()}</p>
-        </HubPage>
-      )}
+    <AppShell sidebar={<SessionListPanel />} subtitle={title}>
+      <div className="hidden"><PanelHead title={title} /></div>
+      {PAGES[panel]()}
     </AppShell>
   )
 }

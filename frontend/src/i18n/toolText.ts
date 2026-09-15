@@ -2,7 +2,7 @@
 // wording per locale. Ported verbatim from the legacy static/i18n.js helper
 // block (HWEB-100). These stay code rather than Paraglide messages because
 // they compose grammar from tables with count-free fallbacks.
-/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-return, @typescript-eslint/prefer-nullish-coalescing, @typescript-eslint/no-unsafe-call, @typescript-eslint/restrict-plus-operands */
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-call, @typescript-eslint/restrict-plus-operands */
 export type ToolActionState = 'running' | 'done'
 export type ToolKind = 'shell' | 'read' | 'list' | 'search' | 'web' | 'write' | 'skill' | 'memory' | 'delegate' | 'unknown' | (string & {})
 

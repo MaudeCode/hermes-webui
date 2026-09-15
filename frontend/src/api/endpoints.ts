@@ -165,7 +165,7 @@ export const deleteSkill = (name: string) => post('api/skills/delete', { name },
 export const toggleSkill = (name: string, enabled: boolean) => post('api/skills/toggle', { name, enabled }, OkSchema, { retries: 0 })
 export const fetchSkillsUsage = () => get('api/skills/usage', SkillsUsageSchema)
 export const fetchMemory = (workspace?: string) => get(`api/memory${qs({ workspace })}`, MemorySchema)
-export const writeMemory = (body: { target: 'memory' | 'user' | 'soul' | 'project_context'; content: string; workspace?: string }) => post('api/memory/write', body, OkSchema, { retries: 0 })
+export const writeMemory = (body: { target: 'memory' | 'user' | 'soul'; content: string }) => post('api/memory/write', { section: body.target, content: body.content }, OkSchema, { retries: 0 })
 export const fetchCrons = (allProfiles = false) => get(`api/crons${qs({ all_profiles: allProfiles ? 1 : undefined })}`, CronsSchema)
 export const cronAction = (action: 'create' | 'update' | 'delete' | 'run' | 'pause' | 'resume', body: Record<string, unknown>) => post(`api/crons/${action}`, body, CronMutationSchema, { retries: 0 })
 export const fetchCronHistory = (job_id: string) => get(`api/crons/history${qs({ job_id })}`, z.looseObject({ history: z.array(z.unknown()).optional(), runs: z.array(z.unknown()).optional() }))

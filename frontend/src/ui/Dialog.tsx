@@ -7,9 +7,9 @@ export interface DialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   title: string
-  description?: string
+  description?: string | undefined
   children?: ReactNode
-  className?: string
+  className?: string | undefined
 }
 
 /** Modal dialog: focus trap, escape, backdrop click, and aria wiring via Base UI. */
@@ -32,7 +32,7 @@ export interface ConfirmDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   title: string
-  description?: string
+  description?: string | undefined
   confirmLabel: string
   cancelLabel: string
   danger?: boolean
