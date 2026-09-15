@@ -88,25 +88,3 @@ class TestRefreshRouteExists:
             "/api/models/refresh must return {ok: true, provider: provider_id} "
             "so the frontend can confirm the operation succeeded."
         )
-
-
-class TestFrontendRefreshPath:
-    """The frontend success path must update the model picker immediately
-    after a cache bust, not wait for the next /api/models poll."""
-
-    def test_refresh_calls_dropdown_updater(self):
-        src = _read_static("panels.js")
-        body = _extract_function_body(src, "async function _refreshProviderModels(")
-        assert "_refreshModelDropdownsAfterProviderChange()" in body, (
-            "_refreshProviderModels must call _refreshModelDropdownsAfterProviderChange() "
-            "on success so the model picker rebuilds immediately after a cache "
-            "bust instead of waiting for the next /api/models call (#3546)."
-        )
-
-    def test_refresh_shows_friendly_404(self):
-        src = _read_static("panels.js")
-        body = _extract_function_body(src, "async function _refreshProviderModels(")
-        assert "e.status===404" in body or "e.status === 404" in body, (
-            "_refreshProviderModels catch block must check e.status===404 to "
-            "show a friendly message when the route is missing on older backends."
-        )

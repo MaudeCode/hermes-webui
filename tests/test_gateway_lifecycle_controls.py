@@ -236,30 +236,3 @@ def test_gateway_lifecycle_missing_cli_returns_sanitized_error(monkeypatch, tmp_
     assert data["ok"] is False
     assert data["action"] == "start"
     assert data["error"] == "Hermes agent CLI entrypoint not found"
-
-
-def test_gateway_lifecycle_frontend_renders_valid_actions():
-    from pathlib import Path
-
-    panels = (Path(__file__).resolve().parents[1] / "static" / "panels.js").read_text(encoding="utf-8")
-    assert "api(`/api/gateway/${encodeURIComponent(action)}`" in panels
-    assert "timeoutMs:70000" in panels
-    assert "timeoutToast:false" in panels
-    assert "(r&&r.running)?['stop','restart']:['start']" in panels
-    assert "document.querySelectorAll('.gateway-action-btn')" in panels
-    assert "await loadGatewayStatus();" in panels
-
-
-def test_gateway_lifecycle_i18n_keys_exist():
-    from pathlib import Path
-
-    i18n = (Path(__file__).resolve().parents[1] / "static" / "i18n.js").read_text(encoding="utf-8")
-    for key in (
-        "gateway_start",
-        "gateway_stop",
-        "gateway_restart",
-        "gateway_start_failed",
-        "gateway_stop_failed",
-        "gateway_restart_failed",
-    ):
-        assert f"{key}:" in i18n

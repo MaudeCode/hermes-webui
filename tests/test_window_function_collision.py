@@ -123,35 +123,3 @@ def test_no_top_level_function_shadowed_by_window_object_assignment():
         "brick-class regression shape from #2715 and #2771:\n  - "
         + "\n  - ".join(collisions)
     )
-
-
-def test_inflight_state_limits_no_longer_collides_with_window_config():
-    """Issue-pinned regression for #2771 specifically.
-
-    Confirms the function rename landed and the old colliding name is gone.
-    """
-    ui_js = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
-    boot_js = (REPO_ROOT / "static" / "boot.js").read_text(encoding="utf-8")
-
-    # The window-attached config still exists (we deliberately kept this name).
-    assert "window._inflightStateLimits={" in boot_js, (
-        "boot.js should still expose the config under the documented name."
-    )
-
-    # The function must use the renamed identifier.
-    assert "function _getInflightStateLimits()" in ui_js, (
-        "ui.js should declare the limit-reader as `_getInflightStateLimits()` "
-        "to avoid the #2771 collision."
-    )
-
-    # The old colliding name must not appear as a function declaration anywhere.
-    assert "function _inflightStateLimits(" not in ui_js, (
-        "`function _inflightStateLimits()` is the colliding name from #2771 "
-        "and must not be reintroduced."
-    )
-
-    # Every call site uses the new name.
-    assert "_inflightStateLimits()" not in ui_js, (
-        "Stale call sites to the old function name `_inflightStateLimits()` "
-        "remain in ui.js (#2771). Update them to `_getInflightStateLimits()`."
-    )

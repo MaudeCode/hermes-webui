@@ -9,25 +9,7 @@ import api.profiles as profiles
 
 
 REPO = Path(__file__).resolve().parent.parent
-PANELS_JS = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
 ROUTES_PY = (REPO / "api" / "routes.py").read_text(encoding="utf-8")
-
-
-def test_profile_create_form_exposes_model_picker():
-    assert 'id="profileFormModel"' in PANELS_JS
-    assert "_populateProfileFormModelSelect" in PANELS_JS
-    assert "profile_model_label" in PANELS_JS
-    assert "profile_model_hint" in PANELS_JS
-
-
-def test_profile_create_payload_preserves_provider_context():
-    fn_start = PANELS_JS.find("async function saveProfileForm()")
-    assert fn_start != -1
-    fn_body = PANELS_JS[fn_start : PANELS_JS.find("\n}", fn_start) + 2]
-    assert "profileFormModel" in fn_body
-    assert "_modelStateForSelect(modelEl, selectedModel)" in fn_body
-    assert "payload.default_model" in fn_body
-    assert "payload.model_provider" in fn_body
 
 
 def test_profile_create_route_passes_model_fields_to_profile_api():

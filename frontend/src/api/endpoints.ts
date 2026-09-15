@@ -148,8 +148,8 @@ export const moveFile = (workspace: string, path: string, destination: string) =
 export const revealFile = (workspace: string, path: string) => post('api/file/reveal', { workspace, path }, OkSchema, { retries: 0 })
 export const openInVsCode = (workspace: string, path: string) => post('api/file/open-vscode', { workspace, path }, OkSchema, { retries: 0 })
 export const folderDownloadUrl = (workspace: string, path: string) => `api/folder/download${qs({ workspace, path })}`
-export const fetchGitInfo = (workspace: string) => get(`api/git-info${qs({ workspace })}`, GitInfoSchema)
-export const fetchGitStatus = (workspace: string) => get(`api/git/status${qs({ workspace })}`, z.looseObject({ status: z.unknown().optional(), files: z.array(z.unknown()).optional(), branch: z.string().optional(), error: z.string().optional() }))
+export const fetchGitInfo = (sessionId: string) => get(`api/git-info${qs({ session_id: sessionId })}`, GitInfoSchema)
+export const fetchGitStatus = (sessionId: string) => get(`api/git/status${qs({ session_id: sessionId })}`, z.looseObject({ status: z.unknown().optional(), files: z.array(z.unknown()).optional(), branch: z.string().optional(), error: z.string().optional() }))
 export const fetchGitDiff = (workspace: string, path?: string, staged?: boolean) => get(`api/git/diff${qs({ workspace, path, staged: staged ? 1 : undefined })}`, z.looseObject({ diff: z.string().optional(), error: z.string().optional() }))
 export const fetchGitBranches = (workspace: string) => get(`api/git/branches${qs({ workspace })}`, z.looseObject({ branches: z.array(z.unknown()).optional(), current: z.string().optional() }))
 export const gitAction = (action: 'stage' | 'unstage' | 'discard' | 'commit' | 'commit-selected' | 'fetch' | 'pull' | 'push' | 'checkout' | 'stash-checkout' | 'commit-message' | 'commit-message-selected', body: Record<string, unknown>) =>

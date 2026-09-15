@@ -49,13 +49,12 @@ def _get(path, request_headers=None):
 def test_config_owner_returns_checkout_static_root():
     static_root = ROOT / "static"
     assert api_config.get_static_root() == static_root
-    assert api_config.get_index_html_path() == static_root / "index.html"
 
 
 def test_manifest_routes_follow_selected_static_root(tmp_path, monkeypatch):
     static_root = tmp_path / "static"
-    static_root.mkdir()
-    manifest_path = static_root / "manifest.json"
+    (static_root / "dist").mkdir(parents=True)
+    manifest_path = static_root / "dist" / "manifest.webmanifest"
     payload = json.dumps({"name": "temp", "display": "standalone"}).encode("utf-8")
     manifest_path.write_bytes(payload)
     monkeypatch.setattr(api_config, "get_static_root", lambda: static_root)
@@ -63,7 +62,7 @@ def test_manifest_routes_follow_selected_static_root(tmp_path, monkeypatch):
     handler = _get("/manifest.json")
     assert handler.status == 200
     assert handler.header("Content-Type") == "application/manifest+json; charset=utf-8"
-    assert handler.header("Cache-Control") == "no-store"
+    assert handler.header("Cache-Control") == "no-cache"
     assert bytes(handler.body) == payload
 
     session_handler = _get("/session/manifest.webmanifest")
@@ -73,10 +72,11 @@ def test_manifest_routes_follow_selected_static_root(tmp_path, monkeypatch):
 
 def test_service_worker_and_favicon_follow_selected_static_root(tmp_path, monkeypatch):
     static_root = tmp_path / "static"
-    static_root.mkdir()
-    sw_path = static_root / "sw.js"
+    (static_root / "dist").mkdir(parents=True)
+    (static_root / "brand").mkdir()
+    sw_path = static_root / "dist" / "sw.js"
     sw_path.write_text("const version = '__WEBUI_VERSION__';\n", encoding="utf-8")
-    favicon_path = static_root / "favicon.ico"
+    favicon_path = static_root / "brand" / "favicon.ico"
     favicon_path.write_bytes(b"favicon-bytes")
     monkeypatch.setattr(api_config, "get_static_root", lambda: static_root)
 
@@ -107,30 +107,27 @@ def test_service_worker_and_favicon_follow_selected_static_root(tmp_path, monkey
 
 def test_index_shell_and_static_route_use_selected_root(tmp_path, monkeypatch):
     static_root = tmp_path / "static"
-    static_root.mkdir()
+    (static_root / "dist").mkdir(parents=True)
+    (static_root / "brand").mkdir()
 
-    index_path = static_root / "index.html"
-    index_path.write_bytes(
-        b"<html>__WEBUI_VERSION__ __MAX_UPLOAD_BYTES__ __CSRF_TOKEN_JSON__ temp</html>"
-    )
-    ui_path = static_root / "ui.js"
-    ui_path.write_bytes(b"console.log('temp static');\n")
+    index_path = static_root / "dist" / "index.html"
+    index_path.write_bytes(b'<html lang="__LANG__"><head><base href="__BASE_HREF__"></head><body>__WEBUI_VERSION__ temp</body></html>')
+    brand_path = static_root / "brand" / "temp.svg"
+    brand_path.write_bytes(b"<svg/>")
 
     monkeypatch.setattr(api_config, "get_static_root", lambda: static_root)
-    monkeypatch.setattr(api_config, "get_index_html_path", lambda: index_path)
-    monkeypatch.setattr(routes, "_INDEX_SHELL_CACHE", {})
     monkeypatch.setattr(routes, "_STATIC_CACHE", {})
 
-    shell = routes._render_index_shell_base()
-    assert "temp" in shell
-    assert "__WEBUI_VERSION__" not in shell
-    assert "__MAX_UPLOAD_BYTES__" not in shell
-    assert "__CSRF_TOKEN_JSON__" in shell
+    shell = _get("/session/abc")
+    assert shell.status == 200
+    body = bytes(shell.body).decode("utf-8")
+    assert "temp" in body
+    assert '<base href="../">' in body
+    assert "__WEBUI_VERSION__" not in body and "__LANG__" not in body
 
-    temp_static = _get("/static/ui.js")
+    temp_static = _get("/static/brand/temp.svg")
     assert temp_static.status == 200
-    assert bytes(temp_static.body) == b"console.log('temp static');\n"
-    assert bytes(temp_static.body) != (ROOT / "static" / "ui.js").read_bytes()
+    assert bytes(temp_static.body) == b"<svg/>"
 
     traversal = _get("/static/../api/routes.py")
     assert traversal.status == 404

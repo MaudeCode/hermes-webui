@@ -30,57 +30,6 @@ def test_gateway_watcher_remains_hash_only():
     assert "if current_hash != self._last_hash:" in poll_once
 
 
-def test_gateway_sse_dedupes_reconnect_snapshot_before_refresh():
-    """Reconnect initial snapshots should not force a sidebar refetch."""
-    src = _read(SESSIONS_JS)
-    # HWEB-33: the frames arrive on the merged sidebar stream now; the handler
-    # that dedupes them is the same one, lifted into a named function.
-    handler = _block(
-        src,
-        "function _handleGatewaySessionsChanged(data){",
-        "function _applyGatewayStatus",
-    )
-
-    assert "function _gatewaySessionSnapshotKey" in src
-    assert "function _isDuplicateGatewaySessionSnapshot" in src
-    assert "if(!_isDuplicateGatewaySessionSnapshot(data.sessions))" in handler
-    assert "renderSessionList({deferWhileInteracting:true}); // re-fetch and re-render" in handler
-
-
-def test_gateway_sse_reattaches_after_profile_switch_restart():
-    """A profile switch must rebind the gateway feed to the new watcher.
-
-    The watcher registry is profile-keyed (#3629), so an already-attached
-    gateway half is still subscribed to the previous profile's watcher. Before
-    HWEB-33 the standalone probe revived a closed EventSource; now the merged
-    sidebar stream is reconnected explicitly, because nothing about the
-    subscription flag changed and the ordinary open path is idempotent.
-    """
-    src = _read(SESSIONS_JS)
-    block = _block(src, "function reconnectSidebarSSE(){", "\n\nlet _searchDebounceTimer")
-
-    assert "_closeSessionEventsSSE();" in block
-    assert "ensureSessionEventsSSE();" in block
-
-    panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
-    assert "reconnectSidebarSSE()" in panels
-
-
-def test_gateway_snapshot_key_matches_backend_hash_fields():
-    """Frontend dedupe must compare the same fields that drive watcher events."""
-    src = _read(SESSIONS_JS)
-    key_fn = _block(
-        src,
-        "function _gatewaySessionSnapshotKey",
-        "\n\nfunction _isGatewaySessionForSnapshot",
-    )
-
-    assert "s.session_id" in key_fn
-    assert "s.updated_at||0" in key_fn
-    assert "s.message_count||0" in key_fn
-    assert ".sort()" in key_fn
-
-
 def test_gateway_snapshot_dedupe_logic_filters_symmetrically():
     """Exercise the dedupe helpers, including null and webui noise."""
     script = r"""
@@ -136,17 +85,3 @@ globalThis._allSessions = [{session_id:'web-1', updated_at:1, message_count:1, s
 if(!_isDuplicateGatewaySessionSnapshot([null, {session_id:'web-2', session_source:'webui'}])) throw new Error('expected empty gateway snapshot duplicate');
 """
     subprocess.run(["node", "-e", script], check=True)
-
-
-def test_load_session_persists_only_after_metadata_loads():
-    """Do not overwrite the last good localStorage sid before /api/session succeeds."""
-    src = _read(SESSIONS_JS)
-    # _mergePendingSessionMessage was lifted to a top-level helper for #6419,
-    # so use a stable boundary inside loadSession instead.
-    load = _block(src, "async function loadSession(sid)", "// Phase 2a:")
-    # HWEB-103: the metadata request is created first and awaited afterwards.
-    api_pos = load.index("data = await _metadataRequest;")
-    persist_pos = load.index("localStorage.setItem('hermes-webui-session',S.session.session_id)")
-
-    assert "_persistActiveSession" not in src
-    assert persist_pos > api_pos

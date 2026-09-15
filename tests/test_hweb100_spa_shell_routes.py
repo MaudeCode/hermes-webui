@@ -1,9 +1,8 @@
 """HWEB-100: the SPA shell allowlist, placeholder substitution, asset serving, and CSP.
 
 Unit checks run against ``api.spa_shell`` directly. HTTP checks boot a
-dedicated ``server.py`` with ``HERMES_WEBUI_FRONTEND=spa`` on an ephemeral
-port and an isolated state directory, because the frontend switch is read
-from the server process environment.
+dedicated ``server.py`` on an ephemeral port with an isolated state directory
+so the shell, asset and CSP behaviour is observed end to end.
 """
 from __future__ import annotations
 
@@ -41,7 +40,7 @@ def test_spa_paths_receive_the_shell(path):
 
 @pytest.mark.parametrize(
     "path",
-    ["/api/sessions", "/api/", "/api/bootstrap", "/health", "/static/style.css", "/static/dist/assets/x.js",
+    ["/api/sessions", "/api/", "/api/bootstrap", "/health", "/static/style.css", "/static/dist/assets/x.js", "/assets/x.js",
      "/session/static/style.css", "/session/manifest.json", "/sw.js", "/manifest.json", "/manifest.webmanifest",
      "/extensions/app.js", "/plugins/foo/index.js", "/dashboard-plugins/x", "/favicon.ico", "/search",
      "/nope", "/settingsx", "/tasksy", "/random/path"],
@@ -82,10 +81,9 @@ def test_render_shell_rejects_bogus_lang():
     assert '<html lang="en"' in spa_shell.render_shell("/", lang='"><script>')
 
 
-def test_csp_spa_mode_has_no_inline_scripts_or_cdn(monkeypatch):
+def test_csp_has_no_inline_scripts_or_cdn():
     from api import helpers
 
-    monkeypatch.setenv("HERMES_WEBUI_FRONTEND", "spa")
     policy = helpers._build_csp_enforced_policy("", "")
     script = next(d for d in policy.split(";") if d.strip().startswith("script-src"))
     assert "'unsafe-inline'" not in script
@@ -94,15 +92,7 @@ def test_csp_spa_mode_has_no_inline_scripts_or_cdn(monkeypatch):
     assert "'self'" in script
 
 
-def test_csp_legacy_mode_keeps_previous_policy(monkeypatch):
-    from api import helpers
-
-    monkeypatch.setenv("HERMES_WEBUI_FRONTEND", "legacy")
-    policy = helpers._build_csp_enforced_policy("", "")
-    assert "'unsafe-inline'" in policy and "cdn.jsdelivr.net" in policy
-
-
-# ── http: dedicated server in SPA mode ───────────────────────────────────────
+# ── http: dedicated server ───────────────────────────────────────
 
 def _free_port() -> int:
     with socket.socket() as s:
@@ -128,7 +118,6 @@ def spa_server():
     (state / "workspace").mkdir()
     env = {k: v for k, v in os.environ.items() if not k.startswith("HERMES_")}
     env.update({
-        "HERMES_WEBUI_FRONTEND": "spa",
         "HERMES_WEBUI_PORT": str(port),
         "HERMES_WEBUI_HOST": "127.0.0.1",
         "HERMES_WEBUI_STATE_DIR": str(state),

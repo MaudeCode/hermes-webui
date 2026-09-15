@@ -77,7 +77,9 @@ static/brand/                   brand artwork (SVG/PNG favicons, apple touch ico
   configuration), and `__LANG__` for the `<html lang>` attribute. No CSRF token,
   language JSON, upload limit, or extension config is embedded in HTML any
   more; the client fetches `/api/bootstrap`.
-- Hashed assets are served from `/static/dist/assets/*` with immutable caching.
+- Hashed assets are served from `<mount>/assets/*` (the shell references them as
+  `./assets/<hash>` relative to its base href) and, for tooling, from
+  `/static/dist/assets/*`; both carry immutable caching and are auth-exempt.
   `/sw.js` maps to `static/dist/sw.js` with `Service-Worker-Allowed: /` and
   `Cache-Control: no-store`. `/manifest.json` and `/manifest.webmanifest` map to
   the generated manifest.

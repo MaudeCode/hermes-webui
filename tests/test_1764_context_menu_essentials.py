@@ -41,38 +41,6 @@ I18N = ROOT / "static" / "i18n.js"
 
 
 class TestCopyFilePathMenuItem:
-    def test_menu_item_present(self):
-        """The workspace file context menu must include a Copy file path
-        action that calls the new /api/file/path endpoint and writes the
-        result to the clipboard.
-        """
-        src = UI.read_text(encoding="utf-8")
-        # Item label is sourced via t('copy_file_path') — pin the call.
-        assert "t('copy_file_path')" in src
-        # Endpoint POSTed to.
-        assert "/api/file/path" in src
-        # Clipboard write.
-        assert "navigator.clipboard.writeText(abs)" in src
-
-    def test_menu_item_has_clipboard_fallback(self):
-        """Some browsers gate the modern Clipboard API (older Safari, any
-        non-secure context). The action must fall back to the legacy
-        execCommand pattern so users on those browsers still get a copy.
-        """
-        src = UI.read_text(encoding="utf-8")
-        assert "document.execCommand('copy')" in src
-        # Hidden textarea pattern — uses a fixed-position offscreen element
-        # so the page doesn't visibly scroll when select() runs.
-        assert "position:fixed;left:-9999px" in src
-
-    def test_menu_item_uses_path_copied_translation(self):
-        """The success toast keys must be wired to translatable strings,
-        not hardcoded English.
-        """
-        src = UI.read_text(encoding="utf-8")
-        assert "t('path_copied')" in src
-        assert "t('path_copy_failed')" in src
-
     def test_endpoint_handler_present(self):
         """Server-side endpoint must exist and route through the dispatcher."""
         src = ROUTES.read_text(encoding="utf-8")
@@ -117,60 +85,6 @@ class TestCopyFilePathMenuItem:
 # ════════════════════════════════════════════════════════════════════
 
 
-class TestSessionRenameMenuItem:
-    def test_rename_action_in_menu(self):
-        """The session three-dot menu (`_openSessionActionMenu`) must
-        include Rename as the first item, gated on _isReadOnlySession.
-        """
-        src = SESSIONS.read_text(encoding="utf-8")
-        # Rename block must be inside _openSessionActionMenu.
-        # Pin the structural anchor.
-        assert "if(!_isReadOnlySession(session)){" in src
-        assert "t('session_rename')" in src
-        assert "t('session_rename_desc')" in src
-
-    def test_rename_dispatches_to_row_closure(self):
-        """The menu's rename action must trigger the existing startRename
-        closure attached to the row element — no duplicated state, no
-        separate API call out of band with the double-click path.
-        """
-        src = SESSIONS.read_text(encoding="utf-8")
-        # Row-attached closure invocation.
-        assert "row._startRename" in src
-        # Row lookup by data-sid must include nested fork rows too.
-        assert "function _findSessionRenameRow(" in src
-        assert ".session-item[data-sid=" in src
-        assert ".session-child-session[data-sid=" in src
-
-    def test_row_exposes_start_rename(self):
-        """The session row builder must attach `_startRename` to the row
-        element so the menu (defined in a different function) can find it
-        without duplicating the closure's state (oldTitle, applyTitle, the
-        _renamingSid bookkeeping, etc.).
-        """
-        src = SESSIONS.read_text(encoding="utf-8")
-        assert "el._startRename = startRename" in src
-        assert "el.dataset.sid = s.session_id" in src
-
-    def test_rename_appears_before_pin(self):
-        """Cygnus's specific ask: Rename should be at the top of the menu,
-        not buried under Pin / Move / Archive / etc. Pin that ordering.
-        """
-        src = SESSIONS.read_text(encoding="utf-8")
-        rename_idx = src.find("t('session_rename')")
-        pin_idx = src.find("t('session_pin')")
-        assert rename_idx > 0 and pin_idx > 0
-        assert rename_idx < pin_idx, (
-            "Rename must appear before Pin in _openSessionActionMenu."
-        )
-
-    def test_rename_translation_keys_present(self):
-        """English translation keys must exist for the new menu item."""
-        src = I18N.read_text(encoding="utf-8")
-        assert "session_rename: 'Rename conversation'" in src
-        assert "session_rename_desc: 'Edit the title of this conversation'" in src
-
-
 # ════════════════════════════════════════════════════════════════════
 #  Item C — reveal-failed toast includes the resolved path
 # ════════════════════════════════════════════════════════════════════
@@ -203,28 +117,6 @@ class TestRevealFailedTostIncludesPath:
         assert 'bad(handler, "File not found", 404)' not in body, (
             "Old bare 'File not found' message must be removed."
         )
-
-    def test_existing_translation_key_unchanged(self):
-        """The frontend toast prefix `reveal_failed: 'Failed to reveal: '`
-        is unchanged — the additional path comes from the server-side
-        message, so the prefix + message concat still reads well.
-        """
-        src = I18N.read_text(encoding="utf-8")
-        assert "reveal_failed: 'Failed to reveal: '" in src
-
-    def test_reveal_call_site_uses_message_or_err(self):
-        """The frontend reveal handler call site must guard against err
-        being a non-Error object (e.g. a network-layer reject without a
-        .message). Previously `err.message` alone could produce
-        "Failed to reveal: undefined" — we use `(err.message||err)`.
-        """
-        src = UI.read_text(encoding="utf-8")
-        # Match both possible forms (with or without parens).
-        assert (
-            "(err.message||err)" in src or "(err.message || err)" in src
-        ), "Reveal-failed toast must guard against err with no .message"
-
-
 
 # ════════════════════════════════════════════════════════════════════
 #  Behaviour tests — exercise the live HTTP endpoints against the

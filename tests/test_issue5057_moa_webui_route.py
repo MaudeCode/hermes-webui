@@ -123,15 +123,6 @@ def test_moa_resolve_endpoint_returns_200():
     assert isinstance(body.get("reference_models"), list)
 
 
-def test_moa_not_in_agent_commands_webui():
-    js_path = Path(__file__).resolve().parent.parent / "static" / "messages.js"
-    source = js_path.read_text(encoding="utf-8")
-    match = re.search(r"_AGENT_COMMANDS_RUN_ON_WEBUI\s*=\s*new\s+Set\(\[([^\]]+)\]\)", source)
-    assert match, "_AGENT_COMMANDS_RUN_ON_WEBUI not found in messages.js"
-    entries = match.group(1)
-    assert "'moa'" not in entries and '"moa"' not in entries
-
-
 def test_no_subprocess_in_moa_code_paths():
     commands_path = Path(__file__).resolve().parent.parent / "api" / "commands.py"
     source = commands_path.read_text(encoding="utf-8")
@@ -141,33 +132,6 @@ def test_no_subprocess_in_moa_code_paths():
     assert "process_command" not in func_body
     assert "HermesCLI" not in func_body
     assert "subprocess" not in func_body
-
-
-def test_moa_config_is_per_turn_not_persisted():
-    """moa_config stays per-turn, but the server re-resolves it instead of
-    trusting a client-echoed dict."""
-    streaming_path = Path(__file__).resolve().parent.parent / "api" / "streaming.py"
-    source = streaming_path.read_text(encoding="utf-8")
-    # moa_config is threaded into the live agent turn as a per-turn kwarg. It is
-    # added CONDITIONALLY (only when not None) so a normal send never trips a
-    # TypeError on an older hermes-agent whose run_conversation() predates the
-    # kwarg — so accept either the direct kwarg form or the conditional-dict form.
-    assert (
-        re.search(r"run_conversation\([\s\S]*?moa_config=moa_config", source)
-        or re.search(r'if moa_config is not None:[\s\S]*?\["moa_config"\]\s*=\s*moa_config', source)
-    ), "run_conversation must receive moa_config as a per-turn kwarg (directly or conditionally)"
-    routes_path = Path(__file__).resolve().parent.parent / "api" / "routes.py"
-    routes_source = routes_path.read_text(encoding="utf-8")
-    assert re.search(r"if body\.get\(\"moa_config\"\):[\s\S]*?moa_config = resolve_moa_config\(\)", routes_source), \
-        "chat-start must re-resolve MoA config server-side instead of trusting the browser payload"
-    assert "MoA override is unavailable on gateway-backed sessions" in routes_source
-    js_path = Path(__file__).resolve().parent.parent / "static" / "messages.js"
-    js_source = js_path.read_text(encoding="utf-8")
-    assert re.search(
-        r"moa_config:\s*(?:_pendingMoaConfig|moaConfigForPostStart)\s*\?\s*true\s*:\s*undefined",
-        js_source,
-    )
-    assert "_pendingMoaConfig=null" in js_source
 
 
 def test_moa_gateway_chat_start_fails_closed(monkeypatch, tmp_path):

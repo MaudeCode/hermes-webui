@@ -19,10 +19,6 @@ ROUTES_SRC = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 # combine both files so static-analysis assertions still pass.
 _ROUTE_APPROVALS = REPO_ROOT / "api" / "route_approvals.py"
 ROUTES_SRC_FULL = ROUTES_SRC + (_ROUTE_APPROVALS.read_text(encoding="utf-8") if _ROUTE_APPROVALS.exists() else "")
-MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
-INDEX_HTML = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
-
-
 # ---------------------------------------------------------------------------
 # Static-analysis: Python routes
 # ---------------------------------------------------------------------------
@@ -73,85 +69,9 @@ def test_backward_compat_legacy_dict_value():
 # Static-analysis: JavaScript frontend
 # ---------------------------------------------------------------------------
 
-def test_respond_sends_approval_id():
-    """respondApproval() must include approval_id in the POST body."""
-    assert "approval_id: approvalId" in MESSAGES_JS, \
-        "respondApproval() must send approval_id in the POST body to /api/approval/respond"
-
-
-def test_show_approval_card_accepts_count():
-    """showApprovalCard must accept a pendingCount parameter."""
-    assert re.search(r"function showApprovalCard\(pending,\s*pendingCount\)", MESSAGES_JS), \
-        "showApprovalCard() must accept a pendingCount argument"
-
-
-def test_show_approval_card_renders_counter():
-    """showApprovalCard must display a '1 of N pending' counter when N > 1."""
-    assert '"1 of " + pendingCount + " pending"' in MESSAGES_JS or \
-           "'1 of ' + pendingCount + ' pending'" in MESSAGES_JS, \
-        "showApprovalCard() must render '1 of N pending' counter for multiple queued approvals"
-
-
-def test_approval_current_id_tracked():
-    """_approvalCurrentId must be set and cleared around each approval."""
-    assert "_approvalCurrentId" in MESSAGES_JS, \
-        "_approvalCurrentId must track the approval_id of the currently displayed card"
-    assert "_approvalCurrentId = pending.approval_id" in MESSAGES_JS or \
-           "_approvalCurrentId = pending.approval_id || null" in MESSAGES_JS, \
-        "_approvalCurrentId must be assigned from pending.approval_id"
-    # Must be nulled on respond
-    assert "_approvalCurrentId = null" in MESSAGES_JS, \
-        "_approvalCurrentId must be cleared when respondApproval() is called"
-
-
-def test_polling_passes_count_to_show():
-    """The poll loop must pass pending_count to the owner-aware approval renderer."""
-    assert "showApprovalForSession(sid, data.pending, data.pending_count" in MESSAGES_JS, \
-        "Poll loop must pass data.pending_count through showApprovalForSession"
-
-
-def test_chat_stream_approval_listener_renders_received_count():
-    """A chat-stream approval event with count two renders the head and count."""
-    node = shutil.which("node")
-    if node is None:
-        import pytest
-        pytest.skip("node is required for the approval listener harness")
-    start = MESSAGES_JS.index("source.addEventListener('approval',e=>{")
-    end_marker = "\n    });"
-    end = MESSAGES_JS.index(end_marker, start) + len(end_marker)
-    listener = MESSAGES_JS[start:end]
-    script = f"""
-    const rendered = [];
-    let activeSid = 'sid-browser';
-    const source = {{ listeners: {{}}, addEventListener(name, cb) {{ this.listeners[name] = cb; }} }};
-    function _applyToAnchor() {{}}
-    function showApprovalForSession(sid, data, count) {{ rendered.push({{sid, data, count}}); }}
-    function playAttentionSound() {{}}
-    function _attentionSoundKey() {{ return 'approval'; }}
-    function sendBrowserNotification() {{}}
-    {listener}
-    source.listeners.approval({{ data: JSON.stringify({{command: 'head', approval_id: 'a', pending_count: 2}}) }});
-    process.stdout.write(JSON.stringify(rendered));
-    """
-    result = subprocess.run([node, "-e", script], capture_output=True, text=True, check=False)
-    assert result.returncode == 0, result.stderr
-    rendered = json.loads(result.stdout)
-    assert rendered == [{
-        "sid": "sid-browser",
-        "data": {"command": "head", "approval_id": "a", "pending_count": 2},
-        "count": 2,
-    }]
-
-
 # ---------------------------------------------------------------------------
 # HTML: counter element present
 # ---------------------------------------------------------------------------
-
-def test_approval_counter_element_exists():
-    """index.html must contain an approvalCounter element."""
-    assert 'id="approvalCounter"' in INDEX_HTML, \
-        "index.html must contain an element with id='approvalCounter' for the '1 of N' display"
-
 
 # ---------------------------------------------------------------------------
 # Functional: multiple entries behave correctly (via routes module directly)

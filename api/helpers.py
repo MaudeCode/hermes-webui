@@ -83,11 +83,9 @@ _CSP_EXTRA_FRAME_RE = _re.compile(
 )
 _CSP_HEADER_NAME = 'Content-Security-Policy'
 # HWEB-100: the production frontend is a bundled SPA with no inline scripts and
-# no CDN assets, so script-src drops 'unsafe-inline', cdn.jsdelivr.net and blob:
-# and worker-src drops the CDN. style-src keeps 'unsafe-inline' for inline
-# `style` attributes set by the rendering libraries (Shiki, KaTeX, xterm); the
-# shell itself contains no <style> blocks. The legacy template below survives
-# only while HERMES_WEBUI_FRONTEND=legacy is honoured; it is removed at cutover.
+# no CDN assets, so script-src has no 'unsafe-inline', no CDN and no blob:.
+# style-src keeps 'unsafe-inline' for inline `style` attributes set by the
+# rendering libraries (Shiki, KaTeX, xterm); the shell contains no <style> blocks.
 _CSP_SHARED_POLICY_TEMPLATE = (
     "default-src 'self' https://*.cloudflareaccess.com; "
     "object-src 'none'; "
@@ -103,27 +101,10 @@ _CSP_SHARED_POLICY_TEMPLATE = (
     "manifest-src 'self' https://*.cloudflareaccess.com; "
     "base-uri 'self'; form-action 'self'"
 )
-_CSP_LEGACY_POLICY_TEMPLATE = (
-    "default-src 'self' https://*.cloudflareaccess.com; "
-    "object-src 'none'; "
-    "frame-ancestors 'none'; "
-    "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com blob:; "
-    "worker-src blob: 'self' https://cdn.jsdelivr.net; "
-    "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
-    "img-src 'self' data: https: blob:; "
-    "font-src 'self' data: https://fonts.gstatic.com; "
-    "media-src 'self' data: blob:; "
-    "connect-src {connect_src}; "
-    "frame-src {frame_src}; "
-    "manifest-src 'self' https://*.cloudflareaccess.com; "
-    "base-uri 'self'; form-action 'self'"
-)
 
 
 def _csp_policy_template() -> str:
-    from api.spa_shell import frontend_mode
-
-    return _CSP_SHARED_POLICY_TEMPLATE if frontend_mode() == "spa" else _CSP_LEGACY_POLICY_TEMPLATE
+    return _CSP_SHARED_POLICY_TEMPLATE
 # Base frame-src: same-origin only by default (so the existing same-origin
 # dashboard/extension iframes keep working). An operator can widen it, opt-in,
 # via HERMES_WEBUI_CSP_FRAME_EXTRA — e.g. to embed a self-hosted dashboard in an
@@ -181,11 +162,7 @@ def _csp_extra_frame_src() -> str:
 
 
 def _csp_connect_src(extra_connect_src: str = "") -> str:
-    from api.spa_shell import frontend_mode
-
-    # The legacy shell fetched Prism grammars from jsDelivr; the bundled SPA has no CDN traffic.
-    cdn = "" if frontend_mode() == "spa" else " https://cdn.jsdelivr.net"
-    return f"{_CSP_CONNECT_BASE}{cdn}{extra_connect_src}"
+    return f"{_CSP_CONNECT_BASE}{extra_connect_src}"
 
 
 def _csp_frame_src(extra_frame_src: str = "") -> str:

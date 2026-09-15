@@ -242,18 +242,6 @@ def test_display_merge_does_not_render_synthetic_summary_prompt():
     assert "here is the summary" in merged[-1]["content"]
 
 
-def test_frontend_handles_tool_limit_apperror_label():
-    messages_js = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
-    start = messages_js.find("source.addEventListener('apperror'")
-    end = messages_js.find("source.addEventListener('warning'", start)
-    assert start != -1 and end != -1
-    block = messages_js[start:end]
-
-    assert "const isToolLimitReached=d.type==='tool_limit_reached';" in block
-    assert "Tool iteration limit reached" in block
-    assert "Terminal state details" in block
-
-
 def test_streaming_tool_limit_with_final_answer_persists_clean_done_state(tmp_path, monkeypatch):
     result = {
         "turn_exit_reason": "max_iterations_reached(30/30)",

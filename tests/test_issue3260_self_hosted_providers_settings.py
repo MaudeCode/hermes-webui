@@ -12,12 +12,10 @@ import api.onboarding as onboarding
 import api.profiles as profiles
 import pytest
 
-from tests.js_source_extract import extract_function
 from tests.test_provider_management import _install_fake_hermes_cli, _post
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 
@@ -333,116 +331,3 @@ def test_get_providers_exposes_self_hosted_flags_and_base_url(monkeypatch, tmp_p
         config.cfg.clear()
         config.cfg.update(old_cfg)
         config._cfg_mtime = old_mtime
-
-
-def test_save_self_hosted_provider_posts_expected_payload(tmp_path):
-    if NODE is None:
-        pytest.skip("node is required to execute the self-hosted provider harness")
-
-    fn_path = tmp_path / "saveSelfHostedProvider.js"
-    fn_path.write_text(
-        extract_function(PANELS_JS, "_saveSelfHostedProvider", prefix="async function"),
-        encoding="utf-8",
-    )
-    driver_path = tmp_path / "driver.js"
-    driver_path.write_text(_DRIVER, encoding="utf-8")
-    scenario = {
-        "providerId": "ollama",
-        "baseUrl": "http://127.0.0.1:11434/v1",
-        "model": "qwen3:8b",
-        "apiKey": "",
-    }
-    result = subprocess.run(
-        [NODE, str(driver_path), json.dumps(scenario), str(fn_path)],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    payload = json.loads(result.stdout)
-    assert payload["calls"] == [{
-        "url": "/api/providers/self-hosted",
-        "method": "POST",
-        "body": {
-            "provider": "ollama",
-            "base_url": "http://127.0.0.1:11434/v1",
-            "model": "qwen3:8b",
-        },
-    }]
-    assert payload["refreshCount"] == 1
-    assert payload["reloadCount"] == 1
-    assert payload["apiKeyAfter"] == ""
-
-
-def test_self_hosted_provider_card_keeps_remove_key_path():
-    card_src = extract_function(PANELS_JS, "_buildProviderCard", prefix="function")
-    assert "if(p.has_key){" in card_src
-    assert "removeBtn.onclick=()=>_removeProviderKey(p.id);" in card_src
-    assert "removeBtn.textContent=t('providers_remove');" in card_src
-
-
-def test_probe_self_hosted_provider_populates_model_and_enables_save(tmp_path):
-    if NODE is None:
-        pytest.skip("node is required to execute the self-hosted provider harness")
-
-    fn_path = tmp_path / "testSelfHostedConnection.js"
-    fn_path.write_text(
-        extract_function(PANELS_JS, "_testSelfHostedConnection", prefix="async function"),
-        encoding="utf-8",
-    )
-    driver_path = tmp_path / "probe-driver.js"
-    driver_path.write_text(_PROBE_DRIVER, encoding="utf-8")
-    scenario = {
-        "providerId": "ollama",
-        "baseUrl": "http://127.0.0.1:11434/v1",
-        "apiKey": "",
-        "model": "",
-        "discoveredModel": "qwen3:8b",
-    }
-    result = subprocess.run(
-        [NODE, str(driver_path), json.dumps(scenario), str(fn_path)],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    payload = json.loads(result.stdout)
-    assert payload["calls"] == [{
-        "url": "/api/onboarding/probe",
-        "method": "POST",
-        "body": {
-            "provider": "ollama",
-            "base_url": "http://127.0.0.1:11434/v1",
-        },
-    }]
-    assert payload["modelValue"] == "qwen3:8b"
-    assert payload["saveDisabled"] is False
-    assert payload["probeText"] == "Connected. 1 model(s) available."
-    assert payload["testDisabled"] is False
-
-
-def test_probe_self_hosted_provider_accepts_string_models(tmp_path):
-    if NODE is None:
-        pytest.skip("node is required to execute the self-hosted provider harness")
-
-    fn_path = tmp_path / "testSelfHostedConnection.js"
-    fn_path.write_text(
-        extract_function(PANELS_JS, "_testSelfHostedConnection", prefix="async function"),
-        encoding="utf-8",
-    )
-    driver_path = tmp_path / "probe-driver-string.js"
-    driver_path.write_text(_PROBE_DRIVER, encoding="utf-8")
-    scenario = {
-        "providerId": "ollama",
-        "baseUrl": "http://127.0.0.1:11434/v1",
-        "apiKey": "",
-        "model": "",
-        "discoveredModels": ["qwen3:8b"],
-    }
-    result = subprocess.run(
-        [NODE, str(driver_path), json.dumps(scenario), str(fn_path)],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    payload = json.loads(result.stdout)
-    assert payload["modelValue"] == "qwen3:8b"
-    assert payload["saveDisabled"] is False

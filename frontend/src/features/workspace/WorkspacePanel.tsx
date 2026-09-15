@@ -22,7 +22,7 @@ function parentOf(path: string): string {
 }
 
 /** Right-hand workspace panel: directory tree, file preview/edit, git status badge. */
-export function WorkspacePanel({ workspace, onClose }: { workspace: string; onClose: () => void }) {
+export function WorkspacePanel({ workspace, sessionId, onClose }: { workspace: string; sessionId: string; onClose: () => void }) {
   const qc = useQueryClient()
   const [dir, setDir] = useState('.')
   const [showHidden, setShowHidden] = useState(false)
@@ -30,7 +30,7 @@ export function WorkspacePanel({ workspace, onClose }: { workspace: string; onCl
   const [draft, setDraft] = useState<string | null>(null)
   useEffect(() => { writePersisted('hermes-webui-workspace-panel', 'open'); document.documentElement.dataset.workspacePanel = 'open'; return () => { writePersisted('hermes-webui-workspace-panel', 'closed'); document.documentElement.dataset.workspacePanel = 'closed' } }, [])
   const listing = useQuery({ queryKey: keys.files.list(workspace, dir, showHidden), queryFn: () => api.listDir(workspace, dir, showHidden), staleTime: 10_000 })
-  const git = useQuery({ queryKey: keys.files.git(workspace), queryFn: () => api.fetchGitInfo(workspace), staleTime: 30_000, retry: false })
+  const git = useQuery({ queryKey: keys.files.git(sessionId), queryFn: () => api.fetchGitInfo(sessionId), staleTime: 30_000, retry: false })
   const content = useQuery({ queryKey: keys.files.content(workspace, file ?? ''), queryFn: () => api.readFile(workspace, file ?? ''), enabled: !!file, staleTime: 5_000 })
   const save = useMutation({ mutationFn: (text: string) => api.saveFile(workspace, file ?? '', text), onSuccess: () => { showToast(m.ws_panel_saved()); setDraft(null); void qc.invalidateQueries({ queryKey: keys.files.content(workspace, file ?? '') }) }, onError: (e) => showToast(e instanceof Error ? e.message : String(e), 4000, 'error') })
   const entries = (listing.data?.entries ?? listing.data?.items ?? []).slice().sort((a, b) => Number(!!b.is_dir) - Number(!!a.is_dir) || a.name.localeCompare(b.name))

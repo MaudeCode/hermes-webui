@@ -1,16 +1,5 @@
-"""Comprehensive renderer audit tests for static/ui.js renderMd().
-
-This file covers the full suite of markdown constructs an LLM might produce,
-with a focus on edge cases and combinations. Tests are grouped by construct.
-
-Python mirrors the renderMd/inlineMd pipeline at the level needed for each
-test — either source-level assertions (checking the JS source directly) or
-behavioural assertions (checking rendered HTML via a Python mirror).
-"""
 import re
 import pathlib
-
-UI_JS = (pathlib.Path(__file__).parent.parent / "static" / "ui.js").read_text(encoding="utf-8")
 
 import html as _html
 
@@ -67,74 +56,6 @@ def _apply_blockquotes(src):
 # ─────────────────────────────────────────────────────────────────────────────
 # Source-level structural checks (JS must contain these patterns)
 # ─────────────────────────────────────────────────────────────────────────────
-
-class TestSourceStructure:
-    """Verify key patterns are present in ui.js."""
-
-    def test_crlf_normalisation_present(self):
-        assert ".replace(/\\r\\n/g,'\\n').replace(/\\r/g,'\\n')" in UI_JS, (
-            "renderMd must normalise \\r\\n and bare \\r to \\n at the start"
-        )
-
-    def test_strikethrough_in_inline_md(self):
-        assert "~~(.+?)~~" in UI_JS and "<del>" in UI_JS, (
-            "inlineMd must handle ~~strikethrough~~ → <del>"
-        )
-
-    def test_del_in_safe_tags(self):
-        assert "del" in UI_JS and "SAFE_TAGS" in UI_JS, (
-            "<del> must be in SAFE_TAGS so it is not HTML-escaped"
-        )
-
-    def test_del_in_safe_inline(self):
-        # SAFE_INLINE is used inside inlineMd
-        safe_inline_idx = UI_JS.find("SAFE_INLINE")
-        assert safe_inline_idx >= 0
-        window = UI_JS[safe_inline_idx: safe_inline_idx + 100]
-        assert "del" in window, "<del> must be in SAFE_INLINE"
-
-    def test_task_list_checked_handled(self):
-        assert "task-done" in UI_JS or "\\u2705" in UI_JS or "✅" in UI_JS, (
-            "Checked task list items [x] must produce a ✅ or task-done class"
-        )
-
-    def test_task_list_unchecked_handled(self):
-        assert "task-todo" in UI_JS or "\\u2610" in UI_JS or "☐" in UI_JS, (
-            "Unchecked task list items [ ] must produce ☐ or task-todo class"
-        )
-
-    def test_nested_blockquote_recurse(self):
-        assert "_applyBlockquotes" in UI_JS, (
-            "Blockquote handler must use a named function for recursive nesting"
-        )
-
-    def test_blockquote_handler_is_function(self):
-        assert "function _applyBlockquotes" in UI_JS, (
-            "Must define _applyBlockquotes as a named inner function for recursion"
-        )
-
-    def test_old_single_line_blockquote_removed(self):
-        assert "replace(/^> (.+)$/gm" not in UI_JS, (
-            "Old single-line blockquote rule must be removed"
-        )
-
-    def test_h1_h2_h3_handled(self):
-        for h in ("h1", "h2", "h3"):
-            assert f"<{h}>" in UI_JS or f"`<{h}>" in UI_JS
-
-    def test_ordered_list_value_attr(self):
-        assert 'value=' in UI_JS, "Ordered list items must use value= to preserve numbering"
-
-    def test_table_handler_present(self):
-        assert "<table>" in UI_JS and "<thead>" in UI_JS
-
-    def test_fenced_code_lang_header(self):
-        assert "pre-header" in UI_JS
-
-    def test_autolink_present(self):
-        # JS stores regex slashes as \/ — search for both forms
-        assert ("https?:\\/\\/" in UI_JS or "https?://" in UI_JS) and "target=\"_blank\"" in UI_JS
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Behavioural: inline formatting

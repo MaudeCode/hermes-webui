@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import gzip
 import mimetypes
-import os
 import threading
 from pathlib import Path
 from urllib.parse import quote
@@ -61,6 +60,7 @@ SPA_PREFIX_PATHS: tuple[str, ...] = (
 # nest under an allowlisted prefix (e.g. ``/session/static/`` legacy alias).
 SERVER_OWNED_PREFIXES: tuple[str, ...] = (
     "/api/",
+    "/assets/",
     "/static/",
     "/extensions/",
     "/plugins/",
@@ -255,9 +255,3 @@ def serve_service_worker(handler) -> bool:
 
 def serve_manifest(handler) -> bool:
     return serve_dist_file(handler, "manifest.webmanifest", cache_control="no-cache")
-
-
-def frontend_mode() -> str:
-    """Temporary migration switch: ``spa`` or ``legacy``. Removed at cutover."""
-    value = (os.getenv("HERMES_WEBUI_FRONTEND") or "legacy").strip().lower()
-    return "spa" if value == "spa" else "legacy"

@@ -13,9 +13,6 @@ import api.routes as routes
 
 ROOT = Path(__file__).resolve().parents[1]
 ROUTES_PY = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
-SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
-
-
 class _FakeHandler:
     def __init__(self):
         self.status = None
@@ -215,10 +212,3 @@ def test_regenerate_endpoint_only_blocks_read_only_imported_sessions():
     block = ROUTES_PY[endpoint_idx:next_endpoint_idx]
     assert "_get_or_materialize_session(sid)" in block
     assert "except PermissionError:" in block
-
-
-def test_sessions_ui_keeps_regenerate_action_for_writable_imports():
-    regen_idx = SESSIONS_JS.index("api('/api/session/title/regenerate'")
-    window = SESSIONS_JS[regen_idx - 500:regen_idx]
-    assert "session.is_imported" not in window
-    assert "_isReadOnlySession(session)" in SESSIONS_JS

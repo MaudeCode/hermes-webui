@@ -12,8 +12,6 @@ import pytest
 
 REPO_ROOT = Path(__file__).parent.parent
 CONFIG_PY = (REPO_ROOT / "api" / "config.py").read_text(encoding="utf-8")
-UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
-
 NODE = shutil.which("node")
 
 
@@ -89,15 +87,6 @@ def test_provider_prefix_only_model():
     assert result == "jingdong:glm.5"
 
 
-def test_ui_js_uses_indexof_not_split_pop():
-    """Frontend must use indexOf(':',1)+slice, not split(':').pop()."""
-    assert "indexOf(':',1)" in UI_JS
-    assert "s.split(':').pop()" not in UI_JS, (
-        "ui.js still uses the buggy split(':').pop() pattern"
-    )
-    assert "strippedAtProvider=!!cand" in UI_JS
-
-
 def test_colon_before_slash_prefix_matches_backend_paths():
     """The non-@ colon-before-slash strip must match both backend helpers."""
     norm = _exec_norm()
@@ -105,51 +94,3 @@ def test_colon_before_slash_prefix_matches_backend_paths():
     model_id = "custom:llm-proxy/opencode_go/deepseek-v4-pro"
     assert norm(model_id) == "deepseek.v4.pro"
     assert static_norm(model_id) == "deepseek.v4.pro"
-
-
-@pytest.mark.skipif(NODE is None, reason="node not in PATH")
-def test_backend_frontend_parity_complex_aggregator_proxy():
-    """Python and JS normalizers must stay byte-for-byte aligned."""
-    py_norm = _exec_norm()
-    static_norm = _exec_static_norm()
-    import re
-    js_match = re.search(
-        r"function _normalizeConfiguredModelKey\([^)]*\)\{(.+?)\n\}",
-        UI_JS,
-        re.DOTALL,
-    )
-    assert js_match, "Could not find _normalizeConfiguredModelKey in ui.js"
-    js_body = js_match.group(1)
-    js_fn = f"""
-    function _normalizeConfiguredModelKey(modelId){{{js_body}}}
-    """
-    import subprocess, json, tempfile, os
-    test_ids = [
-        "@custom:jingdong:GLM-5",
-        "@custom:llm-proxy:kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
-        "@custom:proxy:nvidia/model:free",
-        "@custom:host:8080:model",
-        "openrouter/deepseek:free",
-        "custom:llm-proxy/opencode_go/deepseek-v4-pro",
-    ]
-    js_code = js_fn + "\n" + f"console.log(JSON.stringify({json.dumps(test_ids)}.map(id => [id, _normalizeConfiguredModelKey(id)])))"
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".js", delete=False) as f:
-        f.write(js_code)
-        tmp = f.name
-    try:
-        result = subprocess.run(
-            ["node", tmp], capture_output=True, text=True, timeout=30
-        )
-        assert result.returncode == 0, f"JS execution failed: {result.stderr}"
-        js_pairs = json.loads(result.stdout.strip())
-        js_map = dict(js_pairs)
-    finally:
-        os.unlink(tmp)
-    for model_id in test_ids:
-        py_result = py_norm(model_id)
-        static_result = static_norm(model_id)
-        js_result = js_map[model_id]
-        assert py_result == static_result == js_result, (
-            f"Parity mismatch for {model_id!r}: "
-            f"Python={py_result!r}, static={static_result!r}, JS={js_result!r}"
-        )

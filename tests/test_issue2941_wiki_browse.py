@@ -60,19 +60,6 @@ def test_wiki_page_path_traversal_rejection():
     )
 
 
-def test_render_llm_wiki_status_references_browse():
-    src = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
-    assert "_renderLlmWikiStatus" in src, "_renderLlmWikiStatus not found in panels.js"
-    assert "_openWikiBrowser" in src, "_openWikiBrowser reference not found in panels.js"
-
-
-def test_open_wiki_browser_function_exists():
-    src = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
-    assert "async function _openWikiBrowser" in src, "_openWikiBrowser function not defined in panels.js"
-    assert "/api/wiki/browse" in src, "/api/wiki/browse fetch not found in panels.js"
-    assert "/api/wiki/page" in src, "/api/wiki/page fetch not found in panels.js"
-
-
 def test_wiki_browse_skips_pages_that_disappear_during_listing(monkeypatch, tmp_path):
     from api import routes
 
@@ -548,32 +535,6 @@ def test_wiki_page_alias_spellings_are_rejected(monkeypatch, tmp_path):
         handler = _FakeHandler()
         routes.handle_get(handler, urlparse(f"http://example.com/api/wiki/page?path={alias}"))
         assert handler.status == 400, f"alias spelling {alias!r} must be rejected, got {handler.status}"
-
-
-def test_i18n_wiki_keys_in_all_locales():
-    src = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
-    required_keys = [
-        "wiki_browse",
-        "wiki_search_placeholder",
-        "wiki_no_pages",
-        "wiki_not_configured",
-    ]
-    # Locate all locale block boundaries by finding "_lang:" occurrences,
-    # then verify each required key appears in every locale block.
-    lang_positions = [m.start() for m in re.finditer(r"_lang:", src)]
-    assert lang_positions, "Could not find any locale blocks in i18n data"
-
-    locale_chunks = []
-    for idx, start in enumerate(lang_positions):
-        end = lang_positions[idx + 1] if idx + 1 < len(lang_positions) else len(src)
-        locale_chunks.append(src[start:end])
-
-    for i, chunk in enumerate(locale_chunks):
-        for key in required_keys:
-            assert key + ":" in chunk, (
-                f"i18n key '{key}' missing from locale block {i + 1} "
-                f"(position ~{lang_positions[i]})"
-            )
 
 
 def test_wiki_page_files_documents_hardlink_trust_boundary():

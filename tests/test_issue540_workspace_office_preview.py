@@ -23,7 +23,6 @@ import api.routes as routes
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKSPACE_JS = (ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 
@@ -43,42 +42,6 @@ def _simple_xlsx_bytes() -> bytes:
     buffer = io.BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
-
-
-def _extract_workspace_block(start_marker: str, end_marker: str) -> str:
-    start = WORKSPACE_JS.find(start_marker)
-    assert start >= 0, f"{start_marker!r} not found in static/workspace.js"
-    end = WORKSPACE_JS.find(end_marker, start)
-    assert end >= 0, f"{end_marker!r} not found after {start_marker!r}"
-    return WORKSPACE_JS[start:end]
-
-
-def _extract_workspace_function(name: str) -> str:
-    marker = f"async function {name}("
-    start = WORKSPACE_JS.find(marker)
-    assert start >= 0, f"{name} not found in static/workspace.js"
-    params_depth = 0
-    body_start = -1
-    for idx in range(start, len(WORKSPACE_JS)):
-        char = WORKSPACE_JS[idx]
-        if char == "(":
-            params_depth += 1
-        elif char == ")":
-            params_depth -= 1
-        elif char == "{" and params_depth == 0:
-            body_start = idx
-            break
-    assert body_start >= 0, f"could not find function body for {name}"
-    depth = 0
-    for idx in range(body_start, len(WORKSPACE_JS)):
-        char = WORKSPACE_JS[idx]
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return WORKSPACE_JS[start:idx + 1]
-    raise AssertionError(f"could not find balanced function body for {name}")
 
 
 def _patch_file_ops(monkeypatch, workspace: Path):
@@ -183,58 +146,3 @@ def test_office_save_route_returns_503_when_office_parsers_are_missing(tmp_path,
     )
 
     assert captured["bad"] == (office_documents.OFFICE_DEPENDENCY_HINT, 503)
-
-
-def test_workspace_js_docx_routes_through_file_read_not_download():
-    assert "'.docx'" not in WORKSPACE_JS.split("const DOWNLOAD_EXTS = new Set([", 1)[1].split("]);", 1)[0]
-    assert "'.xlsx'" not in WORKSPACE_JS.split("const DOWNLOAD_EXTS = new Set([", 1)[1].split("]);", 1)[0]
-    assert "'.pptx'" not in WORKSPACE_JS.split("const DOWNLOAD_EXTS = new Set([", 1)[1].split("]);", 1)[0]
-    assert "'.doc'" in WORKSPACE_JS
-    assert "'.xls'" in WORKSPACE_JS
-    assert "'.ppt'" in WORKSPACE_JS
-    assert "data.preview_kind==='office'" in WORKSPACE_JS
-    assert "/api/file/office-save" in WORKSPACE_JS
-
-
-def test_workspace_js_edit_button_uses_server_editable_flag():
-    assert "_previewServerEditable" in WORKSPACE_JS
-    assert "_previewServerEditable===false" in WORKSPACE_JS
-    assert "This Office document is preview-only." in WORKSPACE_JS
-    assert "_previewSaveRoute" in WORKSPACE_JS
-    assert "_previewSaveRoute = data.preview_kind==='office' ? '/api/file/office-save' : '/api/file/save';" in WORKSPACE_JS
-
-
-@pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_openfile_download_only_path_preserves_existing_office_save_route():
-    js = (
-        _extract_workspace_block("const DOWNLOAD_EXTS = new Set([", "function fileExt")
-        + "function fileExt(p){ const i=p.lastIndexOf('.'); return i>=0?p.slice(i).toLowerCase():''; }\n"
-        + _extract_workspace_function("openFile")
-        + "\nconst S = { session: { session_id: 'sid-1' } };\n"
-        + "let _previewServerEditable = true;\n"
-        + "let _previewSaveRoute = '/api/file/office-save';\n"
-        + "let _previewOfficeFormat = 'docx';\n"
-        + "let _previewPreviewKind = 'office';\n"
-        + "let downloaded = null;\n"
-        + "function downloadFile(path){ downloaded = path; }\n"
-        + "(async()=>{ await openFile('legacy.doc'); console.log(JSON.stringify({downloaded,_previewServerEditable,_previewSaveRoute,_previewOfficeFormat,_previewPreviewKind})); })();\n"
-    )
-    result = subprocess.run([NODE, "-e", js], check=True, capture_output=True, text=True, timeout=30)
-    state = json.loads(result.stdout.strip().splitlines()[-1])
-
-    assert state["downloaded"] == "legacy.doc"
-    assert state["_previewSaveRoute"] == "/api/file/office-save"
-    assert state["_previewServerEditable"] is True
-    assert state["_previewOfficeFormat"] == "docx"
-    assert state["_previewPreviewKind"] == "office"
-
-
-def test_pdf_preview_path_is_unchanged():
-    assert "showPreview('pdf')" in WORKSPACE_JS
-    assert "_workspaceRouteForPath(path, 'raw', {inline:true})" in WORKSPACE_JS
-
-
-def test_zip_and_legacy_office_formats_still_download():
-    download_block = WORKSPACE_JS.split("const DOWNLOAD_EXTS = new Set([", 1)[1].split("]);", 1)[0]
-    for ext in [".doc", ".xls", ".ppt", ".odt", ".ods", ".odp", ".zip", ".tar"]:
-        assert ext in download_block

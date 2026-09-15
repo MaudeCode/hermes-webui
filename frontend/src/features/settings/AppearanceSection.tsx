@@ -50,7 +50,7 @@ export function AppearanceSection() {
           {LOCALE_INFO.map((l) => <option key={l.code} value={l.code}>{l.label}</option>)}
         </NativeSelect>
       </FieldRow>
-      {settings.data?.webui_version && <div className="pt-3 text-[11px] text-muted">v{settings.data.webui_version}</div>}
+      {settings.data?.webui_version && <div className="pt-3 text-[11px] text-muted" data-testid="webui-version">v{settings.data.webui_version}</div>}
     </div>
   )
 }

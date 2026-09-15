@@ -65,7 +65,7 @@ theme. The skin is applied as `data-skin="<name>"` on `<html>` (the default
 skin clears the attribute).
 
 The WebUI brandmark uses Talaria's original winged sandal paths in
-`static/brandmark.svg`, adapted from Talaria's `Sandal.svg` source. The title bar
+`static/brand/brandmark.svg`, adapted from Talaria's `Sandal.svg` source. The title bar
 and shared-chat header use a CSS mask colored by the active skin's `--accent`;
 the login page
 uses its existing gold accent. No app-icon shading or outline is included.
@@ -108,16 +108,17 @@ light and dark variants:
 
 Two ways to ship it:
 
-1. **In the repo (built-in):** add the block to `static/style.css`, register it
-   in the Settings skin picker (`static/index.html`) and in the `/theme` command
-   list (`static/commands.js`), then open a PR.
+1. **In the repo (built-in):** add the block to `frontend/src/theme/tokens.css`,
+   register it in `frontend/src/contracts/persisted.ts` (`SkinSchema`) and the
+   skin list in `frontend/src/features/settings/AppearanceSection.tsx`, rebuild
+   `static/dist`, then open a PR.
 
-2. **Self-hosted (no fork):** use the WebUI extensions surface — see
-   `docs/EXTENSIONS.md`. Drop your CSS in `HERMES_WEBUI_EXTENSION_DIR` and
-   declare it in `HERMES_WEBUI_EXTENSION_STYLESHEET_URLS`. No code changes
-   needed; the skin attribute can be set from your own JS.
+2. **Self-hosted (no fork):** declare a `theme` block in your extension manifest
+   (see `docs/architecture/extension-protocol-v1.md`). The host applies the
+   allowlisted tokens as CSS custom properties when the user selects the skin
+   in Settings, Appearance; no stylesheet or script is injected.
 
-   Extensions that register a skin through `window.registerHermesSkin()` may
+   Extensions that declare a skin through the manifest may
    also set `scheme: "light"` or `scheme: "dark"` for light-only or dark-only
    skins. The saved Theme preference stays unchanged, but WebUI applies the
    matching effective base class while that skin is selected so System/Light or
@@ -143,7 +144,7 @@ A full custom *theme* (a different overall mood, not just an accent change) is
 a larger task than a skin: it has to redefine the core palette variables
 (`--bg`, `--surface`, `--text`, `--border`, `--code-bg`, and friends) for one
 or both modes. The contract is defined in the top `:root` and `:root.dark`
-blocks of `static/style.css` — start there.
+blocks of `frontend/src/theme/tokens.css` — start there.
 
 Most of the time, a custom **skin** is what you actually want. Reach for a
 custom theme only when the existing Light/Dark modes don't fit (for example,
@@ -161,7 +162,7 @@ font size. Persists alongside theme and skin.
 
 ## Typography Tokens
 
-The three font tokens are declared in `static/style.css`:
+The three font tokens are declared in `frontend/src/theme/tokens.css`:
 
 - `--font-ui`: user interface chrome, controls, composer chrome, labels, and
   ordinary non-code UI text
@@ -214,9 +215,10 @@ Skins are the easiest extension point — pure CSS, no Python, no JS logic. To
 contribute one upstream:
 
 1. Add your `:root[data-skin="name"]` and `:root.dark[data-skin="name"]`
-   blocks to `static/style.css`.
-2. Register it in the Settings skin picker in `static/index.html` and in the
-   skin list used by `cmdTheme()` in `static/commands.js`.
+   blocks to `frontend/src/theme/tokens.css`.
+2. Register it in `SkinSchema` (`frontend/src/contracts/persisted.ts`) and in
+   the Settings skin picker (`frontend/src/features/settings/AppearanceSection.tsx`);
+   the `/theme` command reads the same list.
 3. Test on desktop and mobile across both Light and Dark themes.
 4. Open a PR — skins are pure CSS additions with no backend changes needed.
 

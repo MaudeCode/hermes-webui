@@ -6,47 +6,9 @@ from unittest.mock import MagicMock
 import api.streaming as streaming
 
 ROOT = Path(__file__).resolve().parents[1]
-SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 ROUTES_PY = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 STREAMING_PY = (ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
 CHANGELOG = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-
-
-def test_session_action_menu_exposes_regenerate_title_control():
-    assert "session_title_regenerate" in SESSIONS_JS
-    assert "session_title_regenerate_desc" in SESSIONS_JS
-    assert "ICONS.spark" in SESSIONS_JS
-    assert "api('/api/session/title/regenerate'" in SESSIONS_JS
-    assert "renderSessionListFromCache();" in SESSIONS_JS
-
-
-def test_writable_imported_sessions_keep_regenerate_action_without_broadening_shared_gate():
-    # The shared _isReadOnlySession() helper must stay scoped to read_only flags
-    # so it does not silently disable rename/pin/archive/etc. for imported
-    # sessions. Writable imported sessions should still expose regenerate.
-    helper_idx = SESSIONS_JS.index("function _isReadOnlySession(session)")
-    next_helper_idx = SESSIONS_JS.index("function _sourceKeyForSession", helper_idx)
-    helper_block = SESSIONS_JS[helper_idx:next_helper_idx]
-    assert "session.is_imported" not in helper_block, (
-        "_isReadOnlySession must not include is_imported; writable imports need regenerate"
-    )
-    regen_idx = SESSIONS_JS.index("api('/api/session/title/regenerate'")
-    guard_window = SESSIONS_JS[regen_idx - 600:regen_idx]
-    assert "session.is_imported" not in guard_window
-
-
-def test_regenerate_title_i18n_and_changelog_entries_exist():
-    for key in [
-        "session_title_regenerate",
-        "session_title_regenerate_desc",
-        "session_title_regenerating",
-        "session_title_regenerated",
-        "session_title_regenerate_failed",
-    ]:
-        assert key in I18N_JS
-    assert "session action menu can regenerate conversation titles" in CHANGELOG
-    assert "#3106" in CHANGELOG
 
 
 def test_regenerate_endpoint_persists_generated_title_without_reordering_sidebar():

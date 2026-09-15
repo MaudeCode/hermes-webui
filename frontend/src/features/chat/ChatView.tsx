@@ -210,7 +210,7 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
         />
         <span className="sr-only" aria-live="polite" id="a11yAnnouncer">{live?.status === 'done' ? m.done() : ''}</span>
       </div>
-      {workspaceOpen && workspace && <WorkspacePanel key={workspace} workspace={workspace} onClose={() => setWorkspaceOpen(false)} />}
+      {workspaceOpen && workspace && sessionId && <WorkspacePanel key={workspace} workspace={workspace} sessionId={sessionId} onClose={() => setWorkspaceOpen(false)} />}
     </div>
   )
 }

@@ -124,27 +124,6 @@ def test_project_context_content_is_redacted_in_memory_response(tmp_path, monkey
     assert "Normal note: keep me." in payload["project_context"]
 
 
-def test_memory_panel_defines_read_only_project_context_section():
-    panels = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
-
-    assert "key: 'project_context'" in panels
-    assert "readOnly: true" in panels
-    assert "project_context_shadowed" in panels
-    assert "/api/memory?session_id=" in panels
-
-
-def test_memory_panel_references_all_memory_path_fields():
-    panels = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
-
-    assert "function _memorySectionPath(key)" in panels
-    assert "_memoryData.memory_path" in panels
-    assert "_memoryData.user_path" in panels
-    assert "_memoryData.soul_path" in panels
-    assert "_memoryData.project_context_path" in panels
-    assert "const sectionPath = _memorySectionPath(s.key)" in panels
-    assert "if (sectionPath) el.title = sectionPath" in panels
-
-
 def _memory_render_blocks():
     panels = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
     helper_start = panels.index("function _memorySectionContent(key)")
@@ -306,42 +285,6 @@ console.log(JSON.stringify(buttons));
         check=True,
     )
     return json.loads(completed.stdout)
-
-
-def test_memory_detail_renders_path_for_non_project_sections():
-    """Base-fails/head-passes regression for issue #4999.
-
-    On base, `_renderMemoryDetail('memory')` ignores `memory_path`, so the
-    rendered header omits the path row entirely. On head, the same render must
-    show `MEMORY.md · <path>` using the existing pinned header row pattern.
-    """
-    if NODE is None:
-        pytest.skip("node not on PATH")
-
-    rendered = _run_memory_render_harness()
-
-    assert "MEMORY.md" in rendered["memoryHtml"]
-    assert "C:/Users/Rod/.hermes/memories/MEMORY.md" in rendered["memoryHtml"]
-    assert "USER.md" in rendered["userHtml"]
-    assert "C:/Users/Rod/.hermes/memories/USER.md" in rendered["userHtml"]
-    assert "SOUL.md" in rendered["soulHtml"]
-    assert "C:/Users/Rod/.hermes/SOUL.md" in rendered["soulHtml"]
-    assert "AGENTS.md · D:/Repos/hermes-webui/AGENTS.md" in rendered["projectHtml"]
-    assert "CLAUDE.md present, shadowed by AGENTS.md" in rendered["projectHtml"]
-
-
-def test_memory_section_list_renders_hover_path_titles():
-    """Base-fails/head-passes regression for issue #5045."""
-    if NODE is None:
-        pytest.skip("node not on PATH")
-
-    rendered = {item["label"]: item["title"] for item in _run_memory_button_harness()}
-
-    assert rendered["memory"] == "C:/Users/Rod/.hermes/memories/MEMORY.md"
-    assert rendered["user"] == "C:/Users/Rod/.hermes/memories/USER.md"
-    assert rendered["soul"] == "C:/Users/Rod/.hermes/SOUL.md"
-    assert rendered["project_context"] == "D:/Repos/hermes-webui/AGENTS.md"
-    assert rendered["external_notes"] == ""
 
 
 def test_blank_session_workspace_does_not_resolve_to_server_cwd(monkeypatch):

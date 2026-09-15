@@ -9,10 +9,6 @@ import types
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-PANELS_JS = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
-
-
 class _JSONHandler:
     def __init__(self):
         self.status = None
@@ -32,37 +28,6 @@ class _JSONHandler:
 
 def _payload(handler):
     return json.loads(handler.wfile.getvalue().decode("utf-8"))
-
-
-def _function_body(name: str) -> str:
-    marker = f"function {name}("
-    start = PANELS_JS.find(marker)
-    assert start != -1, f"{name} not found"
-    paren = PANELS_JS.find("(", start)
-    assert paren != -1, f"{name} params not found"
-    depth = 0
-    for idx in range(paren, len(PANELS_JS)):
-        ch = PANELS_JS[idx]
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-            if depth == 0:
-                brace = PANELS_JS.find("{", idx)
-                break
-    else:
-        raise AssertionError(f"{name} params did not terminate")
-    assert brace != -1, f"{name} body not found"
-    depth = 0
-    for idx in range(brace, len(PANELS_JS)):
-        ch = PANELS_JS[idx]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return PANELS_JS[brace + 1 : idx]
-    raise AssertionError(f"{name} body did not terminate")
 
 
 def test_cron_create_persists_model_provider_pair(monkeypatch):
@@ -165,37 +130,3 @@ def test_cron_update_can_set_and_clear_model_provider_pair(monkeypatch):
         ("job-model", {"model": "gpt-5.4", "provider": "openai-codex"}),
         ("job-model", {"model": None, "provider": None}),
     ]
-
-
-def test_cron_form_has_model_picker_and_saves_model_provider_state():
-    render_body = _function_body("_renderCronForm")
-    save_body = _function_body("saveCronForm")
-    edit_body = _function_body("openCronEdit")
-    detail_body = _function_body("_renderCronDetail")
-
-    picker_body = _function_body("_populateCronFormModelSelect")
-
-    assert "cronFormModel" in render_body
-    assert "cron_model_label" in render_body
-    assert "cron_model_use_default" in picker_body
-    assert "_populateCronFormModelSelect" in render_body
-    assert "_modelStateForSelect" in save_body
-    assert "updates.model" in save_body
-    assert "updates.provider" in save_body
-    assert "body.model" in save_body
-    assert "body.provider" in save_body
-    assert "model: job.model" in edit_body
-    assert "provider: job.provider" in edit_body
-    assert "cron_model_use_default" in detail_body
-
-
-def test_cron_model_picker_i18n_keys_exist():
-    assert "cron_model_label" in I18N_JS
-    assert "cron_model_use_default" in I18N_JS
-    assert "cron_model_hint" in I18N_JS
-    # #4031: the no-agent hint key must be DEFINED in the locale table (with its
-    # value), not merely referenced in panels.js — t() returns the key name itself
-    # for a missing translation, so a missing key would render the literal
-    # "cron_model_no_agent_hint" to the user instead of the hint text.
-    assert "cron_model_no_agent_hint:" in I18N_JS
-    assert "No-agent jobs run the configured script directly" in I18N_JS

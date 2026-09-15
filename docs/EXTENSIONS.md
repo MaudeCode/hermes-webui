@@ -1,17 +1,24 @@
 # WebUI Extensions
 
 Hermes WebUI supports a small, opt-in extension surface for self-hosted installs.
-It lets an administrator serve local static assets and inject same-origin CSS or
-JavaScript into the app shell without editing the WebUI source tree.
+An extension ships a **panel document** that runs in a sandboxed iframe and
+talks to the WebUI through a capability-gated protocol; it never runs inside
+the core page. The protocol is specified in
+[`architecture/extension-protocol-v1.md`](architecture/extension-protocol-v1.md);
+extensions written for the injected-script surface follow
+[`architecture/extension-migration-guide.md`](architecture/extension-migration-guide.md).
 
-> **Trust model — read this first.** Extensions execute with full WebUI session
-> authority. An extension JS file can call any API the logged-in user can call,
-> including reading conversation history, sending messages, modifying settings,
-> and triggering tool actions. **Only enable extensions you wrote yourself or
-> from sources you trust as much as the WebUI source itself.** If your WebUI is
-> shared with users you do not fully trust, do not enable extensions.
-> If you set `HERMES_WEBUI_EXTENSION_DIR` yourself, do not point it at a
-> user-writable directory on a shared host.
+> **Trust model — read this first.** Extension code runs in an `<iframe
+> sandbox>` with an opaque origin: no cookies, no same-origin API access, no
+> access to the host DOM or storage. It reaches the server, the current session,
+> settings, storage and the UI only through the methods its manifest declares
+> in `capabilities`, and the server refuses `/api/*` requests that carry
+> `Origin: null`. That is a much smaller blast radius than the previous
+> injected-script surface, but an extension can still show misleading UI, call
+> its consented sidecar, and read what its capabilities expose. **Only enable
+> extensions from the vetted gallery or sources you trust.** If you set
+> `HERMES_WEBUI_EXTENSION_DIR` yourself, do not point it at a user-writable
+> directory on a shared host.
 
 This is intentionally not a plugin marketplace or dependency system. It is a
 safe escape hatch for local dashboards, internal tooling, and workflow-specific
@@ -23,30 +30,90 @@ panels that should not live in core Hermes WebUI.
 > "In the registry == vetted." That repo holds the entries, the authoring
 > conventions ([`docs/extension-entry.md`](https://github.com/hermes-webui/hermes-webui-extensions/blob/main/docs/extension-entry.md)),
 > the JSON schema, and the CI safety gates. This document covers the WebUI-side
-> *infrastructure* (loader, manifest contract, capabilities, install client);
-> see the library repo to browse existing extensions or contribute a new one.
+> *infrastructure* (manifest contract, panel serving, capabilities, install
+> client); see the library repo to browse existing extensions or contribute a
+> new one.
 
 ## What extensions can do
 
 Extensions can:
 
 - serve files from one configured local directory at `/extensions/...`
-- inject configured same-origin stylesheets into `<head>`
-- inject configured same-origin scripts before `</body>`
-- read a local JSON manifest that lists bundled scripts/styles to inject
-- call the normal WebUI APIs available to the browser session
-- call trusted local loopback sidecars directly from extension JavaScript when
-  the browser Content Security Policy allows that origin
+- add a rail entry that opens their panel document at `/ext/<id>`
+- declare **capabilities** and call the matching host methods: `settings`,
+  `storage`, `sidecar`, `lifecycle` (turn start/complete/error/cancel events),
+  `theme`, `tts`, `navigate`, `toast`, `session`
+- declare a **skin** (design tokens) the user can pick in Settings, Appearance
+- declare a **TTS engine** the user can pick for spoken replies
+- reach a consented loopback sidecar through the fixed per-extension proxy path
 
-Extensions cannot, by themselves:
+Extensions cannot:
 
-- bypass WebUI authentication
-- serve files outside the configured extension directory
-- load third-party scripts/styles through the built-in injection config
-- register new WebUI backend routes or proxy arbitrary sidecar/backend traffic
-  outside the fixed consented extension sidecar path described below
-- change Hermes Agent permissions, models, memory, or tools unless they call
-  existing authenticated APIs that already allow those changes
+- run script or style in the core page, read its DOM, globals, cookies or storage
+- call `/api/*` directly (sandboxed documents are refused before authentication)
+- bypass WebUI authentication or serve files outside the extension directory
+- register new WebUI backend routes or proxy arbitrary traffic outside the
+  fixed consented sidecar path described below
+- change Hermes Agent permissions, models, memory, or tools except through the
+  capabilities above
+
+## Manifest shape
+
+`extensions.json` (or a gallery entry's `extension.json`) lists entries:
+
+```json
+{
+  "extensions": [
+    {
+      "id": "hello-panel",
+      "name": "Hello Panel",
+      "version": "1.0.0",
+      "panel": "hello-panel/index.html",
+      "nav": { "label": "Hello" },
+      "capabilities": ["settings", "storage", "toast", "session", "lifecycle"],
+      "settings_schema": [
+        { "key": "greeting", "type": "string", "label": "Greeting", "default": "Hi" }
+      ],
+      "permissions": { "network_external": false },
+      "theme": { "key": "mint", "name": "Mint", "scheme": "light", "tokens": { "--bg": "#f4fffa", "--accent": "#0b6b4a" } },
+      "tts": { "id": "voicevox", "label": "VOICEVOX (local)" },
+      "sidecar": { "type": "loopback", "origin": "http://127.0.0.1:17787", "health_path": "/health", "proxy_auth": "token-v1" }
+    }
+  ]
+}
+```
+
+- `id` is `^[a-z][a-z0-9_-]{0,63}$` and doubles as the settings/storage
+  namespace and the `/ext/<id>` route.
+- `panel` is a relative path inside the extension directory; it is served at
+  `/extensions/<panel>` with a `sandbox` Content-Security-Policy. An entry
+  without `panel` is headless (skin, TTS or sidecar only).
+- `capabilities`, `settings_schema`, `theme`, `tts` and `sidecar` are
+  sanitized by `api/extension_manifests.py`; rejected fields produce stable
+  warning codes in `GET /api/extensions/manifests` and never reach the client
+  raw.
+- `scripts` and `stylesheets` are ignored. An entry that has only those is
+  listed as **needs migration** in Settings, Extensions and never runs.
+
+The complete example lives in
+[`examples/extensions/hello-panel/`](examples/extensions/hello-panel/).
+
+## Writing a panel
+
+```html
+<script src="../../static/dist/extension-sdk.js"></script>
+<script>
+  Hermes.connect().then(async (hermes) => {
+    const { values } = await hermes.call('settings.get')
+    hermes.on('turn:complete', (ev) => console.log('turn done', ev.sessionId))
+  })
+</script>
+```
+
+`extension-sdk.js` is built from `frontend/src/extensions/sdk.ts` and served
+from `static/dist`. Load it with a relative URL so subpath mounts work. The
+handshake, message bounds, method table, error codes and events are in the
+protocol document.
 
 ## Configuration
 
@@ -57,7 +124,7 @@ Open **Settings → Extensions**, pick an extension from the gallery, and click
 **Install** — it just works. The first install creates a WebUI-managed
 extension directory under your state dir (`STATE_DIR/extensions`, e.g.
 `~/.hermes/webui/extensions/`) and installs into it; gallery-installed
-extensions load automatically on the next app-shell render with no environment
+extensions appear in the rail on the next reload with no environment
 variables and no restart of your shell.
 
 The gallery registry is cached for five minutes. A refresh runs as a single
@@ -67,10 +134,9 @@ existing cached list, or a temporary unavailable response when no cache exists.
 The managed directory lives alongside your sessions and settings in the
 WebUI-owned state dir. That is a different trust domain from "a world-writable
 directory on a shared box": only the WebUI process (and whoever can already
-write your `~/.hermes` state) can place code there. The trust model below still
-applies — installed extension code runs with full session authority — so only
-install extensions from the vetted gallery or sources you trust as much as the
-WebUI source itself.
+write your `~/.hermes` state) can place code there. The trust model above still
+applies, so only install extensions from the vetted gallery or sources you
+trust.
 
 Some gallery entries need more than WebUI assets. If an extension declares
 post-install guidance or lifecycle requirements such as a loopback sidecar or a
@@ -84,104 +150,22 @@ app is started.
 `HERMES_WEBUI_EXTENSION_DIR` is **optional** and overrides the managed default.
 Set it when you want extensions to live in a specific directory you control
 (e.g. a checked-out bundle, or a path mounted into a container). When set it
-must point to an existing directory before any script or stylesheet URLs are
-injected; WebUI never auto-creates an admin-specified path:
+must point to an existing directory; WebUI never auto-creates an admin-specified
+path:
 
 ```bash
-export HERMES_WEBUI_EXTENSION_DIR=/path/to/my-extension/static
-export HERMES_WEBUI_EXTENSION_SCRIPT_URLS=/extensions/app.js
-export HERMES_WEBUI_EXTENSION_STYLESHEET_URLS=/extensions/app.css
+export HERMES_WEBUI_EXTENSION_DIR=/path/to/my-extensions
+export HERMES_WEBUI_EXTENSION_MANIFEST=extensions.json   # relative to the directory (default)
 ./start.sh
 ```
 
-Multiple URLs may be comma-separated:
-
-```bash
-export HERMES_WEBUI_EXTENSION_SCRIPT_URLS=/extensions/runtime.js,/extensions/app.js
-export HERMES_WEBUI_EXTENSION_STYLESHEET_URLS=/extensions/base.css,/extensions/theme.css
-```
-
-For bundled or multi-extension installs, you may list assets in a manifest file
-inside `HERMES_WEBUI_EXTENSION_DIR` instead of maintaining long comma-separated
-environment variables:
-
-```bash
-cat > ~/.hermes/webui-extension-bundle/extensions.json <<'JSON'
-{
-  "extensions": [
-    {
-      "id": "templates",
-      "scripts": ["templates/templates.js"],
-      "stylesheets": ["templates/templates.css"]
-    },
-    {
-      "id": "sidebar-tools",
-      "scripts": ["sidebar-tools/sidebar-tools.js"],
-      "stylesheets": ["sidebar-tools/sidebar-tools.css"]
-    }
-  ]
-}
-JSON
-
-HERMES_WEBUI_EXTENSION_DIR=~/.hermes/webui-extension-bundle \
-HERMES_WEBUI_EXTENSION_MANIFEST=extensions.json \
-./start.sh
-```
-
-Manifest entries use the same URL safety rules as the environment variables.
-Bare relative entries such as `templates/templates.js` resolve to
-`/extensions/templates/templates.js`; absolute same-origin entries such as
-`/extensions/shared.js` or `/static/theme.css` are also accepted. A manifest may
-be an object with top-level `scripts` / `stylesheets`, an object with an
-`extensions` array, or a top-level array of extension objects. Disabled entries
-may be kept in the manifest with the JSON boolean `"enabled": false`. Explicit
-`HERMES_WEBUI_EXTENSION_SCRIPT_URLS` and
-`HERMES_WEBUI_EXTENSION_STYLESHEET_URLS` still work and are appended after
-manifest assets, with duplicates ignored.
-
-When an extension is installed from Settings -> Extensions, WebUI records the
-installed package and loads that package's `manifest.json` automatically on the
-next app-shell render. In this gallery-installed mode, a manifest located at
-`HERMES_WEBUI_EXTENSION_DIR/<extension-id>/manifest.json` resolves bare relative
-assets relative to that package directory. For example,
-`"scripts": ["assets/companion-adapter.js"]` in
-`desktop-companion/manifest.json` injects
-`/extensions/desktop-companion/assets/companion-adapter.js`.
-
-Manual manifests configured with `HERMES_WEBUI_EXTENSION_MANIFEST` follow the
-same rule: relative assets resolve from the manifest file's directory. A root
-manifest such as `extensions.json` keeps the existing
-`/extensions/<asset-path>` behavior, while a subdirectory manifest such as
-`desktop-companion/manifest.json` resolves relative assets under
-`/extensions/desktop-companion/`.
-
-Extension entries may also declare a loopback sidecar for diagnostics and the
-opt-in proxy:
-
-```json
-{
-  "extensions": [
-    {
-      "id": "desktop-companion",
-      "name": "Desktop Companion",
-      "scripts": ["companion-adapter.js"],
-      "stylesheets": ["companion-adapter.css"],
-      "sidecar": {
-        "type": "loopback",
-        "origin": "http://127.0.0.1:17787",
-        "health_path": "/health",
-        "proxy_auth": "token-v1"
-      }
-    }
-  ]
-}
-```
-
-Loopback sidecars do **not** change asset injection behavior. They are reported
-by diagnostics so an operator can see that a local companion service was
-declared and optionally check its health from the browser. If the operator later
-approves the proxy in **Settings → Extensions**, WebUI may proxy requests only
-through the fixed per-extension sidecar path for that extension.
+The manifest lists entries with the fields shown in [Manifest shape](#manifest-shape).
+Paths are relative to the extension directory, must not traverse outside it,
+and dot-prefixed segments are rejected. A manifest entry may declare
+`"enabled": false` to stay listed but inactive; users can toggle installed
+entries from Settings, Extensions. `HERMES_WEBUI_EXTENSION_SCRIPT_URLS` and
+`HERMES_WEBUI_EXTENSION_STYLESHEET_URLS` are no longer honoured: there is no
+injection surface. Move those assets into a panel document.
 
 ### Sidecar proxy authentication (`proxy_auth`)
 
@@ -248,151 +232,9 @@ extension-owned storage:
 }
 ```
 
-Settings are a first-pass browser feature. WebUI sanitizes the manifest schema, injects the accepted schema before extension scripts, and leaves persistence to the browser. The backend does not store extension settings or expose a generic settings write route, and it does not treat these values as secrets.
-
-The sanitizer accepts only `boolean`, `string`, `number`, `integer`, and `enum`
-fields. It drops `sensitive: true` fields, unsupported types, malformed enum
-options, duplicate keys after the first valid field, and defaults that do not
-match the declared type. `settings_schema` is honored only when
-`permissions.storage.owned` is exactly `true`.
-
-Extension scripts can use the sanctioned browser accessors:
-
-```js
-const settings = window.HermesExtensionSettings.settingsForExtension("desktop-companion");
-const value = settings.get("show_badge");
-settings.set("show_badge", false);
-
-const storage = window.HermesExtensionSettings.storageForExtension("desktop-companion");
-storage.set("lastPanel", "settings");
-
-const sameSettings = window.hermesExt.settings.forExtension("desktop-companion");
-const sameStorage = window.hermesExt.storage.forExtension("desktop-companion");
-```
-
-Settings persist only non-default overrides. Resetting settings removes those
-overrides and returns schema defaults. Extension-owned storage uses a separate
-browser-local namespace, and clearing storage removes that namespace without
-changing settings.
-
-### Cooperative extension identity
-
-An injected extension can claim a stable browser-page identity together with its
-existing settings and storage accessors:
-
-```js
-const ext = window.hermesExt.register("desktop-companion");
-if (ext) {
-  ext.settings.set("show_badge", false);
-  ext.storage.set("lastPanel", "settings");
-}
-```
-
-`register(id)` trims the ID and succeeds only for an ID in the effective-enabled,
-Core-sanitized manifest inventory that was present at the initial page boot. It
-returns `null` for empty, malformed, unknown, or untrusted IDs without creating
-settings or storage state. Re-registering the same ID in one page returns the
-same handle object; different IDs receive different handles. The handle exposes
-only the canonical `id`, `settings`, `storage`, and `events` fields. Settings and
-storage are backed by the same factories used by the legacy accessors.
-
-Manifest enable/disable changes still take effect after a WebUI reload. A handle
-already created in the current page may remain cached across a status refresh;
-this is expected and does not implement runtime unload. This identity is a
-cooperative attribution convenience for extensions sharing the page—not a
-sandbox, isolation mechanism, capability or permission system, or security
-boundary. Extensions still execute with the full WebUI session authority
-described above.
-
-### Custom Configure editors
-
-Extensions with structured configuration that does not fit scalar
-`settings_schema` fields can register one custom editor entry point on their
-scoped E0 settings handle:
-
-```js
-const ext = window.hermesExt?.register?.("dictionary-manager");
-const unregister = ext?.settings?.registerConfigure?.(({ opener, restoreFocus }) => {
-  openDictionaryManager({ opener, restoreFocus });
-});
-```
-
-`registerConfigure(handler)` is available only through a valid boot-trusted E0
-handle. It does not require `settings_schema` or extension-owned storage. The
-first handler registered for an extension wins; duplicates return `null` and do
-not replace it. A successful registration returns an idempotent unregister
-function.
-
-Core shows one **Configure** button only for the extension's current
-effective-enabled row under **Settings → Extensions → Installed**. Diagnostics
-never shows the button. Late registration updates an already-mounted Installed
-row. Disable or uninstall status removes the entry point immediately; uninstall
-followed by a same-ID reinstall cannot revive the old page-local handler until a
-full WebUI reload injects and registers the new extension script.
-
-Core enters a pending state before invoking the handler and passes the activated
-button as `opener` plus a one-shot `restoreFocus()` callback. The extension owns
-its dialog, validation, persistence, and close lifecycle. It must either call
-`restoreFocus()` when its UI closes or return a thenable whose settlement means
-the Configure UI is closed. Both paths end pending and converge on Core's
-one-shot focus restoration. A synchronous non-thenable handler remains disabled
-while unsettled. If it never calls `restoreFocus()`, it remains disabled until reload.
-Core does not guess dialog lifetime with a timeout.
-
-Synchronous throws, thenable-access failures, and asynchronous rejections are
-isolated, logged with the extension ID, and surfaced as a generic failure. Focus
-returns to the connected opener when possible, otherwise to the current visible
-Configure button or the Installed tab without forcing navigation. The hook does
-not let an extension return DOM for Core to render, add a backend settings route,
-or change the trusted same-origin extension model.
-
-### Turn lifecycle events
-
-A registered extension can react when a session turn observed by the current page
-starts or reaches a terminal state:
-
-```js
-const ext = window.hermesExt.register("desktop-companion");
-const stop = ext && ext.events.on("turn:complete", event => {
-  console.log(event.sessionId, event.streamId, event.status);
-});
-
-// Remove the listener when the extension no longer needs it.
-if (stop) stop();
-```
-
-The supported event types are `turn:start`, `turn:complete`, `turn:error`, and
-`turn:cancel`. The frozen event object always contains `type`, `sessionId`,
-`streamId`, and `timestamp` (Unix seconds). Start events also contain
-`startedAt`; terminal events contain `endedAt` and may contain `status`.
-`events.on(type, handler)` returns an idempotent unsubscribe function, or `null`
-for an unsupported type or non-function handler. An exception in one extension
-listener is logged and does not prevent other listeners or the chat UI from
-continuing.
-
-The version-1 mapping is deliberately small: attaching a confirmed live session
-stream emits `turn:start`; SSE `done` emits `turn:complete`; SSE `cancel` and
-application errors classified as `cancelled` or `interrupted` emit
-`turn:cancel`; other application errors and an unrecoverable live-stream
-connection failure emit `turn:error`. Transport-only `stream_end` does not emit
-a second terminal event.
-
-Core suppresses reconnect duplicates so a recently observed
-`sessionId`/`streamId` pair produces at most one start event and one terminal
-event. `sessionId` is the owner of the original stream; server-side compression
-or session rotation at completion does not change that lifecycle identity.
-Terminal callbacks run after Core has cleared the original stream ownership,
-applied the current session's immediate terminal transcript projection, and
-returned the owned pane to its idle state. They do not wait for unrelated
-follow-up work such as notifications, queued turns, or optional recovery
-refreshes.
-
-This is a page-local, live-stream notification surface. It does not replay
-history, report turns that finish without this page observing their stream, or
-provide token, tool, approval, or metrics events. It follows the same cooperative
-trust model as `register(id)` and adds no sandbox or permission boundary. A
-durable or global agent event stream is a separate Core contract. Ephemeral
-`/btw` answer streams are not included in this version.
+Extension settings (`settings_schema`) and storage are browser-local and
+reached from the panel through the `settings.*` and `storage.*` protocol
+methods; see [`architecture/extension-protocol-v1.md`](architecture/extension-protocol-v1.md).
 
 ## URL rules
 
@@ -407,34 +249,35 @@ Injected asset URLs are deliberately restricted:
 Allowed examples:
 
 ```text
-/extensions/app.js
+/extensions/hello-panel/index.html
 /extensions/app.css
-/extensions/app.js?v=1
+/extensions/index.html?v=1
 /static/theme.css
 ```
 
 Rejected examples:
 
 ```text
-https://example.com/app.js
-//example.com/app.js
-javascript:alert(1)
+https://example.com/index.html
+//example.com/index.html
+javapanel:alert(1)
 /api/session
-/extensions/app.js#fragment
+/extensions/index.html#fragment
 ```
 
 These restrictions keep the existing Content Security Policy intact and avoid
-turning the extension hook into a third-party script loader. Invalid configured
+turning the extension hook into a third-party panel loader. Invalid configured
 URLs are ignored rather than injected.
 
 ## Trusted local sidecars
 
 Manifest-bundled extensions may integrate with a trusted local sidecar process,
-such as a desktop companion listening on `http://127.0.0.1:17787`. The injected
-extension JavaScript can talk to that sidecar directly from the browser, and
-WebUI diagnostics still use that direct browser path. WebUI may also proxy the
-same sidecar through a fixed per-extension sidecar path after explicit persisted
-user consent. WebUI does not create arbitrary extension-owned backend routes.
+such as a desktop companion listening on `http://127.0.0.1:17787`. A sandboxed
+panel has an opaque origin and cannot call the sidecar itself; it declares the
+`sidecar` capability and calls `sidecar.fetch`, which the host forwards to the
+fixed per-extension proxy path after explicit persisted user consent. WebUI
+diagnostics in Settings, Extensions probe the declared health URL from the
+host page. WebUI does not create arbitrary extension-owned backend routes.
 
 Loopback sidecar origins are already included in WebUI's enforced CSP
 `connect-src` directive:
@@ -458,8 +301,7 @@ HERMES_WEBUI_CSP_CONNECT_EXTRA=https://companion.example.internal HERMES_WEBUI_E
 
 `HERMES_WEBUI_CSP_CONNECT_EXTRA` accepts space-separated `http(s)://` or
 `ws(s)://` origins only. It rejects paths, directive injection, and invalid port
-numbers. Avoid wildcard or remote origins unless you fully control the target;
-extension JavaScript runs with the logged-in WebUI session's authority.
+numbers. Avoid wildcard or remote origins unless you fully control the target.
 
 ## Loopback sidecar declarations
 
@@ -518,9 +360,14 @@ When `HERMES_WEBUI_EXTENSION_DIR` points at an existing directory, files under
 that directory are available below `/extensions/`:
 
 ```text
-/path/to/my-extension/static/app.js  ->  /extensions/app.js
-/path/to/my-extension/static/ui.css  ->  /extensions/ui.css
+/path/to/my-extension/hello-panel/index.html  ->  /extensions/hello-panel/index.html
+/path/to/my-extension/hello-panel/panel.js    ->  /extensions/hello-panel/panel.js
 ```
+
+Every HTML response carries `Content-Security-Policy: sandbox allow-scripts
+allow-forms allow-popups allow-downloads allow-modals; frame-ancestors 'self'`
+and `X-Frame-Options: SAMEORIGIN`, so a panel opened directly in a tab runs
+with the same restrictions as inside the WebUI.
 
 The static handler is sandboxed:
 
@@ -534,9 +381,10 @@ The static handler is sandboxed:
 
 ## Security notes
 
-Only enable extensions from directories you control. Extension JavaScript runs in
-the WebUI origin and can call the same authenticated WebUI APIs as the logged-in
-browser session.
+Only enable extensions from directories you control. Extension JavaScript runs
+in a sandboxed iframe with an opaque origin and reaches the WebUI only through
+the capabilities its manifest declares; the server refuses `/api/*` requests
+with `Origin: null` before authentication.
 
 For shared or remotely exposed installations:
 
@@ -548,161 +396,55 @@ For shared or remotely exposed installations:
 
 ## Registering a custom theme (skin)
 
-Extensions can contribute a custom **skin** that appears in the native
-**Settings → Appearance** skin picker, instead of bolting on a parallel theme
-switcher. Call `window.registerHermesSkin(descriptor)` from your extension
-script:
+Declare a `theme` block in the manifest:
 
-```javascript
-window.registerHermesSkin({
-  name: 'E-Ink',            // display name (also the picker label)
-  value: 'e-ink',           // optional stable key; slugified from name if omitted
-  label: 'E-Ink',           // optional explicit picker label
-  scheme: 'light',          // optional: force a light or dark base while selected
-  colors: ['#000000', '#ffffff', '#555555'],  // up to 3 preview swatches
-  tokens: {                 // CSS design-token overrides for this skin
-    '--bg': '#ffffff',
-    '--surface': '#ffffff',
-    '--text': '#000000',
-    '--accent': '#000000',
-    '--border': '#000000'
-    // ...any of the allowed tokens below
-  }
-});
+```json
+"theme": { "key": "e-ink", "name": "E-Ink", "scheme": "light", "colors": ["#ffffff", "#000000", "#000000"], "tokens": { "--bg": "#ffffff", "--text": "#000000", "--accent": "#000000" } }
 ```
 
-The call returns `true` on success and `false` if the descriptor was rejected
-(so an extension can detect and log a bad theme). Once registered, the skin
-shows up in the picker, can be selected, and persists across reloads exactly
-like a built-in skin. Registering the same key again updates it in place
-(idempotent), which is what a live theme editor relies on while the user edits.
-
-Use `scheme` when a skin is light-only or dark-only. Accepted values are
-`"light"` and `"dark"`; any other value is ignored. This does not rewrite the
-user's saved Theme setting (`Light`, `Dark`, or `System Default`). It only
-controls the effective base theme class while that extension skin is selected,
-so a dark editor skin is not mixed with light-mode code/table tokens, and a
-light E-Ink skin is not mixed with dark-mode tokens.
-
-**Core does the security-sensitive work for you.** Because token values are
-written into CSS, every value is sanitized in core, once, so every theme
-extension inherits the guard:
-
-- **Allowed token names** (anything else is dropped): `--bg`, `--surface`,
-  `--surface2`, `--surface-subtle`, `--text`, `--text2`, `--muted`, `--accent`,
-  `--accent2`, `--accent3`, `--accent-contrast`, `--accent-hover`,
-  `--accent-text`, `--accent-bg`, `--accent-bg-strong`, `--accent-rgb`,
-  `--border`, `--border2`, `--hover-bg`, `--code-bg`, `--code-text`,
-  `--sidebar`, `--sidebar-text`, `--user-bubble`, `--assistant-bubble`,
-  `--success`, `--warning`, `--danger`, `--info`, `--link`.
-- **Allowed value shapes** (anything else is dropped): hex colors, `rgb()` /
-  `rgba()`, `hsl()` / `hsla()`, CSS color keywords, simple numeric-with-unit
-  values (`px`/`em`/`rem`/`%`), and a bare RGB triple (e.g. `0, 0, 0` for
-  `--accent-rgb`, which the app consumes inside `rgba(...)`). Values containing
-  `url()`, `expression()`, semicolons, braces, or other CSS-injection vectors
-  are rejected.
-- **Reserved keys are protected** — an extension cannot overwrite a built-in
-  skin key (e.g. `default`, `ares`, `graphite`).
-- A descriptor with no valid tokens after sanitization is rejected entirely.
-- **Skin scheme is constrained** — only `light` and `dark` are accepted. Invalid
-  scheme values are ignored rather than rendered into CSS.
-
-This is the supported, forward-looking way for theme-pack and theme-creator
-extensions to integrate with the built-in appearance system.
+The host lists it in Settings, Appearance as "E-Ink (from <extension>)" and,
+when selected, sets the allowlisted tokens as CSS custom properties on the
+document root. Token names are limited to the palette allowlist and values to
+hex, `rgb()`, `hsl()`, colour keywords, simple lengths or a bare RGB triple.
+No stylesheet is injected. The persisted `hermes-skin` key keeps the namespaced
+skin key (`<extension-id>-<key>`), so a removed extension falls back to the
+default skin.
 
 ## Registering a custom TTS engine
 
-Extensions can contribute a **text-to-speech engine** that appears in the
-**Settings → TTS Engine** dropdown alongside the built-ins (Browser / Edge /
-ElevenLabs) and is used by **both** playback paths — the hands-free voice-mode
-auto-read and the per-message "Listen" button. Call
-`window.registerHermesTtsEngine(descriptor)`:
+Declare `tts: { "id": "voicevox", "label": "VOICEVOX (local)" }` in the manifest
+and, from the panel, register the synthesiser:
 
 ```javascript
-window.registerHermesTtsEngine({
-  id: 'voicevox',                 // [a-z0-9_-], not a built-in
-  label: 'VOICEVOX (local)',      // shown in the dropdown (textContent — escaped)
-  // synthesize(text, opts) -> Promise<ArrayBuffer | Blob | TypedArray> of audio.
-  // opts carries the user's saved { voice, rate, pitch } (engine may ignore).
-  synthesize(text, opts) {
-    return fetch('http://127.0.0.1:50021/...', { /* ... */ })
-      .then(r => r.arrayBuffer());
-  }
-});  // -> true on success, false if rejected
+Hermes.connect().then((hermes) => {
+  hermes.registerTts({ id: 'voicevox', label: 'VOICEVOX (local)' }, async (text, { voice, rate, pitch }) => {
+    const res = await hermes.call('sidecar.fetch', { path: 'synthesize', method: 'POST', body: JSON.stringify({ text, voice, rate, pitch }) })
+    return base64ToArrayBuffer(res.body)
+  })
+})
 ```
 
-Rules and guarantees:
-
-- **id** must be slug-safe (`[a-z0-9][a-z0-9_-]{0,31}`) and may **not** shadow a
-  built-in engine (`browser`, `edge`, `elevenlabs`) — those are reserved.
-- **label** is inserted with `textContent`, never `innerHTML` (no markup
-  injection into the dropdown).
-- `synthesize` must return audio bytes (`ArrayBuffer`, `Blob`, or a typed array);
-  core coerces to an `ArrayBuffer` and plays it through the same `<audio>`
-  lifecycle as the Edge engine (including stop/rearm in voice mode). A rejected
-  promise or empty/invalid result fails gracefully (toast on the Listen button;
-  re-listen in voice mode).
-- Core owns selection, the dropdown option, and playback; the extension only
-  produces audio. Re-registering the same id updates it in place.
-- **Network note:** if your engine calls a local server (e.g. VOICEVOX on
-  `http://127.0.0.1:50021`), that request is a same-origin-policy / CSP
-  `connect-src` concern like any extension network call — loopback is already in
-  the default `connect-src`. Declare `permissions.network_external` honestly
-  based on where it calls.
+The engine appears in Settings, Conversation. When selected, the host sends
+`tts:synthesize` events to the panel and plays the returned audio buffer through
+the same path as Edge TTS. The engine is only available while its panel is
+open; the host falls back to the browser voice otherwise.
 
 ## Extension authoring guidance
 
-Extensions share the page with the WebUI app, so they should be additive and
-reversible. Prefer small, well-scoped DOM changes that can be removed or hidden
-without breaking the built-in Chat, Tasks, Settings, or session views.
+A panel owns its whole document, so ordinary web development rules apply:
+plain HTML/CSS/JS or any framework you like, loaded relatively. Keep these in
+mind:
 
-Recommended patterns:
-
-- create extension-specific containers with unique IDs or class prefixes
-- add UI next to existing views instead of replacing large app containers
-- keep event listeners scoped to extension-owned elements where possible
-- preserve built-in navigation behavior and restore any view state you change
-- use `hidden`, `aria-*`, and extension-scoped CSS for panels or overlays
-- guard initialization so reloading or re-injecting the script does not create
-  duplicate buttons, panels, timers, or event listeners
-
-Avoid destructive mutations such as replacing `document.body.innerHTML`,
-`main.innerHTML`, or other broad WebUI containers. Those patterns can remove or
-mask the app's existing panels and leave normal navigation unable to recover
-after an extension view is opened.
-
-For custom pages, prefer adding a dedicated panel and toggling it alongside the
-built-in views:
-
-```javascript
-(() => {
-  if (document.getElementById('my-extension-panel')) return;
-
-  const panel = document.createElement('section');
-  panel.id = 'my-extension-panel';
-  panel.className = 'main-view my-extension-panel';
-  panel.hidden = true;
-  panel.textContent = 'My extension page';
-
-  document.querySelector('main')?.appendChild(panel);
-
-  function showPanel() {
-    document.querySelectorAll('main > .main-view').forEach((view) => {
-      view.hidden = view !== panel;
-    });
-  }
-
-  // Wire showPanel() to an extension-owned button or menu item.
-})();
-```
-
-If host CSS overrides `[hidden]`, add an extension-scoped rule such as:
-
-```css
-.my-extension-panel[hidden] {
-  display: none !important;
-}
-```
+- Connect once (`Hermes.connect()`), then keep the returned API; a second
+  handshake is refused.
+- Declare only the capabilities you use. Requests for undeclared methods fail
+  with `capability_denied` and are counted as protocol violations.
+- Settings and storage are namespaced per extension id and persist in the
+  user's browser; keep values small (32 KiB per storage value, 64 keys).
+- Respect the host theme: read `theme.current` and listen for `theme:changed`
+  to switch your own palette.
+- Do not assume the panel is mounted at the site root: use relative URLs.
+- Never embed credentials; the host injects sidecar auth for you.
 
 ### Contributing to the extension library
 
@@ -713,46 +455,6 @@ following [`docs/extension-entry.md`](https://github.com/hermes-webui/hermes-web
 best-practice conventions). Every entry PR runs the repo's CI validators and
 safety scan before it can merge, and merged entries are published to the registry
 that powers Settings → Extensions.
-
-## Minimal example
-
-Create a local extension directory:
-
-```bash
-mkdir -p ~/.hermes/webui-extension
-cat > ~/.hermes/webui-extension/app.css <<'CSS'
-.my-extension-badge {
-  position: fixed;
-  right: 12px;
-  bottom: 12px;
-  padding: 6px 10px;
-  border-radius: 999px;
-  background: #202236;
-  color: #fff;
-  font: 12px system-ui, sans-serif;
-  z-index: 9999;
-}
-CSS
-cat > ~/.hermes/webui-extension/app.js <<'JS'
-(() => {
-  const badge = document.createElement('div');
-  badge.className = 'my-extension-badge';
-  badge.textContent = 'Extension loaded';
-  document.body.appendChild(badge);
-})();
-JS
-```
-
-Start WebUI with the extension enabled:
-
-```bash
-HERMES_WEBUI_EXTENSION_DIR=~/.hermes/webui-extension \
-HERMES_WEBUI_EXTENSION_STYLESHEET_URLS=/extensions/app.css \
-HERMES_WEBUI_EXTENSION_SCRIPT_URLS=/extensions/app.js \
-./start.sh
-```
-
-Open the WebUI and confirm the badge appears.
 
 ## Diagnostics
 
@@ -772,29 +474,33 @@ manifests, fetch new extension assets, uninstall files, or add extension-owned
 backend routes. Manifest entries with `"enabled": false` remain
 manifest-disabled and cannot be re-enabled from WebUI.
 
-The diagnostics return the same public asset URLs that can already be injected
-into the HTML, plus coarse manifest status, per-extension effective state, asset
+The diagnostics return coarse manifest status, per-extension effective state, asset
 counts, sanitized declared loopback sidecars, and warning codes for rejected or
-unavailable configuration. `manifest.script_count` and
-`manifest.stylesheet_count` count accepted assets from the effectively enabled
-manifest entries only; `manifest.sidecar_count` counts accepted enabled loopback
-sidecars from the manifest. `counts.script_urls` and `counts.stylesheet_urls`
-count the final post-env-merge URLs, while `counts.sidecars` counts the sanitized
+unavailable configuration. `manifest.sidecar_count` counts accepted enabled loopback
+sidecars from the manifest. `counts.sidecars` counts the sanitized
 sidecar list returned in `sidecars`. `counts.manifest_extensions` counts
 sanitized manifest extension entries with valid IDs, and `counts.user_disabled`
 counts installed manifest entries currently suppressed by the WebUI-managed
 override. `manifest.entry_count` counts the loaded top-level manifest object and
-effectively enabled extension entries that were inspected for injection, not
-every extension object in the file. The endpoint and Settings panel do **not**
+effectively enabled extension entries, not every extension object in the file. The endpoint and Settings panel do **not**
 return `HERMES_WEBUI_EXTENSION_DIR`, resolved manifest paths, raw environment
 values, rejected URL strings, rejected sidecar origins, rejected health paths, or
 the override state-file path.
 
-When sanitized loopback sidecars are present, **Settings → Extensions** renders a sidecar monitor card. The browser checks each declared `health_url` directly with `fetch(..., { credentials: 'omit', cache: 'no-store' })` and a short timeout. A successful HTTP response is shown as healthy, a non-OK HTTP response as unhealthy, and CORS/network/timeouts as unreachable or blocked; raw health response bodies are never rendered. If a healthy response includes an optional top-level `runtime` object, the panel may parse it and render only allowlisted scalar fields such as `sidecar`, `native_host`, `bridge`, `last_seen_at`, and `webui_origin`. This keeps sidecar-specific diagnostics machine-readable without making WebUI depend on any one extension's private payload shape.
+When sanitized loopback sidecars are present, **Settings → Extensions** renders a sidecar monitor card. The host page checks each declared `health_url` with `fetch(..., { credentials: 'omit', cache: 'no-store' })` and a short timeout. A successful HTTP response is shown as healthy, a non-OK HTTP response as unhealthy, and CORS/network/timeouts as unreachable or blocked; raw health response bodies are never rendered. If a healthy response includes an optional top-level `runtime` object, the panel may parse it and render only allowlisted scalar fields such as `sidecar`, `native_host`, `bridge`, `last_seen_at`, and `webui_origin`. This keeps sidecar-specific diagnostics machine-readable without making WebUI depend on any one extension's private payload shape.
 
 The same card also exposes proxy consent through `POST /api/extensions/sidecar-proxy-consent` and reports the fixed per-extension sidecar path `/api/extensions/<extension-id>/sidecar/<relative-path>`. WebUI strips `Cookie`, `Authorization`, and CSRF headers before contacting the sidecar, and sidecar `Set-Cookie` headers are stripped before the browser sees the response. WebUI does not create arbitrary extension-owned backend routes; the proxy surface stays on that fixed per-extension sidecar path.
 
-When sanitized settings are present, Settings -> Extensions renders
-browser-local controls for installed manifest entries. Save, reset, and clear
-storage actions call `window.HermesExtensionSettings`; they do not call backend
-storage routes and do not write WebUI settings.
+Settings, Extensions also renders each installed entry's declared
+`settings_schema` and lets the user reset the extension's settings and clear its
+storage. Those values live in the browser under `hermes.ext.settings.<id>` and
+`hermes.ext.storage.<id>`; the panel reads and writes them through the
+`settings.*` and `storage.*` methods.
+
+## Minimal example
+
+See [`examples/extensions/hello-panel/`](examples/extensions/hello-panel/): a
+manifest, an `index.html` that loads the SDK, and `panel.js` that reads
+settings, counts clicks in storage, shows a toast and logs lifecycle events.
+Copy the directory into your extension root, add the entry to `extensions.json`,
+reload the WebUI and open **Hello** in the rail.

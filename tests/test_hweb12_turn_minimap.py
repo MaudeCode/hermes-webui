@@ -1,13 +1,3 @@
-"""HWEB-12 - a user-turn timeline minimap in the chat reading column's gutter.
-
-The rail is an extension of the shipped conversation-outline mechanism
-(``static/outline.js``): the same ``_buildEntries()`` turns, the same
-``_jumpToMessage()`` loader/jump, the same ``_outlineAllowed()`` preference and
-desktop gate. Only the presentation is new, so the assertions split the same way
-the sibling suites do - real-browser measurements for the geometry, visibility
-and interaction contract, source-level assertions for the state machine.
-"""
-
 from __future__ import annotations
 
 import re
@@ -18,11 +8,6 @@ import pytest
 from tests._pytest_port import BASE
 
 REPO = Path(__file__).resolve().parents[1]
-OUTLINE_JS = (REPO / "static" / "outline.js").read_text(encoding="utf-8")
-INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
-STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
-
 # Locale blocks in static/i18n.js (en, it, ja, ru, es, de, zh, zh-Hant, pt, ko,
 # fr, cs, tr, pl, vi). Every user-visible string must exist in all of them.
 LOCALE_COUNT = 15
@@ -204,26 +189,6 @@ def test_rail_lives_in_the_unused_gutter_and_never_takes_the_transcript(page):
     assert m["mapPointerEvents"] == "none", m
     assert m["markPointerEvents"] == "auto", m
     assert m["mapUserSelect"] == "none", m
-
-
-def test_the_nearest_visible_turn_is_marked_without_animation(page):
-    _setup(page)
-    page.wait_for_timeout(200)
-    m = page.evaluate(_MEASURE_JS)
-    # Exactly one mark is current, and it is the first turn while parked at the top.
-    assert m["current"] == [0], m
-    # Distinguishable through a static style change, not a running animation.
-    assert m["markAnimation"] in ("none", None), m
-    # Tab lands on the reader's current turn, the rest are arrow-key reachable.
-    assert m["tabStops"].count(0) == 1, m
-    assert m["tabStops"][0] == 0, m
-
-    # Scrolling down moves the marker to the turn the reader is now inside.
-    page.evaluate("() => { const el = document.getElementById('messages');"
-                  " el.scrollTop = el.scrollHeight; }")
-    page.wait_for_timeout(300)
-    later = page.evaluate(_MEASURE_JS)
-    assert later["current"] and later["current"][0] > 0, later
 
 
 def test_a_turn_is_current_even_when_no_user_row_is_on_screen(page):
@@ -571,82 +536,3 @@ def test_preview_reads_responses_style_and_compacted_answers(page):
     assert "Responses-style answer" in previews[0], previews
     assert "Compacted final answer" in previews[1], previews
     _setup(page)  # restore the shared page for the next test
-
-
-def test_markup_and_locale_contract():
-    """The rail ships as static markup with a translated accessible name."""
-    tag = re.search(r'<div id="outlineMinimap".*?</div>', INDEX_HTML, re.S)
-    assert tag, "outlineMinimap markup not found"
-    markup = tag.group(0)
-    assert "hidden" in markup
-    # A toolbar is the ARIA pattern that sanctions roving tabindex + arrow keys.
-    assert 'role="toolbar"' in markup and 'aria-orientation="vertical"' in markup
-    assert 'data-i18n-aria-label="outline_minimap_label"' in markup
-    for key in ("outline_minimap_label:", "outline_minimap_mark:"):
-        assert I18N_JS.count(key) == LOCALE_COUNT, key
-    # The mark label carries both the turn number and its excerpt.
-    assert "outline_minimap_mark: 'Question {0}: {1}'" in I18N_JS
-
-
-def test_reuses_the_outline_mechanism_rather_than_a_second_index():
-    """Turn discovery, jumping and the desktop/preference gate are all shared."""
-    body = OUTLINE_JS[OUTLINE_JS.index("function _syncMinimap()"):]
-    assert "_buildEntries()" in body
-    assert "function _minimapAllowed() {\n  return _outlineAllowed();\n}" in OUTLINE_JS
-    assert "_jumpToMessage(rawIdx);" in OUTLINE_JS
-    assert "_ensureOutlineMessagesLoaded(sid).then" in OUTLINE_JS
-    # The jump takes scroller ownership the same way ui.js's question jump does,
-    # or the load-time bottom settle snaps the reader back to the tail.
-    assert "_cancelBottomSettle();" in OUTLINE_JS
-    assert "_beginMessageJumpScroll(scroller);" in OUTLINE_JS
-    # Mark identity across a reload is ui.js's session-absolute index, which
-    # holds under a prepend AND a concurrent append -- not a list position.
-    assert "_messageSessionIndexForRawIdx(rawIdx)" in OUTLINE_JS
-    assert "_messageRawIdxForSessionIndex(sessionIdx)" in OUTLINE_JS
-    # Stamped at render time: read later, it would resolve against the new base,
-    # so the signature carries the base and a move re-stamps every mark.
-    assert "data-session-idx=" in OUTLINE_JS
-    assert "_minimapSessionIndex(0)" in OUTLINE_JS
-    # Full-width chat changes the column without resizing the pane, so the rail
-    # watches the root attribute rather than relying on a resize.
-    assert "attributeFilter: ['data-workspace-panel', 'data-chat-width']" in OUTLINE_JS
-    # Preview text matches ui.js's visible-assistant-content definition.
-    assert "p.type !== 'input_text' && p.type !== 'output_text'" in OUTLINE_JS
-    assert "_assistantAnchorSceneFinalAnswerText(m)" in OUTLINE_JS
-    # Generated labels are not reachable by applyLocaleToDOM(), so the signature
-    # carries the locale and a language change rebuilds them.
-    assert "document.documentElement.lang + '|'" in OUTLINE_JS
-    # One IntersectionObserver over the rendered user rows - no scroll-time scan.
-    assert OUTLINE_JS.count("new IntersectionObserver") == 1
-    assert "root: document.getElementById('messages')" in OUTLINE_JS
-    assert "addEventListener('scroll'" not in OUTLINE_JS
-
-
-def test_mark_identity_survives_streaming_paging_and_session_switches():
-    """Marks are keyed by absolute rawIdx and rebuilt only when the turns change."""
-    # Identity is the absolute message index, the same key the jump path uses.
-    assert "data-raw-idx=\"' + e.rawIdx +" in OUTLINE_JS
-    assert "'msg-user-' + rawIdx" in OUTLINE_JS
-    # A session switch drops every observation before the new marks are built.
-    assert "if (sid !== _minimapSid) {" in OUTLINE_JS
-    assert "_teardownMinimap();" in OUTLINE_JS
-    # Virtualized rows: re-observed on every render, not only on turn changes.
-    assert "_reobserveMinimapRows();" in OUTLINE_JS
-    assert "_scheduleMinimapSync();" in OUTLINE_JS
-    # Streaming re-renders coalesce into one sync per frame.
-    assert "window.requestAnimationFrame ||" in OUTLINE_JS
-    # Unloaded history is only fetched through the existing explicit jump path.
-    assert OUTLINE_JS.count("/api/session") == 1
-
-
-def test_reduced_motion_and_static_active_state():
-    rule = re.search(
-        r"@media \(prefers-reduced-motion:reduce\)\{\s*\.outline-mark::before\{[^}]*\}[^}]*\}",
-        STYLE_CSS,
-    )
-    assert rule, "minimap reduced-motion block not found"
-    assert "transition:none" in rule.group(0)
-    assert ".outline-jump-flash{animation:none;}" in rule.group(0)
-    # The active mark is a width/colour swap, never a keyframe animation.
-    current = re.search(r"\.outline-mark\[aria-current=\"true\"\]::before\{([^}]*)\}", STYLE_CSS)
-    assert current and "animation" not in current.group(1)

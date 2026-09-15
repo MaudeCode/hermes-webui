@@ -7,11 +7,6 @@ from api.streaming import (
 
 
 REPO = Path(__file__).resolve().parents[1]
-MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
-UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
-WORKSPACE_JS = (REPO / "static" / "workspace.js").read_text(encoding="utf-8")
-
-
 def _function_body(src: str, signature: str) -> str:
     start = src.index(signature)
     brace = src.index("{", start)
@@ -94,27 +89,6 @@ def test_unclosed_inline_thinking_after_content_stays_visible_on_persist():
     assert lead_reasoning == "still thinking"
 
 
-def test_messages_js_live_and_persist_paths_share_extractor():
-    stream_display = _function_body(MESSAGES_JS, "function _streamDisplay")
-    parse_state = _function_body(MESSAGES_JS, "function _parseStreamState")
-    split_persist = _function_body(MESSAGES_JS, "function _splitThinkFromContent")
-
-    assert "_parseInlineThinkingStream(_stripXmlToolCallsStream(assistantText), liveReasoningText, {streaming:true}).content" in stream_display
-    assert "return _parseInlineThinkingStream(_stripXmlToolCallsStream(assistantText), liveReasoningText, {streaming:true});" in parse_state
-    assert "const _parseInlineThinkingStream=_createIncrementalInlineThinkingParser();" in MESSAGES_JS
-    assert "return _extractInlineThinkingFromContent(rawContent, existingReasoning, {streaming:false});" in split_persist
-    assert "window._extractInlineThinkingFromContentForRender" in MESSAGES_JS
-    assert "_thinkingFenceMarkerAt" in MESSAGES_JS
-
-
-def test_render_messages_uses_shared_extractor_on_reload():
-    render = _function_body(UI_JS, "function renderMessages")
-
-    assert "window._extractInlineThinkingFromContentForRender(content, thinkingText)" in render
-    assert "thinkingText=split.reasoning||thinkingText" in render
-    assert "content=split.content" in render
-
-
 def test_inline_and_separate_reasoning_merge_not_drop():
     """#3633: the extractor MERGES inline + an explicitly-passed separate reasoning
     payload (deduped) rather than dropping either. (The reload render path itself
@@ -187,8 +161,3 @@ def test_streaming_partial_opener_tail_respects_code_context():
     assert ext("    <thi", "", streaming=True)[0] == "    <thi"
     # Plain text → the forming partial opener is suppressed from display.
     assert ext("answer <thi", "", streaming=True)[0] == "answer "
-
-
-def test_timeout_wrapper_remains_out_of_scope():
-    assert "Request timed out. Please try again." in WORKSPACE_JS
-    assert "AbortController" in WORKSPACE_JS

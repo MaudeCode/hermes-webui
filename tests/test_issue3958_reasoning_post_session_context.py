@@ -52,13 +52,6 @@ def test_set_reasoning_effort_returns_status_for_explicit_model(tmp_path, monkey
     ]
 
 
-def test_ui_posts_reasoning_context_with_effort():
-    src = read("static/ui.js")
-    assert "function _reasoningEffortContext()" in src
-    assert "new URLSearchParams(_reasoningEffortContext())" in src
-    assert "Object.assign({effort:effort},_reasoningEffortContext())" in src
-
-
 def test_reasoning_post_route_threads_model_context():
     src = read("api/routes.py")
     match = re.search(

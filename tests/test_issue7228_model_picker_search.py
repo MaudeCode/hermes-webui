@@ -19,7 +19,6 @@ Verified at the source level so this stays fast.
 from pathlib import Path
 
 REPO = Path(__file__).parent.parent
-UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 CONFIG_PY = (REPO / "api" / "config.py").read_text(encoding="utf-8")
 
 
@@ -36,29 +35,3 @@ def test_backend_ships_display_name_not_raw_id():
     snippet = snippet[:snippet.index('except Exception')]
     assert "_openrouter_model_display_name(mid)" in snippet
     assert '{"id": mid, "label": mid}' not in snippet
-
-
-def test_filter_models_folds_space_hyphen_dot():
-    # Search must fold whitespace/hyphens/dots on both sides so display names
-    # with spaces match ids with hyphens ("ox alpha" == "ox-alpha").
-    assert "replace(/[\\s._-]+/g,'')" in UI_JS
-    assert "_foldModelSearch(name).includes(foldTerm)" in UI_JS
-    assert "_foldModelSearch(id).includes(foldTerm)" in UI_JS
-
-
-def test_get_model_label_uses_dynamic_map_first():
-    # getModelLabel() must resolve through the dynamic label map, which is
-    # hydrated from m.label / overflowModel.label (now the display name).
-    idx = UI_JS.index("function getModelLabel(modelId){")
-    # The dynamic-map lookup must appear before the static-label fallback,
-    # so backend display names win over the hardcoded table.
-    assert "_dynamicModelLabels[modelId]" in UI_JS[idx:idx + 900]
-    assert UI_JS[idx:idx + 900].index("_dynamicModelLabels[modelId]") < \
-        (UI_JS[idx:idx + 900].index("STATIC_LABELS") if "STATIC_LABELS" in UI_JS[idx:idx + 900] else 10**9)
-    # The dynamic map must be populated from the backend label, not the raw id.
-    assert "_dynamicModelLabels[m.id]=m.label||m.id" in UI_JS
-
-
-def test_literal_substring_match_still_present():
-    # Raw-id search ("stealth", "stealth/ox-alpha") must keep working.
-    assert "name.includes(term)||id.includes(term)" in UI_JS

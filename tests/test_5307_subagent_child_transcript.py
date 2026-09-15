@@ -170,19 +170,6 @@ def test_was_webui_gate_excludes_subagent_children():
     )
 
 
-def test_sessions_js_open_handlers_keep_isexternalsession_contract():
-    """The fix is server-side + view-only, so sessions.js must be UNCHANGED —
-    the #3603 contract that the open/tap/child handlers gate on
-    _isExternalSession is preserved (subagent children are recovered read-only
-    by the server, not by widening the client import trigger)."""
-    js = SESSIONS_JS.read_text(encoding="utf-8")
-    # We did NOT add a widened import predicate — recovery is server-side.
-    assert "_sessionNeedsServerImportForLoad" not in js, (
-        "the #5307 fix is server-side (read-only recovery); the client import "
-        "predicate must NOT be widened (preserves #3603's _isExternalSession contract)"
-    )
-
-
 # ---------------------------------------------------------------------------
 # Functional: helper recovers subagent children, preserves #2782 404
 # ---------------------------------------------------------------------------

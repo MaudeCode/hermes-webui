@@ -115,26 +115,6 @@ def _fe_snapshot(fe_driver: str, args: dict) -> dict:
     return json.loads(result.stdout)
 
 
-@pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_frontend_keeps_full_command_arg(fe_driver):
-    out = _fe_snapshot(fe_driver, {"command": _LONG_CMD})
-    assert len(out["command"].rstrip(".")) > 120
-    assert "echo end" in out["command"]
-
-
-@pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_frontend_keeps_patch_args(fe_driver):
-    out = _fe_snapshot(fe_driver, {"old_string": "o" * 300, "new_string": "n" * 300})
-    assert len(out["old_string"].rstrip(".")) > 120
-    assert len(out["new_string"].rstrip(".")) > 120
-
-
-@pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_frontend_incidental_arg_still_capped(fe_driver):
-    out = _fe_snapshot(fe_driver, {"label": "z" * 300})
-    assert out["label"] == "z" * 120 + "..."
-
-
 # ---------- frontend: transparent Full-tab args render must redact ----------
 
 _DETAIL_DRIVER = r"""
@@ -166,24 +146,3 @@ def detail_driver(tmp_path_factory):
     p = tmp_path_factory.mktemp("detail_driver") / "driver.js"
     p.write_text(_DETAIL_DRIVER, encoding="utf-8")
     return str(p)
-
-
-@pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_transparent_full_tab_redacts_secret_in_long_command(detail_driver):
-    """#4928 gate: now that content args are retained to 4000 chars, the Full-tab
-    args render must redact secrets past char 120 (it renders tc.args directly)."""
-    cmd = "echo start\n" + ("x" * 130) + "\nexport OPENAI_API_KEY=sk_LEAKsecret123\necho end"
-    result = subprocess.run(
-        [NODE, detail_driver, str(UI_JS_PATH)],
-        input=json.dumps({"tc": {"name": "shell", "args": {"command": cmd}}}),
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr)
-    html = result.stdout
-    assert "sk_LEAKsecret123" not in html, f"secret leaked into Full-tab args: {html[:600]}"
-    assert "[redacted]" in html
-    # The non-secret structure should still be present (full command retained).
-    assert "echo end" in html

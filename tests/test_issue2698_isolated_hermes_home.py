@@ -581,10 +581,3 @@ class TestNormalModePreservation:
                     except ImportError:
                         # hermes_cli not available, skip
                         pass
-
-
-def test_profiles_panel_hides_delete_controls_in_single_profile_mode():
-    panels_js = (Path(__file__).resolve().parents[1] / "static" / "panels.js").read_text(encoding="utf-8")
-
-    assert "const singleProfileMode = !!(_profilesCache && _profilesCache.single_profile_mode);" in panels_js
-    assert "if (isDefault || singleProfileMode) hide(delBtn); else show(delBtn);" in panels_js

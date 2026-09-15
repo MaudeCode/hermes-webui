@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { ArrowDown, ArrowUp, Pencil, Plus, Trash2 } from 'lucide-react'
 import { m } from '../../paraglide/messages.js'
 import * as api from '../../api/endpoints'
@@ -48,7 +48,6 @@ export function WorkspacesPage() {
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2 text-sm font-medium text-text"><span className="truncate">{w.name ?? w.path}</span>{ws.data?.last === w.path && <span className="rounded-full bg-accent-bg px-2 py-0.5 text-[10px] uppercase tracking-wider text-accent-text">{m.workspace_current()}</span>}</div>
               <div className="truncate font-mono text-[11px] text-muted">{w.path}</div>
-              <GitBadge path={w.path} />
             </div>
             <IconButton label={m.workspace_move_up()} onClick={() => move(i, -1)} disabled={i === 0}><ArrowUp size={14} aria-hidden="true" /></IconButton>
             <IconButton label={m.workspace_move_down()} onClick={() => move(i, 1)} disabled={i === list.length - 1}><ArrowDown size={14} aria-hidden="true" /></IconButton>
@@ -69,13 +68,6 @@ export function WorkspacesPage() {
       )}
     </HubPage>
   )
-}
-
-function GitBadge({ path }: { path: string }) {
-  const git = useQuery({ queryKey: keys.files.git(path), queryFn: () => api.fetchGitInfo(path), staleTime: 60_000, retry: false })
-  const g = git.data?.git
-  if (!g?.is_git) return null
-  return <div className="mt-0.5 text-[11px] text-muted">{m.workspace_git_branch()}: {g.branch ?? '?'}{g.dirty ? ` · ${g.dirty}±` : ''}</div>
 }
 
 function AddWorkspaceDialog({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {

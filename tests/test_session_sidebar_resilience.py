@@ -19,93 +19,6 @@ def _workspace_js() -> str:
     return (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
 
 
-def test_session_list_refresh_has_visible_failure_state_instead_of_console_only():
-    src = _sessions_js()
-    block_start = src.find("async function _runRenderSessionListRefresh")
-    assert block_start > 0
-    block_end = src.find("async function _drainRenderSessionListQueue", block_start)
-    assert block_end > block_start
-    block = src[block_start:block_end]
-
-    assert "console.warn('renderSessionList',e);" not in block
-    assert "_showSessionListLoadError" in block
-    assert "renderSessionListFromCache" in block
-    assert "session-list-error" in src
-    assert "Retry" in src
-
-
-def test_sessions_and_projects_load_independently_so_projects_failure_cannot_blank_sidebar():
-    src = _sessions_js()
-    block_start = src.find("async function _runRenderSessionListRefresh")
-    assert block_start > 0
-    block_end = src.find("async function _drainRenderSessionListQueue", block_start)
-    assert block_end > block_start
-    block = src[block_start:block_end]
-    helper_start = src.find("async function _loadSidebarSessionListPayload")
-    assert helper_start > 0
-    helper_end = src.find("async function _drainRenderSessionListQueue", helper_start)
-    assert helper_end > helper_start
-    helper = src[helper_start:helper_end]
-
-    assert "Promise.all" not in block
-    assert "_loadSidebarSessionListPayload(" in block
-    # HWEB-43 added a third argument carrying the freshness-window bypass.
-    assert "{force:Boolean(opts&&opts.force)||Boolean(_sessionListLoadError)}," in block
-    assert "const projectPromise = projectsAreFresh" in helper
-    assert "Promise.resolve({projects:_allProjects||[]})" in helper
-    assert "SESSION_PROJECT_REFRESH_INTERVAL_MS" in helper
-    assert "const projectData=await api('/api/projects' + projectQS,{timeoutToast:false});" in helper
-    assert "console.warn('renderProjectsList',projectError);" in helper
-    assert "const projData = await projectPromise;" in helper
-    assert "_applySessionListPayload(sessData,projData,{unreadGen})" in block
-
-
-def test_sessions_api_always_retries_transient_upstream_statuses_and_boot_keeps_longer_timeout():
-    # #5394: the sidebar session-list GET is idempotent, so retries + retryStatuses
-    # (502/503/504) must be set on EVERY refresh — not gated to cold boot — so a
-    # transient 502 during an nginx->backend restart on a warm refresh (profile
-    # switch, focus/visible/reconnect) is retried instead of leaving the sidebar
-    # stale. The larger boot timeout + timeout retry stay boot-only.
-    sessions_src = _sessions_js()
-    workspace_src = _workspace_js()
-    refresh_start = sessions_src.find("async function _runRenderSessionListRefresh")
-    assert refresh_start > 0
-    refresh_end = sessions_src.find("async function _loadSidebarSessionListPayload", refresh_start)
-    assert refresh_end > refresh_start
-    refresh = sessions_src[refresh_start:refresh_end]
-    helper_start = sessions_src.find("async function _loadSidebarSessionListPayload")
-    assert helper_start > 0
-    helper_end = sessions_src.find("async function _drainRenderSessionListQueue", helper_start)
-    assert helper_end > helper_start
-    helper = sessions_src[helper_start:helper_end]
-
-    # Always-on retry options live in the base opts object.
-    assert "const sessionRequestOpts={" in refresh
-    assert "retries:1," in refresh
-    assert "retryStatuses:[502,503,504]," in refresh
-
-    boot_gate = refresh.find("if(!_sessionListHasLoadedOnce){")
-    assert boot_gate > 0
-    # The retry options are declared BEFORE the boot-only gate (i.e. unconditional).
-    assert refresh.index("retries:1,") < boot_gate
-    assert refresh.index("retryStatuses:[502,503,504],") < boot_gate
-
-    # Boot-only path still carries the larger timeout + timeout retry.
-    assert "sessionRequestOpts.timeoutMs=_SESSION_LIST_BOOT_TIMEOUT_MS;" in refresh
-    assert refresh.index("sessionRequestOpts.timeoutMs=_SESSION_LIST_BOOT_TIMEOUT_MS;") > boot_gate
-    assert "sessionRequestOpts.retryTimeouts=true;" in refresh
-    assert refresh.index("sessionRequestOpts.retryTimeouts=true;") > boot_gate
-
-    # HWEB-43 moved the fetch into the else branch of the freshness gate; HWEB-55
-    # spreads the opts into a conditional-GET request object. The retry opts must
-    # still be the ones that reach the fetch.
-    assert "const requestOpts={...(sessionRequestOpts||{}),cache:'no-store'};" in helper
-    assert "await api('/api/sessions' + sessionListQS,requestOpts);" in helper
-    assert "api('/api/sessions' + sessionListQS,{timeoutToast:false})" not in helper
-    assert "retryTimeouts" in workspace_src
-    assert "retryStatuses" in workspace_src
-
-
 def test_sessions_sidebar_response_item_drops_bulky_detail_fields(monkeypatch):
     from api import routes
 
@@ -168,23 +81,6 @@ def test_sidebar_allowlist_preserves_fields_consumed_by_frontend():
 
     assert required <= routes._SIDEBAR_SESSION_RESPONSE_FIELDS
     assert "pending_user_message" not in routes._SIDEBAR_SESSION_RESPONSE_FIELDS
-
-
-def test_session_list_error_path_uses_same_generation_guard_as_success_path():
-    src = _sessions_js()
-    block_start = src.find("async function _runRenderSessionListRefresh")
-    assert block_start > 0
-    block_end = src.find("async function _drainRenderSessionListQueue", block_start)
-    assert block_end > block_start
-    block = src[block_start:block_end]
-    catch_start = block.find("}catch(e){")
-    assert catch_start > 0
-    catch_block = block[catch_start:]
-
-    assert "if (_gen !== _renderSessionListGen) return;" in catch_block
-    assert catch_block.index("if (_gen !== _renderSessionListGen) return;") < catch_block.index(
-        "_showSessionListLoadError(e);"
-    )
 
 
 def test_json_helper_can_emit_compact_json_for_large_list_endpoints():

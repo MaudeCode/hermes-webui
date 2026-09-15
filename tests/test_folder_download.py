@@ -82,21 +82,3 @@ def test_folder_download_streams_not_buffers():
     end_idx = src.index("\n\ndef ", handler_idx + 1)
     body = src[handler_idx:end_idx]
     assert "io.BytesIO" not in body, "must stream, not buffer in memory"
-
-
-def test_ui_context_menu_has_download_folder():
-    src = UI_JS.read_text(encoding="utf-8")
-    assert "download_folder" in src
-    download_idx = src.index("download_folder")
-    snippet = src[max(0, download_idx - 200):download_idx]
-    assert "isDirLike" in snippet or "item.type==='dir'" in snippet or "item.type === 'dir'" in snippet
-
-
-def test_ui_download_folder_uses_endpoint():
-    src = UI_JS.read_text(encoding="utf-8")
-    download_idx = src.index("download_folder")
-    snippet = src[download_idx:download_idx + 600]
-    assert "/api/folder/download" in snippet
-    assert "session_id=" in snippet
-    assert "path=" in snippet
-    assert "encodeURIComponent" in snippet

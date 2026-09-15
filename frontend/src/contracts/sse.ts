@@ -75,7 +75,7 @@ export type ChatEvent = z.infer<typeof ChatEventSchema>
 /** Relay close set: stop draining after these (api.run_journal.SSE_RELAY_CLOSE_EVENTS). */
 export const RELAY_CLOSE_EVENTS: ReadonlySet<ChatEventName> = new Set(['stream_end', 'cancel', 'apperror', 'error'])
 
-/** `GET /api/session/stream` (global session list invalidation). */
+/** `GET /api/sessions/events` (global session list invalidation; `/api/session/stream` is the per-session channel). */
 export const SessionsChangedSchema = z.looseObject({ type: z.literal('sessions_changed').optional(), version: z.number().optional(), reason: z.string().optional(), profile: z.string().nullable().optional(), session_id: z.string().nullable().optional() })
 export const SessionListEventSchema = z.discriminatedUnion('event', [
   z.object({ event: z.literal('initial'), data: Loose }),

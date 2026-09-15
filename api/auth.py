@@ -1242,6 +1242,7 @@ def is_public_path(path: str) -> bool:
             and path not in {'/api/share/create', '/api/share/revoke'}
         )
         or path.startswith('/static/')
+        or path.startswith('/assets/')
         or path.startswith('/session/static/')
     )
 

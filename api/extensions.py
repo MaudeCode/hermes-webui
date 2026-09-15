@@ -2034,57 +2034,6 @@ def get_extension_registry() -> Dict[str, Any]:
         return {"entries": [], "error": "registry_unavailable"}
 
 
-def inject_extension_tags(index_html: str) -> str:
-    """Inject configured extension tags into the app shell.
-
-    Tags are inserted only when the extension directory is enabled. URLs are
-    escaped even though they are already validated, keeping the renderer robust
-    if validation rules evolve later.
-    """
-    config = get_extension_config()
-    if not config["enabled"]:
-        return index_html
-
-    result = index_html
-    stylesheet_tags = [
-        '<link rel="stylesheet" href="{}">'.format(html.escape(url, quote=True))
-        for url in config["stylesheet_urls"]
-    ]
-    script_tags = [
-        '<script src="{}" defer></script>'.format(html.escape(url, quote=True))
-        for url in config["script_urls"]
-    ]
-    runtime_config = {
-        "extensions": config.get("extensions", []),
-    }
-    runtime_json = json.dumps(runtime_config, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
-    runtime_tag = (
-        "<script>window.__HERMES_EXTENSION_CONFIG__={};"
-        "if(window.HermesExtensionSettings)window.HermesExtensionSettings.primeFromStatus(window.__HERMES_EXTENSION_CONFIG__);"
-        "</script>"
-    ).format(runtime_json)
-
-    if stylesheet_tags:
-        head_marker = "</head>"
-        block = "\n".join(stylesheet_tags) + "\n"
-        if head_marker in result:
-            result = result.replace(head_marker, block + head_marker, 1)
-        else:
-            result = block + result
-
-    if runtime_config["extensions"] or script_tags:
-        body_marker = "</body>"
-        block = runtime_tag + "\n"
-        if script_tags:
-            block += "\n".join(script_tags) + "\n"
-        if body_marker in result:
-            result = result.replace(body_marker, block + body_marker, 1)
-        else:
-            result = result + "\n" + block
-
-    return result
-
-
 def _is_safe_relative_path(rel: str) -> bool:
     # Strict: reject empty, traversal, AND any dot-prefixed segment. This is shared
     # by static serving, asset URLs and manifest paths, where a hidden file must

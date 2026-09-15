@@ -1,5 +1,6 @@
 import { HeadContent, Outlet, Scripts, createRootRouteWithContext } from '@tanstack/react-router'
 import type { QueryClient } from '@tanstack/react-query'
+import type { ReactNode } from 'react'
 import type { Bootstrap } from '../contracts/bootstrap'
 import { NotFound, PendingView, RouteError } from '../features/shell/ErrorBoundary'
 
@@ -42,14 +43,20 @@ export const Route = createRootRouteWithContext<RouterContext>()({
   pendingComponent: PendingView,
 })
 
-function RootShell() {
+/**
+ * The router wraps the root match in `shellComponent` on the client as well as
+ * during the prerender. Only the prerender (Node) emits the document; in the
+ * browser the entry already mounted into #app, so the shell is a passthrough.
+ */
+function RootShell({ children }: { children: ReactNode }) {
+  if (typeof window !== 'undefined') return <>{children}</>
   return (
     <html lang="en">
       <head>
         <HeadContent />
       </head>
       <body>
-        <div id="app" />
+        <div id="app">{children}</div>
         <Scripts />
       </body>
     </html>

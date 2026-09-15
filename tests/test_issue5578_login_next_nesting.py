@@ -16,10 +16,6 @@ from pathlib import Path
 from api.routes import _safe_login_redirect_path as guard
 
 ROOT = Path(__file__).resolve().parents[1]
-LOGIN_JS = (ROOT / "static" / "login.js").read_text(encoding="utf-8")
-WORKSPACE_JS = (ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
-
-
 # ── server guard: the self-nesting cases the bug exploited ──────────────────
 
 class TestServerGuardRejectsNesting:
@@ -86,32 +82,6 @@ class TestServerGuardPreservesLegitimateRedirects:
 
 
 # ── client guards: static wiring (both JS sites carry the self-ref guard) ───
-
-class TestClientGuardsWired:
-    def test_login_js_rejects_login_self_and_nested_next(self):
-        # _safeNextPath must carry the login-route + length guards and detect the
-        # login route through nested percent-encoding via bounded decodeURIComponent.
-        assert "/login$/.test(pathOnly)" in LOGIN_JS or "/login$/" in LOGIN_JS
-        assert "decodeURIComponent" in LOGIN_JS
-        assert "2048" in LOGIN_JS
-
-    def test_workspace_js_skips_next_on_login_page(self):
-        # The 401 handler must NOT append the whole login URL as next when it's
-        # already on the login page (the recursion source).
-        assert "login$/.test(_p)" in WORKSPACE_JS
-        assert "window.location.href='login';" in WORKSPACE_JS
-        # And the non-login path still captures the real destination.
-        assert "'login?next='+encodeURIComponent" in WORKSPACE_JS
-
-    def test_all_client_401_helpers_guard_login_page(self):
-        # #5578 Codex round-2: workspace.js was fixed but two more client 401
-        # redirect helpers (ui.js _redirectIfUnauth, boot.js redirectToLogin)
-        # also nested the login URL. All three must carry the on-login guard.
-        UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
-        BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
-        assert "login$/.test(_p)" in UI_JS, "ui.js _redirectIfUnauth must guard the login page"
-        assert "login$/.test(_p)" in BOOT_JS, "boot.js redirectToLogin must guard the login page"
-
 
 class TestServerCheckAuthGuard:
     def test_check_auth_does_not_nest_login_redirect(self):

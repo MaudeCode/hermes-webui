@@ -5,7 +5,7 @@ repository. It is a contributor guide, not a new design proposal. Source
 documents include [`DESIGN.md`](../DESIGN.md), [`README.md`](../README.md),
 [`THEMES.md`](../THEMES.md), [`docs/ui-ux/index.html`](ui-ux/index.html),
 [`docs/ui-ux/two-stage-proposal.html`](ui-ux/two-stage-proposal.html), and
-design comments in `static/style.css`.
+design comments in `frontend/src/theme/tokens.css`.
 
 Use this guide when a change touches layout, chat rendering, composer chrome,
 navigation, theme/skin behavior, responsive behavior, or visual hierarchy. For
@@ -14,8 +14,8 @@ purely backend changes, use the runtime/state contracts instead.
 ## Product shape
 
 Hermes WebUI is a browser workbench for Hermes Agent with near-CLI parity and a
-simple implementation shape: Python on the server, vanilla JavaScript in the
-browser, no build step, no bundler, and no frontend framework.
+simple operating shape: Python on the server and one committed production build
+of the TanStack Start / React / TypeScript app under `frontend/`.
 
 The primary layout is three-panel:
 
@@ -127,7 +127,7 @@ Use three explicit font tokens:
 
 - `--font-ui`: shell chrome, controls, composer, labels, and ordinary UI text
 - `--font-conversation`: user/assistant message prose; by default this is
-  `var(--font-ui)` in `static/style.css`
+  `var(--font-ui)` in `frontend/src/theme/tokens.css`
 - `--font-mono`: code, file paths, command lines, tool payloads, technical logs,
   and terminal output
 
@@ -248,7 +248,7 @@ the conversation. It is part of the conversation-outline feature — same
 `_jumpToMessage()` jump — with the labelled panel as its keyboard/touch fallback.
 The rail is `pointer-events:none` (only the marks and never the hover preview
 take pointer events) so it cannot intercept a transcript selection, and
-`static/outline.js` hides it whenever the measured gutter drops below 52px, the
+the outline component hides it whenever the measured gutter drops below 52px, the
 viewport is under 900px, full-width chat leaves no gutter, or fewer than four
 turns are loaded. The current turn is a static width/colour change driven by one
 `IntersectionObserver` over the rendered user rows — never a running animation.
@@ -268,17 +268,18 @@ and the visible "Show less" text has to stay inside the accessible name).
 Keyboard focus landing on a control below the visible boundary opens the clip
 through the same `toggleMessageExpand` path, so the name stays truthful. The thresholds live in two places that must move
 together — `USER_MSG_COLLAPSE_CHARS` / `USER_MSG_COLLAPSE_LINES` in
-`static/ui.js` and `--msg-collapse-lines` in `static/style.css`. The fade sits
+`frontend/src/features/chat/MessageRow.tsx` and `--msg-collapse-lines` in
+`frontend/src/theme/tokens.css`. The fade sits
 on the `.msg-clip` wrapper, not on `.msg-body`, so skins that repaint the bubble
 background with `!important` keep a solid bubble.
 
 ## Themes and skins
 
 Theme and skin work should use the existing variable system. `THEMES.md` points
-to the core palette variables in `static/style.css`; skin comments in the CSS
+to the core palette variables in `frontend/src/theme/tokens.css`; skin comments in the CSS
 show the expected pattern for full palette rewrites and accent-only changes.
 
-Current implementation has two appearance axes, sourced from `static/boot.js`:
+Current implementation has two appearance axes, sourced from `frontend/src/theme/boot.ts`:
 `theme` is only `light`, `dark`, or `system` and resolves to the `.dark` class
 for dark mode; `skin` is a separate axis applied with `data-skin` and currently
 includes `default`, `ares`, `mono`, `slate`, `poseidon`, `sisyphus`,
@@ -286,7 +287,7 @@ includes `default`, `ares`, `mono`, `slate`, `poseidon`, `sisyphus`,
 and a legacy theme-name migration target; `solarized`, `monokai`, `nord`, and
 `oled` are legacy theme names mapped to current theme/skin pairs. Do not follow
 stale `data-theme`-only guidance without first proving the current
-`static/boot.js`, `static/index.html`, and `static/style.css` contracts still
+`frontend/src/theme/boot.ts` and `frontend/src/theme/tokens.css` contracts still
 support it.
 
 Do not hardcode new colors, radii, shadows, or typography values into isolated

@@ -279,7 +279,9 @@ def _reject_sandboxed_api_request(handler, parsed) -> bool:
     """
     if not parsed.path.startswith("/api/"):
         return False
-    if (handler.headers.get("Origin") or "").strip().lower() != "null":
+    headers = getattr(handler, "headers", None)
+    origin = headers.get("Origin") if headers is not None else None
+    if (origin or "").strip().lower() != "null":
         return False
     body = b'{"error":"Sandboxed documents cannot call the API directly"}'
     handler.send_response(403)

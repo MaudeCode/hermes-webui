@@ -154,53 +154,9 @@ def _backend_label(model_id):
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-class TestNormalizeConfiguredModelKeyUriScheme:
-    def test_uri_scheme_preserved_in_normalization(self, norm_driver):
-        """URI IDs must not have their scheme+authority stripped."""
-        ids = [
-            "gpt://b1g12345/deepseek-v4-flash/latest",
-            "https://proxy.internal/models/gpt4",
-        ]
-        keys = _norm_keys(norm_driver, ids)
-        for model_id in ids:
-            assert "://" in keys[model_id], (
-                f"URI scheme was stripped from normalized key: "
-                f"{model_id!r} → {keys[model_id]!r}"
-            )
-
-    def test_regular_slash_ids_still_normalize(self, norm_driver):
-        """Non-URI slash IDs must still have provider prefix stripped."""
-        ids = ["openai/gpt-5.5", "vendor_a/deepseek-v4-pro"]
-        keys = _norm_keys(norm_driver, ids)
-        assert keys["openai/gpt-5.5"] == "gpt.5.5"
-        assert keys["vendor_a/deepseek-v4-pro"] == "deepseek.v4.pro"
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Backend / frontend parity for URI-scheme IDs
 # ═══════════════════════════════════════════════════════════════════════════
-
-
-class TestBackendFrontendUriSchemeParity:
-    """Python _norm_model_id must match JS _normalizeConfiguredModelKey
-    for URI-scheme inputs."""
-
-    def test_parity_uri_scheme_ids(self, norm_driver):
-        ids = [
-            "gpt://b1g12345/deepseek-v4-flash/latest",
-            "https://proxy.internal/v1/gpt4",
-            "openai/gpt-5.5",
-            "vendor_b/deepseek/deepseek-v4-pro",
-        ]
-        js_keys = _norm_keys(norm_driver, ids)
-        py_norm = _backend_norm()
-        for model_id in ids:
-            py_result = py_norm(model_id)
-            js_result = js_keys[model_id]
-            assert py_result == js_result, (
-                f"Parity mismatch for {model_id!r}: "
-                f"Python={py_result!r}, JS={js_result!r}"
-            )
 
 
 class TestBackendGetLabelUriScheme:

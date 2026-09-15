@@ -38,7 +38,7 @@ export function openChatStream(streamId: string, replay: { afterSeq: number; aft
 }
 
 export function openSessionListStream(cb: { onEvent: (event: SessionListEvent) => void; onError?: (readyState: number) => void; onOpen?: () => void }): SseHandle {
-  const source = new EventSource(resolveApiUrl('api/session/stream').href, { withCredentials: true })
+  const source = new EventSource(resolveApiUrl('api/sessions/events').href, { withCredentials: true })
   for (const name of ['initial', 'sessions_changed', 'gateway_status', 'hello'] as const) {
     source.addEventListener(name, (ev: Event) => {
       const me = ev as MessageEvent<string>

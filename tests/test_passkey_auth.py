@@ -374,15 +374,6 @@ def test_auth_status_reports_passkey_availability_source_contract():
     assert 'registered_credentials()' in src
 
 
-def test_login_page_has_default_hidden_passkey_button_and_script_wiring():
-    routes = open("api/routes.py", encoding="utf-8").read()
-    login_js = open("static/login.js", encoding="utf-8").read()
-    assert 'id="passkey-login"' in routes
-    assert 'style="display:none"' in routes
-    assert "api/auth/passkey/options" in login_js
-    assert "navigator.credentials.get" in login_js
-
-
 def test_passwordless_mode_keeps_auth_enabled_with_passkeys(monkeypatch, tmp_path):
     import api.auth as auth
     # Stage-batch14: passkey support is opt-in default-off behind HERMES_WEBUI_PASSKEY=1
@@ -418,20 +409,6 @@ def test_passkey_feature_flag_via_config(monkeypatch, tmp_path):
         lambda: {"webui_passkey_enabled": True},
     )
     assert auth.are_passkeys_enabled() is True
-
-
-def test_passwordless_settings_and_last_passkey_guard_are_wired():
-    routes = open("api/routes.py", encoding="utf-8").read()
-    panels = open("static/panels.js", encoding="utf-8").read()
-    index = open("static/index.html", encoding="utf-8").read()
-
-    assert "_passwordless" in routes
-    assert "Register a passkey before going passwordless." in routes
-    assert "Set a password or disable auth before removing the last passkey." in routes
-    assert "clear_credentials()" in routes
-    assert "id=\"btnGoPasswordless\"" in index
-    assert "async function goPasswordless" in panels
-    assert "prompt(" not in panels
 
 
 # ── rp_context: RPID/origin derivation (Origin-first, IPv6-safe) — #6772 ──────

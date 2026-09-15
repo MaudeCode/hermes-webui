@@ -150,39 +150,3 @@ def test_login_route_remains_csrf_exempt(monkeypatch):
 
     routes.handle_post(handler, SimpleNamespace(path="/api/auth/login"))
     assert handler.status == 200
-
-
-def test_index_shell_includes_csrf_fetch_and_sendbeacon_injection():
-    src = api_config.get_index_html_path().read_text(encoding="utf-8")
-
-    assert "csrfToken:__CSRF_TOKEN_JSON__" in src
-    assert "X-Hermes-CSRF-Token" in src
-    assert "window.fetch=function" in src
-    assert "navigator.sendBeacon=function" in src
-    assert "auth\\/login|csp-report" in src
-
-
-def test_index_shell_injects_session_bound_csrf_token(monkeypatch):
-    cookie = _signed_cookie("e" * 64)
-    token = auth.csrf_token_for_session(cookie)
-    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
-
-    captured = {}
-
-    def fake_t(_handler, body, *, content_type=None, **_kwargs):
-        captured["body"] = body
-        captured["content_type"] = content_type
-        return True
-
-    import api.extensions as extensions
-
-    monkeypatch.setattr(routes, "t", fake_t)
-    monkeypatch.setattr(extensions, "inject_extension_tags", lambda html: html)
-
-    try:
-        handler = _FakeHandler({"Cookie": f"{auth.COOKIE_NAME}={cookie}"})
-        assert routes.handle_get(handler, SimpleNamespace(path="/", query="")) is True
-        assert captured["content_type"] == "text/html; charset=utf-8"
-        assert f"csrfToken:{token!r}".replace("'", '"') in captured["body"]
-    finally:
-        auth._sessions.pop("e" * 64, None)

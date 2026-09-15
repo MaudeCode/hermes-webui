@@ -20,9 +20,6 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
-
-
 def _extract_block(src: str, marker: str) -> str:
     """Extract a brace-balanced JS block starting at `marker` (a `const x=[` or
     `function name(`)."""
@@ -60,114 +57,12 @@ process.stdout.write(JSON.stringify(_splitThinkFromContent(args.raw, args.existi
 """
 
 
-@pytest.fixture(scope="module")
-def driver(tmp_path_factory):
-    if shutil.which("node") is None:
-        pytest.skip("node not available")
-    pairs = _extract_block(MESSAGES_JS, "const _thinkPairs=")
-    fence = _extract_block(MESSAGES_JS, "function _thinkingFenceMarkerAt(")
-    nextopener = _extract_block(MESSAGES_JS, "function _nextThinkingOpener(")
-    tailpartial = _extract_block(MESSAGES_JS, "function _textTailIsPartialOpener(")
-    indented = _extract_block(MESSAGES_JS, "function _lineIsIndentedCode(")
-    merge = _extract_block(MESSAGES_JS, "function _mergeInlineThinkingReasoning(")
-    extract = _extract_block(MESSAGES_JS, "function _extractInlineThinkingFromContent(")
-    fn = _extract_block(MESSAGES_JS, "function _splitThinkFromContent(")
-    p = tmp_path_factory.mktemp("think3455") / "driver.js"
-    p.write_text(_DRIVER % (pairs, fence, nextopener, tailpartial, indented, merge, extract, fn), encoding="utf-8")
-    return str(p)
-
-
 def _split(driver, raw, existing=""):
     out = subprocess.run(
         ["node", driver, json.dumps({"raw": raw, "existing": existing})],
         capture_output=True, text=True, check=True,
     )
     return json.loads(out.stdout)
-
-
-def test_plain_content_untouched(driver):
-    r = _split(driver, "Hello world, no thinking here.")
-    assert r["content"] == "Hello world, no thinking here."
-    assert r["reasoning"] == ""
-
-
-def test_think_at_start_extracted(driver):
-    r = _split(driver, "<think>my reasoning</think>The visible answer")
-    assert r["content"] == "The visible answer"
-    assert r["reasoning"] == "my reasoning"
-
-
-def test_content_before_think_is_extracted(driver):
-    """#3599: inline providers can emit visible prose before a complete think block."""
-    r = _split(driver, "Real prefix <think>mid</think> tail")
-    assert r["content"] == "Real prefix  tail"
-    assert r["reasoning"] == "mid"
-
-
-def test_closed_literal_think_in_code_block_preserved(driver):
-    """#3455 review (Codex data-loss): a closed literal <think>...</think> inside
-    a fenced code block (visible content, not leading) must NOT be extracted into
-    reasoning — the whole-body scan that did this is removed."""
-    raw = "```html\n<think>visible literal</think>\n```"
-    r = _split(driver, raw)
-    assert r["content"] == raw, "fenced-code closed think tag must stay in content"
-    assert r["reasoning"] == ""
-    assert "visible literal" in r["content"]
-
-
-def test_unclosed_think_hidden_into_reasoning(driver):
-    """Streaming-safe: a partial/unclosed block is hidden from visible content."""
-    r = _split(driver, "<think>still thinking...")
-    assert r["content"] == ""
-    assert r["reasoning"] == "still thinking..."
-
-
-def test_existing_reasoning_is_merged_not_overwritten(driver):
-    r = _split(driver, "<think>extra</think>answer", existing="from on_reasoning stream")
-    assert r["content"] == "answer"
-    assert r["reasoning"] == "from on_reasoning stream\n\nextra"
-
-
-def test_existing_reasoning_substring_does_not_drop_block(driver):
-    r = _split(driver, "<think>plan</think>answer", existing="planning the approach carefully")
-    assert r["content"] == "answer"
-    assert r["reasoning"] == "planning the approach carefully\n\nplan"
-
-
-def test_multiple_blocks_extracted(driver):
-    """#3599: multiple complete inline blocks move to reasoning together."""
-    r = _split(driver, "<think>a</think><think>b</think>the answer")
-    assert r["content"] == "the answer"
-    assert r["reasoning"] == "a\n\nb"
-
-
-def test_block_after_content_extracted(driver):
-    """#3599: complete inline blocks after visible content are reasoning too."""
-    r = _split(driver, "<think>lead</think>answer <think>trailing</think> more")
-    assert r["content"] == "answer  more"
-    assert r["reasoning"] == "lead\n\ntrailing"
-
-
-def test_lookalike_tag_without_close_after_content_stays_visible(driver):
-    """#3633 deep-review (Codex catch): a literal <think> token used mid-sentence
-    and never closed is NOT a thinking trace — it must stay visible, not get the
-    rest of the line swallowed into reasoning. (A LEADING unclosed block is still
-    treated as reasoning; see test_unclosed_think_hidden_into_reasoning.)"""
-    r = _split(driver, "use <think> as a literal token, never closed")
-    assert r["content"] == "use <think> as a literal token, never closed"
-    assert r["reasoning"] == ""
-
-
-def test_empty_content(driver):
-    r = _split(driver, "")
-    assert r["content"] == ""
-    assert r["reasoning"] == ""
-
-
-def test_think_only_message(driver):
-    r = _split(driver, "<think>only thinking</think>")
-    assert r["content"] == ""
-    assert r["reasoning"] == "only thinking"
 
 
 # ── Backend parity: api/streaming._split_thinking_from_content ──────────────

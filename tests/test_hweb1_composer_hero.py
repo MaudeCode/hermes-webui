@@ -32,61 +32,6 @@ def read(rel: str) -> str:
 
 # ── The retired welcome surface is gone from source ──────────────────────────
 
-def test_welcome_panel_dom_is_replaced_by_one_hero_headline():
-    html = read("static/index.html")
-    assert 'id="emptyHeroTitle"' in html
-    assert 'class="empty-logo"' not in html
-    assert 'data-i18n="empty_title"' not in html
-    assert 'data-i18n="empty_subtitle"' not in html
-    assert 'class="suggestion"' not in html
-    assert 'class="suggestion-grid"' not in html
-    # The hero is the page's first paint for a fresh new chat, so the class ships
-    # in the markup instead of waiting for JS (otherwise the composer paints
-    # docked and then jumps).
-    assert '<div id="mainChat" class="main-view composer-hero">' in html
-
-
-def test_hide_welcome_and_hide_suggestions_settings_are_removed():
-    for rel in ("static/index.html", "static/boot.js", "static/panels.js", "api/config.py"):
-        src = read(rel)
-        assert "hide_empty_state_panel" not in src, rel
-        assert "hide_empty_state_suggestions" not in src, rel
-    i18n = read("static/i18n.js")
-    for key in (
-        "settings_label_hide_suggestions",
-        "settings_desc_hide_suggestions",
-        "settings_label_hide_empty_state_panel",
-        "settings_desc_hide_empty_state_panel",
-        "\n    empty_title:",
-        "\n    empty_subtitle:",
-        "\n    suggest_files:",
-    ):
-        assert key not in i18n, key
-
-
-def test_every_locale_carries_both_hero_headlines():
-    i18n = read("static/i18n.js")
-    assert i18n.count("    empty_hero_title: ") == 15
-    assert i18n.count("    empty_hero_title_workspace: ") == 15
-    # The workspace variant has to keep its interpolation slot in every locale.
-    for line in i18n.splitlines():
-        if line.startswith("    empty_hero_title_workspace: "):
-            assert "{0}" in line, line
-
-
-def test_taking_the_empty_state_down_releases_the_hero_layout():
-    """Every transcript-painting caller goes through one chokepoint.
-
-    A stray ``$('emptyState').style.display='none'`` would hide the headline but
-    leave the composer stranded in the middle of the column.
-    """
-    for rel in ("static/ui.js", "static/messages.js"):
-        assert "emptyState').style.display='none'" not in read(rel), rel
-    ui = read("static/ui.js")
-    assert "function hideConversationEmptyState()" in ui
-    assert "classList.toggle('composer-hero'" in ui
-
-
 # ── Real-browser layout ──────────────────────────────────────────────────────
 
 @contextlib.contextmanager
@@ -372,50 +317,6 @@ def test_hero_composer_does_not_paint_a_footer_band_across_the_chat(theme):
             "rgba(0, 0, 0, 0)" in painted["boxBg"] and painted["boxBgImage"] == "none"
         ), painted
         assert "rgba(0, 0, 0, 0)" not in painted["boxBorder"], painted
-
-
-def test_subpath_session_link_never_paints_the_hero_first():
-    """A direct session URL under a subpath mount must set the boot flag.
-
-    ``_sessionIdFromLocation()`` finds ``/session/`` anywhere in the path and also
-    honours ``?session=``/``?session_id=``. The early flag has to recognise the
-    same routes, or a fresh browser opening ``/hermes/session/<id>`` paints the
-    hero and then jumps the composer down once the deferred scripts run.
-    """
-    html = read("static/index.html")
-    boot = next(line for line in html.splitlines() if "dataset.sessionBoot='1'" in line)
-    assert "indexOf('/session/')===0" not in boot, boot
-    assert "indexOf('/session/')>=0" in boot, boot
-    assert "session_id" in boot, boot
-
-    routes = [
-        "/session/abc",
-        "/hermes/session/abc",
-        "/a/b/session/abc",
-        "/?session=abc",
-        "/hermes/?session_id=abc",
-    ]
-    not_sessions = ["/", "/hermes/", "/settings", "/?q=hello", "/?sessions=1"]
-    with _page() as page:
-        detected = page.evaluate(
-            """(cases) => {
-              const src = [...document.querySelectorAll('script:not([src])')]
-                .map((s) => s.textContent)
-                .find((t) => t && t.includes("dataset.sessionBoot='1'"));
-              // Re-run the shipped predicate against synthetic locations.
-              const body = src.slice(src.indexOf('function d()'), src.indexOf('try{'));
-              const make = (url) => {
-                const u = new URL(url, 'http://x');
-                return new Function('location', body + ' return d();')(
-                  { pathname: u.pathname, search: u.search }
-                );
-              };
-              return { yes: cases.yes.map(make), no: cases.no.map(make) };
-            }""",
-            {"yes": routes, "no": not_sessions},
-        )
-        assert all(detected["yes"]), list(zip(routes, detected["yes"], strict=True))
-        assert not any(detected["no"]), list(zip(not_sessions, detected["no"], strict=True))
 
 
 def test_overlapping_rerender_cannot_restore_the_hero_during_a_session_load():

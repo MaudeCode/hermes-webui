@@ -103,37 +103,3 @@ def _read_commands_js():
         encoding="utf-8",
     ) as f:
         return f.read()
-
-
-def test_frontend_resume_404_silent():
-    """resumeManualCompressionForSession must silently return on 404/5xx.
-
-    The catch block should check for 404 and 5xx and return early, so
-    switching sessions never shows 'Compression failed' on transient errors.
-    """
-    src = _read_commands_js()
-
-    # Find the resumeManualCompressionForSession function
-    assert "async function resumeManualCompressionForSession" in src
-
-    # The guard must be present in the catch block
-    assert "e.status===404" in src
-    assert "e.status>=500" in src
-    # Verify it's inside the catch block of resumeManualCompressionForSession
-    fn_start = src.index("async function resumeManualCompressionForSession")
-    # Find the catch block after this function
-    catch_idx = src.index("}catch(e){", fn_start)
-    guard_404 = src.index("e.status===404", fn_start)
-    guard_500 = src.index("e.status>=500", fn_start)
-    assert catch_idx < guard_404 < guard_500, "guards must be inside catch block"
-
-    # The guard must return early (not just log)
-    line_with_guard = src[guard_404 : src.index("\n", guard_500) + 80]
-    assert "return" in line_with_guard, "guard must return early"
-
-
-def test_frontend_compress_status_call_present():
-    """Verify the compress/status API call is still in the frontend code."""
-    src = _read_commands_js()
-    assert "/api/session/compress/status" in src
-    assert "resumeManualCompressionForSession" in src
