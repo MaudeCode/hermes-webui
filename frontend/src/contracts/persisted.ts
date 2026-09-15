@@ -16,8 +16,6 @@ export const LocalDraftSchema = z.object({ text: z.string().max(200_000), update
 /** Sidebar collapsed groups (`hermes-webui-collapsed-groups`). */
 export const CollapsedGroupsSchema = z.array(z.string().max(128)).max(200)
 
-/** Last visible session id (`hermes-webui-session`). Plain string, validated as a session id. */
-export const SessionIdSchema = z.string().regex(/^[A-Za-z0-9_.:-]{1,128}$/)
 
 export const NumberPrefSchema = z.number()
 export const BoolPrefSchema = z.boolean()

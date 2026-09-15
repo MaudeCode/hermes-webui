@@ -704,7 +704,7 @@ function G(e, t) {
 //#endregion
 //#region src/sw.ts
 var K = "./index.html";
-G([{"revision":"b7754f63e08ad2b8542a1d125226deef","url":"./assets/index-hjtf34rj.css"},{"revision":"035b5fb3853986b4c3c99e93a11e20db","url":"./assets/index-j04o023j.js"},{"revision":"d105176f4085d90959d4d775e1c9f049","url":"./assets/routes-ndph7gom.js"},{"revision":"5238da4a0e733bacb2be4b73b88c14f7","url":"./index.html"},{"revision":"dfc02d3012147ec40b9a27d9a06effae","url":"./manifest.webmanifest"}]), H(), self.addEventListener("message", (e) => {
+G([{"revision":"0dd5757b63e5a6d3e5410968956b61e1","url":"./assets/index-cf905jjn.css"},{"revision":"5dc9612066e160cc72b52f47583e7efc","url":"./assets/index-j61dxfi9.js"},{"revision":"32a254caa3f4b80cc2d70ff57684afe3","url":"./assets/routes-krrcxga4.js"},{"revision":"47da7515bb3502aaaa7e6ebdc5cb8e43","url":"./index.html"},{"revision":"dfc02d3012147ec40b9a27d9a06effae","url":"./manifest.webmanifest"}]), H(), self.addEventListener("message", (e) => {
 	let t = e.data;
 	typeof t == "object" && t && t.type === "SKIP_WAITING" && self.skipWaiting();
 }), self.addEventListener("activate", (e) => {

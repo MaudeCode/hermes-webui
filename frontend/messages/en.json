@@ -1909,5 +1909,11 @@
 	"outline_minimap_label": "Conversation timeline",
 	"outline_minimap_mark": "Question {a0}: {a1}",
 	"outline_empty": "No questions yet.",
-	"outline_loading": "Loading…"
+	"outline_loading": "Loading…",
+	"error_generic": "Something went wrong",
+	"retry": "Retry",
+	"reload": "Reload",
+	"not_found_page": "This page does not exist.",
+	"app_starting": "Starting Hermes…",
+	"bootstrap_failed": "Hermes could not load its configuration."
 }

@@ -15041,6 +15041,126 @@ def _handle_spa_get(handler, parsed):
     return None
 
 
+def _auth_status_payload(handler) -> dict:
+    """The public authentication state for this request (``/api/auth/status``, ``/api/bootstrap``)."""
+    from api.auth import (
+        _passkey_feature_flag_enabled,
+        ensure_trusted_auth_session,
+        get_password_hash,
+        is_auth_enabled,
+        is_oidc_auth_enabled,
+        is_trusted_auth_enabled,
+        session_can_manage_server,
+    )
+    from api.passkeys import registered_credentials
+
+    logged_in = False
+    session_info = None
+    auth_enabled = is_auth_enabled()
+    oidc_enabled = is_oidc_auth_enabled()
+    if auth_enabled:
+        session_info = ensure_trusted_auth_session(handler)
+        logged_in = bool(session_info)
+    passkey_flag = _passkey_feature_flag_enabled()
+    passkeys = registered_credentials() if passkey_flag else []
+    password_auth_enabled = get_password_hash() is not None
+    payload = {
+        "auth_enabled": auth_enabled,
+        "logged_in": logged_in,
+        "oidc_enabled": oidc_enabled,
+        "oidc_native_handoff_enabled": oidc_enabled,
+        "password_auth_enabled": password_auth_enabled,
+        "passwordless_enabled": bool(passkeys) and not password_auth_enabled,
+        "passkeys_enabled": bool(passkeys),
+        "passkeys_count": len(passkeys),
+        "passkey_feature_flag": passkey_flag,
+        "auth_disabled_acknowledged": bool(load_settings().get("auth_disabled_acknowledged")) if not auth_enabled else False,
+        "can_manage_server": session_can_manage_server(session_info),
+    }
+    if is_trusted_auth_enabled() or (session_info and session_info.get("auth_type") == "trusted"):
+        payload["trusted_auth_enabled"] = True
+    if session_info and session_info.get("auth_type") in {"trusted", "oidc"}:
+        payload["auth_type"] = session_info.get("auth_type")
+        payload["user"] = session_info.get("username")
+        payload["bound_profile"] = session_info.get("bound_profile")
+    return payload
+
+
+def _bootstrap_payload(handler) -> dict:
+    """``GET /api/bootstrap`` (HWEB-100): public runtime configuration and initial state.
+
+    Replaces the inline ``window.__HERMES_CONFIG__`` / bundle-version / extension
+    globals the legacy shell embedded in HTML. Served without authentication:
+    it carries no secret until a valid session cookie is present, in which case
+    the CSRF token for that session is included.
+    """
+    from api import profiles as profiles_api
+    from api.updates import WEBUI_VERSION
+
+    auth = _auth_status_payload(handler)
+    csrf_token = ""
+    try:
+        from api.auth import csrf_token_for_session, is_auth_enabled, parse_cookie, verify_session
+
+        if is_auth_enabled():
+            cookie_val = parse_cookie(handler) or getattr(handler, "_trusted_auth_session_cookie_value", None)
+            if cookie_val and verify_session(cookie_val):
+                csrf_token = csrf_token_for_session(cookie_val) or ""
+    except Exception:
+        csrf_token = ""
+    authenticated = (not auth["auth_enabled"]) or bool(auth.get("logged_in"))
+    settings = load_settings() if authenticated else {}
+    profile = None
+    onboarding = None
+    features = {
+        "dashboard": False,
+        "terminal_remote_backend": False,
+        "extensions": False,
+        "single_profile_mode": False,
+    }
+    if authenticated:
+        try:
+            active = profiles_api.get_active_profile_name()
+            profile = {"name": active, "is_default": bool(profiles_api._is_root_profile(active))}
+        except Exception:
+            profile = {"name": "default", "is_default": True}
+        try:
+            onboarding = {"completed": bool(get_onboarding_status().get("completed"))}
+        except Exception:
+            onboarding = {"completed": True}
+        try:
+            from api import dashboard_probe
+
+            features["dashboard"] = bool(dashboard_probe.get_dashboard_status().get("running"))
+        except Exception:
+            features["dashboard"] = False
+        try:
+            features["terminal_remote_backend"] = bool(_terminal_remote_backend_enabled())
+        except Exception:
+            features["terminal_remote_backend"] = False
+        try:
+            from api.extensions import get_extension_config
+
+            features["extensions"] = bool(get_extension_config().get("enabled"))
+        except Exception:
+            features["extensions"] = False
+        try:
+            features["single_profile_mode"] = bool(_is_isolated_profile_mode())
+        except Exception:
+            features["single_profile_mode"] = False
+    return {
+        "webui_version": WEBUI_VERSION,
+        "max_upload_bytes": int(MAX_UPLOAD_BYTES),
+        "csrf_token": csrf_token,
+        "language": (_shell_language() or "") if authenticated else "",
+        "bot_name": str(settings.get("bot_name") or "Hermes") if authenticated else "Hermes",
+        "auth": auth,
+        "profile": profile,
+        "onboarding": onboarding,
+        "features": features,
+    }
+
+
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
     proxy_result = _handle_extension_sidecar_proxy(handler, parsed, "GET")
@@ -15050,6 +15170,9 @@ def handle_get(handler, parsed) -> bool:
     spa_result = _handle_spa_get(handler, parsed)
     if spa_result is not None:
         return spa_result
+
+    if parsed.path == "/api/bootstrap":
+        return j(handler, _bootstrap_payload(handler), extra_headers={"Cache-Control": "no-store"})
 
     if parsed.path.startswith("/session/static/"):
         # Strip the leading "/session" so _serve_static() sees a path that
@@ -15282,47 +15405,7 @@ def handle_get(handler, parsed) -> bool:
         return True
 
     if parsed.path == "/api/auth/status":
-        from api.auth import (
-            _passkey_feature_flag_enabled,
-            ensure_trusted_auth_session,
-            get_password_hash,
-            is_auth_enabled,
-            is_oidc_auth_enabled,
-            is_trusted_auth_enabled,
-            session_can_manage_server,
-        )
-        from api.passkeys import registered_credentials
-
-        logged_in = False
-        session_info = None
-        auth_enabled = is_auth_enabled()
-        oidc_enabled = is_oidc_auth_enabled()
-        if auth_enabled:
-            session_info = ensure_trusted_auth_session(handler)
-            logged_in = bool(session_info)
-        passkey_flag = _passkey_feature_flag_enabled()
-        passkeys = registered_credentials() if passkey_flag else []
-        password_auth_enabled = get_password_hash() is not None
-        payload = {
-            "auth_enabled": auth_enabled,
-            "logged_in": logged_in,
-            "oidc_enabled": oidc_enabled,
-            "oidc_native_handoff_enabled": oidc_enabled,
-            "password_auth_enabled": password_auth_enabled,
-            "passwordless_enabled": bool(passkeys) and not password_auth_enabled,
-            "passkeys_enabled": bool(passkeys),
-            "passkeys_count": len(passkeys),
-            "passkey_feature_flag": passkey_flag,
-            "auth_disabled_acknowledged": bool(load_settings().get("auth_disabled_acknowledged")) if not auth_enabled else False,
-            "can_manage_server": session_can_manage_server(session_info),
-        }
-        if is_trusted_auth_enabled() or (session_info and session_info.get("auth_type") == "trusted"):
-            payload["trusted_auth_enabled"] = True
-        if session_info and session_info.get("auth_type") in {"trusted", "oidc"}:
-            payload["auth_type"] = session_info.get("auth_type")
-            payload["user"] = session_info.get("username")
-            payload["bound_profile"] = session_info.get("bound_profile")
-        return j(handler, payload)
+        return j(handler, _auth_status_payload(handler))
 
     if parsed.path.startswith("/api/share/"):
         token = parsed.path[len("/api/share/"):].strip()

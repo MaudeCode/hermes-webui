@@ -1,4 +1,12 @@
-import { HeadContent, Outlet, Scripts, createRootRoute } from '@tanstack/react-router'
+import { HeadContent, Outlet, Scripts, createRootRouteWithContext } from '@tanstack/react-router'
+import type { QueryClient } from '@tanstack/react-query'
+import type { Bootstrap } from '../contracts/bootstrap'
+import { NotFound, PendingView, RouteError } from '../features/shell/ErrorBoundary'
+
+export interface RouterContext {
+  queryClient: QueryClient
+  bootstrap: Bootstrap
+}
 
 /**
  * Root route. The shell component describes the static HTML document the SPA
@@ -6,7 +14,7 @@ import { HeadContent, Outlet, Scripts, createRootRoute } from '@tanstack/react-r
  * UI: the client entry mounts into #app. Every href here is relative so the
  * Python-injected <base href> resolves it under any mount prefix.
  */
-export const Route = createRootRoute({
+export const Route = createRootRouteWithContext<RouterContext>()({
   head: () => ({
     meta: [
       { charSet: 'utf-8' },
@@ -29,6 +37,9 @@ export const Route = createRootRoute({
   }),
   shellComponent: RootShell,
   component: RootComponent,
+  errorComponent: RouteError,
+  notFoundComponent: NotFound,
+  pendingComponent: PendingView,
 })
 
 function RootShell() {
