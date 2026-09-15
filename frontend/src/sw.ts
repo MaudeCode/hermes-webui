@@ -1,26 +1,38 @@
 /// <reference lib="webworker" />
 /**
- * Hermes WebUI service worker (HWEB-100). Built by vite-plugin-pwa in
- * injectManifest mode: the hashed precache list is injected at build time.
+ * Hermes WebUI service worker (HWEB-100). Built by scripts/build-sw.mjs with
+ * the workbox injectManifest strategy: the shell precache list is injected at
+ * build time.
  *
  * Behaviour carried over from the legacy sw.js:
- * - precache the app shell and hashed assets, keyed by build version;
+ * - precache the app shell (index.html, entry chunks, stylesheet, manifest);
+ * - hashed lazy chunks are cached on first use (cache-first, bounded);
  * - never cache API responses or SSE (the UI needs a live backend);
  * - navigations are network-first and fall back to the cached shell so an
  *   installed app still opens offline and shows its own offline notice;
- * - obsolete caches from previous builds are removed on activate;
+ * - obsolete precaches from previous builds are removed on activate;
  * - activation waits for the page's confirmation (`SKIP_WAITING` message) so
  *   the in-app update prompt controls when the new version takes over;
  * - the scope is the mount root, so subpath installs keep working.
  */
 import { cleanupOutdatedCaches, precacheAndRoute, matchPrecache } from 'workbox-precaching'
+import { registerRoute } from 'workbox-routing'
+import { CacheFirst } from 'workbox-strategies'
+import { ExpirationPlugin } from 'workbox-expiration'
 
 declare const self: ServiceWorkerGlobalScope & { __WB_MANIFEST: { url: string; revision: string | null }[] }
 
 const SHELL_URL = './index.html'
+const ASSET_CACHE = 'hermes-assets-v1'
 
 precacheAndRoute(self.__WB_MANIFEST)
 cleanupOutdatedCaches()
+
+// Hashed, immutable chunks under the mount root: cache on first use, keep a bounded set.
+registerRoute(
+  ({ url, request }) => request.method === 'GET' && url.origin === self.location.origin && url.pathname.startsWith(new URL('./assets/', self.registration.scope).pathname),
+  new CacheFirst({ cacheName: ASSET_CACHE, plugins: [new ExpirationPlugin({ maxEntries: 400, maxAgeSeconds: 60 * 60 * 24 * 30, purgeOnQuotaError: true })] }),
+)
 
 self.addEventListener('message', (event: ExtendableMessageEvent) => {
   const data: unknown = event.data
@@ -33,9 +45,7 @@ self.addEventListener('activate', (event) => {
 
 function isServerOwned(url: URL, scope: URL): boolean {
   const rel = url.pathname.startsWith(scope.pathname) ? url.pathname.slice(scope.pathname.length) : url.pathname
-  return (
-    rel.startsWith('api/') || rel === 'health' || rel.startsWith('extensions/') || rel.startsWith('plugins/') || rel.startsWith('dashboard-plugins/') || rel === 'sw.js' || (!rel.startsWith('static/') && rel.includes('/static/'))
-  )
+  return rel.startsWith('api/') || rel === 'health' || rel.startsWith('extensions/') || rel.startsWith('plugins/') || rel.startsWith('dashboard-plugins/') || rel === 'sw.js' || (!rel.startsWith('static/') && rel.includes('/static/'))
 }
 
 self.addEventListener('fetch', (event) => {
@@ -46,13 +56,12 @@ self.addEventListener('fetch', (event) => {
   const scope = new URL(self.registration.scope)
   if (isServerOwned(url, scope)) return
   if (request.mode !== 'navigate') return
-  // Navigation: network first; offline falls back to the precached shell only for a
-  // successful, non-redirected shell (a login redirect must never be replaced by the app).
+  // Navigation: network first; offline falls back to the precached shell. A login
+  // redirect is a network response, so it is never replaced by the app shell.
   event.respondWith(
     (async () => {
       try {
-        const response = await fetch(request)
-        return response
+        return await fetch(request)
       } catch {
         const shell = await matchPrecache(SHELL_URL)
         if (shell) return shell

@@ -1,8 +1,10 @@
 // Build the service worker (workbox injectManifest strategy) into static/dist/sw.js.
 //
-// 1. Bundle src/sw.ts with Vite in library mode (workbox-precaching inlined, no hash).
-// 2. Inject the precache manifest for everything under static/dist except the
-//    worker itself, using content-hash revisions so the output is deterministic.
+// 1. Bundle src/sw.ts with Vite in library mode (workbox inlined, no hash).
+// 2. Inject the precache manifest: the shell (index.html), the assets the shell
+//    references directly (entry chunks and stylesheet), the web manifest and
+//    brand icons. Lazy route/library chunks are hashed and cached on first use
+//    by the runtime cache in sw.ts, so the install footprint stays small.
 // The TanStack Start builder does not run vite-plugin-pwa's closeBundle for the
 // client environment, so this script drives the same workbox pipeline directly.
 import { build } from 'vite'
@@ -35,18 +37,22 @@ await build({
   define: { 'process.env.NODE_ENV': JSON.stringify('production') },
 })
 
+const shell = readFileSync(resolve(distRoot, 'index.html'), 'utf8')
+const shellAssets = [...shell.matchAll(/(?:href|src)="\.\/(assets\/[^"]+)"/g)].map((m) => m[1])
+const wanted = new Set(['index.html', 'manifest.webmanifest', ...shellAssets])
+
 const { count, size, warnings } = await injectManifest({
   swSrc: resolve(swTmp, 'sw.js'),
   swDest: resolve(distRoot, 'sw.js'),
   globDirectory: distRoot,
-  globPatterns: ['**/*.{js,css,html,webmanifest,svg,png,ico,woff2,json}'],
+  globPatterns: ['index.html', 'manifest.webmanifest', 'assets/*.{js,css}'],
   globIgnores: ['sw.js', 'FILES.txt'],
   injectionPoint: 'self.__WB_MANIFEST',
-  // The shell is precached under its served name; the worker resolves entries against its scope.
   manifestTransforms: [
     async (entries) => ({
       manifest: entries
-        .map((e) => ({ ...e, url: e.url === 'index.html' ? './index.html' : `./${e.url}` }))
+        .filter((e) => wanted.has(e.url))
+        .map((e) => ({ ...e, url: `./${e.url}` }))
         .sort((a, b) => a.url.localeCompare(b.url)),
       warnings: [],
     }),
@@ -56,8 +62,7 @@ const { count, size, warnings } = await injectManifest({
 for (const w of warnings) console.warn('build-sw:', w)
 rmSync(swTmp, { recursive: true, force: true })
 
-// Keep FILES.txt complete.
 const filesPath = resolve(distRoot, 'FILES.txt')
 const files = readFileSync(filesPath, 'utf8').split('\n').filter(Boolean)
 if (!files.includes('sw.js')) writeFileSync(filesPath, [...files, 'sw.js'].sort().join('\n') + '\n')
-console.log(`build-sw: precached ${count} files (${size} bytes)`)
+console.log(`build-sw: precached ${count} shell files (${size} bytes)`)

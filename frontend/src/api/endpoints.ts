@@ -82,6 +82,7 @@ export const regenerateTitle = (session_id: SessionId) => post('api/session/titl
 export const importSession = (payload: unknown) => post('api/session/import', payload, SessionEnvelopeSchema.or(OkSchema), { retries: 0 })
 export const importCliSession = (session_id: string) => post('api/session/import_cli', { session_id }, SessionEnvelopeSchema.or(OkSchema), { retries: 0, timeoutMs: 60_000 })
 export const exportSessionUrl = (session_id: SessionId, format: 'json' | 'markdown' | 'html' = 'json') => `api/session/export${qs({ session_id, format })}`
+export const updateSession = (session_id: SessionId, body: { model?: string; model_provider?: string | null; workspace?: string }) => post('api/session/update', { session_id, ...body }, SessionEnvelopeSchema.or(OkSchema), { retries: 0 })
 export const setSessionYolo = (session_id: SessionId, enabled: boolean) => post('api/session/yolo', { session_id, enabled }, z.looseObject({ yolo_enabled: z.boolean().optional(), ok: z.boolean().optional() }), { retries: 0 })
 export const fetchSessionYolo = (session_id: SessionId) => get(`api/session/yolo${qs({ session_id })}`, z.looseObject({ yolo_enabled: z.boolean() }))
 export const setSessionToolsets = (session_id: SessionId, toolsets: string[] | null) => post('api/session/toolsets', { session_id, toolsets }, OkSchema.or(SessionEnvelopeSchema), { retries: 0 })

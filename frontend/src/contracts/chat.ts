@@ -72,6 +72,7 @@ export const ClarifyPendingSchema = z.looseObject({
   clarify_id: z.string().optional(),
   session_id: z.string().optional(),
   question: z.string().optional(),
+  description: z.string().optional(),
   choices: z.array(ClarifyChoiceSchema).optional(),
   title: z.string().optional(),
   name: z.string().optional(),

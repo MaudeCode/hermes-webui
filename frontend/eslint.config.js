@@ -3,7 +3,7 @@ import tseslint from 'typescript-eslint'
 import reactHooks from 'eslint-plugin-react-hooks'
 
 /** Files allowed to talk to the network directly: the single typed client. */
-const NETWORK_ALLOWED = ['src/api/client.ts', 'src/api/sse.ts', 'src/sw.ts', 'src/lib/clientEvents.ts', 'src/features/presence/presence.ts']
+const NETWORK_ALLOWED = ['src/api/client.ts', 'src/api/sse.ts', 'src/sw.ts', 'src/lib/clientEvents.ts', 'src/features/presence/presence.ts', 'src/features/voice/tts.ts']
 
 export default tseslint.config(
   { ignores: ['node_modules', 'dist', 'src/paraglide', 'src/routeTree.gen.ts', 'playwright-report', 'test-results', '.tanstack'] },
