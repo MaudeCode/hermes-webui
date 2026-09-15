@@ -41,4 +41,6 @@ html[data-workspace-panel="closed"] .rightpanel{margin-left:calc(-1 * var(--isla
 .workspace-panel-edge-toggle{border-radius:var(--r-md);border-color:var(--border);box-shadow:var(--float-shadow)}
 .file-item{font-size:12.5px}
 @media (max-width:640px){.workspace-panel-edge-toggle{bottom:calc(72px + env(safe-area-inset-bottom,0px));top:auto;transform:none !important}}
+.rightpanel[data-resizing]{transition:none}
+.rightpanel[data-resizing] ~ *,.rightpanel[data-resizing] *{pointer-events:none;user-select:none}
 }

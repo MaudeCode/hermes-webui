@@ -36,8 +36,16 @@ export function WorkspacePanel({ workspace, sessionId, onClose }: { workspace: s
     const startX = e.clientX
     const startW = panel.current?.getBoundingClientRect().width ?? width
     let next = startW
-    const move = (ev: PointerEvent) => { next = Math.min(1200, Math.max(180, startW - (ev.clientX - startX))); setWidth(next) }
-    const up = () => { writePersisted('hermes-webui-workspace-panel-width', String(Math.round(next))); window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up) }
+    const el = panel.current
+    // Write the width straight to the DOM while dragging: a React render per pointer move (and the panel's width transition) lags the pointer.
+    el?.setAttribute('data-resizing', '1')
+    const move = (ev: PointerEvent) => { next = Math.min(1200, Math.max(180, startW - (ev.clientX - startX))); if (el) el.style.width = `${next}px` }
+    const up = () => {
+      el?.removeAttribute('data-resizing')
+      setWidth(next)
+      writePersisted('hermes-webui-workspace-panel-width', String(Math.round(next)))
+      window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up)
+    }
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)
   }
