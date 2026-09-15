@@ -1,7 +1,6 @@
 import { useMemo, type ReactElement } from 'react'
 import { Link } from '@tanstack/react-router'
 import { m } from '../../paraglide/messages.js'
-import { Brandmark } from '../../shell/Brandmark'
 import type { LiveTurn } from '../../stream/reducer'
 import { Markdown } from './render/Markdown'
 import { extractInlineThinking } from './render/text'
@@ -34,11 +33,7 @@ export function LiveTurnView({ turn, name, mode, userVisible }: { turn: LiveTurn
   const worklog = calls.length > 0 ? <Worklog key="worklog" mode={mode} calls={calls} live={streaming} defaultOpen={mode !== 'compact_worklog'}>{toolBlocks}</Worklog> : null
   return (
     <div className="msg-row assistant-turn live-turn" data-role="assistant" data-live="1" data-stream-id={turn.streamId} data-status={turn.status} aria-busy={streaming}>
-      <div className="msg-role assistant">
-        <Brandmark className="brandmark" size={16} />
-        <span className="msg-role-name">{name}</span>
-        {turn.tps !== null && <span className="msg-tps-inline tabular-nums" title="Tokens per second">{turn.tps.toFixed(1)} tok/s</span>}
-      </div>
+      <div className="msg-role assistant"><span className="msg-role-name">{name}</span></div>
       <div className="assistant-turn-blocks">
         {worklog}
         {blocks}
@@ -48,6 +43,7 @@ export function LiveTurnView({ turn, name, mode, userVisible }: { turn: LiveTurn
             {turn.status === 'reconnecting' ? m.live_reconnecting() : m.live_streaming()}
           </div>
         )}
+        {streaming && turn.tps !== null && <div className="mt-1 font-mono text-[11px] tabular-nums text-muted opacity-75" title="Tokens per second">{turn.tps.toFixed(1)} tok/s</div>}
         {turn.status === 'reconnecting' && blocks.length > 0 && <div className="mt-1 text-[12px] text-muted" role="status">{m.live_reconnecting()}</div>}
         {turn.warning && <div className="mt-1 text-[12px] text-warning" role="status">{turn.warning}</div>}
         {turn.steerConsumed.map((s) => <div key={s.id} className="anchor-steering-message mt-1 text-[12px] text-muted">{m.live_steer_consumed({ text: s.text })}</div>)}

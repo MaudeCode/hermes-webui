@@ -4,7 +4,7 @@ import { ArrowDown, ArrowUp } from 'lucide-react'
 import { m } from '../../paraglide/messages.js'
 import type { LiveTurn } from '../../stream/reducer'
 import { isTerminal } from '../../stream/reducer'
-import { AssistantMessageRow, UserMessageRow, type RowActions, UserMarker } from './MessageRow'
+import { AssistantMessageRow, UserMessageRow, type RowActions } from './MessageRow'
 import { LiveTurnView } from './LiveTurnView'
 import { messageKey, type VisibleMessage } from './useTranscript'
 import type { ActivityMode } from './blocks/Worklog'
@@ -115,7 +115,7 @@ export function Transcript(props: TranscriptProps) {
             ) : rows.map((row, i) => renderRow(row, i))}
             {showLiveUser && (
               <div className="msg-row" data-role="user" data-live-user="1">
-                <div className="msg-user-band"><UserMarker /><div className="msg-body whitespace-pre-wrap break-words">{liveUserText}</div></div>
+                <div className="msg-body whitespace-pre-wrap break-words">{liveUserText}</div>
               </div>
             )}
             {showLive && live && <LiveTurnView turn={live} name={assistantName} mode={mode} userVisible />}
