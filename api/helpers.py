@@ -82,7 +82,28 @@ _CSP_EXTRA_FRAME_RE = _re.compile(
     r"^https?://(?:\*\.)?[A-Za-z0-9._~-]+(?::(?P<port>\d{1,5}|\*))?$"
 )
 _CSP_HEADER_NAME = 'Content-Security-Policy'
+# HWEB-100: the production frontend is a bundled SPA with no inline scripts and
+# no CDN assets, so script-src drops 'unsafe-inline', cdn.jsdelivr.net and blob:
+# and worker-src drops the CDN. style-src keeps 'unsafe-inline' for inline
+# `style` attributes set by the rendering libraries (Shiki, KaTeX, xterm); the
+# shell itself contains no <style> blocks. The legacy template below survives
+# only while HERMES_WEBUI_FRONTEND=legacy is honoured; it is removed at cutover.
 _CSP_SHARED_POLICY_TEMPLATE = (
+    "default-src 'self' https://*.cloudflareaccess.com; "
+    "object-src 'none'; "
+    "frame-ancestors 'none'; "
+    "script-src 'self' https://static.cloudflareinsights.com; "
+    "worker-src 'self' blob:; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: https: blob:; "
+    "font-src 'self' data:; "
+    "media-src 'self' data: blob:; "
+    "connect-src {connect_src}; "
+    "frame-src {frame_src}; "
+    "manifest-src 'self' https://*.cloudflareaccess.com; "
+    "base-uri 'self'; form-action 'self'"
+)
+_CSP_LEGACY_POLICY_TEMPLATE = (
     "default-src 'self' https://*.cloudflareaccess.com; "
     "object-src 'none'; "
     "frame-ancestors 'none'; "
@@ -97,6 +118,12 @@ _CSP_SHARED_POLICY_TEMPLATE = (
     "manifest-src 'self' https://*.cloudflareaccess.com; "
     "base-uri 'self'; form-action 'self'"
 )
+
+
+def _csp_policy_template() -> str:
+    from api.spa_shell import frontend_mode
+
+    return _CSP_SHARED_POLICY_TEMPLATE if frontend_mode() == "spa" else _CSP_LEGACY_POLICY_TEMPLATE
 # Base frame-src: same-origin only by default (so the existing same-origin
 # dashboard/extension iframes keep working). An operator can widen it, opt-in,
 # via HERMES_WEBUI_CSP_FRAME_EXTRA — e.g. to embed a self-hosted dashboard in an
@@ -154,7 +181,11 @@ def _csp_extra_frame_src() -> str:
 
 
 def _csp_connect_src(extra_connect_src: str = "") -> str:
-    return f"{_CSP_CONNECT_BASE} https://cdn.jsdelivr.net{extra_connect_src}"
+    from api.spa_shell import frontend_mode
+
+    # The legacy shell fetched Prism grammars from jsDelivr; the bundled SPA has no CDN traffic.
+    cdn = "" if frontend_mode() == "spa" else " https://cdn.jsdelivr.net"
+    return f"{_CSP_CONNECT_BASE}{cdn}{extra_connect_src}"
 
 
 def _csp_frame_src(extra_frame_src: str = "") -> str:
@@ -169,7 +200,7 @@ def _build_csp_enforced_policy(
         extra_connect_src = _csp_extra_connect_src()
     if extra_frame_src is None:
         extra_frame_src = _csp_extra_frame_src()
-    return _CSP_SHARED_POLICY_TEMPLATE.format(
+    return _csp_policy_template().format(
         connect_src=_csp_connect_src(extra_connect_src),
         frame_src=_csp_frame_src(extra_frame_src),
     )

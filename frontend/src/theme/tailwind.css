@@ -1,0 +1,67 @@
+@import 'tailwindcss';
+@import './tokens.css';
+
+/* Tailwind consumes the legacy design tokens as its theme. Utilities such as
+   bg-surface, text-muted, border-border, rounded-card resolve to the same
+   custom properties the skins override, so every theme and skin keeps working. */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-sidebar: var(--sidebar);
+  --color-surface: var(--surface);
+  --color-surface-subtle: var(--surface-subtle);
+  --color-surface-subtle-hover: var(--surface-subtle-hover);
+  --color-main: var(--main-bg);
+  --color-topbar: var(--topbar-bg);
+  --color-input: var(--input-bg);
+  --color-hover: var(--hover-bg);
+  --color-border: var(--border);
+  --color-border2: var(--border2);
+  --color-border-subtle: var(--border-subtle);
+  --color-border-muted: var(--border-muted);
+  --color-text: var(--text);
+  --color-strong: var(--strong);
+  --color-muted: var(--muted);
+  --color-em: var(--em);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-bg: var(--accent-bg);
+  --color-accent-bg-strong: var(--accent-bg-strong);
+  --color-accent-text: var(--accent-text);
+  --color-blue: var(--blue);
+  --color-gold: var(--gold);
+  --color-code-bg: var(--code-bg);
+  --color-code-text: var(--code-text);
+  --color-code-inline-bg: var(--code-inline-bg);
+  --color-pre-text: var(--pre-text);
+  --color-error: var(--error);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-info: var(--info);
+  --color-focus-ring: var(--focus-ring);
+  --color-focus-glow: var(--focus-glow);
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-card: var(--radius-card);
+  --radius-lg: var(--radius-lg);
+  --radius-pill: var(--radius-pill);
+  --font-ui: var(--font-ui);
+  --font-conversation: var(--font-conversation);
+  --font-mono: var(--font-mono);
+  --text-xs: var(--font-size-xs);
+  --text-sm: var(--font-size-sm);
+  --text-md: var(--font-size-md);
+  --shadow-sm: var(--shadow-sm);
+  --shadow-md: var(--shadow-md);
+}
+
+@layer base {
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body, #app { height: 100%; }
+  body { background: var(--bg); color: var(--text); font-family: var(--font-ui); font-size: 14px; line-height: 1.6; -webkit-font-smoothing: antialiased; }
+  button, input, select, textarea { font-family: var(--font-ui); color: inherit; }
+  :focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
+  }
+}

@@ -15013,11 +15013,43 @@ def _handle_session_get(handler, parsed) -> bool:
 
 
 
+def _handle_spa_get(handler, parsed):
+    """HWEB-100: serve the production SPA shell and its build artefacts.
+
+    Returns True when handled, None when the request is not a frontend route
+    (the legacy dispatch below continues). Active only while the temporary
+    HERMES_WEBUI_FRONTEND switch selects the SPA; the legacy branch and the
+    switch are removed at cutover.
+    """
+    from api import spa_shell
+
+    if spa_shell.frontend_mode() != "spa":
+        return None
+    path = parsed.path
+    if path == "/sw.js":
+        return spa_shell.serve_service_worker(handler) or j(handler, {"error": "not found"}, status=404)
+    if path in ("/manifest.json", "/manifest.webmanifest", "/session/manifest.json", "/session/manifest.webmanifest"):
+        return spa_shell.serve_manifest(handler) or j(handler, {"error": "not found"}, status=404)
+    if path.startswith("/static/dist/"):
+        rel = path[len("/static/dist/"):]
+        return spa_shell.serve_dist_file(handler, rel) or j(handler, {"error": "not found"}, status=404)
+    if spa_shell.is_spa_path(path):
+        if not spa_shell.dist_available():
+            return _serve_shell_unavailable(handler, RuntimeError("static/dist/index.html is missing; run `npm --prefix frontend run build`"))
+        extra = {"X-Robots-Tag": "noindex, nofollow"} if path == "/share" or path.startswith("/share/") else None
+        return spa_shell.serve_shell(handler, path, lang=_shell_language() or "en", extra_headers=extra)
+    return None
+
+
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
     proxy_result = _handle_extension_sidecar_proxy(handler, parsed, "GET")
     if proxy_result is not False:
         return proxy_result
+
+    spa_result = _handle_spa_get(handler, parsed)
+    if spa_result is not None:
+        return spa_result
 
     if parsed.path.startswith("/session/static/"):
         # Strip the leading "/session" so _serve_static() sees a path that
