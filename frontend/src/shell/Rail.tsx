@@ -36,7 +36,7 @@ export function Rail() {
   const settingsItem = visible.find((i) => i.id === 'settings')
   const mainItems = visible.filter((i) => i.id !== 'settings')
   return (
-    <nav className="rail hidden min-[641px]:flex w-16 shrink-0 flex-col items-center gap-0.5 py-2 px-0 bg-(--rail-bg) [backdrop-filter:var(--chrome-backdrop)] border-0" aria-label="Primary navigation">
+    <nav className="rail hidden min-[641px]:flex w-16 shrink-0 flex-col items-center gap-0.5 py-2 px-0 bg-(--rail-bg) border-r border-border [backdrop-filter:var(--chrome-backdrop)] border-0" aria-label="Primary navigation">
       <button type="button" className="rail-brand flex w-[52px] h-11 items-center justify-center mb-1.5 border-0 bg-transparent rounded-(--r-md) cursor-pointer transition-[background] duration-(--dur) ease-(--ease) hover:bg-hover" aria-label={m.new_conversation()} onClick={() => { void newChat() }}>
         <Brandmark className="brandmark rail-brandmark" />
       </button>

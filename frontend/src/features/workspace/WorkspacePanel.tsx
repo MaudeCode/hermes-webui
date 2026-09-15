@@ -59,7 +59,7 @@ export function WorkspacePanel({ workspace, sessionId, onClose }: { workspace: s
   const isMarkdown = !!file && /\.(md|markdown)$/i.test(file)
   const text = draft ?? content.data?.content ?? ''
   return (
-    <aside ref={panel} style={{ width }} className="rightpanel flex w-[300px] shrink-0 flex-col border-l border-border bg-sidebar max-[768px]:absolute max-[768px]:inset-y-0 max-[768px]:right-0 max-[768px]:z-[150] max-[768px]:w-[min(100vw,360px)] max-[768px]:shadow-md" aria-label={m.ws_panel_title()} data-panel="workspace">
+    <aside ref={panel} style={{ width }} className="rightpanel flex w-[300px] shrink-0 flex-col p-(--island-gap) max-[768px]:p-0 max-[768px]:bg-(--sidebar-bg) max-[768px]:absolute max-[768px]:inset-y-0 max-[768px]:right-0 max-[768px]:z-[150] max-[768px]:w-[min(100vw,360px)] max-[768px]:shadow-md" aria-label={m.ws_panel_title()} data-panel="workspace">
       <div className="resize-handle absolute top-0 bottom-0 w-[5px] cursor-col-resize z-10 transition-[background] duration-150 hover:bg-accent" id="rightpanelResize" role="separator" aria-orientation="vertical" aria-label={m.ws_panel_title()} onPointerDown={startResize} />
       <div className="flex min-h-12 items-center justify-between gap-2 border-b border-border px-3 py-2">
         <div className="min-w-0">

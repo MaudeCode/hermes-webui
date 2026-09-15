@@ -17,7 +17,7 @@
  * `virtual:hermes-theme.css`; `tailwind.css` maps the same names into utilities.
  */
 
-export const TOKEN_NAMES = ['--bg', '--sidebar', '--border', '--border2', '--text', '--muted', '--accent', '--blue', '--gold', '--code-bg', '--surface', '--topbar-bg', '--main-bg', '--focus-ring', '--focus-glow', '--input-bg', '--hover-bg', '--strong', '--em', '--code-text', '--code-inline-bg', '--pre-text', '--accent-hover', '--accent-bg', '--accent-bg-strong', '--accent-text', '--error', '--success', '--warning', '--info', '--radius-sm', '--radius-md', '--radius-card', '--radius-lg', '--radius-pill', '--space-1', '--space-2', '--space-3', '--space-4', '--font-size-xs', '--font-size-sm', '--font-size-md', '--message-body-font-size', '--message-body-line-height', '--message-code-font-size', '--message-pre-code-font-size', '--message-table-font-size', '--file-tree-toggle-width', '--font-ui', '--font-conversation', '--font-mono', '--surface-subtle', '--surface-subtle-hover', '--border-subtle', '--border-muted', '--app-titlebar-safe-top', '--skeleton-base', '--skeleton-sheen', '--msg-rail', '--msg-max', '--chat-col-inset', '--user-bubble-bg', '--user-bubble-border', '--user-bubble-text', '--user-bubble-placeholder', '--user-selection-bg', '--user-selection-text', '--ease', '--dur', '--shadow-sm', '--shadow-md', '--r-sm', '--r-md', '--r-lg', '--canvas', '--island-ring', '--island-radius', '--island-gap', '--accent-fg', '--link-color', '--link-hover-glow', '--purple', '--amber', '--amber-strong', '--danger', '--panel-head-primary-fg', '--overlay-faint', '--overlay', '--overlay-strong', '--overlay-max', '--overlay-neutral', '--ink-overlay', '--scrim', '--dialog-bg', '--source-telegram', '--source-discord', '--source-slack', '--source-claude-code', '--scrollbar-thumb', '--scrollbar-thumb-hover', '--selection-bg', '--selection-fg', '--root-font-size', '--root-line-height', '--body-weight', '--body-tracking', '--text-rendering', '--msg-tracking', '--msg-code-size', '--heading-tracking', '--titlebar-title-tracking', '--composer-font-size', '--composer-line-height', '--composer-tracking', '--composer-scrollbar-width', '--composer-scrollbar-display', '--body-bg', '--rail-bg', '--titlebar-bg', '--titlebar-border', '--sidebar-bg', '--sidebar-border', '--sidebar-border-style', '--sidebar-shadow', '--main-surface', '--pane-bg', '--island-ring-width', '--chrome-backdrop', '--control-radius', '--composer-wrap-bg', '--composer-wrap-border-top', '--composer-bg', '--composer-border-color', '--composer-border-width', '--composer-radius', '--composer-shadow', '--composer-focus-border', '--composer-focus-shadow', '--chip-bg', '--chip-border', '--chip-fg', '--chip-hover-bg', '--chip-hover-border', '--chip-hover-fg', '--ws-chip-hover-bg', '--ws-chip-hover-border', '--ws-chip-hover-fg', '--send-bg', '--send-fg', '--send-shadow', '--send-weight', '--send-hover-bg', '--send-hover-shadow', '--send-disabled-bg', '--send-disabled-fg', '--send-disabled-opacity', '--primary-bg', '--primary-fg', '--primary-border', '--primary-hover-bg', '--primary-hover-border', '--primary-hover-transform', '--primary-hover-shadow', '--float-btn-bg', '--float-shadow', '--scroll-btn-bg', '--scroll-btn-shadow', '--btn-radius', '--rail-btn-radius', '--nav-tab-radius', '--nav-tab-radius-mobile', '--input-radius', '--chip-radius', '--session-radius', '--icon-btn-hover-bg', '--project-chip-hover-bg', '--file-item-hover-bg', '--project-chip-bg', '--project-chip-border', '--project-chip-active-bg', '--project-chip-active-fg', '--project-chip-active-border', '--project-chip-active-shadow', '--project-chip-active-weight', '--select-border', '--input-focus-border', '--input-focus-shadow', '--search-bg', '--search-border', '--search-focus-bg', '--search-focus-shadow', '--table-border', '--table-head-border', '--pre-bg', '--pre-border', '--msg-role-user-fg', '--assistant-msg-bg', '--user-msg-bg', '--user-msg-border', '--user-msg-rail-width', '--user-msg-rail', '--user-msg-radius', '--user-msg-fg', '--user-msg-padding', '--user-msg-weight', '--user-msg-size', '--user-msg-code-bg', '--tool-running-bg', '--tool-running-border', '--session-font-size', '--session-line-height', '--session-hover-bg', '--session-active-bg', '--session-active-fg', '--session-active-border', '--session-active-rail-width', '--session-active-rail-color', '--session-active-shadow', '--session-active-weight', '--session-active-title-fg', '--session-active-meta-fg', '--session-bar-color', '--session-bar-radius', '--session-bar-inset-y', '--session-bar-left', '--session-bar-opacity', '--session-pinned-fg', '--session-trigger-active-fg', '--pick-active-bg', '--pick-active-border', '--pick-active-shadow', '--pick-active-fg', '--pick-active-weight', '--settings-section-bg', '--menu-active-bg', '--menu-active-fg', '--menu-active-shadow', '--menu-active-weight', '--nav-active-bg', '--nav-active-fg', '--nav-active-shadow', '--nav-active-weight', '--nav-active-icon-fg', '--nav-hover-bg', '--nav-tooltip-fg', '--rail-active-bg', '--rail-active-fg', '--rail-active-shadow', '--rail-active-weight', '--rail-active-icon-fg', '--panel-btn-hover-bg', '--panel-btn-hover-fg'] as const
+export const TOKEN_NAMES = ['--bg', '--sidebar', '--border', '--border2', '--text', '--muted', '--accent', '--blue', '--gold', '--code-bg', '--surface', '--topbar-bg', '--main-bg', '--focus-ring', '--focus-glow', '--input-bg', '--hover-bg', '--strong', '--em', '--code-text', '--code-inline-bg', '--pre-text', '--accent-hover', '--accent-bg', '--accent-bg-strong', '--accent-text', '--error', '--success', '--warning', '--info', '--radius-sm', '--radius-md', '--radius-card', '--radius-lg', '--radius-pill', '--space-1', '--space-2', '--space-3', '--space-4', '--font-size-xs', '--font-size-sm', '--font-size-md', '--message-body-font-size', '--message-body-line-height', '--message-code-font-size', '--message-pre-code-font-size', '--message-table-font-size', '--file-tree-toggle-width', '--font-ui', '--font-conversation', '--font-mono', '--surface-subtle', '--surface-subtle-hover', '--border-subtle', '--border-muted', '--app-titlebar-safe-top', '--skeleton-base', '--skeleton-sheen', '--msg-rail', '--msg-max', '--chat-col-inset', '--user-bubble-bg', '--user-bubble-border', '--user-bubble-text', '--user-bubble-placeholder', '--user-selection-bg', '--user-selection-text', '--ease', '--dur', '--shadow-sm', '--shadow-md', '--r-sm', '--r-md', '--r-lg', '--canvas', '--island-ring', '--island-radius', '--island-gap', '--island-shadow', '--accent-fg', '--link-color', '--link-hover-glow', '--purple', '--amber', '--amber-strong', '--danger', '--panel-head-primary-fg', '--overlay-faint', '--overlay', '--overlay-strong', '--overlay-max', '--overlay-neutral', '--ink-overlay', '--scrim', '--dialog-bg', '--source-telegram', '--source-discord', '--source-slack', '--source-claude-code', '--scrollbar-thumb', '--scrollbar-thumb-hover', '--selection-bg', '--selection-fg', '--root-font-size', '--root-line-height', '--body-weight', '--body-tracking', '--text-rendering', '--msg-tracking', '--msg-code-size', '--heading-tracking', '--titlebar-title-tracking', '--composer-font-size', '--composer-line-height', '--composer-tracking', '--composer-scrollbar-width', '--composer-scrollbar-display', '--body-bg', '--rail-bg', '--titlebar-bg', '--titlebar-border', '--sidebar-bg', '--sidebar-border', '--sidebar-border-style', '--sidebar-shadow', '--main-surface', '--pane-bg', '--island-ring-width', '--chrome-backdrop', '--control-radius', '--composer-wrap-bg', '--composer-wrap-border-top', '--composer-bg', '--composer-border-color', '--composer-border-width', '--composer-radius', '--composer-shadow', '--composer-focus-border', '--composer-focus-shadow', '--chip-bg', '--chip-border', '--chip-fg', '--chip-hover-bg', '--chip-hover-border', '--chip-hover-fg', '--ws-chip-hover-bg', '--ws-chip-hover-border', '--ws-chip-hover-fg', '--send-bg', '--send-fg', '--send-shadow', '--send-weight', '--send-hover-bg', '--send-hover-shadow', '--send-disabled-bg', '--send-disabled-fg', '--send-disabled-opacity', '--primary-bg', '--primary-fg', '--primary-border', '--primary-hover-bg', '--primary-hover-border', '--primary-hover-transform', '--primary-hover-shadow', '--float-btn-bg', '--float-shadow', '--scroll-btn-bg', '--scroll-btn-shadow', '--btn-radius', '--rail-btn-radius', '--nav-tab-radius', '--nav-tab-radius-mobile', '--input-radius', '--chip-radius', '--session-radius', '--icon-btn-hover-bg', '--project-chip-hover-bg', '--file-item-hover-bg', '--project-chip-bg', '--project-chip-border', '--project-chip-active-bg', '--project-chip-active-fg', '--project-chip-active-border', '--project-chip-active-shadow', '--project-chip-active-weight', '--select-border', '--input-focus-border', '--input-focus-shadow', '--search-bg', '--search-border', '--search-focus-bg', '--search-focus-shadow', '--table-border', '--table-head-border', '--pre-bg', '--pre-border', '--msg-role-user-fg', '--assistant-msg-bg', '--user-msg-bg', '--user-msg-border', '--user-msg-rail-width', '--user-msg-rail', '--user-msg-radius', '--user-msg-fg', '--user-msg-padding', '--user-msg-weight', '--user-msg-size', '--user-msg-code-bg', '--tool-running-bg', '--tool-running-border', '--session-font-size', '--session-line-height', '--session-hover-bg', '--session-active-bg', '--session-active-fg', '--session-active-border', '--session-active-rail-width', '--session-active-rail-color', '--session-active-shadow', '--session-active-weight', '--session-active-title-fg', '--session-active-meta-fg', '--session-bar-color', '--session-bar-radius', '--session-bar-inset-y', '--session-bar-left', '--session-bar-opacity', '--session-pinned-fg', '--session-trigger-active-fg', '--pick-active-bg', '--pick-active-border', '--pick-active-shadow', '--pick-active-fg', '--pick-active-weight', '--settings-section-bg', '--menu-active-bg', '--menu-active-fg', '--menu-active-shadow', '--menu-active-weight', '--nav-active-bg', '--nav-active-fg', '--nav-active-shadow', '--nav-active-weight', '--nav-active-icon-fg', '--nav-hover-bg', '--nav-tooltip-fg', '--rail-active-bg', '--rail-active-fg', '--rail-active-shadow', '--rail-active-weight', '--rail-active-icon-fg', '--panel-btn-hover-bg', '--panel-btn-hover-fg'] as const
 export type TokenName = (typeof TOKEN_NAMES)[number]
 export type TokenMap = Partial<Record<TokenName, string>>
 
@@ -114,10 +114,12 @@ export const BASE: { tokens: Record<TokenName, string>; dark: TokenMap } = {
     '--r-sm': '6px',
     '--r-md': '8px',
     '--r-lg': '12px',
-    '--canvas': 'var(--bg)',
+    // Inset shell (shadcn sidebar variant="inset"): rail + sidebar sit on the frame tone; main is a rounded, shadowed card with no ring.
+    '--canvas': 'var(--sidebar)',
     '--island-ring': 'var(--border)',
     '--island-radius': '12px',
-    '--island-gap': '10px',
+    '--island-gap': '8px',
+    '--island-shadow': '0 1px 3px rgba(0,0,0,.1),0 1px 2px -1px rgba(0,0,0,.1)',
     '--accent-fg': '#fff',
     '--link-color': 'var(--blue)',
     '--link-hover-glow': 'none',
@@ -166,7 +168,7 @@ export const BASE: { tokens: Record<TokenName, string>; dark: TokenMap } = {
     '--sidebar-shadow': 'none',
     '--main-surface': 'var(--bg)',
     '--pane-bg': 'transparent',
-    '--island-ring-width': '1px',
+    '--island-ring-width': '0',
     '--chrome-backdrop': 'none',
     '--control-radius': '6px',
     '--composer-wrap-bg': 'var(--sidebar)',
@@ -294,6 +296,7 @@ export const BASE: { tokens: Record<TokenName, string>; dark: TokenMap } = {
     '--panel-btn-hover-fg': 'var(--accent-text)',
   },
   dark: {
+    '--canvas': 'var(--surface)',
     '--user-msg-border': '0',
     '--user-msg-bg': 'rgba(255,255,255,.07)',
     '--bg': '#0D0D1A',
@@ -425,6 +428,7 @@ export const SKINS = [
       '--body-tracking': '0',
       '--text-rendering': 'optimizeLegibility',
       '--body-bg': 'var(--bg)',
+      '--canvas': 'var(--sidebar)',
       '--rail-bg': 'var(--sidebar)',
       '--titlebar-bg': 'var(--sidebar)',
       '--sidebar-border': 'var(--border)',
@@ -571,6 +575,7 @@ export const SKINS = [
       '--body-tracking': '0',
       '--text-rendering': 'optimizeLegibility',
       '--body-bg': 'var(--bg)',
+      '--canvas': 'var(--sidebar)',
       '--rail-bg': 'var(--sidebar)',
       '--titlebar-bg': 'var(--sidebar)',
       '--sidebar-border': 'var(--border)',
@@ -694,7 +699,6 @@ export const SKINS = [
       '--user-bubble-border': '#EDEDF0',
       '--user-bubble-text': '#111114',
       '--user-bubble-placeholder': '#6B6B74',
-      '--canvas': '#EFEFF1',
       '--island-ring': 'rgba(0,0,0,.07)',
     },
     dark: {
@@ -722,7 +726,6 @@ export const SKINS = [
       '--user-bubble-border': '#202023',
       '--user-bubble-text': '#F4F4F5',
       '--user-bubble-placeholder': '#8E8E93',
-      '--canvas': '#09090B',
       '--island-ring': 'rgba(255,255,255,.06)',
     },
   },
@@ -815,6 +818,7 @@ export const SKINS = [
       '--body-tracking': '0',
       '--text-rendering': 'optimizeLegibility',
       '--body-bg': 'var(--bg)',
+      '--canvas': 'var(--sidebar)',
       '--rail-bg': 'var(--sidebar)',
       '--titlebar-bg': 'var(--sidebar)',
       '--sidebar-border': 'var(--border)',
@@ -961,6 +965,7 @@ export const SKINS = [
       '--body-tracking': '0',
       '--text-rendering': 'optimizeLegibility',
       '--body-bg': 'var(--bg)',
+      '--canvas': 'var(--sidebar)',
       '--rail-bg': 'var(--sidebar)',
       '--titlebar-bg': 'var(--sidebar)',
       '--sidebar-border': 'var(--border)',
@@ -1511,6 +1516,7 @@ export const SKINS = [
       '--user-bubble-text': '#111111',
       '--accent-fg': '#ffffff',
       '--body-bg': 'var(--bg)',
+      '--canvas': 'var(--sidebar)',
       '--body-tracking': '-0.011em',
       '--rail-bg': 'var(--sidebar)',
       '--titlebar-bg': 'var(--sidebar)',
