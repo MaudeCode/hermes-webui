@@ -95,6 +95,23 @@ Proposed RFCs are review guardrails, not implementation authorization. Do not
 implement RFC fragments unless the task or tracking issue explicitly asks for
 that slice.
 
+## Frontend application contracts
+
+- [`docs/architecture/frontend-migration.md`](architecture/frontend-migration.md):
+  the browser application architecture after HWEB-100: TanStack Start SPA
+  shell, Router-owned URLs, Query-owned server state, the reducer-owned chat
+  stream, Zod contracts as the backend migration seam, Paraglide
+  localisation, Streamdown rendering, PWA build, CSP, and the build/serve
+  pipeline for `static/dist/`. Start here for any change under `frontend/`.
+- [`docs/architecture/frontend-parity-matrix.md`](architecture/frontend-parity-matrix.md):
+  the checked-in inventory of user-visible capabilities, their owners,
+  routes, verification, and status. A capability may not be dropped without a
+  row and an approval reference.
+- [`docs/architecture/extension-protocol-v1.md`](architecture/extension-protocol-v1.md)
+  and [`docs/architecture/extension-migration-guide.md`](architecture/extension-migration-guide.md):
+  the unified sandboxed extension protocol and the migration path from the
+  legacy injection and dashboard-plugin interfaces.
+
 ## UI, UX, and theme contracts
 
 - [`DESIGN.md`](../DESIGN.md): design tokens and the current calm-console
