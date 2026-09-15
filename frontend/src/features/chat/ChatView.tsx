@@ -22,6 +22,7 @@ import { Composer } from '../composer/Composer'
 import { ApprovalCard } from './ApprovalCard'
 import { ClarifyCard } from './ClarifyCard'
 import { TerminalPanel } from '../terminal/TerminalPanel'
+import { createPortal } from 'react-dom'
 import { WorkspacePanel } from '../workspace/WorkspacePanel'
 import { workspaceLabel } from '../workspaces/label'
 import { RuntimeNoticeStack } from '../notices/RuntimeNoticeStack'
@@ -40,6 +41,10 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
   const settings = useSettingsQuery()
   const { query, session, rows, live, truncated, loadOlder, loadingOlder, refresh } = useTranscript(sessionId)
   const [terminalOpen, setTerminalOpen] = useState(false)
+  // The workspace panel is a sibling of <main> in the layout row (legacy .rightpanel), so it renders through the shell's slot.
+  const [rightSlot, setRightSlot] = useState<HTMLElement | null>(null)
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time DOM lookup after the shell has committed its slot
+  useEffect(() => { setRightSlot(document.getElementById('rightpanelSlot')) }, [])
   const [workspaceOpen, setWorkspaceOpen] = useState(() => readPersisted('hermes-webui-workspace-panel') === 'open')
   const [queued, setQueued] = useState<string[]>([])
   const [reasoning, setReasoning] = useState<string | null>(null)
@@ -186,7 +191,7 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
             mode={mode}
             renderUserMarkdown={!!settings.data?.render_user_markdown}
             autoFollow={settings.data?.auto_scroll_follow !== false}
-            workspace={workspace}
+            sessionId={sessionId ?? undefined}
             actions={{ onEdit: (row, text) => { void onEdit(row, text) }, onBranch: (row) => { void onBranch(row) }, onRegenerate: () => { void onRegenerate() } }}
             tts={!!(settings.data as Record<string, unknown> | undefined)?.tts_enabled}
             truncated={truncated}
@@ -222,7 +227,7 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
         />
         <span className="sr-only" aria-live="polite" id="a11yAnnouncer">{live?.status === 'done' ? m.done() : ''}</span>
       </div>
-      {workspaceOpen && workspace && sessionId && <WorkspacePanel key={workspace} workspace={workspace} sessionId={sessionId} onClose={() => setWorkspaceOpen(false)} />}
+      {workspaceOpen && workspace && sessionId && rightSlot && createPortal(<WorkspacePanel key={workspace} workspace={workspace} sessionId={sessionId} onClose={() => setWorkspaceOpen(false)} />, rightSlot)}
       {!workspaceOpen && sessionId && workspace && (
         <button type="button" className="workspace-panel-edge-toggle has-tooltip has-tooltip--left" id="btnWorkspacePanelEdgeToggle" data-tooltip={m.composer_files_toggle()} aria-label={m.composer_files_toggle()} onClick={() => setWorkspaceOpen(true)}>
           <ChevronLeft size={14} aria-hidden="true" />

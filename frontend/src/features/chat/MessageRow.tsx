@@ -22,14 +22,14 @@ export interface RowActions {
   onBranch?: (row: VisibleMessage) => void
 }
 
-function AttachmentList({ message, workspace }: { message: Message; workspace: string | undefined }) {
+function AttachmentList({ message, sessionId }: { message: Message; sessionId: string | undefined }) {
   const items = message.attachments ?? []
   if (items.length === 0) return null
   return (
     <ul className="mt-2 flex flex-wrap gap-2" aria-label={m.attachments_label()}>
       {items.map((a, i) => {
         const name = a.filename ?? a.name ?? a.path?.split('/').pop() ?? `file-${i + 1}`
-        const href = a.path && workspace ? appUrl(rawFileUrl(workspace, a.path)).href : undefined
+        const href = a.path && sessionId ? appUrl(rawFileUrl(sessionId, a.path)).href : undefined
         return (
           <li key={`${name}-${i}`} className="attachment-chip rounded-md border border-border bg-surface px-2 py-1 text-[12px] text-text">
             {a.is_image && href ? <img src={href} alt={name} className="max-h-48 rounded" loading="lazy" /> : href ? <a href={href} target="_blank" rel="noopener noreferrer" className="underline">{name}</a> : <span>{name}</span>}
@@ -48,11 +48,11 @@ export function toolCardsFor(message: Message, toolResults: Record<string, Messa
   })
 }
 
-export const UserMessageRow = memo(function UserMessageRow({ row, renderMarkdown, workspace, actions }: { row: VisibleMessage; renderMarkdown: boolean; workspace: string | undefined; actions: RowActions }) {
+export const UserMessageRow = memo(function UserMessageRow({ row, renderMarkdown, sessionId, actions }: { row: VisibleMessage; renderMarkdown: boolean; sessionId: string | undefined; actions: RowActions }) {
   const text = messageText(row.message.content)
   return (
     <div className="msg-row" data-role="user" data-msg-idx={row.index} data-message-key={row.key}>
-      <AttachmentList message={row.message} workspace={workspace} />
+      <AttachmentList message={row.message} sessionId={sessionId} />
       <div className="msg-body">{renderMarkdown ? <Markdown text={text} /> : <div className="whitespace-pre-wrap">{text}</div>}</div>
       <div className="msg-foot">
         {row.message.timestamp ? <span className="msg-time">{formatDate(row.message.timestamp)}</span> : null}
@@ -82,7 +82,7 @@ export const AssistantMessageRow = memo(function AssistantMessageRow({ row, name
           </Worklog>
         ) : reasoning ? <ReasoningBlock text={reasoning} /> : null}
         {split.content.trim() && <div className="msg-body"><Markdown text={split.content} /></div>}
-        <AttachmentList message={row.message} workspace={undefined} />
+        <AttachmentList message={row.message} sessionId={undefined} />
       </div>
       <div className={cn('msg-foot', isLast && 'msg-foot-latest')}>
         {row.message.timestamp ? <span className="msg-time">{formatDate(row.message.timestamp)}</span> : null}

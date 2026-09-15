@@ -29,10 +29,10 @@ export function WorkspacePanel({ workspace, sessionId, onClose }: { workspace: s
   const [file, setFile] = useState<string | null>(null)
   const [draft, setDraft] = useState<string | null>(null)
   useEffect(() => { writePersisted('hermes-webui-workspace-panel', 'open'); document.documentElement.dataset.workspacePanel = 'open'; return () => { writePersisted('hermes-webui-workspace-panel', 'closed'); document.documentElement.dataset.workspacePanel = 'closed' } }, [])
-  const listing = useQuery({ queryKey: keys.files.list(workspace, dir, showHidden), queryFn: () => api.listDir(workspace, dir, showHidden), staleTime: 10_000 })
+  const listing = useQuery({ queryKey: keys.files.list(workspace, dir, showHidden), queryFn: () => api.listDir(sessionId, dir, showHidden), staleTime: 10_000 })
   const git = useQuery({ queryKey: keys.files.git(sessionId), queryFn: () => api.fetchGitInfo(sessionId), staleTime: 30_000, retry: false })
-  const content = useQuery({ queryKey: keys.files.content(workspace, file ?? ''), queryFn: () => api.readFile(workspace, file ?? ''), enabled: !!file, staleTime: 5_000 })
-  const save = useMutation({ mutationFn: (text: string) => api.saveFile(workspace, file ?? '', text), onSuccess: () => { showToast(m.ws_panel_saved()); setDraft(null); void qc.invalidateQueries({ queryKey: keys.files.content(workspace, file ?? '') }) }, onError: (e) => showToast(e instanceof Error ? e.message : String(e), 4000, 'error') })
+  const content = useQuery({ queryKey: keys.files.content(workspace, file ?? ''), queryFn: () => api.readFile(sessionId, file ?? ''), enabled: !!file, staleTime: 5_000 })
+  const save = useMutation({ mutationFn: (text: string) => api.saveFile(sessionId, file ?? '', text), onSuccess: () => { showToast(m.ws_panel_saved()); setDraft(null); void qc.invalidateQueries({ queryKey: keys.files.content(workspace, file ?? '') }) }, onError: (e) => showToast(e instanceof Error ? e.message : String(e), 4000, 'error') })
   const entries = (listing.data?.entries ?? listing.data?.items ?? []).slice().sort((a, b) => Number(!!b.is_dir) - Number(!!a.is_dir) || a.name.localeCompare(b.name))
   const g = git.data?.git
   const isMarkdown = !!file && /\.(md|markdown)$/i.test(file)
@@ -55,7 +55,7 @@ export function WorkspacePanel({ workspace, sessionId, onClose }: { workspace: s
           <div className="flex items-center gap-1 border-b border-border-subtle px-2 py-1 text-xs">
             <Button size="sm" variant="ghost" onClick={() => { setFile(null); setDraft(null) }}><ArrowUp size={12} aria-hidden="true" /> {m.back()}</Button>
             <span className="min-w-0 flex-1 truncate font-mono text-muted">{file}</span>
-            <a className="text-muted hover:text-text" href={appUrl(api.rawFileUrl(workspace, file)).href} download aria-label={m.download_folder()}><Download size={14} aria-hidden="true" /></a>
+            <a className="text-muted hover:text-text" href={appUrl(api.rawFileUrl(sessionId, file)).href} download aria-label={m.download_folder()}><Download size={14} aria-hidden="true" /></a>
           </div>
           {content.isPending && <LoadingState />}
           {content.isError && <ErrorState error={content.error} onRetry={() => { void content.refetch() }} />}
@@ -81,7 +81,7 @@ export function WorkspacePanel({ workspace, sessionId, onClose }: { workspace: s
           <div className="flex items-center gap-1 border-b border-border-subtle px-2 py-1 text-xs">
             <IconButton label={m.ws_panel_up()} className="h-7 w-7" disabled={dir === '.'} onClick={() => setDir(parentOf(dir))}><ArrowUp size={14} aria-hidden="true" /></IconButton>
             <span className="min-w-0 flex-1 truncate font-mono text-muted">{dir}</span>
-            <a className="text-muted hover:text-text" href={appUrl(api.folderDownloadUrl(workspace, dir)).href} aria-label={m.ws_panel_download()}><Download size={14} aria-hidden="true" /></a>
+            <a className="text-muted hover:text-text" href={appUrl(api.folderDownloadUrl(sessionId, dir)).href} aria-label={m.ws_panel_download()}><Download size={14} aria-hidden="true" /></a>
           </div>
           <div className="file-tree min-h-0 flex-1 overflow-y-auto p-1" role="tree" aria-label={m.ws_panel_files()}>
             {listing.isPending && <LoadingState />}

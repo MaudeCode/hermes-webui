@@ -33,6 +33,7 @@ export function AppShell({ sidebar, children, title, subtitle, hub, showing }: {
         <main className={cn('main flex flex-1 flex-col overflow-hidden min-w-0 min-h-0 bg-(--main-surface) border-(length:--island-ring-width) border-(--island-ring) rounded-(--island-radius) min-[901px]:flex-[1_1_420px] min-[901px]:min-w-[420px] max-[769px]:rounded-none max-[769px]:border-0', showing && `showing-${showing}`)} id="main">
           {children}
         </main>
+        <div id="rightpanelSlot" className="contents" />
       </div>
       <Tabbar />
       <Toaster />

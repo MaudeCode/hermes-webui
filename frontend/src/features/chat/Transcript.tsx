@@ -20,7 +20,7 @@ export interface TranscriptProps {
   mode: ActivityMode
   renderUserMarkdown: boolean
   autoFollow: boolean
-  workspace: string | undefined
+  sessionId: string | undefined
   actions: RowActions
   tts: boolean
   truncated: boolean
@@ -37,7 +37,7 @@ export interface TranscriptProps {
  * virtualized with TanStack Virtual.
  */
 export function Transcript(props: TranscriptProps) {
-  const { rows, live, assistantName, mode, renderUserMarkdown, autoFollow, workspace, actions, tts, truncated, onLoadOlder, loadingOlder, emptyState, showJumpButtons } = props
+  const { rows, live, assistantName, mode, renderUserMarkdown, autoFollow, sessionId, actions, tts, truncated, onLoadOlder, loadingOlder, emptyState, showJumpButtons } = props
   const scrollRef = useRef<HTMLDivElement>(null)
   const [pinned, setPinned] = useState(true)
   const [atTop, setAtTop] = useState(true)
@@ -85,7 +85,7 @@ export function Transcript(props: TranscriptProps) {
 
   const renderRow = (row: VisibleMessage, i: number) => (
     row.message.role === 'user'
-      ? <UserMessageRow key={row.key} row={row} renderMarkdown={renderUserMarkdown} workspace={workspace} actions={actions} />
+      ? <UserMessageRow key={row.key} row={row} renderMarkdown={renderUserMarkdown} sessionId={sessionId} actions={actions} />
       : <AssistantMessageRow key={row.key} row={row} name={assistantName} mode={mode} actions={actions} tts={tts} isLast={i === lastAssistantIndex && !showLive} />
   )
 
