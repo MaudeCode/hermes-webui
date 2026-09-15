@@ -15,7 +15,6 @@ import { formatDate } from '../../ui/States'
 import { rawFileUrl } from '../../api/endpoints'
 import { appUrl } from '../../lib/appRoot'
 import { speak } from '../voice/tts'
-import { Brandmark } from '../../shell/Brandmark'
 
 export interface RowActions {
   onEdit?: (row: VisibleMessage, text: string) => void
@@ -74,12 +73,14 @@ export const AssistantMessageRow = memo(function AssistantMessageRow({ row, name
   const meta = [typeof run._turnDuration === 'number' && run._turnDuration >= 0.5 ? `${run._turnDuration < 10 ? run._turnDuration.toFixed(1) : Math.round(run._turnDuration)}s` : null, run._usedModel || null].filter(Boolean).join(' · ')
   return (
     <div className="msg-row assistant-turn" data-role="assistant" data-msg-idx={row.index} data-message-key={row.key} data-latest={isLast ? '1' : undefined}>
-      <div className="msg-role assistant"><Brandmark className="brandmark" size={14} /><span className="msg-role-name">{name}</span>{row.message.badge && <span className="msg-badge">{row.message.badge}</span>}</div>
+      <div className="msg-role assistant"><span className="msg-role-name">{name}</span>{row.message.badge && <span className="msg-badge">{row.message.badge}</span>}</div>
       <div className="assistant-turn-blocks">
-        <Worklog mode={mode} calls={calls} live={false} hasReasoning={!!reasoning}>
-          {reasoning && <ReasoningBlock text={reasoning} />}
-          {calls.map((c) => <ToolCard key={c.id} call={c} />)}
-        </Worklog>
+        {calls.length > 0 ? (
+          <Worklog mode={mode} calls={calls} live={false} hasReasoning={!!reasoning}>
+            {reasoning && <ReasoningBlock text={reasoning} />}
+            {calls.map((c) => <ToolCard key={c.id} call={c} />)}
+          </Worklog>
+        ) : reasoning ? <ReasoningBlock text={reasoning} /> : null}
         {split.content.trim() && <div className="msg-body"><Markdown text={split.content} /></div>}
         <AttachmentList message={row.message} workspace={undefined} />
       </div>

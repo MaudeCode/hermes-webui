@@ -48,20 +48,20 @@
 .tool-card-args{margin-bottom:6px}
 .tool-card-args div{font-size:var(--message-code-font-size);line-height:1.6}
 .tool-card-result pre{font-size:var(--message-code-font-size);color:var(--muted);font-family:var(--font-mono);white-space:pre-wrap;word-break:break-word;max-height:240px;overflow-y:auto;margin:0;line-height:1.55;width:100%;max-width:100%;box-sizing:border-box;min-width:0}
-.thinking-card-label{font-weight:600;letter-spacing:.02em}
+.thinking-card-label{font-weight:500;letter-spacing:0}
 .thinking-card-toggle{font-size:10px;display:inline-flex;align-items:center;justify-content:center;transform-origin:center;transition:transform .18s ease;will-change:transform}
 .thinking-card.open .thinking-card-toggle{transform:rotate(90deg)}
 .thinking-card{margin-left:var(--msg-rail);max-width:var(--msg-max)}
 .agent-activity-group .thinking-card{margin-left:0;max-width:none}
-.thinking-card{background:var(--accent-bg);border:1px solid var(--accent-bg-strong);border-radius:8px;padding:0;margin:3px 0 3px var(--msg-rail);transition:border-color .15s, background .15s}
-.thinking-card:hover{border-color:var(--accent-hover);background:var(--accent-bg)}
+.thinking-card{background:transparent;border:0;border-radius:0;padding:0;margin:0 0 6px var(--msg-rail);transition:none}
+.thinking-card:hover{background:transparent}
 .thinking-card-head-row{display:flex;align-items:center}
-.thinking-card-header{display:flex;align-items:center;gap:8px;flex:1;min-width:0;padding:5px 10px;border:0;background:transparent;color:var(--accent-text);font:inherit;font-size:12px;font-weight:600;text-align:left;opacity:.85;cursor:pointer}
+.thinking-card-header{display:inline-flex;align-items:center;gap:6px;flex:0 1 auto;min-width:0;padding:2px 6px 2px 0;border:0;background:transparent;color:var(--muted);font:inherit;font-size:12px;font-weight:500;text-align:left;opacity:.85;cursor:pointer}
 .thinking-card-header:hover{opacity:1}
 .thinking-card-icon{opacity:.7}
 .thinking-card-body{max-height:0;opacity:0;overflow:hidden;padding:0 12px;border-top:1px solid transparent;transition:max-height .22s ease, opacity .18s ease, padding .22s ease, border-top-color .22s ease}
 .thinking-card-body[hidden]{display:none}
-.thinking-card.open .thinking-card-body{max-height:260px;overflow-y:auto;opacity:1;padding:8px 12px;border-top-color:var(--accent-bg-strong)}
+.thinking-card.open .thinking-card-body{max-height:260px;overflow-y:auto;opacity:1;padding:4px 0 4px 12px;border-top:0;border-left:2px solid var(--accent-bg-strong);margin:2px 0 8px}
 .thinking-card-body pre{font-family:var(--font-mono);font-size:11px;line-height:1.6;color:var(--muted);white-space:pre-wrap;word-break:break-word;margin:0}
 .tool-call-group-summary,.tool-worklog-summary{border-radius:var(--r-sm);transition:background var(--dur) var(--ease),color var(--dur) var(--ease)}
 .tool-call-group-summary:hover{background:var(--hover-bg);color:var(--text)}

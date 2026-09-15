@@ -1,7 +1,6 @@
 import { useMemo, type ReactElement } from 'react'
 import { Link } from '@tanstack/react-router'
 import { m } from '../../paraglide/messages.js'
-import { Brandmark } from '../../shell/Brandmark'
 import type { LiveTurn } from '../../stream/reducer'
 import { Markdown } from './render/Markdown'
 import { extractInlineThinking } from './render/text'
@@ -35,7 +34,6 @@ export function LiveTurnView({ turn, name, mode, userVisible }: { turn: LiveTurn
   return (
     <div className="msg-row assistant-turn live-turn" data-role="assistant" data-live="1" data-stream-id={turn.streamId} data-status={turn.status} aria-busy={streaming}>
       <div className="msg-role assistant">
-        <Brandmark className="brandmark" size={14} />
         <span className="msg-role-name">{name}</span>
         {turn.tps !== null && <span className="msg-tps-inline tabular-nums" title="Tokens per second">{turn.tps.toFixed(1)} tok/s</span>}
       </div>
