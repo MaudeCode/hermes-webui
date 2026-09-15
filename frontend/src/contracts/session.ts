@@ -15,9 +15,11 @@ export const AttachmentSchema = z.looseObject({
 })
 export type Attachment = z.infer<typeof AttachmentSchema>
 
+/** Stored transcripts carry the OpenAI shape (`function.name` / `function.arguments` JSON string); live events carry `name` / `args`. */
 export const ToolCallSchema = z.looseObject({
   name: z.string().optional(),
   args: z.unknown().optional(),
+  function: z.looseObject({ name: z.string().optional(), arguments: z.unknown().optional() }).optional(),
   id: z.string().optional(),
   call_id: z.string().optional(),
   tool_call_id: z.string().optional(),
@@ -39,11 +41,14 @@ export const MessageContentSchema = z.union([z.string(), z.array(ContentPartSche
 
 export const MessageRoleSchema = z.enum(['user', 'assistant', 'system', 'tool'])
 
+/** Persisted rows have integer ids; live rows carry string ids. */
+export const MessageIdSchema = z.union([z.string(), z.number()])
+
 export const MessageSchema = z.looseObject({
   role: z.string(),
   content: MessageContentSchema.optional(),
-  id: z.string().optional(),
-  message_id: z.string().optional(),
+  id: MessageIdSchema.optional(),
+  message_id: MessageIdSchema.optional(),
   timestamp: z.number().nullable().optional(),
   attachments: z.array(AttachmentSchema).optional(),
   tool_calls: z.array(ToolCallSchema).optional(),

@@ -229,7 +229,7 @@ function reduceTurn(turn: LiveTurn, action: Extract<StreamAction, { type: 'event
     case 'goal_continue':
       return { ...stamped, goal: event.data }
     case 'server_turn_started':
-      return { ...stamped, turnId: event.data.turn_id ?? stamped.turnId, userMessageId: event.data.user_message_id ?? stamped.userMessageId }
+      return { ...stamped, turnId: event.data.turn_id ?? stamped.turnId, userMessageId: event.data.user_message_id === undefined ? stamped.userMessageId : String(event.data.user_message_id) }
     case 'done': {
       if (terminal) return stamped
       const session = event.data.session

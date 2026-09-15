@@ -21,7 +21,7 @@ export const ChatStartResponseSchema = z.looseObject({
   stream_id: z.string(),
   session_id: SessionIdSchema.optional(),
   turn_id: NullableString.optional(),
-  user_message_id: NullableString.optional(),
+  user_message_id: z.union([z.string(), z.number()]).nullable().optional(),
   pending_started_at: z.number().nullable().optional(),
   title: z.string().optional(),
   effective_model: z.string().optional(),

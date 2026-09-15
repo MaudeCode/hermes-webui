@@ -7,7 +7,7 @@ import { extractInlineThinking, messageText } from './render/text'
 import { ReasoningBlock } from './blocks/ReasoningBlock'
 import { ToolCard, type ToolCardData } from './blocks/ToolCard'
 import { Worklog, type ActivityMode } from './blocks/Worklog'
-import { toolCallId, type VisibleMessage } from './useTranscript'
+import { toolCallId, messageKey, toolCallName, toolCallArgs, type VisibleMessage } from './useTranscript'
 import { IconButton } from '../../ui/Button'
 import { showToast } from '../toast/toast'
 import { cn } from '../../ui/cn'
@@ -42,9 +42,9 @@ function AttachmentList({ message, workspace }: { message: Message; workspace: s
 
 export function toolCardsFor(message: Message, toolResults: Record<string, Message>): ToolCardData[] {
   return (message.tool_calls ?? []).map((tc, i) => {
-    const id = toolCallId(tc, `${message.id ?? message.message_id ?? 'm'}-${i}`)
+    const id = toolCallId(tc, `${messageKey(message) ?? 'm'}-${i}`)
     const result = toolResults[id]
-    return { id, name: tc.name ?? 'tool', args: tc.args, preview: tc.preview ?? null, done: tc.done ?? true, isError: !!tc.is_error, duration: tc.duration ?? null, costUsd: tc.cost_usd ?? null, result: result ? messageText(result.content) : tc.result ?? tc.output ?? null }
+    return { id, name: toolCallName(tc) ?? 'tool', args: toolCallArgs(tc), preview: tc.preview ?? null, done: tc.done ?? true, isError: !!tc.is_error, duration: tc.duration ?? null, costUsd: tc.cost_usd ?? null, result: result ? messageText(result.content) : tc.result ?? tc.output ?? null }
   })
 }
 

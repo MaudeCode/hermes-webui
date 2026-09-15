@@ -53,13 +53,28 @@ export function projectMessages(messages: Message[]): VisibleMessage[] {
       const r = id ? results.get(id) : undefined
       if (id && r) toolResults[id] = r
     }
-    rows.push({ index, message, key: message.message_id ?? message.id ?? `${index}-${message.role}`, toolResults })
+    rows.push({ index, message, key: messageKey(message) ?? `${index}-${message.role}`, toolResults })
   })
   return rows
 }
 
 export function toolCallId(tc: ToolCall, fallback: string): string {
   return tc.id ?? tc.call_id ?? tc.tool_call_id ?? fallback
+}
+
+/** Stable string id of a message (`message_id` wins; persisted rows carry integer `id`s). */
+export function messageKey(message: Message): string | undefined {
+  const raw = message.message_id ?? message.id
+  return raw === undefined || raw === null ? undefined : String(raw)
+}
+
+/** Tool name and arguments, whichever shape the call was stored in. */
+export function toolCallName(tc: ToolCall): string | undefined { return tc.name ?? tc.function?.name }
+export function toolCallArgs(tc: ToolCall): unknown {
+  if (tc.args !== undefined) return tc.args
+  const raw = tc.function?.arguments
+  if (typeof raw !== 'string') return raw
+  try { return JSON.parse(raw) as unknown } catch { return raw }
 }
 
 export function useTranscript(sessionId: string | null) {

@@ -175,7 +175,7 @@ export interface StartTurnInput { sessionId: string; message: string; request: O
 /** Send a turn: POST /api/chat/start, adopt the server turn identity, open the stream. */
 export async function startTurn(input: StartTurnInput) {
   const res = await api.startChat({ session_id: input.sessionId, message: input.message, ...input.request })
-  dispatch({ type: 'start', sessionId: input.sessionId, streamId: res.stream_id, turnId: res.turn_id ?? null, userMessageId: res.user_message_id ?? null, userText: input.message, now: Date.now() })
+  dispatch({ type: 'start', sessionId: input.sessionId, streamId: res.stream_id, turnId: res.turn_id ?? null, userMessageId: res.user_message_id === undefined || res.user_message_id === null ? null : String(res.user_message_id), userText: input.message, now: Date.now() })
   open(input.sessionId, res.stream_id, null)
   invalidateSession(input.sessionId)
   return res

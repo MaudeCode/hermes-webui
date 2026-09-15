@@ -6,7 +6,7 @@ import type { LiveTurn } from '../../stream/reducer'
 import { isTerminal } from '../../stream/reducer'
 import { AssistantMessageRow, UserMessageRow, type RowActions } from './MessageRow'
 import { LiveTurnView } from './LiveTurnView'
-import type { VisibleMessage } from './useTranscript'
+import { messageKey, type VisibleMessage } from './useTranscript'
 import type { ActivityMode } from './blocks/Worklog'
 import { cn } from '../../ui/cn'
 import { Button } from '../../ui/Button'
@@ -42,7 +42,7 @@ export function Transcript(props: TranscriptProps) {
   const [pinned, setPinned] = useState(true)
   const [atTop, setAtTop] = useState(true)
   const lastRowIsUser = rows.length > 0 && rows[rows.length - 1]?.message.role === 'user'
-  const showLiveUser = !!live && !isTerminal(live.status) && live.userText.trim() !== '' && !lastRowIsUser && !rows.some((r) => r.message.role === 'user' && (r.message.message_id ?? r.message.id) === live.userMessageId)
+  const showLiveUser = !!live && !isTerminal(live.status) && live.userText.trim() !== '' && !lastRowIsUser && !rows.some((r) => r.message.role === 'user' && messageKey(r.message) === live.userMessageId)
   const liveUserText = live?.userText ?? ''
   const showLive = !!live && (!isTerminal(live.status) || (live.doneSession === null && live.status !== 'done') || live.status === 'error' || live.status === 'cancelled')
   const lastAssistantIndex = useMemo(() => { for (let i = rows.length - 1; i >= 0; i--) if (rows[i]?.message.role === 'assistant') return i; return -1 }, [rows])

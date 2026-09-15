@@ -25,7 +25,7 @@ const Steer = z.looseObject({ session_id: z.string().optional(), steer_id: z.str
 const StateSaved = z.looseObject({ session_id: z.string().optional(), status: z.string().optional(), kind: z.string().optional(), name: z.string().optional(), reason: z.string().optional(), action: z.string().optional() })
 const TodoState = z.looseObject({ session_id: z.string().optional(), todos: z.array(z.unknown()).optional(), version: z.number().optional(), ts: z.number().optional(), source: z.string().optional(), description: z.string().optional(), pending_count: z.number().optional() })
 const BgTask = z.looseObject({ session_id: z.string().optional(), task_id: z.string().optional(), id: z.string().optional(), title: z.string().optional(), status: z.string().optional(), summary: z.string().optional(), error: z.string().optional() })
-const ServerTurn = z.looseObject({ session_id: z.string().optional(), stream_id: z.string().optional(), turn_id: z.string().optional(), user_message_id: z.string().optional() })
+const ServerTurn = z.looseObject({ session_id: z.string().optional(), stream_id: z.string().optional(), turn_id: z.string().optional(), user_message_id: z.union([z.string(), z.number()]).optional() })
 const Loose = z.looseObject({})
 
 export const CHAT_EVENT_NAMES = [
