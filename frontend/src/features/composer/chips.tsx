@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { ChevronDown, Cpu, Brain, Wrench, FolderOpen } from 'lucide-react'
 import { m } from '../../paraglide/messages.js'
+import { workspaceLabel } from '../workspaces/label'
 import { useModelsQuery, useWorkspacesQuery } from '../../app/queries'
 import { Menu, MenuGroup, MenuGroupLabel, MenuItem, MenuRadioGroup, MenuRadioItem, MenuSeparator } from '../../ui/Menu'
 import { cn } from '../../ui/cn'
@@ -80,7 +81,7 @@ export function ToolsetsChip({ value, onChange }: { value: string[] | null; onCh
 export function WorkspaceChip({ value, onChange }: { value: string | undefined; onChange: (path: string) => void }) {
   const ws = useWorkspacesQuery()
   const list = ws.data?.workspaces ?? []
-  const label = list.find((w) => w.path === value)?.name ?? value?.split('/').filter(Boolean).pop() ?? '—'
+  const label = workspaceLabel(list, value) || '—'
   return (
     <Menu label={m.composer_control_workspace()} side="top" className="min-w-64" trigger={<Chip icon={<FolderOpen size={14} aria-hidden="true" />} label={label} title={m.composer_control_workspace()} className="composer-workspace-chip" disabled={list.length === 0} />}>
       <MenuRadioGroup value={value ?? ''} onValueChange={(v: string) => onChange(v)}>

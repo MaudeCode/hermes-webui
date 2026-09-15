@@ -11,7 +11,7 @@ import { ChevronLeft } from 'lucide-react'
 import * as api from '../../api/endpoints'
 import { keys } from '../../api/queryKeys'
 import { useBootstrap } from '../../app/bootstrap'
-import { useSettingsQuery } from '../../app/queries'
+import { useSettingsQuery, useWorkspacesQuery } from '../../app/queries'
 import type { Session } from '../../contracts'
 import { configureStream, cancelTurn, startTurn } from '../../stream/connection'
 import { dispatch } from '../../stream/store'
@@ -23,6 +23,7 @@ import { ApprovalCard } from './ApprovalCard'
 import { ClarifyCard } from './ClarifyCard'
 import { TerminalPanel } from '../terminal/TerminalPanel'
 import { WorkspacePanel } from '../workspace/WorkspacePanel'
+import { workspaceLabel } from '../workspaces/label'
 import { RuntimeNoticeStack } from '../notices/RuntimeNoticeStack'
 import { showToast } from '../toast/toast'
 import { isApiError } from '../../contracts/common'
@@ -143,6 +144,8 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
   const assistantName = bootstrap.profile && !bootstrap.profile.is_default ? bootstrap.profile.name.charAt(0).toUpperCase() + bootstrap.profile.name.slice(1) : bootstrap.bot_name
   const title = session?.title ?? ''
   const workspace = session?.workspace ?? settings.data?.default_workspace
+  const workspaces = useWorkspacesQuery()
+  const wsLabel = workspaceLabel(workspaces.data?.workspaces, workspace)
   const meta = useMemo(() => [session?.model, session?.message_count !== undefined ? m.session_meta_messages({ n: session.message_count }) : null, session?.updated_at ? formatDate(session.updated_at) : null].filter(Boolean).join(' · '), [session])
 
   const notFound = query.isError && isApiError(query.error) && query.error.status === 404
@@ -150,10 +153,9 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
 
   const emptyState = (
     <div className="empty-state" id="emptyState">
-      <h2 className="empty-hero-title ready" id="emptyHeroTitle">{workspace ? m.empty_hero_title_workspace({ a0: workspace.split('/').filter(Boolean).pop() ?? workspace }) : m.empty_hero_title()}</h2>
+      <h2 className="empty-hero-title ready" id="emptyHeroTitle">{wsLabel ? m.empty_hero_title_workspace({ a0: wsLabel }) : m.empty_hero_title()}</h2>
     </div>
   )
-  const wsLabel = workspace ? (workspace.split('/').filter(Boolean).pop() ?? workspace) : ''
   const openChip = (id: string) => { const el = document.getElementById(id); if (el instanceof HTMLElement) el.click() }
 
   return (

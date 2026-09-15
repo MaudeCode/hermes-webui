@@ -137,6 +137,7 @@ export const AuxiliaryModelsSchema = z.looseObject({
 
 // ── Workspaces and files ──────────────────────────────────────────────────────
 export const WorkspaceSchema = z.looseObject({ name: z.string().optional(), path: z.string() })
+export type Workspace = z.infer<typeof WorkspaceSchema>
 export const WorkspacesSchema = z.looseObject({ workspaces: z.array(WorkspaceSchema), last: NullableString.optional(), terminal_remote_backend: z.boolean().optional() })
 export type Workspaces = z.infer<typeof WorkspacesSchema>
 
