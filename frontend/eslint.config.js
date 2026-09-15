@@ -35,6 +35,11 @@ export default tseslint.config(
     },
   },
   {
+    // TanStack Router's redirect()/notFound() are thrown control-flow objects by design.
+    files: ['src/routes/**', 'src/features/**/*.tsx'],
+    rules: { '@typescript-eslint/only-throw-error': 'off' },
+  },
+  {
     files: NETWORK_ALLOWED,
     rules: { 'no-restricted-globals': 'off', 'no-restricted-properties': 'off' },
   },

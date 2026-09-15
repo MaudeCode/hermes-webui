@@ -17,9 +17,10 @@
     "i18n:gate": "node scripts/i18n-gate.mjs",
     "audit:deps": "npm audit --omit=dev && npm outdated || true",
     "i18n:compile": "paraglide-js compile --project ./project.inlang --outdir ./src/paraglide",
-    "pretest": "npm run i18n:compile",
-    "pretypecheck": "npm run i18n:compile",
-    "prelint": "npm run i18n:compile"
+    "pretest": "npm run i18n:compile && npm run routes:generate",
+    "pretypecheck": "npm run i18n:compile && npm run routes:generate",
+    "prelint": "npm run i18n:compile && npm run routes:generate",
+    "routes:generate": "node scripts/generate-routes.mjs"
   },
   "dependencies": {
     "@base-ui/react": "1.8.0",
