@@ -211,7 +211,7 @@ export function Composer(props: ComposerProps) {
         </div>
       )}
       <div
-        className={cn('composer-box', dragOver && 'drag-over')}
+        className={cn('composer-box relative z-[2] flex flex-col mx-auto max-w-(--msg-max) bg-surface border border-border rounded-(--r-lg) shadow-[0_1px_2px_rgba(0,0,0,.04)] transition-[border-color,box-shadow] duration-(--dur) ease-(--ease) focus-within:border-[rgba(255,215,0,.5)] focus-within:shadow-[0_0_0_1px_rgba(255,215,0,.25)] max-[641px]:rounded-[12px]', dragOver && 'drag-over')}
         id="composerBox"
         onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
         onDragLeave={() => setDragOver(false)}
@@ -238,7 +238,7 @@ export function Composer(props: ComposerProps) {
           aria-expanded={palette.open ? true : undefined}
         />
         <div className={cn('composer-footer cf-burger', !text && files.length === 0 && !busy && 'cf-collapsed')}>
-          <div className="composer-left">
+          <div className="composer-left flex items-center gap-1 min-w-0 flex-1 overflow-x-auto overflow-y-hidden [scrollbar-width:none] max-[641px]:flex-[1_1_auto] max-[641px]:w-auto max-[641px]:flex-nowrap max-[641px]:items-center max-[641px]:gap-x-2.5 max-[641px]:gap-y-0 max-[641px]:max-h-none max-[641px]:[-webkit-overflow-scrolling:touch] max-[341px]:gap-x-0.5">
             {!hide('hide_composer_attach') && (
               <>
                 <input type="file" id="fileInput" multiple className="file-input-visually-hidden" onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = '' }} accept="image/*,text/*,application/pdf,application/json,.csv,.md,.docx,.xlsx,.pptx" />
@@ -265,7 +265,7 @@ export function Composer(props: ComposerProps) {
               {!hide('hide_composer_toolsets') && <div className="composer-config-row composer-toolsets-wrap" id="composerToolsetsWrap"><ToolsetsChip value={session?.enabled_toolsets ?? null} onChange={onToolsetsChange} /></div>}
             </div>
           </div>
-          <div className="composer-right">
+          <div className="composer-right flex gap-2 items-center shrink-0 max-[641px]:flex-none max-[641px]:w-auto max-[641px]:justify-end max-[641px]:gap-1.5 max-[641px]:min-w-0">
             {!hide('hide_composer_context') && <ContextRing used={contextUsed} total={contextTotal} threshold={session?.threshold_tokens} />}
             {busy ? (
               <button type="button" onClick={() => { if (sessionId) void cancelTurn(sessionId) }} className="send-btn stop has-tooltip has-tooltip--left" id="btnStop" data-tooltip={m.composer_stop()} aria-label={m.composer_stop()} title={m.composer_stop()}>

@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import { Link, useParams } from '@tanstack/react-router'
-import { AppShell } from '../../shell/AppShell'
+import { AppShell, MAIN_VIEW } from '../../shell/AppShell'
 import { PanelHead } from '../../shell/Sidebar'
 import { m } from '../../paraglide/messages.js'
 import { cn } from '../../ui/cn'
@@ -28,13 +28,13 @@ function SectionMenu() {
   return (
     <div className="panel-view active" id="panelSettings">
       <PanelHead title={m.tab_settings()} />
-      <nav className="side-menu" id="settingsMenu" aria-label={m.tab_settings()}>
-        <div className="settings-menu-items">
+      <nav className="side-menu flex flex-col gap-px p-2 overflow-visible min-h-0" id="settingsMenu" aria-label={m.tab_settings()}>
+        <div className="settings-menu-items flex flex-col gap-0.5 min-h-0 flex-1 overflow-y-auto">
           {SettingsSectionSchema.options.map((section) => {
             const active = params.section === section
             const Icon = SECTION_ICON[section]
             return (
-              <Link key={section} to="/settings/$section" params={{ section }} onClick={closeMobileSidebar} aria-current={active ? 'page' : undefined} className={cn('side-menu-item', active && 'active')} data-settings-section={section}>
+              <Link key={section} to="/settings/$section" params={{ section }} onClick={closeMobileSidebar} aria-current={active ? 'page' : undefined} className={cn('side-menu-item flex w-full items-center gap-2 px-2.5 py-[7px] rounded-(--r-sm) border-0 bg-transparent text-text cursor-pointer text-left text-[13px] font-medium transition-[background,color] duration-(--dur) ease-(--ease) hover:bg-hover [&.active]:bg-accent-bg [&.active]:text-accent-text [&.active]:shadow-none [&.active]:font-semibold [&_svg]:shrink-0 [&_svg]:size-4 [&_svg]:opacity-90 [&.active_svg]:text-accent-text', active && 'active')} data-settings-section={section}>
                 <Icon size={16} strokeWidth={1.5} aria-hidden="true" />
                 <span>{SECTION_LABEL[section]()}</span>
               </Link>
@@ -49,7 +49,7 @@ function SectionMenu() {
 export function SettingsLayout({ children }: { children: ReactNode }) {
   return (
     <AppShell sidebar={<SectionMenu />} showing="settings">
-      <div className="main-view active" id="mainSettings">{children}</div>
+      <div className={MAIN_VIEW + ' active'} id="mainSettings">{children}</div>
     </AppShell>
   )
 }

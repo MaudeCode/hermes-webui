@@ -189,13 +189,19 @@ replay, session replacement, profile change, and unmount. Invariants from
 
 ## 9. UI, styling, accessibility
 
-- `frontend/src/theme/legacy.css` carries the legacy stylesheet verbatim (the
-  final cascade of tokens, skins and chrome); `tokens.css` keeps the early
-  `:root`, `:root.dark`, and
-  `[data-skin]` custom properties forward verbatim as the authoritative design
-  tokens. `tailwind.css` maps them into Tailwind's `@theme` so utilities such as
-  `bg-surface`, `text-muted`, `border-border` consume tokens rather than
-  literal colours.
+- The legacy stylesheet is converted, not carried: `frontend/scripts/css-convert.mjs`
+  reads it from git history and emits `theme/tokens.css` (every `:root`,
+  `:root.dark` and `[data-skin]` custom property, in source order),
+  `theme/keyframes.css`, and `theme/components/*.css` holding only the rules
+  whose classes the React app renders, in `@layer legacy` after Tailwind's
+  utilities. `frontend/scripts/css-ledger.json` and
+  `docs/architecture/css-conversion-ledger.md` give every one of the 4166 legacy
+  rules a disposition (tokens, converted to utilities, live, overridden, dead).
+  `tailwind.css` maps the tokens into `@theme` so utilities such as
+  `bg-surface`, `text-muted`, `border-border` consume tokens rather than literal
+  colours, and pins `--spacing: 4px` so spacing utilities match the px design.
+  Shell chrome components carry their base declarations as utilities and keep
+  the legacy class names as hooks for skin and state rules.
 - Base UI provides dialogs, alert dialogs, menus, popovers, tooltips, tabs,
   selects, comboboxes, and focus management. The composer command palette uses
   Base UI Combobox; the approval card keeps its inline placement but uses the

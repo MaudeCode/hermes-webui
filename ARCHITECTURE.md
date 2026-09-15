@@ -82,9 +82,11 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       src/features/        Chat, composer, sessions, settings, hubs, extensions, voice, terminal, share
       src/extensions/      Sandboxed extension host, SDK source, registry (protocol v1)
       src/i18n/            Paraglide runtime helpers; messages/<locale>.json hold the catalog
-      src/theme/           legacy.css (the legacy stylesheet carried forward: tokens, skins, chrome), tailwind.css, boot.ts, fonts/
+      src/theme/           tailwind.css (theme map, layer order), tokens.css + keyframes.css + components/*.css (generated
+                           from the legacy stylesheet by scripts/css-convert.mjs), boot.ts, fonts/
       src/sw.ts            Service worker source (Workbox)
-      scripts/             finalize-dist, build-sw, check-dist, i18n-gate, generate-routes
+      scripts/             finalize-dist, build-sw, check-dist, i18n-gate, generate-routes, css-convert (legacy CSS -> layers + ledger),
+                           css-computed-diff (compare computed styles between two builds)
       e2e/                 Playwright suite + screenshot baselines
     static/
       dist/                Committed production build served by Python (index.html shell,
@@ -551,14 +553,27 @@ contains no inline scripts, so the CSP `script-src` has no `'unsafe-inline'`.
       extensions/        ExtensionHost (MessageChannel protocol v1), sdk.ts (built to static/dist/extension-sdk.js),
                          registry (manifests, skins, TTS engines, lifecycle bridge)
       i18n/              Paraglide runtime (locale switch, hermes-lang persistence), locale metadata, tool text
-      theme/             legacy.css (the legacy stylesheet: tokens, 21 skins, shell/transcript/composer chrome), tailwind.css (@theme mapping), boot.ts
+      theme/             tokens.css (21 skins, theme and preference tokens), keyframes.css, components/*.css (live legacy rules per
+                         feature in @layer legacy), tailwind.css (@theme mapping, px spacing scale, layer order), boot.ts
       ui/                Base UI wrappers: Button, Dialog, Field, Menu, Tooltip, States
 
 Layout: rail (desktop) + sidebar (sessions or hub navigation) + main on the
-legacy island shell. Mobile uses a drawer and the bottom tab bar. Components
-render the legacy class structure so `legacy.css` styles them exactly as
-before; Tailwind utilities (mapped to the same tokens) cover layout-only
-concerns in feature pages. No component hardcodes colours.
+legacy island shell. Mobile uses a drawer and the bottom tab bar.
+
+Styling is Tailwind v4 on the legacy design tokens. `scripts/css-convert.mjs`
+splits the legacy stylesheet into `tokens.css` (every `:root`/skin custom
+property), `keyframes.css`, and per-feature sheets under `theme/components/`
+that keep only the rules whose classes the React app still renders; every
+legacy rule has a disposition in `scripts/css-ledger.json` and
+`docs/architecture/css-conversion-ledger.md`. The shell chrome (layout, rail,
+sidebar, panel heads, titlebar, tab bar, chat header, transcript containers,
+composer box, settings frame, pickers) carries its base declarations as
+utilities in JSX while keeping the legacy class names as hooks. The generated
+sheets sit in `@layer legacy`, ordered after `utilities`, so theme, skin and
+state overrides keep beating the structural utilities exactly as they beat the
+base rules in the legacy cascade; extension skins stay unlayered and win over
+everything. The spacing scale is px-based (`--spacing: 4px`) because the legacy
+design is specified in px on a 14px root. No component hardcodes colours.
 
 ### 5.2 State
 

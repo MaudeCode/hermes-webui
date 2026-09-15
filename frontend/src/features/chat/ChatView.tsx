@@ -3,6 +3,10 @@ import { useNavigate } from '@tanstack/react-router'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { m } from '../../paraglide/messages.js'
 import { cn } from '../../ui/cn'
+import { MAIN_VIEW } from '../../shell/AppShell'
+
+/** Legacy `.chat-context-item`; the `·` separator between items stays a legacy `::before` rule. */
+const CONTEXT_ITEM = 'chat-context-item border-0 bg-transparent text-muted text-[12px] font-medium py-px px-1.5 -mx-0.5 rounded-[5px] cursor-pointer whitespace-nowrap overflow-hidden text-ellipsis max-w-[220px] transition-[background,color] duration-(--dur) ease-(--ease) hover:bg-hover hover:text-text'
 import { ChevronLeft } from 'lucide-react'
 import * as api from '../../api/endpoints'
 import { keys } from '../../api/queryKeys'
@@ -154,16 +158,16 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
 
   return (
     <>
-      <div id="mainChat" className={cn('main-view active', rows.length === 0 && !live && 'composer-hero')}>
-        <div className="chat-header">
-          <div className="chat-header-text">
-            <h1 className="chat-header-title" id="topbarTitle">{session ? (title || m.untitled()) : bootstrap.bot_name}</h1>
-            {session && meta && <div className="chat-header-meta" id="topbarMeta">{meta}</div>}
-            <div className="chat-context">
-              <button type="button" className="chat-context-item chat-context-profile" onClick={() => openChip('profileChip')}>{bootstrap.profile?.name ?? 'default'}</button>
-              {(session?.model ?? settings.data?.default_model) && <button type="button" className="chat-context-item chat-context-model" onClick={() => openChip('composerModelChip')}>{session?.model ?? settings.data?.default_model}</button>}
-              {reasoning && <button type="button" className="chat-context-item chat-context-effort" onClick={() => openChip('composerReasoningChip')}>{reasoning}</button>}
-              {wsLabel && <button type="button" className="chat-context-item chat-context-workspace" onClick={() => openChip('composerWorkspaceChip')}>{wsLabel}</button>}
+      <div id="mainChat" className={cn(MAIN_VIEW, 'active', rows.length === 0 && !live && 'composer-hero')}>
+        <div className="chat-header flex items-center gap-3 min-h-[52px] px-5 py-1.5 border-b border-border shrink-0 max-[641px]:hidden">
+          <div className="chat-header-text min-w-0 flex-1 flex flex-col gap-px">
+            <h1 className="chat-header-title m-0 text-[13.5px] font-[550] text-text whitespace-nowrap overflow-hidden text-ellipsis tracking-[-.01em]" id="topbarTitle">{session ? (title || m.untitled()) : bootstrap.bot_name}</h1>
+            {session && meta && <div className="chat-header-meta hidden text-[11px] text-muted whitespace-nowrap overflow-hidden text-ellipsis font-mono" id="topbarMeta">{meta}</div>}
+            <div className="chat-context flex items-center gap-0.5 mt-0.5 min-w-0 overflow-hidden max-[641px]:hidden">
+              <button type="button" className={cn(CONTEXT_ITEM, 'chat-context-profile')} onClick={() => openChip('profileChip')}>{bootstrap.profile?.name ?? 'default'}</button>
+              {(session?.model ?? settings.data?.default_model) && <button type="button" className={cn(CONTEXT_ITEM, 'chat-context-model')} onClick={() => openChip('composerModelChip')}>{session?.model ?? settings.data?.default_model}</button>}
+              {reasoning && <button type="button" className={cn(CONTEXT_ITEM, 'chat-context-effort')} onClick={() => openChip('composerReasoningChip')}>{reasoning}</button>}
+              {wsLabel && <button type="button" className={cn(CONTEXT_ITEM, 'chat-context-workspace')} onClick={() => openChip('composerWorkspaceChip')}>{wsLabel}</button>}
             </div>
           </div>
         </div>

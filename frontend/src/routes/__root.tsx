@@ -3,6 +3,7 @@ import type { QueryClient } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import type { Bootstrap } from '../contracts/bootstrap'
 import { NotFound, PendingView, RouteError } from '../features/shell/ErrorBoundary'
+import interWoff2 from '../theme/fonts/InterVariable.woff2?url'
 
 export interface RouterContext {
   queryClient: QueryClient
@@ -34,6 +35,8 @@ export const Route = createRootRouteWithContext<RouterContext>()({
       { rel: 'icon', type: 'image/svg+xml', sizes: 'any', href: 'static/brand/favicon.svg' },
       { rel: 'apple-touch-icon', sizes: '512x512', href: 'static/brand/apple-touch-icon.png' },
       { rel: 'manifest', href: 'manifest.webmanifest', crossOrigin: 'use-credentials' },
+      // Inter uses font-display: optional; preloading (as the legacy shell did) keeps it from losing the first-paint race.
+      { rel: 'preload', href: interWoff2, as: 'font', type: 'font/woff2', crossOrigin: 'anonymous' },
     ],
   }),
   shellComponent: RootShell,
