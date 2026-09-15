@@ -10,7 +10,7 @@ import type { KanbanTaskSchema } from '../../contracts'
 import { HubPage } from '../../shell/AppShell'
 import { PanelHeadButton } from '../../shell/Sidebar'
 import { Button, IconButton } from '../../ui/Button'
-import { Checkbox, FieldRow, NativeSelect, TextInput } from '../../ui/Field'
+import { Switch, FieldRow, NativeSelect, TextInput } from '../../ui/Field'
 import { Dialog } from '../../ui/Dialog'
 import { EmptyState, ErrorState, LoadingState, formatDate } from '../../ui/States'
 import { showToast } from '../toast/toast'
@@ -50,7 +50,7 @@ export function KanbanPage() {
               </NativeSelect>
             </label>
           )}
-          <label className="flex items-center gap-1.5 text-xs text-muted"><Checkbox checked={includeArchived} onChange={(e) => setIncludeArchived(e.target.checked)} /> {m.kanban_include_archived()}</label>
+          <label className="flex items-center gap-1.5 text-xs text-muted"><Switch checked={includeArchived} onCheckedChange={(checked) => setIncludeArchived(checked)} /> {m.kanban_include_archived()}</label>
           {readOnly && <span className="text-xs text-warning">{m.kanban_read_only()}</span>}
         </>
       }

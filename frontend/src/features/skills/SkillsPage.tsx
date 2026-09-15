@@ -6,7 +6,7 @@ import * as api from '../../api/endpoints'
 import { keys } from '../../api/queryKeys'
 import { HubPage } from '../../shell/AppShell'
 import { Button } from '../../ui/Button'
-import { NativeSelect } from '../../ui/Field'
+import { NativeSelect, Switch } from '../../ui/Field'
 import { ConfirmDialog } from '../../ui/Dialog'
 import { EmptyState, ErrorState, LoadingState } from '../../ui/States'
 import { showToast } from '../toast/toast'
@@ -61,7 +61,7 @@ export function SkillsPage() {
               {s.category && <span className="rounded-full border border-border px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted">{s.category}</span>}
               {use > 0 && <span className="text-[11px] text-muted">{m.skill_uses({ n: use })}</span>}
               <label className="flex items-center gap-1 text-xs text-muted">
-                <input type="checkbox" checked={!s.disabled} onChange={(e) => toggle.mutate({ name: s.name, enabled: e.target.checked })} aria-label={`${s.name}: ${s.disabled ? m.skill_disabled() : m.skill_enabled()}`} className="h-[15px] w-[15px] accent-accent" />
+                <Switch checked={!s.disabled} onCheckedChange={(checked) => toggle.mutate({ name: s.name, enabled: checked })} aria-label={`${s.name}: ${s.disabled ? m.skill_disabled() : m.skill_enabled()}`} />
               </label>
             </li>
           )

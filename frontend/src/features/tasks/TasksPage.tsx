@@ -11,7 +11,7 @@ import { CronJobSchema } from '../../contracts'
 import { HubPage } from '../../shell/AppShell'
 import { Button } from '../../ui/Button'
 import { PanelHeadButton } from '../../shell/Sidebar'
-import { Checkbox, FieldRow, NativeSelect, TextInput } from '../../ui/Field'
+import { Switch, FieldRow, NativeSelect, TextInput } from '../../ui/Field'
 import { ConfirmDialog, Dialog } from '../../ui/Dialog'
 import { EmptyState, ErrorState, LoadingState, formatDate } from '../../ui/States'
 import { showToast } from '../toast/toast'
@@ -71,7 +71,7 @@ export function TasksPage() {
       title={m.tab_tasks()}
       actions={
         <>
-          <label className="flex items-center gap-1.5 text-xs text-muted"><Checkbox checked={allProfiles} onChange={(e) => setAllProfiles(e.target.checked)} /> {m.all_profiles()}</label>
+          <label className="flex items-center gap-1.5 text-xs text-muted"><Switch checked={allProfiles} onCheckedChange={(checked) => setAllProfiles(checked)} /> {m.all_profiles()}</label>
           <PanelHeadButton label={m.refresh()} onClick={() => { void crons.refetch() }}><RefreshCw size={16} aria-hidden="true" /></PanelHeadButton>
           <PanelHeadButton label={m.cron_new_job()} className="primary" onClick={() => setEditing('new')}><Plus size={16} aria-hidden="true" /></PanelHeadButton>
         </>
@@ -194,7 +194,7 @@ function JobDialog({ job, onClose, onSaved }: { job: CronJob | null; onClose: ()
       <form onSubmit={(e) => { e.preventDefault(); void form.handleSubmit() }} className="flex flex-col gap-1">
         <form.Field name="name">{(f) => <FieldRow label={m.cron_job_name_placeholder()} htmlFor="cronName"><TextInput id="cronName" value={f.state.value} onChange={(e) => f.handleChange(e.target.value)} /></FieldRow>}</form.Field>
         <form.Field name="schedule">{(f) => <FieldRow label={m.cron_schedule_placeholder()} htmlFor="cronSchedule" hint="*/30 * * * * · every 2h · daily at 09:00"><TextInput id="cronSchedule" required value={f.state.value} onChange={(e) => f.handleChange(e.target.value)} /></FieldRow>}</form.Field>
-        <form.Field name="no_agent">{(f) => <FieldRow label={m.cron_no_agent_label()} hint={m.cron_no_agent_hint()} htmlFor="cronNoAgent" inline><Checkbox id="cronNoAgent" checked={f.state.value} onChange={(e) => f.handleChange(e.target.checked)} /></FieldRow>}</form.Field>
+        <form.Field name="no_agent">{(f) => <FieldRow label={m.cron_no_agent_label()} hint={m.cron_no_agent_hint()} htmlFor="cronNoAgent" inline><Switch id="cronNoAgent" checked={f.state.value} onCheckedChange={(checked) => f.handleChange(checked)} /></FieldRow>}</form.Field>
         <form.Field name="prompt">{(f) => <FieldRow label={m.cron_prompt_placeholder()} htmlFor="cronPrompt"><textarea id="cronPrompt" rows={4} value={f.state.value} onChange={(e) => f.handleChange(e.target.value)} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-text" /></FieldRow>}</form.Field>
         <form.Field name="script">{(f) => <FieldRow label={m.cron_script_path_label()} hint={m.cron_script_path_hint()} htmlFor="cronScript"><TextInput id="cronScript" value={f.state.value} onChange={(e) => f.handleChange(e.target.value)} placeholder={m.cron_script_path_placeholder()} /></FieldRow>}</form.Field>
         <form.Field name="deliver">{(f) => <FieldRow label={m.cron_deliver_label()} htmlFor="cronDeliver"><TextInput id="cronDeliver" value={f.state.value} onChange={(e) => f.handleChange(e.target.value)} /></FieldRow>}</form.Field>
@@ -210,7 +210,7 @@ function JobDialog({ job, onClose, onSaved }: { job: CronJob | null; onClose: ()
           )}</form.Field>
         </div>
         <form.Field name="model">{(f) => <FieldRow label={m.settings_label_model()} htmlFor="cronModel"><TextInput id="cronModel" value={f.state.value} onChange={(e) => f.handleChange(e.target.value)} placeholder={m.model_custom_placeholder()} /></FieldRow>}</form.Field>
-        <form.Field name="toast_notifications">{(f) => <FieldRow label={m.cron_toast_label()} htmlFor="cronToast" inline><Checkbox id="cronToast" checked={f.state.value} onChange={(e) => f.handleChange(e.target.checked)} /></FieldRow>}</form.Field>
+        <form.Field name="toast_notifications">{(f) => <FieldRow label={m.cron_toast_label()} htmlFor="cronToast" inline><Switch id="cronToast" checked={f.state.value} onCheckedChange={(checked) => f.handleChange(checked)} /></FieldRow>}</form.Field>
         {error && <div role="alert" className="text-sm text-error">{error}</div>}
         <div className="mt-3 flex justify-end gap-2">
           <Button onClick={onClose}>{m.cancel()}</Button>

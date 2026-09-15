@@ -1,5 +1,5 @@
 import { m } from '../../paraglide/messages.js'
-import { Checkbox, FieldRow, NativeSelect, TextInput } from '../../ui/Field'
+import { Switch, FieldRow, NativeSelect, TextInput } from '../../ui/Field'
 import { useSettingField } from './useSettingField'
 import { useModelsQuery } from '../../app/queries'
 import { LoadingState, ErrorState } from '../../ui/States'
@@ -12,7 +12,7 @@ function Toggle({ label, hint, settingKey, fallback = false }: { label: string; 
   const id = `settings-${settingKey}`
   return (
     <FieldRow label={label} htmlFor={id} {...(hint ? { hint } : {})} inline>
-      <Checkbox id={id} checked={bool(settingKey, fallback)} onChange={(e) => set({ [settingKey]: e.target.checked })} />
+      <Switch id={id} checked={bool(settingKey, fallback)} onCheckedChange={(checked) => set({ [settingKey]: checked })} />
     </FieldRow>
   )
 }
@@ -70,7 +70,7 @@ export function PreferencesSection() {
       <FieldRow label={m.settings_label_pinned_limit()} hint={m.settings_desc_pinned_limit()} htmlFor="settingsPinnedLimit" inline>
         <TextInput id="settingsPinnedLimit" type="number" min={1} max={50} className="w-20" value={num('pinned_sessions_limit', 3)} onChange={(e) => { const n = Number(e.target.value); if (Number.isInteger(n) && n > 0) set({ pinned_sessions_limit: n }) }} />
       </FieldRow>
-      <FieldRow label={m.settings_label_external_sessions()} htmlFor="settings-show_cli_sessions" inline><Checkbox id="settings-show_cli_sessions" checked={bool('show_cli_sessions')} onChange={(e) => set({ show_cli_sessions: e.target.checked })} /></FieldRow>
+      <FieldRow label={m.settings_label_external_sessions()} htmlFor="settings-show_cli_sessions" inline><Switch id="settings-show_cli_sessions" checked={bool('show_cli_sessions')} onCheckedChange={(checked) => set({ show_cli_sessions: checked })} /></FieldRow>
       <Toggle label={m.settings_label_claude_code_sessions()} settingKey="show_claude_code_sessions" />
       <Toggle label={m.settings_label_cron_sessions()} settingKey="show_cron_sessions" />
       <Toggle label={m.settings_label_webhook_sessions()} settingKey="show_webhook_sessions" />
@@ -84,7 +84,7 @@ export function PreferencesSection() {
             const hidden = (settings.data.hidden_tabs ?? []).includes(n.id)
             return (
               <label key={n.id} className="flex items-center gap-1.5 text-sm">
-                <Checkbox checked={!hidden} onChange={(e) => { const cur = new Set(settings.data.hidden_tabs ?? []); if (e.target.checked) cur.delete(n.id); else cur.add(n.id); set({ hidden_tabs: [...cur] }) }} /> {n.label()}
+                <Switch checked={!hidden} onCheckedChange={(checked) => { const cur = new Set(settings.data.hidden_tabs ?? []); if (checked) cur.delete(n.id); else cur.add(n.id); set({ hidden_tabs: [...cur] }) }} /> {n.label()}
               </label>
             )
           })}

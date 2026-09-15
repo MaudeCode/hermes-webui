@@ -1,5 +1,5 @@
 import { m } from '../../paraglide/messages.js'
-import { Checkbox, FieldRow, NativeSelect, TextInput } from '../../ui/Field'
+import { Switch, FieldRow, NativeSelect, TextInput } from '../../ui/Field'
 import { useSettingField } from './useSettingField'
 import { LoadingState, ErrorState } from '../../ui/States'
 
@@ -8,7 +8,7 @@ function Toggle({ label, hint, settingKey, fallback = false }: { label: string; 
   const id = `settings-${settingKey}`
   return (
     <FieldRow label={label} htmlFor={id} {...(hint ? { hint } : {})} inline>
-      <Checkbox id={id} checked={bool(settingKey, fallback)} onChange={(e) => set({ [settingKey]: e.target.checked })} />
+      <Switch id={id} checked={bool(settingKey, fallback)} onCheckedChange={(checked) => set({ [settingKey]: checked })} />
     </FieldRow>
   )
 }

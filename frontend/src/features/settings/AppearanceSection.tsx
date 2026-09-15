@@ -1,6 +1,6 @@
 import { Moon, Monitor, Sun } from 'lucide-react'
 import { m } from '../../paraglide/messages.js'
-import { FieldRow, NativeSelect, Checkbox } from '../../ui/Field'
+import { FieldRow, NativeSelect, Switch } from '../../ui/Field'
 import { setFontSize, setFullWidthChat, setLanguage, setRtl, setSkin, setTheme, useAppearance } from '../../app/appearance'
 import { SKINS } from '../../theme/skins'
 import { FontSizeSchema, SkinSchema } from '../../contracts/persisted'
@@ -75,12 +75,12 @@ export function AppearanceSection() {
       </div>
       <div className="settings-field">
         <FieldRow label={m.settings_label_full_width_chat()} htmlFor="settingsFullWidth" inline>
-          <Checkbox id="settingsFullWidth" checked={appearance.fullWidth} onChange={(e) => { setFullWidthChat(e.target.checked); save.mutate({ full_width_chat: e.target.checked }) }} />
+          <Switch id="settingsFullWidth" checked={appearance.fullWidth} onCheckedChange={(checked) => { setFullWidthChat(checked); save.mutate({ full_width_chat: checked }) }} />
         </FieldRow>
       </div>
       <div className="settings-field">
         <FieldRow label={m.settings_label_rtl()} htmlFor="settingsRtl" inline>
-          <Checkbox id="settingsRtl" checked={appearance.rtl} onChange={(e) => setRtl(e.target.checked)} />
+          <Switch id="settingsRtl" checked={appearance.rtl} onCheckedChange={(checked) => setRtl(checked)} />
         </FieldRow>
       </div>
       <div className="settings-field">

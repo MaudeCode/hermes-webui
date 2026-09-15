@@ -7,7 +7,7 @@ import { keys } from '../../api/queryKeys'
 import { useExtensionManifests } from '../../extensions/registry'
 import type { ExtensionManifest } from '../../contracts/extension'
 import { Button } from '../../ui/Button'
-import { Checkbox } from '../../ui/Field'
+import { Switch } from '../../ui/Field'
 import { ConfirmDialog } from '../../ui/Dialog'
 import { EmptyState, ErrorState, LoadingState } from '../../ui/States'
 import { showToast } from '../toast/toast'
@@ -75,7 +75,7 @@ function ExtensionRow({ ext, canManage, onToggle, onConsent, onUninstall }: { ex
         </div>
         {ext.panel && ext.enabled && <Link to="/ext/$extensionId" params={{ extensionId: ext.id }} className="text-xs text-accent-text underline">{m.extensions_open()}</Link>}
         {canManage && ext.source !== 'plugin' && !ext.legacy_injection && (
-          <label className="flex items-center gap-1 text-xs text-muted"><Checkbox checked={ext.enabled} onChange={(e) => onToggle(e.target.checked)} aria-label={`${ext.name}: ${ext.enabled ? m.plugins_enabled() : m.plugins_disabled()}`} /> {ext.enabled ? m.plugins_enabled() : m.plugins_disabled()}</label>
+          <label className="flex items-center gap-1 text-xs text-muted"><Switch checked={ext.enabled} onCheckedChange={(checked) => onToggle(checked)} aria-label={`${ext.name}: ${ext.enabled ? m.plugins_enabled() : m.plugins_disabled()}`} /> {ext.enabled ? m.plugins_enabled() : m.plugins_disabled()}</label>
         )}
         {canManage && ext.source === 'gallery' && <Button size="sm" variant="ghost" className="text-error" onClick={onUninstall}>{m.extensions_uninstall()}</Button>}
       </div>
@@ -86,7 +86,7 @@ function ExtensionRow({ ext, canManage, onToggle, onConsent, onUninstall }: { ex
       {ext.sidecar && (
         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted">
           <span className="font-mono">{ext.sidecar.origin}</span>
-          {canManage && <label className="flex items-center gap-1"><Checkbox checked={!!ext.sidecar.consented} onChange={(e) => onConsent(e.target.checked)} /> {m.extensions_sidecar_consent()}</label>}
+          {canManage && <label className="flex items-center gap-1"><Switch checked={!!ext.sidecar.consented} onCheckedChange={(checked) => onConsent(checked)} /> {m.extensions_sidecar_consent()}</label>}
         </div>
       )}
       {ext.legacy_injection && (

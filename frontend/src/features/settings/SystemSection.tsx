@@ -5,7 +5,7 @@ import * as api from '../../api/endpoints'
 import { keys } from '../../api/queryKeys'
 import { useBootstrap } from '../../app/bootstrap'
 import { Button } from '../../ui/Button'
-import { Checkbox, FieldRow, NativeSelect, TextInput } from '../../ui/Field'
+import { Switch, FieldRow, NativeSelect, TextInput } from '../../ui/Field'
 import { ConfirmDialog } from '../../ui/Dialog'
 import { ErrorState, LoadingState, formatDate } from '../../ui/States'
 import { showToast } from '../toast/toast'
@@ -58,15 +58,15 @@ export function SystemSection() {
       </section>
       <section>
         <h2 className="mb-1 text-sm font-semibold text-text">{m.system_updates()}</h2>
-        <FieldRow label={m.settings_label_check_updates()} htmlFor="settingsCheckUpdates" inline><Checkbox id="settingsCheckUpdates" checked={bool('check_for_updates', true)} onChange={(e) => set({ check_for_updates: e.target.checked })} /></FieldRow>
+        <FieldRow label={m.settings_label_check_updates()} htmlFor="settingsCheckUpdates" inline><Switch id="settingsCheckUpdates" checked={bool('check_for_updates', true)} onCheckedChange={(checked) => set({ check_for_updates: checked })} /></FieldRow>
         <FieldRow label={m.settings_label_update_channel()} htmlFor="settingsUpdateChannel" inline>
           <NativeSelect id="settingsUpdateChannel" value={str('update_channel', 'stable')} onChange={(e) => set({ update_channel: e.target.value })}>
             <option value="stable">{m.settings_update_channel_stable()}</option>
             <option value="experimental">{m.settings_update_channel_experimental()}</option>
           </NativeSelect>
         </FieldRow>
-        <FieldRow label={m.settings_label_ignore_agent_updates()} htmlFor="settingsIgnoreAgentUpdates" inline><Checkbox id="settingsIgnoreAgentUpdates" checked={bool('ignore_agent_updates')} onChange={(e) => set({ ignore_agent_updates: e.target.checked })} /></FieldRow>
-        <FieldRow label={m.settings_label_whats_new_summary()} htmlFor="settingsWhatsNew" inline><Checkbox id="settingsWhatsNew" checked={bool('whats_new_summary_enabled')} onChange={(e) => set({ whats_new_summary_enabled: e.target.checked })} /></FieldRow>
+        <FieldRow label={m.settings_label_ignore_agent_updates()} htmlFor="settingsIgnoreAgentUpdates" inline><Switch id="settingsIgnoreAgentUpdates" checked={bool('ignore_agent_updates')} onCheckedChange={(checked) => set({ ignore_agent_updates: checked })} /></FieldRow>
+        <FieldRow label={m.settings_label_whats_new_summary()} htmlFor="settingsWhatsNew" inline><Switch id="settingsWhatsNew" checked={bool('whats_new_summary_enabled')} onCheckedChange={(checked) => set({ whats_new_summary_enabled: checked })} /></FieldRow>
         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted">
           {updates.data?.disabled ? <span>—</span> : updates.data?.webui?.behind ? <span className="text-accent-text">{m.system_update_available({ name: 'webui', n: updates.data.webui.behind })}</span> : updates.data ? <span>{m.system_up_to_date()}</span> : null}
           {updates.data?.agent?.behind ? <span className="text-accent-text">{m.system_update_available({ name: 'agent', n: updates.data.agent.behind })}</span> : null}
@@ -103,7 +103,7 @@ export function SystemSection() {
             </form>
           )}
           {!bool('auth_enabled') && (
-            <FieldRow label={m.auth_acknowledged_label()} htmlFor="settingsAuthAck" inline><Checkbox id="settingsAuthAck" checked={bool('auth_disabled_acknowledged')} onChange={(e) => set({ auth_disabled_acknowledged: e.target.checked })} /></FieldRow>
+            <FieldRow label={m.auth_acknowledged_label()} htmlFor="settingsAuthAck" inline><Switch id="settingsAuthAck" checked={bool('auth_disabled_acknowledged')} onCheckedChange={(checked) => set({ auth_disabled_acknowledged: checked })} /></FieldRow>
           )}
         </section>
       )}
