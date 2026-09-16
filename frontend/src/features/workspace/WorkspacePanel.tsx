@@ -39,7 +39,7 @@ export function WorkspacePanel({ workspace, sessionId, open, onToggle, onClose }
     const el = panel.current
     // Write the width straight to the DOM while dragging: a React render per pointer move (and the panel's width transition) lags the pointer.
     el?.setAttribute('data-resizing', '1')
-    const move = (ev: PointerEvent) => { next = Math.min(1200, Math.max(180, startW - (ev.clientX - startX))); if (el) el.style.width = `${next}px` }
+    const move = (ev: PointerEvent) => { next = Math.round(Math.min(1200, Math.max(180, startW - (ev.clientX - startX)))); if (el) el.style.width = `${next}px` }
     const up = () => {
       el?.removeAttribute('data-resizing')
       setWidth(next)

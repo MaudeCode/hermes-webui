@@ -59,6 +59,6 @@ html[data-workspace-panel="closed"] .rightpanel{margin-left:0;border-color:trans
    ring inside each join's arc, which at the join's outer row spans exactly the bar's column, so the pieces meet. */
 .rightpanel .resize-handle{left:-4px;width:7px;transition:none}
 .rightpanel .resize-handle:hover{background:linear-gradient(var(--accent),var(--accent)) 1px 0/3px calc(50% - 20px - var(--r-md)) no-repeat,linear-gradient(var(--accent),var(--accent)) 1px 100%/3px calc(50% - 20px - var(--r-md)) no-repeat}
-.rightpanel:has(> .resize-handle:hover) .workspace-panel-edge-toggle{box-shadow:0 0 0 3px var(--accent);clip-path:inset(calc(-1 * var(--r-md) - 3px) 0 calc(-1 * var(--r-md) - 3px) -3px)}
+.rightpanel:has(> .resize-handle:hover) .workspace-panel-edge-toggle{box-shadow:0 0 0 3px var(--accent);clip-path:inset(calc(-1 * var(--r-md) - 3px) 1px calc(-1 * var(--r-md) - 3px) -3px)}
 .rightpanel:has(> .resize-handle:hover) .edge-tab-join-top{background:radial-gradient(circle at 0 0,transparent calc(var(--r-md) - 3.5px),var(--accent) calc(var(--r-md) - 3px),var(--accent) calc(var(--r-md) - .5px),var(--canvas) var(--r-md))}
 .rightpanel:has(> .resize-handle:hover) .edge-tab-join-bottom{background:radial-gradient(circle at 0 100%,transparent calc(var(--r-md) - 3.5px),var(--accent) calc(var(--r-md) - 3px),var(--accent) calc(var(--r-md) - .5px),var(--canvas) var(--r-md))}
