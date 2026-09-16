@@ -58,7 +58,7 @@ html[data-workspace-panel="closed"] .rightpanel{margin-left:0;border-color:trans
    join radius above and below the 40px tab; a spread box-shadow around the tab, clipped on its panel side; and a
    ring inside each join's arc, which at the join's outer row spans exactly the bar's column, so the pieces meet. */
 .rightpanel .resize-handle{left:-4px;width:7px;transition:none}
-.rightpanel .resize-handle:hover{background:linear-gradient(var(--accent),var(--accent)) 1px var(--island-radius)/3px calc(50% - 20px - var(--r-md) - var(--island-radius)) no-repeat,linear-gradient(var(--accent),var(--accent)) 1px calc(100% - var(--island-radius))/3px calc(50% - 20px - var(--r-md) - var(--island-radius)) no-repeat}
+.rightpanel .resize-handle:hover{background:linear-gradient(var(--accent),var(--accent)) 1px var(--island-radius)/3px calc(50% - 20px - var(--r-md) - var(--island-radius) + 1px) no-repeat,linear-gradient(var(--accent),var(--accent)) 1px calc(100% - var(--island-radius))/3px calc(50% - 20px - var(--r-md) - var(--island-radius) + 1px) no-repeat}
 /* Seam rings on the card side of the arc, meeting the bar's column at the arc's end. */
 .rightpanel:has(> .resize-handle:hover) .seam-tl{background:radial-gradient(circle at 100% 100%,transparent calc(var(--island-radius) - .5px),var(--accent) var(--island-radius),var(--accent) calc(var(--island-radius) + 3px),var(--main-surface) calc(var(--island-radius) + 3.5px))}
 .rightpanel:has(> .resize-handle:hover) .seam-bl{background:radial-gradient(circle at 100% 0,transparent calc(var(--island-radius) - .5px),var(--accent) var(--island-radius),var(--accent) calc(var(--island-radius) + 3px),var(--main-surface) calc(var(--island-radius) + 3.5px))}
