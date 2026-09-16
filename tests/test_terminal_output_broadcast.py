@@ -139,6 +139,7 @@ def test_sse_reconnect_honors_last_event_id_and_emits_ids(monkeypatch):
             pass
 
     monkeypatch.setattr(routes, "_embedded_terminal_gate_allows", lambda _handler: True)
+    monkeypatch.setattr(routes, "_terminal_local_io_allowed", lambda _handler, _sid: True)
     monkeypatch.setattr(routes, "_sse_set_write_deadline", lambda _handler: None)
     monkeypatch.setitem(terminal._TERMINALS, term.session_id, term)
     handler = _Handler()
@@ -178,6 +179,7 @@ def test_sse_heartbeat_is_a_valid_comment_and_cleans_up(monkeypatch):
             pass
 
     monkeypatch.setattr(routes, "_embedded_terminal_gate_allows", lambda _handler: True)
+    monkeypatch.setattr(routes, "_terminal_local_io_allowed", lambda _handler, _sid: True)
     monkeypatch.setattr(routes, "_sse_set_write_deadline", lambda _handler: None)
     monkeypatch.setattr(routes, "_SSE_HEARTBEAT_INTERVAL_SECONDS", 0)
     monkeypatch.setitem(terminal._TERMINALS, term.session_id, term)

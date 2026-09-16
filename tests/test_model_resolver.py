@@ -472,7 +472,7 @@ def test_session_provider_context_keeps_named_custom_provider_for_slash_model():
     assert encoded == '@custom:packyapi:vendor/shared-model'
     assert model == 'vendor/shared-model'
     assert provider == 'custom:packyapi'
-    assert base_url is None
+    assert base_url == 'https://www.packyapi.ai/v1'
 
 
 def test_model_and_custom_connection_use_one_explicit_profile_config_snapshot():

@@ -15,8 +15,11 @@ from api.helpers import j, read_body
 from api.models import get_session
 from api.profiles import _profiles_match, get_active_profile_name as _get_active_profile_name
 from api.workspace import (
+    REMOTE_WORKSPACE_UNSUPPORTED_CODE,
+    REMOTE_WORKSPACE_UNSUPPORTED_MESSAGE,
     safe_resolve_ws,
     resolve_trusted_workspace,
+    session_workspace_supports_local_io,
     open_anchored_create_fd,
     make_anchored_dir,
     rmtree_anchored,
@@ -777,9 +780,20 @@ def handle_workspace_upload(handler):
             return j(handler, {'error': 'Session not found'}, status=404)
         if _reject_invisible_session(handler, session):
             return True
+        if not session_workspace_supports_local_io(session):
+            return j(
+                handler,
+                {
+                    'error': REMOTE_WORKSPACE_UNSUPPORTED_MESSAGE,
+                    'code': REMOTE_WORKSPACE_UNSUPPORTED_CODE,
+                },
+                status=400,
+            )
 
-        # Resolve workspace root from session
-        workspace = resolve_trusted_workspace(session.workspace)
+        # Resolve workspace root using the session profile, not the ambient request profile.
+        workspace = resolve_trusted_workspace(
+            session.workspace, profile=getattr(session, "profile", None)
+        )
 
         # Resolve target subdirectory within workspace
         target_dir = safe_resolve_ws(workspace, subpath) if subpath else workspace

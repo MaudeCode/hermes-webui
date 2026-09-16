@@ -201,11 +201,12 @@ def _allowed_roots_for_capture() -> list[Path]:
         if resolved not in roots:
             roots.append(resolved)
     try:
-        from api.workspace import get_last_workspace
+        from api.workspace import get_last_workspace, profile_supports_local_io
 
-        ws = Path(get_last_workspace()).resolve()
-        if ws.is_dir() and ws not in roots:
-            roots.append(ws)
+        if profile_supports_local_io():
+            ws = Path(get_last_workspace()).resolve()
+            if ws.is_dir() and ws not in roots:
+                roots.append(ws)
     except Exception:
         pass
     extra = os.environ.get("MEDIA_ALLOWED_ROOTS", "").strip()

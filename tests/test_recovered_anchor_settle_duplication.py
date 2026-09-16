@@ -165,7 +165,7 @@ def _settle_session_turn(session, turn: int, prompt: str, answer: str):
 
 
 def test_repeated_prompt_with_distinct_stable_id_does_not_realign_anchors(monkeypatch):
-    monkeypatch.setattr(_streaming, "_annotate_media_snapshots_for_settled_messages", lambda m: None)
+    monkeypatch.setattr(_streaming, "_annotate_media_snapshots_for_settled_messages", lambda m, **_kwargs: None)
     display, context = _repeated_prompt_history(64)
     session = Session(session_id="a" * 12, title="t", messages=copy.deepcopy(display))
     session.context_messages = copy.deepcopy(context)
@@ -250,7 +250,7 @@ def _assistant_successor_history(n_anchors: int) -> tuple[list[dict], list[dict]
 
 def _settle_replacing_result(monkeypatch, display, context, result, prompt):
     """Result that REPLACES the compacted context (does not extend it)."""
-    monkeypatch.setattr(_streaming, "_annotate_media_snapshots_for_settled_messages", lambda m: None)
+    monkeypatch.setattr(_streaming, "_annotate_media_snapshots_for_settled_messages", lambda m, **_kwargs: None)
     session = Session(session_id="d" * 12, title="t", messages=copy.deepcopy(display))
     session.context_messages = copy.deepcopy(context)
     _settle_result_messages(
@@ -324,7 +324,7 @@ def test_current_only_collision_with_exact_authority_keeps_one_block(monkeypatch
     )
     assert _streaming._active_turn_boundary_is_valid(identity)
     assert _streaming._active_turn_boundary(copy.deepcopy(result), context, identity, "do it") == 0
-    monkeypatch.setattr(_streaming, "_annotate_media_snapshots_for_settled_messages", lambda m: None)
+    monkeypatch.setattr(_streaming, "_annotate_media_snapshots_for_settled_messages", lambda m, **_kwargs: None)
     session = Session(session_id="f" * 12, title="t", messages=copy.deepcopy(display))
     session.context_messages = copy.deepcopy(context)
     _settle_result_messages(
@@ -385,7 +385,7 @@ def _reasoning_cards(messages) -> list:
 
 
 def _settled_session(monkeypatch, display, context, result_ids=()):
-    monkeypatch.setattr(_streaming, "_annotate_media_snapshots_for_settled_messages", lambda m: None)
+    monkeypatch.setattr(_streaming, "_annotate_media_snapshots_for_settled_messages", lambda m, **_kwargs: None)
     session = Session(session_id="b" * 12, title="t", messages=copy.deepcopy(display))
     session.context_messages = copy.deepcopy(context)
     result = copy.deepcopy(context) + [
@@ -530,18 +530,20 @@ def test_handle_chat_sync_passes_result_turn_authority_to_settlement(tmp_path, m
     import sys
     from types import SimpleNamespace
 
-    from api import models, routes
+    from api import models, profiles, routes
+
+    monkeypatch.setattr(profiles, "_skill_modules_support_profile_home", lambda _home: True)
 
     _isolated_session_store(tmp_path, monkeypatch)
     monkeypatch.setattr(routes, "SESSION_INDEX_FILE", models.SESSION_INDEX_FILE)
     monkeypatch.setattr(routes, "get_session", models.get_session)
     monkeypatch.setattr(routes, "title_from", models.title_from)
     monkeypatch.setattr(routes, "get_config", lambda: {"model": "m", "provider": "p"})
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: tmp_path)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value, **_kw: tmp_path)
     monkeypatch.setattr(routes, "load_settings", lambda: {})
     monkeypatch.setattr(routes, "_resolve_cli_toolsets", lambda: [])
     monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_k: None)
-    monkeypatch.setattr(_streaming, "_annotate_media_snapshots_for_settled_messages", lambda m: None)
+    monkeypatch.setattr(_streaming, "_annotate_media_snapshots_for_settled_messages", lambda m, **_kwargs: None)
 
     display, context = _assistant_successor_history(4)
     session = Session(

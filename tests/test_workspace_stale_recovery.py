@@ -422,7 +422,7 @@ def test_chat_recovery_preserves_remote_workspace_rejection(
 
     monkeypatch.setattr(routes, "get_last_workspace", fallback)
 
-    with pytest.raises(ValueError, match="Path does not exist"):
+    with pytest.raises(ValueError, match="outside the configured remote terminal workspace"):
         routes._resolve_chat_workspace_with_recovery(session, None)
 
     assert fallback_calls["count"] == 0
@@ -674,6 +674,9 @@ def test_list_dir_preserves_remote_workspace_rejection(
     )
     monkeypatch.setattr(workspace, "_home_path", lambda: tmp_path)
     monkeypatch.setattr(routes, "get_session", lambda _sid: session)
+    monkeypatch.setattr(
+        routes, "session_workspace_supports_local_io", lambda _session, **_kwargs: False
+    )
 
     def fallback():
         calls["fallback"] += 1
@@ -687,8 +690,8 @@ def test_list_dir_preserves_remote_workspace_rejection(
     monkeypatch.setattr(routes, "list_dir", fake_list_dir)
     monkeypatch.setattr(
         routes,
-        "bad",
-        lambda _handler, message, status=400: {"error": message, "status": status},
+        "j",
+        lambda _handler, payload, status=200, **_kwargs: payload | {"status": status},
     )
 
     payload = routes._handle_list_dir(
@@ -696,6 +699,6 @@ def test_list_dir_preserves_remote_workspace_rejection(
     )
 
     assert isinstance(payload, dict)
-    assert payload["status"] == 404
-    assert "Path does not exist" in payload["error"]
+    assert payload["status"] == 400
+    assert payload["error"] == "remote_workspace_unsupported"
     assert calls == {"fallback": 0, "list_dir": 0}

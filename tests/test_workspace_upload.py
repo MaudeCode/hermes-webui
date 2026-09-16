@@ -136,7 +136,8 @@ def _configure_direct_office_upload(monkeypatch, tmp_path):
 
     monkeypatch.setattr(upload, "get_session", lambda _sid: session)
     monkeypatch.setattr(upload, "_reject_invisible_session", lambda *_args: False)
-    monkeypatch.setattr(upload, "resolve_trusted_workspace", lambda path: path)
+    monkeypatch.setattr(upload, "session_workspace_supports_local_io", lambda _session: True)
+    monkeypatch.setattr(upload, "resolve_trusted_workspace", lambda path, **_kw: path)
     return upload, office_documents, workspace
 
 
@@ -830,3 +831,71 @@ class TestWorkspaceUploadSymlinkTarget:
         finally:
             import shutil
             shutil.rmtree(escape, ignore_errors=True)
+
+
+def test_remote_workspace_upload_never_writes_to_colliding_local_path(monkeypatch, tmp_path):
+    """A target-side path must not become a local upload destination."""
+    from api import config as api_config
+    from api import upload
+
+    local_collision = tmp_path / "remote-workspace"
+    local_collision.mkdir()
+    session = SimpleNamespace(workspace=str(local_collision), profile="alice")
+
+    monkeypatch.setattr(upload, "get_session", lambda _sid: session)
+    monkeypatch.setattr(upload, "_reject_invisible_session", lambda *_args: False)
+    monkeypatch.setattr(
+        upload,
+        "parse_multipart",
+        lambda *_args, **_kwargs: (
+            {"session_id": "remote-session", "path": ""},
+            {"file": ("must-not-land.txt", b"remote payload")},
+        ),
+    )
+    monkeypatch.setattr(
+        api_config,
+        "get_config_for_profile_home",
+        lambda _home: {"terminal": {"backend": "ssh", "cwd": str(local_collision)}},
+    )
+
+    handler = _FakeUploadHandler(content_length=len(b"remote payload"))
+    upload.handle_workspace_upload(handler)
+
+    assert handler.status == 400
+    assert handler.json_body()["code"] == "remote_workspace_unsupported"
+    assert not (local_collision / "must-not-land.txt").exists()
+
+
+def test_workspace_upload_fails_closed_when_profile_config_cannot_be_read(
+    monkeypatch, tmp_path
+):
+    """Unknown backend authority must not fall through to local filesystem I/O."""
+    from api import config as api_config
+    from api import upload
+
+    local_collision = tmp_path / "unknown-workspace"
+    local_collision.mkdir()
+    session = SimpleNamespace(workspace=str(local_collision), profile="alice")
+
+    monkeypatch.setattr(upload, "get_session", lambda _sid: session)
+    monkeypatch.setattr(upload, "_reject_invisible_session", lambda *_args: False)
+    monkeypatch.setattr(
+        upload,
+        "parse_multipart",
+        lambda *_args, **_kwargs: (
+            {"session_id": "unknown-session", "path": ""},
+            {"file": ("must-not-land.txt", b"unknown payload")},
+        ),
+    )
+    monkeypatch.setattr(
+        api_config,
+        "get_config_for_profile_home",
+        lambda _home: (_ for _ in ()).throw(OSError("config unavailable")),
+    )
+
+    handler = _FakeUploadHandler(content_length=len(b"unknown payload"))
+    upload.handle_workspace_upload(handler)
+
+    assert handler.status == 400
+    assert handler.json_body()["code"] == "remote_workspace_unsupported"
+    assert not (local_collision / "must-not-land.txt").exists()

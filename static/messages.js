@@ -8362,7 +8362,30 @@ function autoResize(){
   }
   const el=$('msg');
   const _nextValue=String(el.value||'');
+  if(typeof CSS!=='undefined'&&typeof CSS.supports==='function'&&CSS.supports('field-sizing','content')){
+    if(el.style.height) el.style.height='';
+    _composerLastResizeValue=_nextValue;
+    updateSendBtn();
+    if(typeof _scheduleComposerFit==='function') _scheduleComposerFit();
+    return;
+  }
   const _isAppendOnly=_nextValue.length>_composerLastResizeValue.length&&_nextValue.startsWith(_composerLastResizeValue);
+  // An EMPTY composer has no content to measure, so clear any inline height and
+  // let the CSS `min-height` define the resting size. Measuring instead would
+  // read the PLACEHOLDER's scrollHeight — a long busy/compression hint wraps to
+  // two or three lines and would grow the empty composer (71px for the English
+  // busy hint, 97px for the French compression one) purely because of hint text.
+  // That made the empty height history-dependent on this path: 44px on a fresh
+  // send, but grown after any later resize while empty. The native
+  // `field-sizing` path above always holds the resting height, so clearing here
+  // keeps both paths on the same contract.
+  if(!_nextValue){
+    if(el.style.height) el.style.height='';
+    _composerLastResizeValue=_nextValue;
+    updateSendBtn();
+    if(typeof _scheduleComposerFit==='function') _scheduleComposerFit();
+    return;
+  }
   const _fitsCurrentHeight=el.scrollHeight<=el.offsetHeight;
   // Only a direct append at the natural one-row height can skip the height
   // round trip. Replacements and an already-tall composer must remeasure so the
@@ -8375,11 +8398,6 @@ function autoResize(){
   const _minHeightRaw=_isAppendOnly&&_fitsCurrentHeight?getComputedStyle(el).minHeight:'';
   const _minHeight=/^(?:\d+(?:\.\d+)?|\.\d+)px$/.test(_minHeightRaw)?parseFloat(_minHeightRaw):NaN;
   const _isAtMinimumHeight=Number.isFinite(_minHeight)&&el.offsetHeight<=Math.ceil(_minHeight)+1;
-  // HWEB-10: every programmatic composer-value write in the app routes through
-  // here (session draft restore, failed-send restore, slash commands, prefill,
-  // dictation), and none of them dispatch an `input` event — so this is the one
-  // chokepoint where the phone collapse stage can be kept in sync with the value
-  // it is deciding on. rAF-coalesced, so a burst costs one fit.
   // HWEB-10: every programmatic composer-value write in the app routes through
   // here (session draft restore, failed-send restore, slash commands, prefill,
   // dictation), and none of them dispatch an `input` event — so this is the one
