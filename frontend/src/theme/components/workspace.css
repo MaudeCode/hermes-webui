@@ -32,13 +32,14 @@
 .rightpanel{transition:width .24s ease,padding .24s ease,opacity .18s ease,transform .24s ease,margin .24s ease;backdrop-filter:var(--chrome-backdrop)}
 html[data-workspace-panel="closed"] .rightpanel{margin-left:0;border-color:transparent}
 /* A tab on the panel's left edge, in the frame's own tone with no border, so it is one piece with the panel and
-   the frame; the panel must not clip it. The two pseudo-elements are the inverse-rounded joins where the tab
-   meets the panel edge, so it flows into the panel instead of butting against it. */
+   the frame; the panel must not clip it. The two .edge-tab-join children are the inverse-rounded joins where the
+   tab meets the panel edge, so it flows into the panel instead of butting against it (real elements, because the
+   tooltip owns the button's pseudo-elements). */
 .rightpanel{overflow:visible}
 .workspace-panel-edge-toggle{width:18px;height:40px;padding:0;border:0;border-radius:var(--r-md) 0 0 var(--r-md);box-shadow:none;background:var(--canvas);color:var(--muted);overflow:visible}
-.workspace-panel-edge-toggle::before,.workspace-panel-edge-toggle::after{content:"";position:absolute;right:0;width:var(--r-md);height:var(--r-md);pointer-events:none}
-.workspace-panel-edge-toggle::before{top:calc(-1 * var(--r-md));background:radial-gradient(circle at 0 0,transparent calc(var(--r-md) - .5px),var(--canvas) var(--r-md))}
-.workspace-panel-edge-toggle::after{bottom:calc(-1 * var(--r-md));background:radial-gradient(circle at 0 100%,transparent calc(var(--r-md) - .5px),var(--canvas) var(--r-md))}
+.edge-tab-join{position:absolute;right:0;width:var(--r-md);height:var(--r-md);pointer-events:none}
+.edge-tab-join-top{top:calc(-1 * var(--r-md));background:radial-gradient(circle at 0 0,transparent calc(var(--r-md) - .5px),var(--canvas) var(--r-md))}
+.edge-tab-join-bottom{bottom:calc(-1 * var(--r-md));background:radial-gradient(circle at 0 100%,transparent calc(var(--r-md) - .5px),var(--canvas) var(--r-md))}
 .workspace-panel-edge-toggle:hover{background:var(--canvas);color:var(--text)}
 @media (max-width:768px){.rightpanel{border-radius:0;border:0;backdrop-filter:var(--chrome-backdrop)}}
 @media (max-width:768px){.rightpanel{border-left:1px solid var(--border);backdrop-filter:var(--chrome-backdrop)}}

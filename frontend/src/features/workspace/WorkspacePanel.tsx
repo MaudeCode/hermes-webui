@@ -62,6 +62,8 @@ export function WorkspacePanel({ workspace, sessionId, open, onToggle, onClose }
     <aside ref={panel} style={{ width }} className="rightpanel flex w-[300px] shrink-0 flex-col p-(--island-gap) max-[768px]:p-0 max-[768px]:bg-(--sidebar-bg) max-[768px]:absolute max-[768px]:inset-y-0 max-[768px]:right-0 max-[768px]:z-[150] max-[768px]:w-[min(100vw,360px)] max-[768px]:shadow-md" aria-label={m.ws_panel_title()} data-panel="workspace">
       {/* The edge tab rides on the panel's left edge, so it slides with the panel and sits flush with the screen when closed. */}
       <button type="button" className="workspace-panel-edge-toggle has-tooltip has-tooltip--left" id="btnWorkspacePanelEdgeToggle" data-tooltip={open ? m.workspace_panel_hide() : m.workspace_panel_show()} aria-label={open ? m.workspace_panel_hide() : m.workspace_panel_show()} aria-expanded={open} onClick={onToggle}>
+        <span className="edge-tab-join edge-tab-join-top" aria-hidden="true" />
+        <span className="edge-tab-join edge-tab-join-bottom" aria-hidden="true" />
         {open ? <ChevronRight size={12} aria-hidden="true" /> : <ChevronLeft size={12} aria-hidden="true" />}
       </button>
       <div className="resize-handle absolute top-0 bottom-0 w-[5px] cursor-col-resize z-10 transition-[background] duration-150 hover:bg-accent" id="rightpanelResize" role="separator" aria-orientation="vertical" aria-label={m.ws_panel_title()} onPointerDown={startResize} />
