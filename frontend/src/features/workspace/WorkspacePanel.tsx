@@ -22,7 +22,7 @@ function parentOf(path: string): string {
 }
 
 /** Right-hand workspace panel: directory tree, file preview/edit, git status badge. */
-export function WorkspacePanel({ workspace, sessionId, onClose }: { workspace: string; sessionId: string; onClose: () => void }) {
+export function WorkspacePanel({ workspace, sessionId, open, onClose }: { workspace: string; sessionId: string; open: boolean; onClose: () => void }) {
   const qc = useQueryClient()
   const [dir, setDir] = useState('.')
   const [showHidden, setShowHidden] = useState(false)
@@ -49,7 +49,7 @@ export function WorkspacePanel({ workspace, sessionId, onClose }: { workspace: s
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)
   }
-  useEffect(() => { writePersisted('hermes-webui-workspace-panel', 'open'); document.documentElement.dataset.workspacePanel = 'open'; return () => { writePersisted('hermes-webui-workspace-panel', 'closed'); document.documentElement.dataset.workspacePanel = 'closed' } }, [])
+  useEffect(() => { const state = open ? 'open' : 'closed'; writePersisted('hermes-webui-workspace-panel', state); document.documentElement.dataset.workspacePanel = state }, [open])
   const listing = useQuery({ queryKey: keys.files.list(workspace, dir, showHidden), queryFn: () => api.listDir(sessionId, dir, showHidden), staleTime: 10_000 })
   const git = useQuery({ queryKey: keys.files.git(sessionId), queryFn: () => api.fetchGitInfo(sessionId), staleTime: 30_000, retry: false })
   const content = useQuery({ queryKey: keys.files.content(workspace, file ?? ''), queryFn: () => api.readFile(sessionId, file ?? ''), enabled: !!file, staleTime: 5_000 })
