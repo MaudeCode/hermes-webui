@@ -13,7 +13,7 @@ import { readPersisted, readPersistedJson, writePersistedJson } from '../lib/per
  * (login and logout clear that prefix).
  */
 const SNAPSHOT_KEY = 'hermes-boot:queries'
-const SNAPSHOT_LIMIT = 350_000
+const SNAPSHOT_LIMIT = 2_000_000
 
 function snapshotSchema(key: readonly unknown[]): ZodType | null {
   switch (key[0]) {
@@ -41,9 +41,11 @@ function restoreSnapshot(qc: QueryClient): void {
 }
 
 function persistSnapshot(qc: QueryClient): void {
-  const state = dehydrate(qc, { shouldDehydrateQuery: (q: Query) => q.state.status === 'success' && snapshotSchema(q.queryKey) !== null })
-  const json = JSON.stringify(state)
-  if (json.length <= SNAPSHOT_LIMIT) writePersistedJson(SNAPSHOT_KEY, state)
+  const keep = (q: Query) => q.state.status === 'success' && snapshotSchema(q.queryKey) !== null
+  let state = dehydrate(qc, { shouldDehydrateQuery: keep })
+  // Over budget: the transcript is the only entry that grows; drop it and keep the shell queries.
+  if (JSON.stringify(state).length > SNAPSHOT_LIMIT) state = dehydrate(qc, { shouldDehydrateQuery: (q) => keep(q) && q.queryKey[1] !== 'detail' })
+  if (JSON.stringify(state).length <= SNAPSHOT_LIMIT) writePersistedJson(SNAPSHOT_KEY, state)
 }
 
 export function createQueryClient(): QueryClient {
