@@ -285,6 +285,37 @@ and skin custom properties as the authoritative design tokens. The legacy
 stylesheet remains the visual parity baseline until the chrome is restyled with
 Tailwind against the screenshot baselines.
 
+## 13b. Validation-round adjustments
+
+Recorded after the ticket owner validated the built frontend on the LAN
+preview (2026-09-15 and 2026-09-16). Product-visible changes are X5 to X11 in
+the parity matrix. Mechanisms worth knowing:
+
+- **Boot.** `frontend/src/theme/prepaint.js` is a blocking classic script in
+  `<head>` (a hashed asset, never inlined as a `data:` URL, precached by the
+  service worker) that applies the persisted theme, skin, collapsed sidebar and
+  workspace-panel state before first paint. While `#app` is empty, pseudo-element
+  rules in `shell.css` draw the frame (rail divider and main card). The query
+  client hydrates a `dehydrate()` snapshot of the shell queries from
+  `hermes-boot:queries` (validated with the contract schemas on the way in,
+  stale on arrival, written 500 ms after each successful fetch and on
+  `pagehide`). Login and logout clear the `hermes-boot:` prefix. The chat view
+  assumes a session has content until its transcript says otherwise; only a
+  session remembered in `hermes-webui-session-empty` opens in the hero layout.
+- **Stylesheets** are imported by the root route, not the client entry, so the
+  dev document links them in `<head>` too.
+- **Shell geometry.** The main pane has no outer margin; the sidebar, the rail
+  (while the sidebar is collapsed) and the workspace panel carry `.seam`
+  children, card-coloured concave fillets built from radial gradients, the same
+  construction as the workspace edge tab's joins. The side columns stack above
+  `.composer-wrap` so their resize handles are never covered. Both resize
+  highlights stop one seam radius short of the top and bottom and the seams draw
+  an accent ring along their arc on hover.
+- **Component sheets** keep every rule inside their `@layer app{}` block; an
+  unlayered rule outranks layered ones regardless of specificity, which hid one
+  hover rule during this round.
+- **Dev server.** See "Development server" in section 3.
+
 ## 14. Testing
 
 | Layer | Command | Covers |
