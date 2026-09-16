@@ -1020,6 +1020,7 @@ def test_agent_session_source_normalization_contract():
         'discord': ('messaging', 'Discord'),
         'slack': ('messaging', 'Slack'),
         'matrix': ('messaging', 'Matrix'),
+        'signal': ('messaging', 'Signal'),
         'cron': ('cron', 'Cron'),
         'webhook': ('webhook', 'Webhook'),
         'tool': ('tool', 'Tool'),

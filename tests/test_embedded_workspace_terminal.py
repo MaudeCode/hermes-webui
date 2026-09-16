@@ -105,11 +105,7 @@ def test_terminal_start_rejects_remote_backend_with_stale_workspace_before_local
             workspace="/Users/other/projects/stale-remote-workspace",
         ),
     )
-    monkeypatch.setattr(
-        routes,
-        "get_config",
-        lambda: {"terminal": {"backend": "docker", "cwd": "/Users/joeyshiue"}},
-    )
+    monkeypatch.setattr(routes, "session_workspace_supports_local_io", lambda _session: False)
 
     handler = _RouteHandler()
     routes._handle_terminal_start(

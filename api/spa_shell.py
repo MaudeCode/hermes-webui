@@ -29,6 +29,7 @@ SPA_EXACT_PATHS: frozenset[str] = frozenset(
     {
         "/",
         "/index.html",
+        "/sessions",
         "/tasks",
         "/kanban",
         "/skills",

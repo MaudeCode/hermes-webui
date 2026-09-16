@@ -54,7 +54,7 @@ def _new_page(browser):
     page.goto(BASE + "/", wait_until="domcontentloaded")
     page.wait_for_function(
         "() => typeof setLocale === 'function' && typeof applyLocaleToDOM === 'function'"
-        " && typeof api === 'function'",
+        " && typeof api === 'function' && S && S._bootReady === true",
         timeout=15000,
     )
     return page

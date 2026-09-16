@@ -120,6 +120,45 @@ def test_absent_key_with_config_default_on_creates_worktree_session(tmp_path, mo
     assert session["worktree_branch"] == "hermes/hermes-6022"
 
 
+def test_remote_profile_config_default_skips_host_worktree(tmp_path, monkeypatch):
+    repo, _ = _mk_repo_dirs(tmp_path)
+    monkeypatch.setattr(routes, "profile_supports_local_io", lambda _profile=None: False)
+    monkeypatch.setattr(
+        worktrees,
+        "create_worktree_for_workspace",
+        lambda _workspace: pytest.fail("remote profile must not create a host worktree"),
+    )
+    captured = _post_session_new(
+        tmp_path,
+        monkeypatch,
+        {"workspace": str(repo), "profile": "remote"},
+        config_default=True,
+        workspace_dir=repo,
+    )
+    assert captured["status"] == 200
+    assert captured["payload"]["session"].get("worktree_path") in (None, "")
+    assert captured["payload"]["worktree_skipped"]
+
+
+def test_remote_profile_explicit_worktree_fails_closed(tmp_path, monkeypatch):
+    repo, _ = _mk_repo_dirs(tmp_path)
+    monkeypatch.setattr(routes, "profile_supports_local_io", lambda _profile=None: False)
+    monkeypatch.setattr(
+        worktrees,
+        "create_worktree_for_workspace",
+        lambda _workspace: pytest.fail("remote profile must not create a host worktree"),
+    )
+    captured = _post_session_new(
+        tmp_path,
+        monkeypatch,
+        {"workspace": str(repo), "profile": "remote", "worktree": True},
+        config_default=False,
+        workspace_dir=repo,
+    )
+    assert captured["status"] == 400
+    assert captured["payload"]["error"] == "remote_workspace_unsupported"
+
+
 # ── Route matrix: explicit wins ──────────────────────────────────────────────
 
 
