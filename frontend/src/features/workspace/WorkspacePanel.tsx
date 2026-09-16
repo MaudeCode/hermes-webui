@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowUp, Download, Eye, EyeOff, File as FileIcon, Folder, RefreshCw, X } from 'lucide-react'
+import { ArrowUp, ChevronLeft, ChevronRight, Download, Eye, EyeOff, File as FileIcon, Folder, RefreshCw, X } from 'lucide-react'
 import { m } from '../../paraglide/messages.js'
 import * as api from '../../api/endpoints'
 import { keys } from '../../api/queryKeys'
@@ -22,7 +22,7 @@ function parentOf(path: string): string {
 }
 
 /** Right-hand workspace panel: directory tree, file preview/edit, git status badge. */
-export function WorkspacePanel({ workspace, sessionId, open, onClose }: { workspace: string; sessionId: string; open: boolean; onClose: () => void }) {
+export function WorkspacePanel({ workspace, sessionId, open, onToggle, onClose }: { workspace: string; sessionId: string; open: boolean; onToggle: () => void; onClose: () => void }) {
   const qc = useQueryClient()
   const [dir, setDir] = useState('.')
   const [showHidden, setShowHidden] = useState(false)
@@ -50,9 +50,9 @@ export function WorkspacePanel({ workspace, sessionId, open, onClose }: { worksp
     window.addEventListener('pointerup', up)
   }
   useEffect(() => { const state = open ? 'open' : 'closed'; writePersisted('hermes-webui-workspace-panel', state); document.documentElement.dataset.workspacePanel = state }, [open])
-  const listing = useQuery({ queryKey: keys.files.list(workspace, dir, showHidden), queryFn: () => api.listDir(sessionId, dir, showHidden), staleTime: 10_000 })
-  const git = useQuery({ queryKey: keys.files.git(sessionId), queryFn: () => api.fetchGitInfo(sessionId), staleTime: 30_000, retry: false })
-  const content = useQuery({ queryKey: keys.files.content(workspace, file ?? ''), queryFn: () => api.readFile(sessionId, file ?? ''), enabled: !!file, staleTime: 5_000 })
+  const listing = useQuery({ queryKey: keys.files.list(workspace, dir, showHidden), queryFn: () => api.listDir(sessionId, dir, showHidden), staleTime: 10_000, enabled: open })
+  const git = useQuery({ queryKey: keys.files.git(sessionId), queryFn: () => api.fetchGitInfo(sessionId), staleTime: 30_000, retry: false, enabled: open })
+  const content = useQuery({ queryKey: keys.files.content(workspace, file ?? ''), queryFn: () => api.readFile(sessionId, file ?? ''), enabled: !!file && open, staleTime: 5_000 })
   const save = useMutation({ mutationFn: (text: string) => api.saveFile(sessionId, file ?? '', text), onSuccess: () => { showToast(m.ws_panel_saved()); setDraft(null); void qc.invalidateQueries({ queryKey: keys.files.content(workspace, file ?? '') }) }, onError: (e) => showToast(e instanceof Error ? e.message : String(e), 4000, 'error') })
   const entries = (listing.data?.entries ?? listing.data?.items ?? []).slice().sort((a, b) => Number(!!b.is_dir) - Number(!!a.is_dir) || a.name.localeCompare(b.name))
   const g = git.data?.git
@@ -60,7 +60,12 @@ export function WorkspacePanel({ workspace, sessionId, open, onClose }: { worksp
   const text = draft ?? content.data?.content ?? ''
   return (
     <aside ref={panel} style={{ width }} className="rightpanel flex w-[300px] shrink-0 flex-col p-(--island-gap) max-[768px]:p-0 max-[768px]:bg-(--sidebar-bg) max-[768px]:absolute max-[768px]:inset-y-0 max-[768px]:right-0 max-[768px]:z-[150] max-[768px]:w-[min(100vw,360px)] max-[768px]:shadow-md" aria-label={m.ws_panel_title()} data-panel="workspace">
+      {/* The edge tab rides on the panel's left edge, so it slides with the panel and sits flush with the screen when closed. */}
+      <button type="button" className="workspace-panel-edge-toggle has-tooltip has-tooltip--left" id="btnWorkspacePanelEdgeToggle" data-tooltip={open ? m.workspace_panel_hide() : m.workspace_panel_show()} aria-label={open ? m.workspace_panel_hide() : m.workspace_panel_show()} aria-expanded={open} onClick={onToggle}>
+        {open ? <ChevronRight size={12} aria-hidden="true" /> : <ChevronLeft size={12} aria-hidden="true" />}
+      </button>
       <div className="resize-handle absolute top-0 bottom-0 w-[5px] cursor-col-resize z-10 transition-[background] duration-150 hover:bg-accent" id="rightpanelResize" role="separator" aria-orientation="vertical" aria-label={m.ws_panel_title()} onPointerDown={startResize} />
+      <div className="rightpanel-body flex flex-1 min-h-0 flex-col overflow-hidden">
       <div className="flex min-h-12 items-center justify-between gap-2 border-b border-border px-3 py-2">
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold text-text">{m.ws_panel_title()}</div>
@@ -123,6 +128,7 @@ export function WorkspacePanel({ workspace, sessionId, open, onClose }: { worksp
           </div>
         </div>
       )}
+      </div>
     </aside>
   )
 }

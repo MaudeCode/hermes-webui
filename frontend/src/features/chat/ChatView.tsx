@@ -7,7 +7,6 @@ import { MAIN_VIEW } from '../../shell/AppShell'
 
 /** Legacy `.chat-context-item`; the `·` separator between items stays a legacy `::before` rule. */
 const CONTEXT_ITEM = 'chat-context-item border-0 bg-transparent text-muted text-[12px] font-medium py-px px-1.5 -mx-0.5 rounded-[5px] cursor-pointer whitespace-nowrap overflow-hidden text-ellipsis max-w-[220px] transition-[background,color] duration-(--dur) ease-(--ease) hover:bg-hover hover:text-text'
-import { ChevronLeft, ChevronRight } from 'lucide-react'
 import * as api from '../../api/endpoints'
 import { keys } from '../../api/queryKeys'
 import { useBootstrap } from '../../app/bootstrap'
@@ -46,9 +45,6 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
   // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time DOM lookup after the shell has committed its slot
   useEffect(() => { setRightSlot(document.getElementById('rightpanelSlot')) }, [])
   const [workspaceOpen, setWorkspaceOpen] = useState(() => readPersisted('hermes-webui-workspace-panel') === 'open')
-  // Once opened the panel stays mounted so closing animates (width to 0 via html[data-workspace-panel]) instead of unmounting.
-  const [workspaceMounted, setWorkspaceMounted] = useState(workspaceOpen)
-  const toggleWorkspace = useCallback((open: boolean) => { setWorkspaceOpen(open); if (open) setWorkspaceMounted(true) }, [])
   const [queued, setQueued] = useState<string[]>([])
   const [reasoning, setReasoning] = useState<string | null>(null)
   const [yolo, setYolo] = useState(false)
@@ -243,12 +239,8 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
         />
         <span className="sr-only" aria-live="polite" id="a11yAnnouncer">{live?.status === 'done' ? m.done() : ''}</span>
       </div>
-      {workspaceMounted && workspace && sessionId && rightSlot && createPortal(<WorkspacePanel key={workspace} workspace={workspace} sessionId={sessionId} open={workspaceOpen} onClose={() => toggleWorkspace(false)} />, rightSlot)}
-      {sessionId && workspace && (
-        <button type="button" className="workspace-panel-edge-toggle has-tooltip has-tooltip--left" id="btnWorkspacePanelEdgeToggle" data-tooltip={workspaceOpen ? m.workspace_panel_hide() : m.workspace_panel_show()} aria-label={workspaceOpen ? m.workspace_panel_hide() : m.workspace_panel_show()} aria-expanded={workspaceOpen} onClick={() => toggleWorkspace(!workspaceOpen)}>
-          {workspaceOpen ? <ChevronRight size={12} aria-hidden="true" /> : <ChevronLeft size={12} aria-hidden="true" />}
-        </button>
-      )}
+      {/* Always mounted beside main (its queries run only while open) so opening and closing animate and the edge tab is always there. */}
+      {workspace && sessionId && rightSlot && createPortal(<WorkspacePanel key={workspace} workspace={workspace} sessionId={sessionId} open={workspaceOpen} onToggle={() => setWorkspaceOpen((o) => !o)} onClose={() => setWorkspaceOpen(false)} />, rightSlot)}
     </>
   )
 }
