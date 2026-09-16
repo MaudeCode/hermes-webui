@@ -125,7 +125,6 @@ html.hub-active .layout .sidebar .resize-handle{display:none}
 @media (max-width:768px){.main-view.hub-page .main-view-header{padding:12px 14px 6px}}
 @media (min-width:641px){.app-titlebar{display:none}}
 @media (min-width:641px) and (display-mode: window-controls-overlay){.app-titlebar{display:flex}}
-@media (min-width:769px){html.pwa-browser .layout{padding-top:var(--island-gap)}}
 .rail .rail-btn.has-tooltip::after{font-size:10px;font-weight:500;letter-spacing:-.01em;line-height:1.3;padding:0 3px 1px;max-width:52px;box-sizing:border-box}
 .sidebar-search{padding:2px 10px 8px}
 .icon-btn{width:30px;height:30px}
@@ -134,7 +133,7 @@ html.hub-active .layout .sidebar .resize-handle{display:none}
 .has-tooltip::after{font-size:11px}
 .rail-brand svg,.rail-brand .app-titlebar-icon{width:30px;height:30px;display:inline-flex}
 .rail-brand .app-titlebar-icon svg{width:30px;height:30px}
-html.hub-active .rightpanel{width:0 !important;min-width:0 !important;opacity:0;pointer-events:none;overflow:hidden;border-color:transparent;margin-left:calc(-1 * var(--island-gap));content-visibility:hidden}
+html.hub-active .rightpanel{width:0 !important;min-width:0 !important;opacity:0;pointer-events:none;overflow:hidden;border-color:transparent;margin-left:0;content-visibility:hidden}
 html.hub-active .workspace-panel-edge-toggle{display:none !important}
 .rail-brand .rail-brandmark{width:30px;height:30px;color:var(--accent)}
 .main-view-actions .panel-head-btn{width:32px;height:32px;border-radius:var(--r-md);border:1px solid var(--border);background:var(--surface)}
@@ -147,9 +146,7 @@ html.hub-active .workspace-panel-edge-toggle{display:none !important}
 .chat,.panel-view,.empty-state{background:var(--pane-bg)}
 .nav-tab.active svg{color:var(--nav-active-icon-fg)}
 /* Inset shell: the card keeps the frame gap on the sides where no frame element sits. */
-@media (min-width:641px){.layout.sidebar-collapsed > main.main,html.hub-active .layout > main.main{margin-left:var(--island-gap)}}
 @media (min-width:641px){.layout.sidebar-collapsed .sidebar:not(.mobile-open),html.hub-active .layout .sidebar:not(.mobile-open){padding:0}}
-@media (min-width:901px){html[data-workspace-panel="open"]:not(.hub-active) .layout > main.main{margin-right:0}}
 @media (min-width:641px){.sidebar .panel-head{border-bottom-color:transparent}}
 }
 /* First paint. #app is empty until the module entry mounts (about 50ms built, longer under the dev server),
@@ -158,11 +155,23 @@ html.hub-active .workspace-panel-edge-toggle{display:none !important}
    a bare canvas. */
 #app:empty{flex-direction:row;background:var(--canvas)}
 #app:empty::before{content:"";width:64px;flex-shrink:0;background:var(--rail-bg);border-right:1px solid var(--border)}
-#app:empty::after{content:"";flex:1;min-width:0;margin:var(--island-gap) var(--island-gap) var(--island-gap) 300px;background:var(--main-surface);border:var(--island-ring-width) solid var(--island-ring);border-radius:var(--island-radius);box-shadow:var(--island-shadow)}
-html[data-sidebar-collapsed="1"] #app:empty::after{margin-left:var(--island-gap)}
+#app:empty::after{content:"";flex:1;min-width:0;margin:0 0 0 300px;background:var(--main-surface);border:var(--island-ring-width) solid var(--island-ring);box-shadow:var(--island-shadow)}
+html[data-sidebar-collapsed="1"] #app:empty::after{margin-left:0}
 @media (max-width:768px){#app:empty::after{margin:0 0 0 300px;border:0;border-radius:0;box-shadow:none}}
 @media (max-width:640px){#app:empty::before{display:none}#app:empty::after{margin:0}}
 /* Phone titlebar: one hamburger on the left against two buttons on the right, so flex centring lands the title
    off-centre (legacy had the same offset). Centre the title block on the bar itself and drop the balancing spacer,
    which only matched the hamburger when the right side had no buttons. */
 @media (max-width:640px){.app-titlebar-spacer{display:none}.app-titlebar-new-chat{margin-left:auto}.app-titlebar-inner{position:absolute;left:50%;top:var(--app-titlebar-safe-top);bottom:0;transform:translateX(-50%);flex:none;max-width:calc(100% - 200px)}}
+/* Seams: where the sidebar, the rail (sidebar collapsed) or the workspace panel meets the main card, a card-coloured
+   concave fillet at the top and bottom, the same construction as the edge tab's joins, so the card flows into its
+   neighbours instead of ending in a rounded corner with a wedge of canvas. Desktop only; the card has square corners. */
+.seam{position:absolute;width:var(--island-radius);height:var(--island-radius);pointer-events:none;z-index:1}
+.seam-tr{right:0;top:0;background:radial-gradient(circle at 0 100%,transparent calc(var(--island-radius) - .5px),var(--main-surface) var(--island-radius))}
+.seam-br{right:0;bottom:0;background:radial-gradient(circle at 0 0,transparent calc(var(--island-radius) - .5px),var(--main-surface) var(--island-radius))}
+.seam-tl{left:0;top:0;background:radial-gradient(circle at 100% 100%,transparent calc(var(--island-radius) - .5px),var(--main-surface) var(--island-radius))}
+.seam-bl{left:0;bottom:0;background:radial-gradient(circle at 100% 0,transparent calc(var(--island-radius) - .5px),var(--main-surface) var(--island-radius))}
+.rail-seam{display:none}
+.layout.sidebar-collapsed .rail-seam{display:block}
+.layout.sidebar-collapsed .sidebar .seam,html.hub-active .rightpanel .seam,html[data-workspace-panel="closed"] .rightpanel .seam{display:none}
+@media (max-width:769px){.seam{display:none}}

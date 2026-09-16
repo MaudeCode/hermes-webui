@@ -50,6 +50,8 @@ export function Sidebar({ panel }: { panel: ReactNode }) {
           </>
         )}
         {panel}
+        <span className="seam seam-tr" aria-hidden="true" />
+        <span className="seam seam-br" aria-hidden="true" />
         {isDesktop && !collapsed && (
           <div className="resize-handle absolute top-0 bottom-0 w-[5px] cursor-col-resize z-10 transition-[background] duration-150 hover:bg-accent" id="sidebarResize" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" onPointerDown={startResize} />
         )}

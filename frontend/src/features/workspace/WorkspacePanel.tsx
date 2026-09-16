@@ -67,6 +67,8 @@ export function WorkspacePanel({ workspace, sessionId, open, onToggle, onClose }
         {open ? <ChevronRight size={12} aria-hidden="true" /> : <ChevronLeft size={12} aria-hidden="true" />}
       </button>
       <div className="resize-handle absolute top-0 bottom-0 w-[5px] cursor-col-resize z-10 transition-[background] duration-150 hover:bg-accent" id="rightpanelResize" role="separator" aria-orientation="vertical" aria-label={m.ws_panel_title()} onPointerDown={startResize} />
+      <span className="seam seam-tl" aria-hidden="true" />
+      <span className="seam seam-bl" aria-hidden="true" />
       <div className="rightpanel-body flex flex-1 min-h-0 flex-col overflow-hidden">
       <div className="flex min-h-12 items-center justify-between gap-2 border-b border-border px-3 py-2">
         <div className="min-w-0">
