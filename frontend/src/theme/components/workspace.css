@@ -25,7 +25,6 @@
 @media (max-width:640px){.rightpanel.mobile-open{right:0 !important;box-shadow:-4px 0 24px rgba(0,0,0,.4) !important}}
 @media (max-width:640px){.rightpanel .resize-handle{display:none}}
 @media (min-width:641px){.rightpanel{position:relative;backdrop-filter:var(--chrome-backdrop)}}
-.rightpanel .resize-handle{left:-2px}
 .rightpanel[data-active-tab="artifacts"] .file-tree{display:none !important}
 .rightpanel[data-active-tab="todos"] .file-tree{display:none !important}
 .rightpanel{border:0;border-radius:0;background:transparent;backdrop-filter:var(--chrome-backdrop)}
@@ -53,11 +52,12 @@ html[data-workspace-panel="closed"] .rightpanel{margin-left:0;border-color:trans
 .rightpanel[data-resizing] ~ *,.rightpanel[data-resizing] *{pointer-events:none;user-select:none}
 @media (max-width:640px){.rightpanel{background:var(--sidebar-bg)}}
 }
-/* Resize hover: the highlight leaves a gap where the edge tab sits and runs around the tab and its joins instead
-   of passing behind it. The tab is 40px high plus one join radius above and below, centred on the panel. */
-/* The handle spans panel x -2..3; the bar sits at 0..3 just inside the panel edge, on the same side of the
-   silhouette as the tab's inset stroke and the join rings, and runs 3px into each join to meet its ring. */
-.rightpanel .resize-handle:hover{background:linear-gradient(var(--accent),var(--accent)) 2px 0/3px calc(50% - 20px - var(--r-md) + 3px) no-repeat,linear-gradient(var(--accent),var(--accent)) 2px 100%/3px calc(50% - 20px - var(--r-md) + 3px) no-repeat}
-.rightpanel:has(> .resize-handle:hover) .workspace-panel-edge-toggle{box-shadow:inset 3px 0 0 var(--accent),inset 0 3px 0 var(--accent),inset 0 -3px 0 var(--accent)}
-.rightpanel:has(> .resize-handle:hover) .edge-tab-join-top{background:radial-gradient(circle at 0 0,transparent calc(var(--r-md) - .5px),var(--accent) var(--r-md),var(--accent) calc(var(--r-md) + 3px),var(--canvas) calc(var(--r-md) + 3.5px))}
-.rightpanel:has(> .resize-handle:hover) .edge-tab-join-bottom{background:radial-gradient(circle at 0 100%,transparent calc(var(--r-md) - .5px),var(--accent) var(--r-md),var(--accent) calc(var(--r-md) + 3px),var(--canvas) calc(var(--r-md) + 3.5px))}
+/* Resize hover: the highlight leaves a gap where the edge tab sits and runs around the tab instead of passing behind
+   it. Every piece lies on the card side of the silhouette, 3px thick: the handle's bar at panel x -3..0, stopping one
+   join radius above and below the 40px tab; a spread box-shadow around the tab, clipped on its panel side; and a
+   ring inside each join's arc, which at the join's outer row spans exactly the bar's column, so the pieces meet. */
+.rightpanel .resize-handle{left:-4px;width:7px}
+.rightpanel .resize-handle:hover{background:linear-gradient(var(--accent),var(--accent)) 1px 0/3px calc(50% - 20px - var(--r-md)) no-repeat,linear-gradient(var(--accent),var(--accent)) 1px 100%/3px calc(50% - 20px - var(--r-md)) no-repeat}
+.rightpanel:has(> .resize-handle:hover) .workspace-panel-edge-toggle{box-shadow:0 0 0 3px var(--accent);clip-path:inset(calc(-1 * var(--r-md) - 3px) 0 calc(-1 * var(--r-md) - 3px) -3px)}
+.rightpanel:has(> .resize-handle:hover) .edge-tab-join-top{background:radial-gradient(circle at 0 0,transparent calc(var(--r-md) - 3.5px),var(--accent) calc(var(--r-md) - 3px),var(--accent) calc(var(--r-md) - .5px),var(--canvas) var(--r-md))}
+.rightpanel:has(> .resize-handle:hover) .edge-tab-join-bottom{background:radial-gradient(circle at 0 100%,transparent calc(var(--r-md) - 3.5px),var(--accent) calc(var(--r-md) - 3px),var(--accent) calc(var(--r-md) - .5px),var(--canvas) var(--r-md))}
