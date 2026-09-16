@@ -5,6 +5,10 @@ import type { Bootstrap } from '../contracts/bootstrap'
 import { NotFound, PendingView, RouteError } from '../features/shell/ErrorBoundary'
 import interWoff2 from '../theme/fonts/InterVariable.woff2?url'
 import prepaintUrl from '../theme/prepaint.js?url'
+// Stylesheets belong to the root route, not the client entry: the route's CSS is linked in <head> of the
+// prerendered shell and of the dev document, so the first-paint frame (#app:empty) is styled before the module runs.
+import '../theme/tailwind.css'
+import 'virtual:hermes-theme.css'
 
 export interface RouterContext {
   queryClient: QueryClient

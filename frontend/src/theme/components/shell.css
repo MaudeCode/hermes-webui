@@ -150,3 +150,13 @@ html.hub-active .workspace-panel-edge-toggle{display:none !important}
 @media (min-width:901px){html[data-workspace-panel="open"]:not(.hub-active) .layout > main.main{margin-right:0}}
 @media (min-width:641px){.sidebar .panel-head{border-bottom-color:transparent}}
 }
+/* First paint. #app is empty until the module entry mounts (about 50ms built, longer under the dev server),
+   so the inset frame (rail divider + main card) is drawn from pseudo-elements meanwhile; prepaint.js has
+   already set the theme, skin and sidebar state on <html>. A reload then keeps its frame instead of flashing
+   a bare canvas. */
+#app:empty{flex-direction:row;background:var(--canvas)}
+#app:empty::before{content:"";width:64px;flex-shrink:0;background:var(--rail-bg);border-right:1px solid var(--border)}
+#app:empty::after{content:"";flex:1;min-width:0;margin:var(--island-gap) var(--island-gap) var(--island-gap) 300px;background:var(--main-surface);border:var(--island-ring-width) solid var(--island-ring);border-radius:var(--island-radius);box-shadow:var(--island-shadow)}
+html[data-sidebar-collapsed="1"] #app:empty::after{margin-left:var(--island-gap)}
+@media (max-width:768px){#app:empty::after{margin:0 0 0 300px;border:0;border-radius:0;box-shadow:none}}
+@media (max-width:640px){#app:empty::before{display:none}#app:empty::after{margin:0}}

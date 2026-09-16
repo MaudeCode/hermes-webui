@@ -13,8 +13,6 @@ import { getRouter } from './router'
 import { createQueryClient } from './api/queryClient'
 import { loadBootstrap, BootstrapContext } from './app/bootstrap'
 import { FatalError } from './features/shell/ErrorBoundary'
-import './theme/tailwind.css'
-import 'virtual:hermes-theme.css'
 
 const appRoot = freezeAppRoot()
 applyBootAppearance()
