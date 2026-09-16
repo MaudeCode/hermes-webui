@@ -2,8 +2,9 @@
  * Apply persisted appearance before first paint. Ported from the legacy inline
  * <head> scripts: theme axis (light/dark/system plus legacy aliases), skin axis,
  * font size, full-width chat, RTL, sidebar collapse, workspace panel state.
- * Runs synchronously from the module entry, which the shell loads in <head>
- * order before any content exists, so no inline script is needed.
+ * Runs synchronously from the module entry. The first paint happens before the
+ * module arrives, so theme/prepaint.js (a blocking head script) sets the theme
+ * and skin ahead of it; this pass validates and completes the rest.
  */
 import { readPersisted, writePersisted } from '../lib/persisted'
 import { ThemeSchema, SkinSchema, FontSizeSchema, type Theme, type Skin } from '../contracts/persisted'

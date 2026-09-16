@@ -4,6 +4,7 @@ import type { ReactNode } from 'react'
 import type { Bootstrap } from '../contracts/bootstrap'
 import { NotFound, PendingView, RouteError } from '../features/shell/ErrorBoundary'
 import interWoff2 from '../theme/fonts/InterVariable.woff2?url'
+import prepaintUrl from '../theme/prepaint.js?url'
 
 export interface RouterContext {
   queryClient: QueryClient
@@ -38,6 +39,8 @@ export const Route = createRootRouteWithContext<RouterContext>()({
       // Inter uses font-display: optional; preloading (as the legacy shell did) keeps it from losing the first-paint race.
       { rel: 'preload', href: interWoff2, as: 'font', type: 'font/woff2', crossOrigin: 'anonymous' },
     ],
+    // Blocking, before the body: paints the persisted theme/skin so a reload never flashes the other theme.
+    scripts: [{ src: prepaintUrl }],
   }),
   shellComponent: RootShell,
   component: RootComponent,

@@ -56,6 +56,8 @@ export default defineConfig({
   build: {
     sourcemap: process.env.HERMES_WEBUI_SOURCEMAP === '1',
     manifest: true,
+    // The pre-paint head script must stay a file: a data: URL script is blocked by the CSP script-src.
+    assetsInlineLimit: (file) => (file.endsWith('/prepaint.js') ? false : undefined),
     rollupOptions: {
       output: {
         // Stable, sorted chunk naming; content hashes make output deterministic for identical inputs.
