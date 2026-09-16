@@ -16,8 +16,7 @@ import {
   SessionStatusSchema, SessionUsageSchema, SessionsListSchema, SettingsSchema, ShareCreateResponseSchema, ShareReadSchema, SkillContentSchema,
   SkillsSchema, SkillsUsageSchema, SteerRequestSchema, SteerResponseSchema, StreamStatusSchema, SystemHealthSchema, TranscribeCapabilitySchema,
   UpdateApplySchema, UpdatesCheckSchema, UpdatesSummarySchema, UploadResponseSchema, WorkspacesSchema,
-  type ChatStartRequest, type SessionId,
-} from '../contracts'
+  type ChatStartRequest, type SessionId, ReasoningStatusSchema } from '../contracts'
 
 const qs = (params: Record<string, string | number | boolean | undefined | null>) => {
   const p = new URLSearchParams()
@@ -55,7 +54,11 @@ export const fetchProviderQuotas = (refresh = false) => get(`api/provider/quotas
 export const fetchPersonalities = () => get('api/personalities', PersonalitiesSchema)
 export const setPersonality = (session_id: SessionId, personality: string | null) => post('api/personality/set', { session_id, personality }, OkSchema, { retries: 0 })
 export const fetchAuxiliaryModels = () => get('api/model/auxiliary', AuxiliaryModelsSchema)
-export const fetchReasoning = (model?: string, provider?: string) => get(`api/reasoning${qs({ model, provider })}`, z.looseObject({ supported: z.boolean().optional(), levels: z.array(z.string()).optional(), current: z.string().nullable().optional(), effort: z.string().nullable().optional() }))
+/** Reasoning config shared with the CLI (config.yaml agent.reasoning_effort / display.show_reasoning). */
+export const fetchReasoning = (model?: string | null, provider?: string | null) => get(`api/reasoning${qs({ model: model ?? undefined, provider: provider ?? undefined })}`, ReasoningStatusSchema)
+/** `effort: ''` clears the override so the provider default applies. */
+export const setReasoningEffort = (effort: string, model?: string | null, provider?: string | null) => post('api/reasoning', { effort, ...(model ? { model } : {}), ...(provider ? { provider } : {}) }, ReasoningStatusSchema, { retries: 0 })
+export const setReasoningDisplay = (display: 'show' | 'hide') => post('api/reasoning', { display }, ReasoningStatusSchema, { retries: 0 })
 
 // Sessions
 export interface SessionListParams { include_archived?: boolean; all_profiles?: boolean; sidebar_source?: 'webui' | 'cli'; exclude_hidden?: boolean }
@@ -114,7 +117,7 @@ export const uploadFile = (session_id: SessionId, file: File) => {
   form.set('file', file, file.name)
   return postForm(`api/upload${qs({ session_id })}`, form, UploadResponseSchema, { timeoutMs: 120_000 })
 }
-export const rollbackUpload = (session_id: SessionId, tokens: string[]) => post('api/upload/rollback', { session_id, tokens }, OkSchema, { retries: 0 })
+export const rollbackUpload = (session_id: SessionId, rollback_tokens: string[]) => post('api/upload/rollback', { session_id, rollback_tokens }, OkSchema, { retries: 0 })
 export const goalCommand = (session_id: SessionId, action: string, text?: string) => post('api/goal', { session_id, action, text }, GoalResponseSchema, { retries: 0 })
 export const fetchBackground = (session_id: SessionId) => get(`api/background/status${qs({ session_id })}`, BackgroundStatusSchema, { dedupe: false })
 export const ackBackgroundTask = (session_id: SessionId, task_id: string) => post('api/bg-task-complete-ack', { session_id, task_id }, OkSchema, { retries: 0 })

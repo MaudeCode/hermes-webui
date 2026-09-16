@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { m } from '../../paraglide/messages.js'
 import { cn } from '../../ui/cn'
 import { MAIN_VIEW } from '../../shell/AppShell'
@@ -46,7 +46,6 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
   useEffect(() => { setRightSlot(document.getElementById('rightpanelSlot')) }, [])
   const [workspaceOpen, setWorkspaceOpen] = useState(() => readPersisted('hermes-webui-workspace-panel') === 'open')
   const [queued, setQueued] = useState<string[]>([])
-  const [reasoning, setReasoning] = useState<string | null>(null)
   const [yolo, setYolo] = useState(false)
   useSessionSearch(sessionId)
 
@@ -77,6 +76,19 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
     await navigate({ to: '/session/$sessionId', params: { sessionId: created.session_id }, replace: true })
     return created
   }, [session, settings.data, bootstrap.profile, qc, navigate])
+
+  // Reasoning effort is server state shared with the CLI (config.yaml), keyed on the session's model.
+  const reasoningKey = ['reasoning', session?.model ?? null, session?.model_provider ?? null] as const
+  const reasoningStatus = useQuery({ queryKey: reasoningKey, queryFn: () => api.fetchReasoning(session?.model, session?.model_provider), enabled: !!sessionId, staleTime: 30_000 })
+  const reasoning = reasoningStatus.data?.reasoning_effort || null
+  const reasoningLevels = reasoningStatus.data?.supported_efforts
+  const reasoningSupported = reasoningStatus.data?.supports_reasoning_effort !== false || reasoningStatus.data?.supports_thinking_toggle === true
+  const setReasoning = useCallback((level: string | null) => {
+    void api.setReasoningEffort(level ?? '', session?.model, session?.model_provider)
+      .then((status) => { qc.setQueryData(reasoningKey, status); showToast(`${m.composer_control_reasoning()}: ${status.reasoning_effort || m.reasoning_default()}`) })
+      .catch((e: unknown) => showToast(e instanceof Error ? e.message : String(e), 4000, 'error'))
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- reasoningKey is derived from session model/provider
+  }, [qc, session?.model, session?.model_provider])
 
   const patchSession = useMutation({ mutationFn: (body: { model?: string; model_provider?: string | null; workspace?: string }) => api.updateSession(sessionId ?? '', body) })
   const updateSession = useCallback(async (body: { model?: string; model_provider?: string | null; workspace?: string }) => {
@@ -116,7 +128,13 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
       case 'usage': if (sessionId) { const u = await api.fetchSessionUsage(sessionId); showToast(`${(u.input_tokens ?? 0).toLocaleString()} in · ${(u.output_tokens ?? 0).toLocaleString()} out${u.estimated_cost ? ` · $${u.estimated_cost.toFixed(4)}` : ''}`, 4000) } return true
       case 'yolo': onToggleYolo(); return true
       case 'branch': if (sessionId) { const r = await api.branchSession(sessionId, rows.length); await navigate({ to: '/session/$sessionId', params: { sessionId: r.session.session_id } }) } return true
-      case 'reasoning': setReasoning(args || null); return true
+      case 'reasoning': {
+        const arg = args.trim().toLowerCase()
+        if (!arg) { showToast(`${m.composer_control_reasoning()}: ${reasoning ?? m.reasoning_default()}`, 4000); return true }
+        if (arg === 'show' || arg === 'on' || arg === 'hide' || arg === 'off') { await api.setReasoningDisplay(arg === 'show' || arg === 'on' ? 'show' : 'hide'); void qc.invalidateQueries({ queryKey: keys.settings }); return true }
+        setReasoning(arg === 'default' ? null : arg)
+        return true
+      }
       case 'model': if (args) onModelChange(args, null); return true
       case 'workspace': if (args) onWorkspaceChange(args); return true
       case 'personality': if (sessionId) { await api.setPersonality(sessionId, args || null); await refresh() } return true
@@ -185,7 +203,7 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
             <div className="chat-context flex items-center gap-0.5 mt-0.5 min-w-0 overflow-hidden max-[641px]:hidden">
               <button type="button" className={cn(CONTEXT_ITEM, 'chat-context-profile')} onClick={() => openChip('profileChip')}>{bootstrap.profile?.name ?? 'default'}</button>
               {(session?.model ?? settings.data?.default_model) && <button type="button" className={cn(CONTEXT_ITEM, 'chat-context-model')} onClick={() => openChip('composerModelChip')}>{session?.model ?? settings.data?.default_model}</button>}
-              {reasoning && <button type="button" className={cn(CONTEXT_ITEM, 'chat-context-effort')} onClick={() => openChip('composerReasoningChip')}>{reasoning}</button>}
+              {reasoning && reasoningSupported && <button type="button" className={cn(CONTEXT_ITEM, 'chat-context-effort')} onClick={() => openChip('composerReasoningChip')}>{reasoning}</button>}
               {wsLabel && <button type="button" className={cn(CONTEXT_ITEM, 'chat-context-workspace')} onClick={() => openChip('composerWorkspaceChip')}>{wsLabel}</button>}
             </div>
           </div>
@@ -232,6 +250,8 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
           onToolsetsChange={onToolsetsChange}
           onReasoningChange={setReasoning}
           reasoning={reasoning}
+          reasoningLevels={reasoningLevels}
+          reasoningSupported={reasoningSupported}
           yolo={yoloOn}
           onToggleYolo={onToggleYolo}
           queued={queued}

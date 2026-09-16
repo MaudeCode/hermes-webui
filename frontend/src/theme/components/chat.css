@@ -76,6 +76,8 @@
 .msg-body td code,.msg-body th code{font-size:0.85em;padding:1px 4px;vertical-align:baseline}
 .msg-body .katex{font-size:1.1em}
 textarea#msg{width:100%;background:transparent;border:none;outline:none;color:var(--text);font-size:var(--composer-font-size);line-height:var(--composer-line-height);padding:12px 16px 6px;resize:none;min-height:44px;max-height:200px;font-family:inherit;letter-spacing:var(--composer-tracking);font-weight:var(--body-weight);overflow-y:auto;scrollbar-width:var(--composer-scrollbar-width)}
+textarea#msg{field-sizing:content}
+textarea#msg:placeholder-shown{field-sizing:fixed}
 textarea#msg::placeholder{color:var(--muted)}
 @media (max-width:640px){.msg-body{padding-left:0;max-width:100%}}
 @media (max-width:640px){.msg-role{font-size:12px}}

@@ -18,6 +18,7 @@ import { Route as AppKanbanRouteImport } from './routes/_app.kanban'
 import { Route as AppLogsRouteImport } from './routes/_app.logs'
 import { Route as AppMemoryRouteImport } from './routes/_app.memory'
 import { Route as AppProfilesRouteImport } from './routes/_app.profiles'
+import { Route as AppSessionsRouteImport } from './routes/_app.sessions'
 import { Route as AppSettingsRouteImport } from './routes/_app.settings'
 import { Route as AppSkillsRouteImport } from './routes/_app.skills'
 import { Route as AppTasksRouteImport } from './routes/_app.tasks'
@@ -71,6 +72,11 @@ const AppMemoryRoute = AppMemoryRouteImport.update({
 const AppProfilesRoute = AppProfilesRouteImport.update({
   id: '/profiles',
   path: '/profiles',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppSessionsRoute = AppSessionsRouteImport.update({
+  id: '/sessions',
+  path: '/sessions',
   getParentRoute: () => AppRoute,
 } as any)
 const AppSettingsRoute = AppSettingsRouteImport.update({
@@ -133,6 +139,7 @@ export interface FileRoutesByFullPath {
   '/logs': typeof AppLogsRoute
   '/memory': typeof AppMemoryRoute
   '/profiles': typeof AppProfilesRoute
+  '/sessions': typeof AppSessionsRoute
   '/settings': typeof AppSettingsRouteWithChildren
   '/skills': typeof AppSkillsRoute
   '/tasks': typeof AppTasksRoute
@@ -152,6 +159,7 @@ export interface FileRoutesByTo {
   '/logs': typeof AppLogsRoute
   '/memory': typeof AppMemoryRoute
   '/profiles': typeof AppProfilesRoute
+  '/sessions': typeof AppSessionsRoute
   '/skills': typeof AppSkillsRoute
   '/tasks': typeof AppTasksRoute
   '/todos': typeof AppTodosRoute
@@ -173,6 +181,7 @@ export interface FileRoutesById {
   '/_app/logs': typeof AppLogsRoute
   '/_app/memory': typeof AppMemoryRoute
   '/_app/profiles': typeof AppProfilesRoute
+  '/_app/sessions': typeof AppSessionsRoute
   '/_app/settings': typeof AppSettingsRouteWithChildren
   '/_app/skills': typeof AppSkillsRoute
   '/_app/tasks': typeof AppTasksRoute
@@ -196,6 +205,7 @@ export interface FileRouteTypes {
     | '/logs'
     | '/memory'
     | '/profiles'
+    | '/sessions'
     | '/settings'
     | '/skills'
     | '/tasks'
@@ -215,6 +225,7 @@ export interface FileRouteTypes {
     | '/logs'
     | '/memory'
     | '/profiles'
+    | '/sessions'
     | '/skills'
     | '/tasks'
     | '/todos'
@@ -235,6 +246,7 @@ export interface FileRouteTypes {
     | '/_app/logs'
     | '/_app/memory'
     | '/_app/profiles'
+    | '/_app/sessions'
     | '/_app/settings'
     | '/_app/skills'
     | '/_app/tasks'
@@ -318,6 +330,13 @@ declare module '@tanstack/react-router' {
       path: '/profiles'
       fullPath: '/profiles'
       preLoaderRoute: typeof AppProfilesRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/sessions': {
+      id: '/_app/sessions'
+      path: '/sessions'
+      fullPath: '/sessions'
+      preLoaderRoute: typeof AppSessionsRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/settings': {
@@ -413,6 +432,7 @@ interface AppRouteChildren {
   AppLogsRoute: typeof AppLogsRoute
   AppMemoryRoute: typeof AppMemoryRoute
   AppProfilesRoute: typeof AppProfilesRoute
+  AppSessionsRoute: typeof AppSessionsRoute
   AppSettingsRoute: typeof AppSettingsRouteWithChildren
   AppSkillsRoute: typeof AppSkillsRoute
   AppTasksRoute: typeof AppTasksRoute
@@ -429,6 +449,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppLogsRoute: AppLogsRoute,
   AppMemoryRoute: AppMemoryRoute,
   AppProfilesRoute: AppProfilesRoute,
+  AppSessionsRoute: AppSessionsRoute,
   AppSettingsRoute: AppSettingsRouteWithChildren,
   AppSkillsRoute: AppSkillsRoute,
   AppTasksRoute: AppTasksRoute,

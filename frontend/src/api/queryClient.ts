@@ -1,7 +1,7 @@
 import { QueryClient, dehydrate, hydrate, type DehydratedState, type Query } from '@tanstack/react-query'
 import { z, type ZodType } from 'zod'
 import { isApiError } from '../contracts/common'
-import { ProfilesSchema, ProjectsSchema, SessionEnvelopeSchema, SessionsListSchema, SettingsSchema, WorkspacesSchema } from '../contracts'
+import { ProfilesSchema, ProjectsSchema, ReasoningStatusSchema, SessionEnvelopeSchema, SessionsListSchema, SettingsSchema, WorkspacesSchema } from '../contracts'
 import { readPersisted, readPersistedJson, writePersistedJson } from '../lib/persisted'
 
 /**
@@ -21,6 +21,7 @@ function snapshotSchema(key: readonly unknown[]): ZodType | null {
     case 'profiles': return ProfilesSchema
     case 'workspaces': return WorkspacesSchema
     case 'projects': return ProjectsSchema
+    case 'reasoning': return ReasoningStatusSchema
     case 'sessions':
       if (key[1] === 'list') return SessionsListSchema
       if (key[1] === 'detail' && key[2] === readPersisted('hermes-webui-session')) return SessionEnvelopeSchema

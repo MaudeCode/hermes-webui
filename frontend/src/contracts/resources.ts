@@ -82,6 +82,10 @@ export const ProfileSchema = z.looseObject({
   has_env: z.boolean().optional(),
   visible: z.boolean().optional(),
 })
+/** `/api/reasoning`: config.yaml agent.reasoning_effort / display.show_reasoning, resolved for a model. */
+export const ReasoningStatusSchema = z.looseObject({ show_reasoning: z.boolean().optional(), reasoning_effort: z.string().nullable().optional(), supported_efforts: z.array(z.string()).optional(), supports_reasoning_effort: z.boolean().optional(), supports_thinking_toggle: z.boolean().optional() })
+export type ReasoningStatus = z.infer<typeof ReasoningStatusSchema>
+
 export const ProfilesSchema = z.looseObject({ profiles: z.array(ProfileSchema), active: z.string(), single_profile_mode: z.boolean().optional() })
 export type Profiles = z.infer<typeof ProfilesSchema>
 export const ActiveProfileSchema = z.looseObject({ name: z.string(), path: z.string().optional(), is_default: z.boolean().optional(), default_workspace: NullableString.optional() })

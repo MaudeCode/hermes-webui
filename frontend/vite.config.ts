@@ -29,7 +29,7 @@ const PROXIED = /^(?:\/[^/]+)*?(?=\/(?:api|static)(?:\/|$))/
 export default defineConfig({
   base: './',
   ...(devProxy
-    ? { server: { host: true, proxy: { '^(?!/(?:src|@|node_modules)/)(?:/[^/]+)*/(?:api|static)(?:/|$)': { target: devProxy, changeOrigin: true, rewrite: (path: string) => path.replace(PROXIED, '') } } } }
+    ? { server: { host: true, proxy: { '^(?!/(?:src|@|node_modules)/)(?:/[^/]+)*/(?:api|static)(?:/|$)': { target: devProxy, changeOrigin: true, headers: { origin: devProxy }, rewrite: (path: string) => path.replace(PROXIED, '') } } } }
     : {}),
   resolve: { alias: { '~': new URL('./src', import.meta.url).pathname } },
   plugins: [

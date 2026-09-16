@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Mic, Paperclip, Square, ArrowUp, TerminalSquare, SlidersHorizontal } from 'lucide-react'
 import { m } from '../../paraglide/messages.js'
@@ -36,6 +36,9 @@ export interface ComposerProps {
   onWorkspaceChange: (path: string) => void
   onToolsetsChange: (toolsets: string[] | null) => void
   onReasoningChange: (level: string | null) => void
+  reasoningLevels?: string[] | undefined
+  /** False when the model has neither an effort ladder nor a thinking toggle; the chip is hidden, as legacy did. */
+  reasoningSupported?: boolean | undefined
   reasoning: string | null
   yolo: boolean
   onToggleYolo: () => void
@@ -65,8 +68,11 @@ function fileKey(f: File): string {
  * paste), slash commands, busy modes (steer / queue / interrupt), dictation,
  * and the model, reasoning, toolsets, workspace and profile chips.
  */
+/** Draft and files handed from the empty chat's composer to the one mounted for the session it just created. */
+let handoff: { text: string; files: File[] } | null = null
+
 export function Composer(props: ComposerProps) {
-  const { sessionId, session, live, settings, onEnsureSession, onLocalCommand, terminalOpen, onToggleTerminal, onModelChange, onWorkspaceChange, onToolsetsChange, onReasoningChange, reasoning, yolo, onToggleYolo, queued, onQueue } = props
+  const { sessionId, session, live, settings, onEnsureSession, onLocalCommand, terminalOpen, onToggleTerminal, onModelChange, onWorkspaceChange, onToolsetsChange, onReasoningChange, reasoning, reasoningLevels, reasoningSupported = true, yolo, onToggleYolo, queued, onQueue } = props
   const bootstrap = useBootstrap()
   const qc = useQueryClient()
   const [text, setText] = useState(() => (sessionId ? readLocalDraft(sessionId) : ''))
@@ -124,12 +130,22 @@ export function Composer(props: ComposerProps) {
   const palette = useCommandPalette(text)
   useDraftPersistence(sessionId, text)
 
-  useEffect(() => { setText(sessionId ? readLocalDraft(sessionId) : ''); setFiles([]) }, [sessionId])
+  // Session change resets the draft and tray, unless this session's composer just adopted a hand-off (below); the
+  // guard also keeps StrictMode's effect replay from wiping the adopted state.
+  const adopted = useRef<string | null>(null)
+  useEffect(() => {
+    if (adopted.current === sessionId) return
+    setText(sessionId ? readLocalDraft(sessionId) : '')
+    setFiles([])
+  }, [sessionId])
 
   // Autosize.
   useEffect(() => {
     const el = textarea.current
     if (!el) return
+    // Native sizing where supported (upstream #6760); otherwise measure. An empty composer keeps its resting
+    // height rather than the placeholder's wrapped height.
+    if (!text || (typeof CSS !== 'undefined' && CSS.supports('field-sizing', 'content'))) { el.style.height = ''; return }
     el.style.height = 'auto'
     el.style.height = `${Math.min(el.scrollHeight, 320)}px`
   }, [text])
@@ -138,6 +154,14 @@ export function Composer(props: ComposerProps) {
   const addFiles = useCallback((incoming: FileList | File[]) => {
     const list = Array.from(incoming)
     if (list.length === 0) return
+    // Attaching to the empty chat: the index route and the session route mount separate composers, so the navigation
+    // that lazy session creation causes would drop this state. Hand the draft and files to the composer that mounts
+    // for the new session; it runs the uploads with the session in hand.
+    if (!session) {
+      handoff = { text, files: list }
+      void onEnsureSession().catch((e: unknown) => { handoff = null; showToast(e instanceof Error ? e.message : String(e), 4000, 'error') })
+      return
+    }
     for (const f of list) {
       if (f.size > maxBytes) { showToast(m.composer_too_large({ name: f.name, max: Math.round(maxBytes / 1024 / 1024) }), 4000, 'error'); continue }
       const key = fileKey(f)
@@ -153,7 +177,16 @@ export function Composer(props: ComposerProps) {
         }
       })()
     }
-  }, [maxBytes, session, onEnsureSession])
+  }, [maxBytes, session, onEnsureSession, text])
+
+  // Adopt a hand-off from the empty chat's composer (see addFiles). Runs after the session-change reset above.
+  useEffect(() => {
+    if (!sessionId || !session || !handoff) return
+    const h = handoff; handoff = null
+    adopted.current = sessionId
+    setText(h.text)
+    addFiles(h.files)
+  }, [sessionId, session, addFiles])
 
   const removeFile = (key: string) => {
     const f = files.find((p) => p.key === key)
@@ -253,7 +286,6 @@ export function Composer(props: ComposerProps) {
   const contextUsed = compressedEstimate && compressedEstimate > 0 ? compressedEstimate : (session?.last_prompt_tokens ?? null)
   const contextTotal = session?.context_length ?? null
   const canSend = (text.trim() !== '' || files.some((f) => f.status === 'done')) && !sending
-  const reasoningLevels = useMemo(() => undefined, [])
 
   return (
     <div className="composer-wrap" id="composerWrap">
@@ -307,7 +339,7 @@ export function Composer(props: ComposerProps) {
             {!hide('hide_composer_profile') && <div className="composer-profile-wrap" id="profileChipWrap"><ProfileMenu /></div>}
             {!hide('hide_composer_workspace') && <div className="composer-ws-wrap"><WorkspaceChip value={session?.workspace ?? settings?.default_workspace} onChange={onWorkspaceChange} /></div>}
             {!hide('hide_composer_model') && <div className="composer-model-wrap"><ModelChip value={session?.model ?? null} defaultModel={settings?.default_model} onChange={onModelChange} /></div>}
-            {!hide('hide_composer_reasoning') && <div className="composer-reasoning-wrap"><ReasoningChip value={reasoning} levels={reasoningLevels} onChange={onReasoningChange} /></div>}
+            {!hide('hide_composer_reasoning') && reasoningSupported && <div className="composer-reasoning-wrap"><ReasoningChip value={reasoning} levels={reasoningLevels} onChange={onReasoningChange} /></div>}
             {!hide('hide_composer_toolsets') && <div className="composer-toolsets-wrap"><ToolsetsChip value={session?.enabled_toolsets ?? null} onChange={onToolsetsChange} /></div>}
             <button className="icon-btn composer-mobile-config-btn has-tooltip" id="composerMobileConfigBtn" type="button" data-tooltip={m.composer_config_title()} aria-label={m.composer_config_title()} aria-expanded={configOpen} aria-controls="composerMobileConfigPanel" onClick={() => setConfigOpen((o) => !o)}>
               <SlidersHorizontal size={16} aria-hidden="true" />
@@ -329,7 +361,7 @@ export function Composer(props: ComposerProps) {
             {stage === 'burger' && !hide('hide_composer_profile') && <ProfileMenu row />}
             {stage === 'burger' && !hide('hide_composer_workspace') && <WorkspaceChip row value={session?.workspace ?? settings?.default_workspace} onChange={onWorkspaceChange} />}
             {stage === 'burger' && !hide('hide_composer_model') && <ModelChip row value={session?.model ?? null} defaultModel={settings?.default_model} onChange={onModelChange} />}
-            {stage === 'burger' && !hide('hide_composer_reasoning') && <ReasoningChip row value={reasoning} levels={reasoningLevels} onChange={onReasoningChange} />}
+            {stage === 'burger' && !hide('hide_composer_reasoning') && reasoningSupported && <ReasoningChip row value={reasoning} levels={reasoningLevels} onChange={onReasoningChange} />}
             {stage === 'burger' && <button type="button" className={cn('icon-btn', terminalOpen && 'active')} id="btnTerminal" title={m.composer_terminal_toggle()} aria-label={m.composer_terminal_toggle()} aria-pressed={terminalOpen} onClick={() => { setConfigOpen(false); onToggleTerminal() }}><TerminalSquare size={16} aria-hidden="true" /><span className="composer-mobile-config-value">{m.composer_terminal_toggle()}</span></button>}
             {stage === 'burger' && !hide('hide_composer_toolsets') && <ToolsetsChip row value={session?.enabled_toolsets ?? null} onChange={onToolsetsChange} />}
             {stage === 'burger' && !hide('hide_composer_context') && <ContextRow used={contextUsed} total={contextTotal} threshold={session?.threshold_tokens} />}

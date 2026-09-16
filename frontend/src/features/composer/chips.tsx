@@ -7,17 +7,18 @@ import { Menu, MenuGroup, MenuGroupLabel, MenuItem, MenuRadioGroup, MenuRadioIte
 import { cn } from '../../ui/cn'
 
 /** Footer pill, or (`row`) a labelled row for the composer overflow panel. */
-function Chip({ icon, label, title, className, disabled, row }: { icon: React.ReactNode; label: string; title: string; className?: string; disabled?: boolean; row?: boolean | undefined }) {
+/** Composer chip. Also the render target of `Menu`'s trigger, so every other prop (Base UI's aria attributes, handlers, ref) is spread onto the button. */
+function Chip({ icon, label, title, className, disabled, row, id, ...rest }: { icon: React.ReactNode; label: string; title: string; className?: string; disabled?: boolean; row?: boolean | undefined; id?: string | undefined } & Omit<React.ComponentProps<'button'>, 'title' | 'className' | 'disabled' | 'id'>) {
   if (row) {
     return (
-      <button type="button" disabled={disabled} title={title} aria-label={`${title}: ${label}`} className="composer-mobile-config-action">
+      <button type="button" {...rest} id={id} disabled={disabled} title={title} aria-label={`${title}: ${label}`} className="composer-mobile-config-action">
         {icon}
         <span className="composer-mobile-config-copy"><span className="composer-mobile-config-kicker">{title}</span><span className="composer-mobile-config-value">{label}</span></span>
       </button>
     )
   }
   return (
-    <button type="button" disabled={disabled} title={title} aria-label={`${title}: ${label}`} className={cn('composer-chip inline-flex h-8 max-w-[280px] items-center gap-1.5 rounded-full border border-transparent px-2.5 text-[12.5px] font-medium text-muted hover:border-border hover:bg-hover hover:text-text disabled:opacity-60', className)}>
+    <button type="button" {...rest} id={id} disabled={disabled} title={title} aria-label={`${title}: ${label}`} className={cn('composer-chip inline-flex h-8 max-w-[280px] items-center gap-1.5 rounded-full border border-transparent px-2.5 text-[12.5px] font-medium text-muted hover:border-border hover:bg-hover hover:text-text disabled:opacity-60', className)}>
       {icon}
       <span className="truncate">{label}</span>
       <ChevronDown size={10} aria-hidden="true" />
@@ -42,7 +43,7 @@ export function ModelChip({ value, onChange, defaultModel, row }: { value: strin
   }, [models.data, value, defaultModel])
   const providerOf = (id: string): string | null => { for (const g of models.data?.groups ?? []) if (g.models.some((mm) => mm.id === id)) return g.provider_id ?? g.provider; return null }
   return (
-    <Menu label={m.composer_control_model()} side="top" className="max-h-[60vh] min-w-72" trigger={<Chip icon={<Cpu size={14} aria-hidden="true" />} label={label} title={m.composer_control_model()} row={row} className="composer-model-chip" />}>
+    <Menu label={m.composer_control_model()} side="top" className="max-h-[60vh] min-w-72" trigger={<Chip id={row ? undefined : "composerModelChip"} icon={<Cpu size={14} aria-hidden="true" />} label={label} title={m.composer_control_model()} row={row} className="composer-model-chip" />}>
       <div className="p-1"><input type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder={m.model_search_placeholder()} aria-label={m.model_search_placeholder()} className="h-8 w-full rounded-md border border-border bg-input px-2 text-sm text-text" onKeyDown={(e) => e.stopPropagation()} /></div>
       <MenuRadioGroup value={value ?? defaultModel ?? ''} onValueChange={(v: string) => onChange(v, providerOf(v))}>
         {groups.map((g) => (
@@ -66,7 +67,7 @@ const EFFORTS = ['default', 'minimal', 'low', 'medium', 'high', 'xhigh'] as cons
 export function ReasoningChip({ value, levels, onChange, row }: { value: string | null; levels: string[] | undefined; onChange: (level: string | null) => void; row?: boolean }) {
   const options = levels?.length ? ['default', ...levels] : [...EFFORTS]
   return (
-    <Menu label={m.composer_control_reasoning()} side="top" trigger={<Chip icon={<Brain size={14} aria-hidden="true" />} label={value ?? m.reasoning_default()} title={m.composer_control_reasoning()} row={row} className="composer-reasoning-chip" />}>
+    <Menu label={m.composer_control_reasoning()} side="top" trigger={<Chip id={row ? undefined : "composerReasoningChip"} icon={<Brain size={14} aria-hidden="true" />} label={value ?? m.reasoning_default()} title={m.composer_control_reasoning()} row={row} className="composer-reasoning-chip" />}>
       <MenuRadioGroup value={value ?? 'default'} onValueChange={(v: string) => onChange(v === 'default' ? null : v)}>
         {options.map((o) => <MenuRadioItem key={o} value={o} className={RADIO_CLASS}>{o === 'default' ? m.reasoning_default() : o}</MenuRadioItem>)}
       </MenuRadioGroup>
@@ -92,7 +93,7 @@ export function WorkspaceChip({ value, onChange, row }: { value: string | undefi
   const list = ws.data?.workspaces ?? []
   const label = workspaceLabel(list, value) || '—'
   return (
-    <Menu label={m.composer_control_workspace()} side="top" className="min-w-64" trigger={<Chip icon={<FolderOpen size={14} aria-hidden="true" />} label={label} title={m.composer_control_workspace()} row={row} className="composer-workspace-chip" disabled={list.length === 0} />}>
+    <Menu label={m.composer_control_workspace()} side="top" className="min-w-64" trigger={<Chip id={row ? undefined : "composerWorkspaceChip"} icon={<FolderOpen size={14} aria-hidden="true" />} label={label} title={m.composer_control_workspace()} row={row} className="composer-workspace-chip" disabled={list.length === 0} />}>
       <MenuRadioGroup value={value ?? ''} onValueChange={(v: string) => onChange(v)}>
         {list.map((w) => <MenuRadioItem key={w.path} value={w.path} className={RADIO_CLASS}><span className="flex min-w-0 flex-col"><span className="truncate">{w.name ?? w.path}</span><span className="truncate font-mono text-[10px] text-muted">{w.path}</span></span></MenuRadioItem>)}
       </MenuRadioGroup>

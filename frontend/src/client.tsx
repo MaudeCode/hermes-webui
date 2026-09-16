@@ -13,9 +13,11 @@ import { getRouter } from './router'
 import { createQueryClient } from './api/queryClient'
 import { loadBootstrap, BootstrapContext } from './app/bootstrap'
 import { FatalError } from './features/shell/ErrorBoundary'
+import { registerServiceWorker } from './app/pwa'
 
 const appRoot = freezeAppRoot()
 applyBootAppearance()
+registerServiceWorker(appRoot)
 
 const container = document.getElementById('app')
 if (!container) throw new Error('missing #app mount node')
