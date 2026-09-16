@@ -4,7 +4,7 @@ import { useBootstrap } from '../app/bootstrap'
 import { useDashboardStatusQuery, useSettingsQuery } from '../app/queries'
 import { cn } from '../ui/cn'
 import { DASHBOARD_ICON, orderedNav, panelForPath } from './nav'
-import { readHiddenTabs, readTabOrder } from './useShellState'
+import { readHiddenTabs, readTabOrder, toggleSidebarCollapsed, useIsDesktop } from './useShellState'
 import { useNewChat } from '../features/sessions/useNewChat'
 import { useLocale } from '../i18n/useLocale'
 import { useExtensionManifests } from '../extensions/registry'
@@ -32,6 +32,9 @@ export function Rail() {
   const hidden = settings.data?.hidden_tabs ?? readHiddenTabs()
   const { visible } = orderedNav(readTabOrder(), hidden)
   const current = panelForPath(location.pathname)
+  const isDesktop = useIsDesktop()
+  // Clicking the tab that is already active toggles the sidebar instead of re-navigating (desktop only; phones use the drawer).
+  const onActiveClick = (e: React.MouseEvent) => { if (isDesktop) { e.preventDefault(); toggleSidebarCollapsed() } }
   const DashboardIcon = DASHBOARD_ICON
   const settingsItem = visible.find((i) => i.id === 'settings')
   const mainItems = visible.filter((i) => i.id !== 'settings')
@@ -44,7 +47,7 @@ export function Rail() {
         const Icon = item.icon
         const active = current === item.id
         return (
-          <Link key={item.id} to={item.to} className={cn(RAIL_BTN, active && 'active')} data-tooltip={item.label()} aria-label={item.label()} aria-current={active ? 'page' : undefined} data-panel={item.id}>
+          <Link key={item.id} to={item.to} className={cn(RAIL_BTN, active && 'active')} data-tooltip={item.label()} aria-label={item.label()} aria-current={active ? 'page' : undefined} data-panel={item.id} onClick={active ? onActiveClick : undefined}>
             <Icon size={20} strokeWidth={1.5} aria-hidden="true" />
           </Link>
         )
