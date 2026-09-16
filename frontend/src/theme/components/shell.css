@@ -162,3 +162,7 @@ html.hub-active .workspace-panel-edge-toggle{display:none !important}
 html[data-sidebar-collapsed="1"] #app:empty::after{margin-left:var(--island-gap)}
 @media (max-width:768px){#app:empty::after{margin:0 0 0 300px;border:0;border-radius:0;box-shadow:none}}
 @media (max-width:640px){#app:empty::before{display:none}#app:empty::after{margin:0}}
+/* Phone titlebar: one hamburger on the left against two buttons on the right, so flex centring lands the title
+   off-centre (legacy had the same offset). Centre the title block on the bar itself and drop the balancing spacer,
+   which only matched the hamburger when the right side had no buttons. */
+@media (max-width:640px){.app-titlebar-spacer{display:none}.app-titlebar-new-chat{margin-left:auto}.app-titlebar-inner{position:absolute;left:50%;top:var(--app-titlebar-safe-top);bottom:0;transform:translateX(-50%);flex:none;max-width:calc(100% - 200px)}}
