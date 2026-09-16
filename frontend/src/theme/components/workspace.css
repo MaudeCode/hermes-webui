@@ -53,3 +53,11 @@ html[data-workspace-panel="closed"] .rightpanel{margin-left:0;border-color:trans
 .rightpanel[data-resizing] ~ *,.rightpanel[data-resizing] *{pointer-events:none;user-select:none}
 @media (max-width:640px){.rightpanel{background:var(--sidebar-bg)}}
 }
+/* Resize hover: the highlight leaves a gap where the edge tab sits and runs around the tab and its joins instead
+   of passing behind it. The tab is 40px high plus one join radius above and below, centred on the panel. */
+/* The handle spans panel x -2..3; the bar sits at 0..3 just inside the panel edge, on the same side of the
+   silhouette as the tab's inset stroke and the join rings, and runs 3px into each join to meet its ring. */
+.rightpanel .resize-handle:hover{background:linear-gradient(var(--accent),var(--accent)) 2px 0/3px calc(50% - 20px - var(--r-md) + 3px) no-repeat,linear-gradient(var(--accent),var(--accent)) 2px 100%/3px calc(50% - 20px - var(--r-md) + 3px) no-repeat}
+.rightpanel:has(> .resize-handle:hover) .workspace-panel-edge-toggle{box-shadow:inset 3px 0 0 var(--accent),inset 0 3px 0 var(--accent),inset 0 -3px 0 var(--accent)}
+.rightpanel:has(> .resize-handle:hover) .edge-tab-join-top{background:radial-gradient(circle at 0 0,transparent calc(var(--r-md) - .5px),var(--accent) var(--r-md),var(--accent) calc(var(--r-md) + 3px),var(--canvas) calc(var(--r-md) + 3.5px))}
+.rightpanel:has(> .resize-handle:hover) .edge-tab-join-bottom{background:radial-gradient(circle at 0 100%,transparent calc(var(--r-md) - .5px),var(--accent) var(--r-md),var(--accent) calc(var(--r-md) + 3px),var(--canvas) calc(var(--r-md) + 3.5px))}
