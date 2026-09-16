@@ -64,7 +64,11 @@ html[data-session-boot="1"] .empty-state{display:none}
 @media (max-width: 640px){.panel-head-btn.mobile-sidebar-close{display:inline-flex !important;align-items:center;justify-content:center;right:4px;top:calc(var(--app-titlebar-safe-top) - 2px);width:44px !important;height:44px !important;min-width:44px;min-height:44px;line-height:1;overflow:hidden}}
 @media (max-width: 640px){.panel-head-btn.mobile-sidebar-close svg{width:14px;height:14px;display:block}}
 @media (prefers-reduced-motion:reduce){.empty-hero-title{transition:none}}
-.sidebar .resize-handle{right:-2px}
+/* Handle spans sidebar x -3..4; the hover bar is 3px on the card side (x 0..3), one seam radius short of top and bottom. */
+.sidebar .resize-handle{right:-4px;width:7px;transition:none}
+.sidebar .resize-handle:hover{background:linear-gradient(var(--accent),var(--accent)) 3px var(--island-radius)/3px calc(100% - 2 * var(--island-radius)) no-repeat}
+.sidebar:has(> .resize-handle:hover) .seam-tr{background:radial-gradient(circle at 0 100%,transparent calc(var(--island-radius) - .5px),var(--accent) var(--island-radius),var(--accent) calc(var(--island-radius) + 3px),var(--main-surface) calc(var(--island-radius) + 3.5px))}
+.sidebar:has(> .resize-handle:hover) .seam-br{background:radial-gradient(circle at 0 0,transparent calc(var(--island-radius) - .5px),var(--accent) var(--island-radius),var(--accent) calc(var(--island-radius) + 3px),var(--main-surface) calc(var(--island-radius) + 3.5px))}
 /* z above .composer-wrap (10): the resize handle overlaps the card's left edge, which the composer wrap spans. */
 @media (min-width:641px){.sidebar{z-index:11}}
 main.main > #mainChat,main.main > #mainSettings{display:none}
@@ -148,7 +152,6 @@ html.hub-active .workspace-panel-edge-toggle{display:none !important}
 /* Inset shell: the card keeps the frame gap on the sides where no frame element sits. */
 @media (min-width:641px){.layout.sidebar-collapsed .sidebar:not(.mobile-open),html.hub-active .layout .sidebar:not(.mobile-open){padding:0}}
 @media (min-width:641px){.sidebar .panel-head{border-bottom-color:transparent}}
-}
 /* First paint. #app is empty until the module entry mounts (about 50ms built, longer under the dev server),
    so the inset frame (rail divider + main card) is drawn from pseudo-elements meanwhile; prepaint.js has
    already set the theme, skin and sidebar state on <html>. A reload then keeps its frame instead of flashing
@@ -166,12 +169,13 @@ html[data-sidebar-collapsed="1"] #app:empty::after{margin-left:0}
 /* Seams: where the sidebar, the rail (sidebar collapsed) or the workspace panel meets the main card, a card-coloured
    concave fillet at the top and bottom, the same construction as the edge tab's joins, so the card flows into its
    neighbours instead of ending in a rounded corner with a wedge of canvas. Desktop only; the card has square corners. */
-.seam{position:absolute;width:var(--island-radius);height:var(--island-radius);pointer-events:none;z-index:1}
-.seam-tr{right:0;top:0;background:radial-gradient(circle at 0 100%,transparent calc(var(--island-radius) - .5px),var(--main-surface) var(--island-radius))}
-.seam-br{right:0;bottom:0;background:radial-gradient(circle at 0 0,transparent calc(var(--island-radius) - .5px),var(--main-surface) var(--island-radius))}
-.seam-tl{left:0;top:0;background:radial-gradient(circle at 100% 100%,transparent calc(var(--island-radius) - .5px),var(--main-surface) var(--island-radius))}
-.seam-bl{left:0;bottom:0;background:radial-gradient(circle at 100% 0,transparent calc(var(--island-radius) - .5px),var(--main-surface) var(--island-radius))}
+.seam{position:absolute;width:calc(var(--island-radius) + 3px);height:var(--island-radius);pointer-events:none;z-index:1}
+.seam-tr{right:-3px;top:0;background:radial-gradient(circle at 0 100%,transparent calc(var(--island-radius) - .5px),var(--main-surface) var(--island-radius))}
+.seam-br{right:-3px;bottom:0;background:radial-gradient(circle at 0 0,transparent calc(var(--island-radius) - .5px),var(--main-surface) var(--island-radius))}
+.seam-tl{left:-3px;top:0;background:radial-gradient(circle at 100% 100%,transparent calc(var(--island-radius) - .5px),var(--main-surface) var(--island-radius))}
+.seam-bl{left:-3px;bottom:0;background:radial-gradient(circle at 100% 0,transparent calc(var(--island-radius) - .5px),var(--main-surface) var(--island-radius))}
 .rail-seam{display:none}
 .layout.sidebar-collapsed .rail-seam{display:block}
 .layout.sidebar-collapsed .sidebar .seam,html.hub-active .rightpanel .seam,html[data-workspace-panel="closed"] .rightpanel .seam{display:none}
 @media (max-width:769px){.seam{display:none}}
+}
