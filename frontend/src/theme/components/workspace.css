@@ -7,7 +7,8 @@
 :root[data-font-size="xlarge"] .file-item{font-size:16px}
 .file-input-visually-hidden{position:absolute;left:-9999px;top:auto;width:1px;height:1px;opacity:0;overflow:hidden}
 .rightpanel{width:300px;display:flex;flex-direction:column;overflow:hidden;flex-shrink:0;min-width:0;opacity:1;transform:translateX(0);transform-origin:right center;transition:width .24s cubic-bezier(.22,1,.36,1),opacity .18s ease,transform .24s cubic-bezier(.22,1,.36,1),border-color .24s ease;container-type:inline-size;container-name:rightpanel}
-.workspace-panel-edge-toggle{position:absolute;left:0;top:50%;transform:translate(-100%,-50%);z-index:120;width:34px;height:44px;border:1px solid var(--border2);border-radius:999px;background:var(--float-btn-bg);color:var(--muted);box-shadow:var(--float-shadow);display:none;align-items:center;justify-content:center;cursor:pointer;opacity:0;pointer-events:none;transition:opacity .18s ease,transform .18s ease,color .15s ease,background .15s ease,border-color .15s ease}
+/* left:1px: the tab reaches 1px into the panel (canvas over canvas), so the hover outline's clip, 1px in from the tab's right edge, cuts at the panel edge and exposes no card. */
+.workspace-panel-edge-toggle{position:absolute;left:1px;top:50%;transform:translate(-100%,-50%);z-index:120;width:34px;height:44px;border:1px solid var(--border2);border-radius:999px;background:var(--float-btn-bg);color:var(--muted);box-shadow:var(--float-shadow);display:none;align-items:center;justify-content:center;cursor:pointer;opacity:0;pointer-events:none;transition:opacity .18s ease,transform .18s ease,color .15s ease,background .15s ease,border-color .15s ease}
 .workspace-panel-edge-toggle:hover{color:var(--text);background:var(--hover-bg);border-color:var(--accent)}
 .workspace-panel-edge-toggle:disabled{opacity:.3;cursor:not-allowed}
 .file-tree{flex:1;overflow-y:auto;padding:8px}
@@ -37,7 +38,7 @@ html[data-workspace-panel="closed"] .rightpanel{margin-left:0;border-color:trans
    tooltip owns the button's pseudo-elements). */
 .rightpanel{overflow:visible}
 .workspace-panel-edge-toggle{width:18px;height:40px;padding:0;border:0;border-radius:var(--r-md) 0 0 var(--r-md);box-shadow:none;background:var(--canvas);color:var(--muted);overflow:visible}
-.edge-tab-join{position:absolute;right:0;width:var(--r-md);height:var(--r-md);pointer-events:none}
+.edge-tab-join{position:absolute;right:1px;width:var(--r-md);height:var(--r-md);pointer-events:none}
 .edge-tab-join-top{top:calc(-1 * var(--r-md));background:radial-gradient(circle at 0 0,transparent calc(var(--r-md) - .5px),var(--canvas) var(--r-md))}
 .edge-tab-join-bottom{bottom:calc(-1 * var(--r-md));background:radial-gradient(circle at 0 100%,transparent calc(var(--r-md) - .5px),var(--canvas) var(--r-md))}
 .workspace-panel-edge-toggle:hover{background:var(--canvas);color:var(--text)}
