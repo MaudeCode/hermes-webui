@@ -14,8 +14,6 @@ export function useShellState(): ShellState {
 export function toggleSidebarCollapsed(next?: boolean): void {
   const collapsed = next ?? !state.collapsed
   writePersisted('hermes-webui-sidebar-collapsed', collapsed ? '1' : '0')
-  if (collapsed) document.documentElement.dataset.sidebarCollapsed = '1'
-  else delete document.documentElement.dataset.sidebarCollapsed
   set({ collapsed })
 }
 export function openMobileSidebar(): void { set({ mobileOpen: true }) }

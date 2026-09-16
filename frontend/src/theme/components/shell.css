@@ -64,6 +64,9 @@ html[data-session-boot="1"] .empty-state{display:none}
 @media (max-width: 640px){.panel-head-btn.mobile-sidebar-close{display:inline-flex !important;align-items:center;justify-content:center;right:4px;top:calc(var(--app-titlebar-safe-top) - 2px);width:44px !important;height:44px !important;min-width:44px;min-height:44px;line-height:1;overflow:hidden}}
 @media (max-width: 640px){.panel-head-btn.mobile-sidebar-close svg{width:14px;height:14px;display:block}}
 @media (prefers-reduced-motion:reduce){.empty-hero-title{transition:none}}
+/* Collapse/expand animation (a Tailwind transition-[…] class cannot carry durations, so it lives here). */
+@media (min-width:641px){.sidebar{transition:width .24s ease,min-width .24s ease,padding .24s ease,opacity .18s ease,transform .24s ease,margin .24s ease}}
+@media (max-width:640px){.sidebar{transition:transform .25s ease}}
 /* Handle spans sidebar x -3..4; the hover bar is 3px on the card side (x 0..3), one seam radius short of top and bottom. */
 .sidebar .resize-handle{right:-4px;width:7px;transition:none}
 .sidebar .resize-handle:hover{background:linear-gradient(var(--accent),var(--accent)) 3px var(--island-radius)/3px calc(100% - 2 * var(--island-radius)) no-repeat}
