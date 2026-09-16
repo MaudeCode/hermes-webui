@@ -1,0 +1,1 @@
+import{t as e}from"./jsx-runtime-eu92a5pu.js";import{n as t}from"./SettingsLayout-mqquqc1e.js";import{H as n}from"./index-e8zx0ges.js";var r=e(),i=()=>(0,r.jsx)(t,{children:(0,r.jsx)(n,{})});export{i as component};
