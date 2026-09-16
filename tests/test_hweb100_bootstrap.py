@@ -4,8 +4,6 @@ from __future__ import annotations
 import json
 import urllib.request
 
-import pytest
-
 
 def _get_json(base_url: str, path: str, headers: dict | None = None):
     req = urllib.request.Request(base_url + path, headers=headers or {})
