@@ -65,6 +65,8 @@ html[data-session-boot="1"] .empty-state{display:none}
 @media (max-width: 640px){.panel-head-btn.mobile-sidebar-close svg{width:14px;height:14px;display:block}}
 @media (prefers-reduced-motion:reduce){.empty-hero-title{transition:none}}
 .sidebar .resize-handle{right:-2px}
+/* z above .composer-wrap (10): the resize handle overlaps the card's left edge, which the composer wrap spans. */
+@media (min-width:641px){.sidebar{z-index:11}}
 main.main > #mainChat,main.main > #mainSettings{display:none}
 main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-logs):not(.showing-plugin) > #mainChat{display:flex}
 main.main.showing-settings > #mainSettings{display:flex;overflow-y:auto}
