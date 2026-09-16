@@ -12,7 +12,7 @@ import * as api from '../../api/endpoints'
 import { keys } from '../../api/queryKeys'
 import { useBootstrap } from '../../app/bootstrap'
 import { useSettingsQuery, useWorkspacesQuery } from '../../app/queries'
-import type { Session } from '../../contracts'
+import type { Session, SessionsList } from '../../contracts'
 import { configureStream, cancelTurn, startTurn } from '../../stream/connection'
 import { dispatch } from '../../stream/store'
 import { isTerminal } from '../../stream/reducer'
@@ -29,7 +29,7 @@ import { RuntimeNoticeStack } from '../notices/RuntimeNoticeStack'
 import { showToast } from '../toast/toast'
 import { isApiError } from '../../contracts/common'
 import { ErrorState, formatDate } from '../../ui/States'
-import { readPersisted, removePersisted } from '../../lib/persisted'
+import { readPersisted, removePersisted, writePersisted } from '../../lib/persisted'
 import type { ActivityMode } from './blocks/Worklog'
 import { createSessionNow } from '../sessions/useNewChat'
 import { useSessionSearch } from './useSessionSearch'
@@ -147,11 +147,24 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
 
   const mode = (settings.data?.chat_activity_display_mode as ActivityMode | undefined) ?? 'compact_worklog'
   const assistantName = bootstrap.profile && !bootstrap.profile.is_default ? bootstrap.profile.name.charAt(0).toUpperCase() + bootstrap.profile.name.slice(1) : bootstrap.bot_name
-  const title = session?.title ?? ''
+  // Until the transcript arrives the header shows the title the sidebar already has for this session.
+  const listedTitle = sessionId ? qc.getQueryData<SessionsList>(keys.sessions.list({}))?.sessions.find((r) => r.session_id === sessionId)?.title : undefined
+  const title = session?.title ?? listedTitle ?? ''
   const workspace = session?.workspace ?? settings.data?.default_workspace
   const workspaces = useWorkspacesQuery()
   const wsLabel = workspaceLabel(workspaces.data?.workspaces, workspace)
   const meta = useMemo(() => [session?.model, session?.message_count !== undefined ? m.session_meta_messages({ n: session.message_count }) : null, session?.updated_at ? formatDate(session.updated_at) : null].filter(Boolean).join(' · '), [session])
+
+  // Composer placement. A session is assumed to have content until the transcript says otherwise;
+  // only a session remembered as empty (legacy `hermes-webui-session-empty`) opens in the hero layout
+  // before its transcript has loaded, so the composer never starts mid-screen and slides down.
+  const knownEmpty = !sessionId || readPersisted('hermes-webui-session-empty') === sessionId
+  const hero = !live && (!sessionId || (query.isSuccess ? rows.length === 0 : knownEmpty))
+  useEffect(() => {
+    if (!sessionId || !query.isSuccess) return
+    if (rows.length === 0) writePersisted('hermes-webui-session-empty', sessionId)
+    else if (readPersisted('hermes-webui-session-empty') === sessionId) removePersisted('hermes-webui-session-empty')
+  }, [sessionId, query.isSuccess, rows.length])
 
   const notFound = query.isError && isApiError(query.error) && query.error.status === 404
   const otherProfile = query.isError && isApiError(query.error) && query.error.status === 409
@@ -165,10 +178,10 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
 
   return (
     <>
-      <div id="mainChat" className={cn(MAIN_VIEW, 'active', rows.length === 0 && !live && 'composer-hero')}>
+      <div id="mainChat" className={cn(MAIN_VIEW, 'active', hero && 'composer-hero')}>
         <div className="chat-header flex items-center gap-3 min-h-[52px] px-5 py-1.5 border-b border-border shrink-0 max-[641px]:hidden">
           <div className="chat-header-text min-w-0 flex-1 flex flex-col gap-px">
-            <h1 className="chat-header-title m-0 text-[13.5px] font-[550] text-text whitespace-nowrap overflow-hidden text-ellipsis tracking-[-.01em]" id="topbarTitle">{session ? (title || m.untitled()) : bootstrap.bot_name}</h1>
+            <h1 className="chat-header-title m-0 text-[13.5px] font-[550] text-text whitespace-nowrap overflow-hidden text-ellipsis tracking-[-.01em]" id="topbarTitle">{session || listedTitle ? (title || m.untitled()) : bootstrap.bot_name}</h1>
             {session && meta && <div className="chat-header-meta hidden text-[11px] text-muted whitespace-nowrap overflow-hidden text-ellipsis font-mono" id="topbarMeta">{meta}</div>}
             <div className="chat-context flex items-center gap-0.5 mt-0.5 min-w-0 overflow-hidden max-[641px]:hidden">
               <button type="button" className={cn(CONTEXT_ITEM, 'chat-context-profile')} onClick={() => openChip('profileChip')}>{bootstrap.profile?.name ?? 'default'}</button>
@@ -183,7 +196,7 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
         {notFound && <div className="p-4"><ErrorState error={new Error(m.transcript_not_found())} onRetry={() => { void navigate({ to: '/', search: { action: 'new-chat' } }) }} /></div>}
         {otherProfile && <div className="p-4"><ErrorState error={new Error(m.transcript_other_profile({ profile: ((query.error as { body?: { profile?: string } }).body?.profile ?? '') }))} /></div>}
         {query.isError && !notFound && !otherProfile && <div className="p-4"><ErrorState error={query.error} onRetry={() => { void refresh() }} /></div>}
-        {(!sessionId || query.isSuccess) && (
+        {!query.isError && (
           <Transcript
             rows={rows}
             live={live}
@@ -197,7 +210,7 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
             truncated={truncated}
             onLoadOlder={() => { void loadOlder() }}
             loadingOlder={loadingOlder}
-            emptyState={emptyState}
+            emptyState={query.isPending && !knownEmpty ? null : emptyState}
             showJumpButtons={(settings.data as Record<string, unknown> | undefined)?.session_jump_buttons !== false}
           />
         )}
