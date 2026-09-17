@@ -132,8 +132,6 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .icon-btn{border-radius:var(--btn-radius);transition:background var(--dur) var(--ease),color var(--dur) var(--ease),opacity var(--dur) var(--ease)}
 .icon-btn:hover{background:var(--icon-btn-hover-bg);color:var(--text)}
 .has-tooltip::after{border-radius:var(--r-sm);border-color:var(--border);box-shadow:var(--shadow-md);font-size:11.5px;font-weight:500;padding:4px 8px}
-html.hub-active .layout .sidebar:not(.mobile-open){width:0 !important;min-width:0;opacity:0;pointer-events:none;overflow:hidden;border-color:transparent}
-html.hub-active .layout .sidebar .resize-handle{display:none}
 .main-view.hub-page .main-view-header{padding:16px 28px 8px;gap:10px;border-bottom:1px solid var(--border)}
 .hub-toolbar .panel-view{display:none}
 .hub-toolbar .panel-view.active{display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;gap:8px 14px}
@@ -156,7 +154,7 @@ html.hub-active .layout .sidebar .resize-handle{display:none}
 .rail-brand svg,.rail-brand .app-titlebar-icon{width:30px;height:30px;display:inline-flex}
 .rail-brand .app-titlebar-icon svg{width:30px;height:30px}
 html.hub-active .rightpanel{width:0 !important;min-width:0 !important;opacity:0;pointer-events:none;overflow:hidden;border-color:transparent;margin-left:0;content-visibility:hidden}
-html.hub-active .workspace-panel-edge-toggle{display:none !important}
+html.hub-active .rightpanel .workspace-panel-edge-toggle{display:none !important}
 .rail-brand .rail-brandmark{width:30px;height:30px;color:var(--accent)}
 .main-view-actions .panel-head-btn{width:32px;height:32px;border-radius:var(--r-md);border:1px solid var(--border);background:var(--surface)}
 .main-view-actions .panel-head-btn:hover{background:var(--hover-bg)}
@@ -168,7 +166,7 @@ html.hub-active .workspace-panel-edge-toggle{display:none !important}
 .chat,.panel-view,.empty-state{background:var(--pane-bg)}
 .nav-tab.active svg{color:var(--nav-active-icon-fg)}
 /* Inset shell: the card keeps the frame gap on the sides where no frame element sits. */
-@media (min-width:641px){.layout.sidebar-collapsed .sidebar:not(.mobile-open),html.hub-active .layout .sidebar:not(.mobile-open){padding:0}}
+@media (min-width:641px){.layout.sidebar-collapsed .sidebar:not(.mobile-open){padding:0}}
 @media (min-width:641px){.sidebar .panel-head{border-bottom-color:transparent}}
 /* First paint. #app is empty until the module entry mounts (about 50ms built, longer under the dev server),
    so the inset frame (rail divider + main card) is drawn from pseudo-elements meanwhile; prepaint.js has
