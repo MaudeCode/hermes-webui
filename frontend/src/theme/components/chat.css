@@ -191,3 +191,8 @@ textarea#msg::-webkit-scrollbar{display:var(--composer-scrollbar-display)}
 .msg-foot > button{flex-shrink:0;width:26px;height:26px}
 @media (max-width:640px){.msg-foot .msg-run-meta{display:none}}
 }
+/* Transcript loading skeleton (TranscriptSkeleton.tsx). Sheen/fade keyframes live in keyframes.css. */
+.transcript-skeleton{animation:skeletonFadeIn .25s ease .15s both}
+.skeleton-bar{height:10px;margin:8px 0;border-radius:var(--radius-pill,999px);background:linear-gradient(90deg,var(--skeleton-base,color-mix(in srgb,var(--text) 8%,transparent)) 0%,var(--skeleton-base,color-mix(in srgb,var(--text) 8%,transparent)) 28%,var(--skeleton-sheen,color-mix(in srgb,var(--text) 18%,transparent)) 50%,var(--skeleton-base,color-mix(in srgb,var(--text) 8%,transparent)) 72%,var(--skeleton-base,color-mix(in srgb,var(--text) 8%,transparent)) 100%);background-size:200% 100%;animation:skeletonSheen 1.6s linear infinite}
+.skeleton-role{width:72px;height:9px;margin:0 0 10px;background:color-mix(in srgb,var(--accent) 22%,transparent);animation:none}
+.skeleton-user{align-self:flex-end;width:46%;max-width:min(76%,360px);height:40px;border-radius:var(--user-msg-radius,12px);border-bottom-right-radius:min(6px,var(--user-msg-radius,12px));border-left:var(--user-msg-rail-width,0) solid var(--user-msg-rail,var(--accent));background:var(--user-msg-bg,var(--surface-subtle));opacity:.7}

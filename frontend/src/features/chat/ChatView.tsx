@@ -17,6 +17,7 @@ import { dispatch } from '../../stream/store'
 import { isTerminal } from '../../stream/reducer'
 import { useTranscript, type VisibleMessage } from './useTranscript'
 import { Transcript } from './Transcript'
+import { TranscriptSkeleton } from './TranscriptSkeleton'
 import { Composer, type QueuedTurn } from '../composer/Composer'
 import { ApprovalCard } from './ApprovalCard'
 import { ClarifyCard } from './ClarifyCard'
@@ -245,7 +246,6 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
           </div>
         </div>
         <RuntimeNoticeStack live={live} onRetry={() => { void onRegenerate() }} />
-        {query.isPending && sessionId && <div className="p-4 text-sm text-muted" role="status">{m.transcript_loading()}</div>}
         {notFound && <div className="p-4"><ErrorState error={new Error(m.transcript_not_found())} onRetry={() => { void navigate({ to: '/', search: { action: 'new-chat' } }) }} /></div>}
         {otherProfile && <div className="p-4"><ErrorState error={new Error(m.transcript_other_profile({ profile: ((query.error as { body?: { profile?: string } }).body?.profile ?? '') }))} /></div>}
         {query.isError && !notFound && !otherProfile && <div className="p-4"><ErrorState error={query.error} onRetry={() => { void refresh() }} /></div>}
@@ -263,7 +263,7 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
             truncated={truncated}
             onLoadOlder={() => { void loadOlder() }}
             loadingOlder={loadingOlder}
-            emptyState={query.isPending && !knownEmpty ? null : emptyState}
+            emptyState={query.isPending && !knownEmpty ? <TranscriptSkeleton /> : emptyState}
             showJumpButtons={(settings.data as Record<string, unknown> | undefined)?.session_jump_buttons !== false}
             virtualizeLongTranscripts={(settings.data as Record<string, unknown> | undefined)?.virtualize_transcript === true}
           />
