@@ -1,6 +1,8 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { HubRoute } from '../features/hub/HubRoute'
+import { TasksSearchSchema } from '../contracts/url'
+import { TasksRoute } from '../features/tasks/TasksPage'
 
 export const Route = createFileRoute('/_app/tasks')({
-  component: () => <HubRoute panel="tasks" />,
+  validateSearch: TasksSearchSchema,
+  component: () => <TasksRoute />,
 })

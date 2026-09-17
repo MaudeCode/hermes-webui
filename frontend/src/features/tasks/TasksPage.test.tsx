@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { useState } from 'react'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -10,7 +11,7 @@ vi.mock(import('../../api/endpoints'), async (importOriginal) => ({
   fetchCronDeliveryOptions: vi.fn(), fetchSkills: vi.fn(), fetchProfiles: vi.fn(), fetchModels: vi.fn(),
 }))
 import * as api from '../../api/endpoints'
-import { TasksPage } from './TasksPage'
+import { useTasksWorkbench } from './TasksPage'
 
 // Persisted shape: cron.jobs.create_job record plus _cron_job_for_api projections
 // (profile, toast_notifications, monitor, continuity) with every field set.
@@ -25,10 +26,17 @@ const feed: CronJob = { ...full, id: 'feed0000feed', name: 'Feed', context_from:
 const attention: CronJob = { ...feed, id: 'a77e0000a77e', name: 'Stuck', enabled: false, state: 'completed', next_run_at: null, last_error: "No module named 'croniter'", last_delivery_error: 'telegram: 401' }
 const foreign: CronJob = { ...feed, id: 'f0e1f0e1f0e1', name: 'Other profile job', read_only: true, owner_profile: 'personal', profile: 'personal' }
 
+/** The route without the app shell: selection is local state instead of `?job=`. */
+function Workbench() {
+  const [selected, setSelected] = useState<string | null>(null)
+  const { sidebar, main } = useTasksWorkbench(selected, setSelected)
+  return <><aside data-testid="sidebar">{sidebar}</aside><main data-testid="main">{main}</main></>
+}
+
 function renderPage(jobs: CronJob[]) {
   vi.mocked(api.fetchCrons).mockResolvedValue({ jobs, active_profile: 'work', all_profiles: false, other_profile_count: 0 })
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  return render(<QueryClientProvider client={qc}><TasksPage /></QueryClientProvider>)
+  return render(<QueryClientProvider client={qc}><Workbench /></QueryClientProvider>)
 }
 
 async function openJob(name: string, jobs: CronJob[] = [full, feed]) {
@@ -37,14 +45,17 @@ async function openJob(name: string, jobs: CronJob[] = [full, feed]) {
 }
 
 async function selectJob(name: string) {
-  await userEvent.click(await screen.findByRole('button', { name: new RegExp(name) }))
-  return within(await screen.findByTestId('cron-detail'))
+  await userEvent.click(await within(screen.getByTestId('sidebar')).findByRole('button', { name: new RegExp(name) }))
+  await screen.findByTestId('cron-detail')
+  return within(screen.getByTestId('main'))
 }
 
 const runs = Array.from({ length: 50 }, (_, i) => ({ filename: `2026-09-${String(17 - (i % 17)).padStart(2, '0')}_09-00-${String(i).padStart(2, '0')}.md`, size: 1200 + i, modified: 1_789_600_000 - i * 3600, usage: { input_tokens: 1000 + i, output_tokens: 50 } }))
 
 describe('TasksPage', () => {
   beforeEach(() => {
+    // jsdom has no matchMedia; the empty state asks whether the sidebar is a drawer.
+    vi.stubGlobal('matchMedia', (query: string) => ({ matches: true, media: query, addEventListener: () => undefined, removeEventListener: () => undefined }))
     vi.mocked(api.fetchCronStatus).mockResolvedValue({ running: {} })
     vi.mocked(api.fetchCronHistory).mockResolvedValue({ job_id: 'x', runs, total: 73, offset: 0 })
     vi.mocked(api.fetchCronRun).mockReset().mockResolvedValue({ content: '# Not markdown\n| literal |', snippet: 'literal', usage: { input_tokens: 1000, output_tokens: 50 } })
@@ -57,15 +68,16 @@ describe('TasksPage', () => {
 
   it('shows the actions, including Edit, as soon as a writable task is selected', async () => {
     const detail = await openJob('Digest')
+    expect(detail.getByRole('heading', { level: 1 })).toHaveTextContent('Digest')
     for (const name of [/run now/i, /^pause/i, /^edit/i, /duplicate/i, /delete/i]) expect(detail.getByRole('button', { name })).toBeVisible()
     await userEvent.click(detail.getByRole('button', { name: /^edit/i }))
-    expect(await screen.findByRole('dialog', { name: /edit job/i })).toBeVisible()
+    expect(await screen.findByRole('form', { name: /edit job/i })).toBeVisible()
   })
 
   it('round-trips every stored field when only the name changes', async () => {
     const detail = await openJob('Digest')
     await userEvent.click(detail.getByRole('button', { name: /^edit/i }))
-    const dialog = await screen.findByRole('dialog', { name: /edit job/i })
+    const dialog = await screen.findByRole('form', { name: /edit job/i })
     await waitFor(() => expect(within(dialog).getByRole('combobox', { name: /model override/i })).toHaveTextContent('@openai-codex:gpt-5.6-sol'))
     const name = within(dialog).getByLabelText(/^name$/i)
     await userEvent.clear(name)
@@ -82,7 +94,7 @@ describe('TasksPage', () => {
   it('duplicates into a new editable copy that never reuses the original id', async () => {
     const detail = await openJob('Digest')
     await userEvent.click(detail.getByRole('button', { name: /duplicate/i }))
-    const dialog = await screen.findByRole('dialog', { name: /duplicate job/i })
+    const dialog = await screen.findByRole('form', { name: /duplicate job/i })
     expect(within(dialog).getByLabelText(/^name$/i)).toHaveValue('Digest (copy)')
     expect(within(dialog).getByLabelText(/^prompt$/i)).toHaveValue('Summarise the inbox')
     await userEvent.click(within(dialog).getByRole('button', { name: /^save$/i }))
@@ -96,9 +108,9 @@ describe('TasksPage', () => {
 
   it('lists the newest 50 runs and fetches one body only when opened', async () => {
     const detail = await openJob('Digest')
-    const history = await detail.findByRole('region', { name: /last output/i })
+    const history = await detail.findByRole('region', { name: /^runs$/i })
     expect(within(history).getAllByRole('listitem')).toHaveLength(50)
-    expect(history).toHaveTextContent('73 runs, showing latest 50')
+    expect(history).toHaveTextContent('latest 50 of 73')
     expect(api.fetchCronHistory).toHaveBeenCalledWith('ab12cd34ef56')
     expect(api.fetchCronRun).not.toHaveBeenCalled()
     await userEvent.click(within(history).getAllByRole('button')[0]!)
@@ -112,10 +124,9 @@ describe('TasksPage', () => {
     vi.mocked(api.fetchCronHistory).mockResolvedValueOnce({ job_id: 'x', runs: [], total: 0, offset: 0 })
     const detail = await openJob('Digest')
     expect(await detail.findByText(/no runs yet/i)).toBeVisible()
-    await userEvent.click(screen.getByRole('button', { name: /Digest/ }))
     vi.mocked(api.fetchCronRun).mockRejectedValueOnce(new Error('run not found'))
     const detail2 = await selectJob('Feed')
-    const history = await detail2.findByRole('region', { name: /last output/i })
+    const history = await detail2.findByRole('region', { name: /^runs$/i })
     await userEvent.click(within(history).getAllByRole('button')[0]!)
     expect(await within(history).findByRole('alert')).toHaveTextContent(/could not load this run.*run not found/i)
   })
@@ -124,8 +135,9 @@ describe('TasksPage', () => {
     const writeText = vi.fn<(text: string) => Promise<void>>(() => Promise.resolve())
     Object.assign(navigator, { clipboard: { writeText } })
     renderPage([attention, feed])
-    expect(await screen.findByRole('button', { name: /Stuck/ })).toHaveTextContent(/needs attention/i)
-    expect(screen.getByRole('button', { name: /Feed/ })).toHaveTextContent(/active/i)
+    const sidebar = within(screen.getByTestId('sidebar'))
+    expect(await sidebar.findByRole('button', { name: /Stuck/ })).toHaveTextContent(/needs attention/i)
+    expect(sidebar.getByRole('button', { name: /Feed/ })).toHaveTextContent(/active/i)
     const detail = await selectJob('Stuck')
     const banner = detail.getByRole('alert')
     expect(banner).toHaveTextContent(/no next run time/i)
@@ -145,8 +157,8 @@ describe('TasksPage', () => {
   it('keeps read-only cross-profile tasks non-mutating and skips their output fetches', async () => {
     const detail = await openJob('Other profile job', [foreign])
     expect(detail.getByRole('note')).toHaveTextContent(/personal/)
-    expect(detail.queryByRole('button')).toBeNull()
-    expect(detail.getByText('Owner profile').nextElementSibling).toHaveTextContent('personal')
+    for (const name of [/run/i, /pause|resume/i, /edit/i, /duplicate/i, /delete/i]) expect(detail.queryByRole('button', { name })).toBeNull()
+    expect(detail.getByText(/Owner profile: personal/)).toBeVisible()
     expect(api.fetchCronHistory).not.toHaveBeenCalled()
     expect(api.fetchCronRun).not.toHaveBeenCalled()
   })

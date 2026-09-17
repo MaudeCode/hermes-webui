@@ -2,7 +2,6 @@ import type { ReactNode } from 'react'
 import { AppShell } from '../../shell/AppShell'
 import type { PanelId } from '../../shell/nav'
 import { useLocale } from '../../i18n/useLocale'
-import { TasksPage } from '../tasks/TasksPage'
 import { KanbanPage } from '../kanban/KanbanPage'
 import { SkillsPage } from '../skills/SkillsPage'
 import { MemoryPage } from '../memory/MemoryPage'
@@ -13,10 +12,9 @@ import { InsightsPage } from '../insights/InsightsPage'
 import { LogsPage } from '../logs/LogsPage'
 import { SessionListPanel } from '../sessions/SessionListPanel'
 
-export type HubPanel = Exclude<PanelId, 'chat' | 'settings'>
+export type HubPanel = Exclude<PanelId, 'chat' | 'settings' | 'tasks'>
 
 const PAGES: Record<HubPanel, () => ReactNode> = {
-  tasks: () => <TasksPage />,
   kanban: () => <KanbanPage />,
   skills: () => <SkillsPage />,
   memory: () => <MemoryPage />,

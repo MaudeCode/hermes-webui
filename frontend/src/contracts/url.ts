@@ -11,6 +11,8 @@ export const IndexSearchSchema = z.object({
 })
 export type IndexSearch = z.infer<typeof IndexSearchSchema>
 
+export const TasksSearchSchema = z.object({ job: z.string().optional().catch(undefined) })
+
 export const SettingsSectionSchema = z.enum(['appearance', 'conversation', 'preferences', 'providers', 'plugins', 'extensions', 'system', 'help'])
 export type SettingsSection = z.infer<typeof SettingsSectionSchema>
 
