@@ -1,0 +1,153 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import type { CronJob } from '../../contracts'
+
+vi.mock(import('../../api/endpoints'), async (importOriginal) => ({
+  ...(await importOriginal()),
+  fetchCrons: vi.fn(), fetchCronStatus: vi.fn(), fetchCronHistory: vi.fn(), fetchCronRun: vi.fn(), cronAction: vi.fn(),
+  fetchCronDeliveryOptions: vi.fn(), fetchSkills: vi.fn(), fetchProfiles: vi.fn(), fetchModels: vi.fn(),
+}))
+import * as api from '../../api/endpoints'
+import { TasksPage } from './TasksPage'
+
+// Persisted shape: cron.jobs.create_job record plus _cron_job_for_api projections
+// (profile, toast_notifications, monitor, continuity) with every field set.
+const full: CronJob = {
+  id: 'ab12cd34ef56', name: 'Digest', prompt: 'Summarise the inbox', skills: ['inbox', 'summary'], model: 'gpt-5.6-sol', provider: 'openai-codex',
+  script: 'collect.sh', no_agent: false, monitor: 'https://example.com/status', continuity: true, context_from: ['self', 'feed0000feed'],
+  schedule: { kind: 'cron', expr: '0 9 * * *', display: '0 9 * * *' }, schedule_display: '0 9 * * *', repeat: { times: null, completed: 4 },
+  enabled: true, state: 'scheduled', next_run_at: '2026-09-18T09:00:00+02:00', last_run_at: '2026-09-17T09:00:00+02:00', last_status: 'ok',
+  last_error: null, last_delivery_error: null, deliver: 'telegram', workdir: '/srv/digest', reasoning_effort: 'high', profile: 'work', toast_notifications: false,
+}
+const feed: CronJob = { ...full, id: 'feed0000feed', name: 'Feed', context_from: [], continuity: false, monitor: '', skills: [], reasoning_effort: null, model: null, provider: null, workdir: null }
+const attention: CronJob = { ...feed, id: 'a77e0000a77e', name: 'Stuck', enabled: false, state: 'completed', next_run_at: null, last_error: "No module named 'croniter'", last_delivery_error: 'telegram: 401' }
+const foreign: CronJob = { ...feed, id: 'f0e1f0e1f0e1', name: 'Other profile job', read_only: true, owner_profile: 'personal', profile: 'personal' }
+
+function renderPage(jobs: CronJob[]) {
+  vi.mocked(api.fetchCrons).mockResolvedValue({ jobs, active_profile: 'work', all_profiles: false, other_profile_count: 0 })
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return render(<QueryClientProvider client={qc}><TasksPage /></QueryClientProvider>)
+}
+
+async function openJob(name: string, jobs: CronJob[] = [full, feed]) {
+  renderPage(jobs)
+  return selectJob(name)
+}
+
+async function selectJob(name: string) {
+  await userEvent.click(await screen.findByRole('button', { name: new RegExp(name) }))
+  return within(await screen.findByTestId('cron-detail'))
+}
+
+const runs = Array.from({ length: 50 }, (_, i) => ({ filename: `2026-09-${String(17 - (i % 17)).padStart(2, '0')}_09-00-${String(i).padStart(2, '0')}.md`, size: 1200 + i, modified: 1_789_600_000 - i * 3600, usage: { input_tokens: 1000 + i, output_tokens: 50 } }))
+
+describe('TasksPage', () => {
+  beforeEach(() => {
+    vi.mocked(api.fetchCronStatus).mockResolvedValue({ running: {} })
+    vi.mocked(api.fetchCronHistory).mockResolvedValue({ job_id: 'x', runs, total: 73, offset: 0 })
+    vi.mocked(api.fetchCronRun).mockReset().mockResolvedValue({ content: '# Not markdown\n| literal |', snippet: 'literal', usage: { input_tokens: 1000, output_tokens: 50 } })
+    vi.mocked(api.cronAction).mockReset().mockResolvedValue({ ok: true, job: full })
+    vi.mocked(api.fetchCronDeliveryOptions).mockResolvedValue({ platforms: [{ value: 'local', label: 'Local' }, { value: 'telegram', label: 'Telegram' }] })
+    vi.mocked(api.fetchSkills).mockResolvedValue({ skills: [{ name: 'inbox' }] })
+    vi.mocked(api.fetchProfiles).mockResolvedValue({ profiles: [{ name: 'work' }, { name: 'personal' }], active: 'work' })
+    vi.mocked(api.fetchModels).mockResolvedValue({ groups: [{ provider: 'OpenAI Codex', provider_id: 'openai-codex', models: [{ id: '@openai-codex:gpt-5.6-sol' }, { id: '@openai-codex:gpt-6-astra' }] }] })
+  })
+
+  it('shows the actions, including Edit, as soon as a writable task is selected', async () => {
+    const detail = await openJob('Digest')
+    for (const name of [/run now/i, /^pause/i, /^edit/i, /duplicate/i, /delete/i]) expect(detail.getByRole('button', { name })).toBeVisible()
+    await userEvent.click(detail.getByRole('button', { name: /^edit/i }))
+    expect(await screen.findByRole('dialog', { name: /edit job/i })).toBeVisible()
+  })
+
+  it('round-trips every stored field when only the name changes', async () => {
+    const detail = await openJob('Digest')
+    await userEvent.click(detail.getByRole('button', { name: /^edit/i }))
+    const dialog = await screen.findByRole('dialog', { name: /edit job/i })
+    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: /model override/i })).toHaveTextContent('@openai-codex:gpt-5.6-sol'))
+    const name = within(dialog).getByLabelText(/^name$/i)
+    await userEvent.clear(name)
+    await userEvent.type(name, 'Digest v2')
+    await userEvent.click(within(dialog).getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(api.cronAction).toHaveBeenCalledTimes(1))
+    expect(api.cronAction).toHaveBeenCalledWith('update', {
+      job_id: 'ab12cd34ef56', name: 'Digest v2', schedule: '0 9 * * *', prompt: 'Summarise the inbox', script: 'collect.sh', no_agent: false,
+      deliver: 'telegram', profile: 'work', toast_notifications: false, monitor: 'https://example.com/status', continuity: true,
+      context_from: ['feed0000feed'], reasoning_effort: 'high', model: 'gpt-5.6-sol', provider: 'openai-codex',
+    })
+  })
+
+  it('duplicates into a new editable copy that never reuses the original id', async () => {
+    const detail = await openJob('Digest')
+    await userEvent.click(detail.getByRole('button', { name: /duplicate/i }))
+    const dialog = await screen.findByRole('dialog', { name: /duplicate job/i })
+    expect(within(dialog).getByLabelText(/^name$/i)).toHaveValue('Digest (copy)')
+    expect(within(dialog).getByLabelText(/^prompt$/i)).toHaveValue('Summarise the inbox')
+    await userEvent.click(within(dialog).getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(api.cronAction).toHaveBeenCalledTimes(1))
+    const [action, body] = vi.mocked(api.cronAction).mock.calls[0]!
+    expect(action).toBe('create')
+    expect(body).toMatchObject({ name: 'Digest (copy)', schedule: '0 9 * * *', prompt: 'Summarise the inbox', skills: ['inbox', 'summary'], script: 'collect.sh', monitor: 'https://example.com/status', continuity: true, context_from: ['feed0000feed'], reasoning_effort: 'high', model: 'gpt-5.6-sol', provider: 'openai-codex', deliver: 'telegram', profile: 'work', toast_notifications: false })
+    expect(body).not.toHaveProperty('job_id')
+    expect(JSON.stringify(body)).not.toContain('ab12cd34ef56')
+  })
+
+  it('lists the newest 50 runs and fetches one body only when opened', async () => {
+    const detail = await openJob('Digest')
+    const history = await detail.findByRole('region', { name: /last output/i })
+    expect(within(history).getAllByRole('listitem')).toHaveLength(50)
+    expect(history).toHaveTextContent('73 runs, showing latest 50')
+    expect(api.fetchCronHistory).toHaveBeenCalledWith('ab12cd34ef56')
+    expect(api.fetchCronRun).not.toHaveBeenCalled()
+    await userEvent.click(within(history).getAllByRole('button')[0]!)
+    await waitFor(() => expect(api.fetchCronRun).toHaveBeenCalledTimes(1))
+    expect(api.fetchCronRun).toHaveBeenCalledWith('ab12cd34ef56', runs[0]!.filename)
+    // Literal output: the markdown heading and table pipe survive verbatim.
+    expect((await within(history).findByText(/# Not markdown/)).tagName).toBe('PRE')
+  })
+
+  it('shows explicit empty and failed-detail states', async () => {
+    vi.mocked(api.fetchCronHistory).mockResolvedValueOnce({ job_id: 'x', runs: [], total: 0, offset: 0 })
+    const detail = await openJob('Digest')
+    expect(await detail.findByText(/no runs yet/i)).toBeVisible()
+    await userEvent.click(screen.getByRole('button', { name: /Digest/ }))
+    vi.mocked(api.fetchCronRun).mockRejectedValueOnce(new Error('run not found'))
+    const detail2 = await selectJob('Feed')
+    const history = await detail2.findByRole('region', { name: /last output/i })
+    await userEvent.click(within(history).getAllByRole('button')[0]!)
+    expect(await within(history).findByRole('alert')).toHaveTextContent(/could not load this run.*run not found/i)
+  })
+
+  it('explains a needs-attention job and offers resume, run once and diagnostics', async () => {
+    const writeText = vi.fn<(text: string) => Promise<void>>(() => Promise.resolve())
+    Object.assign(navigator, { clipboard: { writeText } })
+    renderPage([attention, feed])
+    expect(await screen.findByRole('button', { name: /Stuck/ })).toHaveTextContent(/needs attention/i)
+    expect(screen.getByRole('button', { name: /Feed/ })).toHaveTextContent(/active/i)
+    const detail = await selectJob('Stuck')
+    const banner = detail.getByRole('alert')
+    expect(banner).toHaveTextContent(/no next run time/i)
+    expect(banner).toHaveTextContent(/croniter/i)
+    expect(detail.getByText("No module named 'croniter'")).toBeVisible()
+    expect(detail.getByText('telegram: 401')).toBeVisible()
+    await userEvent.click(within(banner).getByRole('button', { name: /resume and recalculate/i }))
+    expect(api.cronAction).toHaveBeenCalledWith('resume', { job_id: 'a77e0000a77e' })
+    await userEvent.click(within(banner).getByRole('button', { name: /run once now/i }))
+    expect(api.cronAction).toHaveBeenCalledWith('run', { job_id: 'a77e0000a77e' })
+    await userEvent.click(within(banner).getByRole('button', { name: /copy diagnostics/i }))
+    const copied = JSON.parse(writeText.mock.calls[0]![0]) as Record<string, unknown>
+    expect(copied).toMatchObject({ id: 'a77e0000a77e', state: 'completed', enabled: false, last_error: "No module named 'croniter'", last_delivery_error: 'telegram: 401', schedule_display: '0 9 * * *' })
+    expect(copied).not.toHaveProperty('prompt')
+  })
+
+  it('keeps read-only cross-profile tasks non-mutating and skips their output fetches', async () => {
+    const detail = await openJob('Other profile job', [foreign])
+    expect(detail.getByRole('note')).toHaveTextContent(/personal/)
+    expect(detail.queryByRole('button')).toBeNull()
+    expect(detail.getByText('Owner profile').nextElementSibling).toHaveTextContent('personal')
+    expect(api.fetchCronHistory).not.toHaveBeenCalled()
+    expect(api.fetchCronRun).not.toHaveBeenCalled()
+  })
+})
