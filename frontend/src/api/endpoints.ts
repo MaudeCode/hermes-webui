@@ -16,7 +16,7 @@ import {
   SessionStatusSchema, SessionUsageSchema, SessionsListSchema, SettingsSchema, ShareCreateResponseSchema, ShareReadSchema, SkillContentSchema,
   SkillsSchema, SkillsUsageSchema, SteerRequestSchema, SteerResponseSchema, StreamStatusSchema, SystemHealthSchema, TranscribeCapabilitySchema,
   UpdateApplySchema, UpdatesCheckSchema, UpdatesSummarySchema, UploadResponseSchema, WorkspacesSchema,
-  type ChatStartRequest, type SessionId, ReasoningStatusSchema } from '../contracts'
+  type ChatStartRequest, type SessionId, ReasoningStatusSchema, SessionRowSchema, NullableString } from '../contracts'
 
 const qs = (params: Record<string, string | number | boolean | undefined | null>) => {
   const p = new URLSearchParams()
@@ -63,7 +63,8 @@ export const setReasoningDisplay = (display: 'show' | 'hide') => post('api/reaso
 // Sessions
 export interface SessionListParams { include_archived?: boolean; all_profiles?: boolean; sidebar_source?: 'webui' | 'cli'; exclude_hidden?: boolean }
 export const fetchSessions = (params: SessionListParams = {}) => get(`api/sessions${qs({ include_archived: params.include_archived ? 1 : undefined, all_profiles: params.all_profiles ? 1 : undefined, sidebar_source: params.sidebar_source, exclude_hidden: params.exclude_hidden ? 1 : undefined })}`, SessionsListSchema, { timeoutMs: 45_000 })
-export const searchSessions = (q: string) => get(`api/sessions/search${qs({ q })}`, z.looseObject({ results: z.array(z.unknown()).optional(), sessions: z.array(z.unknown()).optional() }))
+/** Title and message-content search; rows carry `match_type` and, for content hits, `match_preview`. */
+export const searchSessions = (q: string, depth = 5) => get(`api/sessions/search${qs({ q, content: 1, depth })}`, z.looseObject({ sessions: z.array(SessionRowSchema.extend({ match_type: z.string().optional(), match_preview: NullableString.optional() })), count: z.number().optional() }))
 export interface SessionGetParams { messages?: boolean; msg_limit?: number; msg_before?: number; resolve_model?: boolean }
 export const fetchSession = (id: SessionId, params: SessionGetParams = {}) =>
   get(`api/session${qs({ session_id: id, messages: params.messages === false ? 0 : undefined, msg_limit: params.msg_limit, msg_before: params.msg_before, resolve_model: params.resolve_model === false ? 0 : undefined })}`, SessionEnvelopeSchema, { timeoutMs: 60_000 })
@@ -76,8 +77,9 @@ export const pinSession = (session_id: SessionId, pinned: boolean) => post('api/
 export const archiveSession = (session_id: SessionId, archived: boolean) => post('api/session/archive', { session_id, archived }, OkSchema.or(SessionEnvelopeSchema), { retries: 0 })
 export const moveSession = (session_id: SessionId, project_id: string | null) => post('api/session/move', { session_id, project_id }, OkSchema.or(SessionEnvelopeSchema), { retries: 0 })
 export const duplicateSession = (session_id: SessionId) => post('api/session/duplicate', { session_id }, SessionEnvelopeSchema, { retries: 0 })
-export const branchSession = (session_id: SessionId, message_index: number) => post('api/session/branch', { session_id, message_index }, SessionEnvelopeSchema, { retries: 0 })
-export const truncateSession = (session_id: SessionId, message_index: number) => post('api/session/truncate', { session_id, message_index }, SessionEnvelopeSchema.or(OkSchema), { retries: 0 })
+/** `keep_count`: number of messages (absolute, from the start of the session) to copy or keep. */
+export const branchSession = (session_id: SessionId, keep_count: number) => post('api/session/branch', { session_id, keep_count }, z.looseObject({ session_id: SessionIdSchema, title: z.string().optional(), parent_session_id: NullableString.optional() }), { retries: 0 })
+export const truncateSession = (session_id: SessionId, keep_count: number) => post('api/session/truncate', { session_id, keep_count }, SessionEnvelopeSchema.or(OkSchema), { retries: 0 })
 export const undoSession = (session_id: SessionId) => post('api/session/undo', { session_id }, SessionEnvelopeSchema.or(OkSchema), { retries: 0 })
 export const retrySession = (session_id: SessionId) => post('api/session/retry', { session_id }, ChatStartResponseSchema.or(OkSchema), { retries: 0 })
 export const clearSession = (session_id: SessionId) => post('api/session/clear', { session_id }, SessionEnvelopeSchema.or(OkSchema), { retries: 0 })

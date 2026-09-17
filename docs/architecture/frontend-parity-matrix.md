@@ -187,6 +187,39 @@ and route error boundaries (`routes/__root.tsx` `errorComponent`,
 `features/shell/ErrorBoundary.tsx`) offer retry and reload; a failed lazy
 chunk triggers the route error boundary with a reload action.
 
+## 8a. Legacy Python browser suites removed
+
+These `tests/*.py` Playwright suites asserted the legacy DOM and CSS contracts
+of earlier tickets and cannot run against the React markup. Their behaviours
+are covered by the rows above and by the Node Playwright suite (`frontend/e2e`);
+removed with this migration rather than ported:
+
+| File | Ticket / issue | Behaviour | Now covered by |
+|---|---|---|---|
+| `test_hweb1_composer_hero.py` | HWEB-1 | Composer as the new-conversation hero | C-rows, `shell.spec.ts` home |
+| `test_hweb2_chat_column.py` | HWEB-2 | One shared reading column | `skins.spec.ts` |
+| `test_hweb3_user_message_collapse.py` | HWEB-3 | User bubble width and folding | X5 (bubbles redesigned) |
+| `test_hweb6_chat_code_and_tables.py` | HWEB-6 | Quiet code blocks and tables | E-rows, `skins.spec.ts` |
+| `test_hweb7_composer_overflow.py` | HWEB-7 | Composer overflow panel | C-rows (fit stages), manual |
+| `test_hweb9_scroll_to_end_pill.py` | HWEB-9 | Scroll-to-end pill | D-rows (jump buttons) |
+| `test_hweb10_mobile_composer_collapse.py` | HWEB-10 | Phone composer collapse | C-rows (`cf-collapsed`), manual |
+| `test_hweb12_turn_minimap.py` | HWEB-12 | Turn minimap | not carried (no minimap in the React shell; see D16) |
+| `test_hweb37_shell_cache_and_locale_split.py` | HWEB-37 | Legacy JS shell caching and locale split | Vite hashed assets, Paraglide (section 7) |
+| `test_inline_handler_arg_escaping.py` | — | `jsArg()` in legacy inline handlers | no inline handlers exist |
+| `test_issue5638_user_row_intrinsic_height_collapse.py` | #5638 | User row intrinsic height | X5 |
+| `test_issue5932_kanban_board_default_workdir_layout.py` | #5932 | Kanban board modal layout | `shell.spec.ts` hubs, manual |
+| `test_issue6906_kanban_modal_height_cap.py` | #6906 | Kanban modal reachable in short windows | manual |
+
+Kept and adapted: `test_hweb72_oidc_synthetic_provider.py` (href compared as a
+resolved URL), `test_layout_helpers.py` (waits for `main.main`, canonical
+paths), `test_issue1361_cancel_data_loss.py`, `test_docker_docs_and_readonly.py`,
+`test_issue6066_workspace_sort_*`. The legacy `browser-smoke` and
+`conversation-lifecycle` workflows (which drove the legacy UI) are removed; the
+Node suite runs in the `frontend` job. Screenshot comparisons there are
+informational: the committed baselines are rendered on macOS and Linux text
+rasterisation differs, so CI runs the functional checks with `--ignore-snapshots`
+and publishes the comparison report as an artifact.
+
 ## 9. Intentional differences
 
 | Ref | Difference | Reason | Approval |

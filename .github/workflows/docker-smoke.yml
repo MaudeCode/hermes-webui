@@ -169,12 +169,13 @@ jobs:
           LOGS="$(docker logs "$CONTAINER" 2>&1)"
 
           # The identity must have been detected from the state dir, not /workspace.
-          if ! echo "$LOGS" | grep -qE -- "-- Auto-detected UID: ${HOST_UID} \(from /app/data\)"; then
+          # Here-strings, not `echo | grep -q`: under pipefail the early exit of grep -q makes a long log fail on echo's broken pipe.
+          if ! grep -qE -- "-- Auto-detected UID: ${HOST_UID} \(from /app/data\)" <<<"$LOGS"; then
             echo "❌ UID was not auto-detected from the state directory (#7027)"
             echo "$LOGS" | grep -E -- "-- (Auto-detected|WANTED_)" || true
             exit 1
           fi
-          if ! echo "$LOGS" | grep -qE -- "-- Auto-detected GID: ${HOST_UID} \(from /app/data\)"; then
+          if ! grep -qE -- "-- Auto-detected GID: ${HOST_UID} \(from /app/data\)" <<<"$LOGS"; then
             echo "❌ GID was not auto-detected from the state directory (#7027)"
             echo "$LOGS" | grep -E -- "-- (Auto-detected|WANTED_)" || true
             exit 1

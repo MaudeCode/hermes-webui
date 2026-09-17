@@ -102,12 +102,16 @@ export function SessionListPanel() {
   const [searchOpen, setSearchOpen] = useState(false)
   const [source, setSource] = useState<'webui' | 'cli'>('webui')
   const [project, setProject] = useState<string | null>(null)
-  const list = useSessionListQuery()
+  const [showArchived, setShowArchived] = useState(false)
+  const list = useSessionListQuery(showArchived ? { include_archived: true } : {})
+  // Server-backed search (title and message content) once the query is long enough; the local title filter answers instantly meanwhile.
+  const q = filter.trim()
+  const search = useQuery({ queryKey: keys.sessions.search(q), queryFn: () => api.searchSessions(q), enabled: q.length >= 2, staleTime: 15_000, placeholderData: (prev) => prev })
   const projects = useProjectsQuery()
   useSessionListStream()
   const newChat = useNewChat()
   const data = list.data
-  const rows = useMemo(() => (data?.sessions ?? []).filter((r) => !r.archived), [data])
+  const rows = useMemo(() => (data?.sessions ?? []).filter((r) => showArchived || !r.archived), [data, showArchived])
   const cliCount = useMemo(() => rows.filter((r) => r.is_cli_session).length, [rows])
   const webuiCount = rows.length - cliCount
   const hasUnprojected = useMemo(() => rows.some((r) => !r.project_id), [rows])
@@ -118,8 +122,15 @@ export function SessionListPanel() {
     if (cliCount > 0) visible = visible.filter((r) => (source === 'cli' ? !!r.is_cli_session : !r.is_cli_session))
     if (project === NO_PROJECT) visible = visible.filter((r) => !r.project_id)
     else if (project) visible = visible.filter((r) => r.project_id === project)
-    return q ? visible.filter((r) => r.title.toLowerCase().includes(q)) : visible
-  }, [rows, filter, cliCount, source, project])
+    if (!q) return visible
+    // Merge the server's matches (content hits included) into the visible set, keeping list order for known rows.
+    const hits = new Map((search.data?.sessions ?? []).map((r) => [r.session_id, r]))
+    const local = visible.filter((r) => r.title.toLowerCase().includes(q) || hits.has(r.session_id))
+    const known = new Set(local.map((r) => r.session_id))
+    const extra = [...hits.values()].filter((r) => !known.has(r.session_id) && (showArchived || !r.archived))
+    return [...local, ...extra]
+  }, [rows, filter, cliCount, source, project, search.data, showArchived])
+  const previews = useMemo(() => new Map((search.data?.sessions ?? []).flatMap((r) => (r.match_preview ? [[r.session_id, r.match_preview] as const] : []))), [search.data])
   const groups = useMemo(() => {
     const order: ReturnType<typeof groupLabel>[] = ['pinned', 'today', 'yesterday', 'week', 'older']
     const byGroup = new Map<string, SessionRow[]>()
@@ -149,6 +160,9 @@ export function SessionListPanel() {
           <>
             <PanelHeadButton label={m.filter_conversations()} active={searchOpen} onClick={() => { setSearchOpen((o) => !o); if (searchOpen) setFilter('') }}>
               <Filter size={16} aria-hidden="true" />
+            </PanelHeadButton>
+            <PanelHeadButton label={showArchived ? m.session_hide_archived() : m.session_show_archived()} active={showArchived} onClick={() => setShowArchived((a) => !a)}>
+              {showArchived ? <ArchiveRestore size={16} aria-hidden="true" /> : <Archive size={16} aria-hidden="true" />}
             </PanelHeadButton>
             <PanelHeadButton label={m.new_conversation()} id="btnNewChat" tooltipSide="bottom-right" onClick={() => { void newChat() }}>
               <Plus size={16} aria-hidden="true" />
@@ -193,7 +207,7 @@ export function SessionListPanel() {
             {m.error_generic()} <button type="button" className="linklike" onClick={() => { void list.refetch() }}>{m.retry()}</button>
           </div>
         )}
-        {list.isSuccess && filtered.length === 0 && <div className="session-list-note">{filter ? m.no_matching_sessions() : m.no_sessions_yet()}</div>}
+        {list.isSuccess && filtered.length === 0 && !(q.length >= 2 && search.isPending) && <div className="session-list-note">{filter ? m.no_matching_sessions() : m.no_sessions_yet()}</div>}
         {groups.map((g) => {
           const isCollapsed = !!collapsedGroups[g.id]
           return (
@@ -216,7 +230,7 @@ export function SessionListPanel() {
                       data-sid={row.session_id}
                       data-source={row.is_cli_session ? (row.source_label ?? 'CLI') : undefined}
                       aria-current={active ? 'page' : undefined}
-                      className={cn('session-item', active && 'active', row.is_streaming && 'streaming', row.is_cli_session && 'cli-session', row.attention && 'needs-attention')}
+                      className={cn('session-item', active && 'active', row.is_streaming && 'streaming', row.is_cli_session && 'cli-session', row.attention && 'needs-attention', row.archived && 'archived')}
                     >
                       <div className="session-text">
                         <div className="session-title-row">
@@ -224,6 +238,7 @@ export function SessionListPanel() {
                           {proj && <span className="session-project-dot" style={{ background: proj.color ?? 'var(--blue)' }} title={proj.name} />}
                           <span className={cn('session-time', (row.is_streaming || row.attention) && 'is-hidden')}>{row.is_streaming || row.attention ? '' : relativeTime(row.last_message_at ?? row.updated_at)}</span>
                         </div>
+                        {previews.get(row.session_id) && <div className="session-search-preview truncate text-[11px] text-muted" title={m.session_search_content_matches()}>{previews.get(row.session_id)}</div>}
                       </div>
                       {row.is_streaming && <span className="session-state-indicator streaming" aria-label={m.status_streaming()} />}
                       {row.attention && !row.is_streaming && <span className="session-state-indicator attention" aria-label={m.session_attention_generic({ n: row.attention.count ?? 1 })} />}

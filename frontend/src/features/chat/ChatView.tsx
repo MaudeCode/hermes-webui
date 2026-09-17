@@ -127,7 +127,7 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
       case 'compress': case 'compact': if (sessionId) { await api.compressSession(sessionId); showToast(m.live_compressing()) } return true
       case 'usage': if (sessionId) { const u = await api.fetchSessionUsage(sessionId); showToast(`${(u.input_tokens ?? 0).toLocaleString()} in · ${(u.output_tokens ?? 0).toLocaleString()} out${u.estimated_cost ? ` · $${u.estimated_cost.toFixed(4)}` : ''}`, 4000) } return true
       case 'yolo': onToggleYolo(); return true
-      case 'branch': if (sessionId) { const r = await api.branchSession(sessionId, rows.length); await navigate({ to: '/session/$sessionId', params: { sessionId: r.session.session_id } }) } return true
+      case 'branch': if (sessionId) { const r = await api.branchSession(sessionId, rows.length); void qc.invalidateQueries({ queryKey: keys.sessions.all }); await navigate({ to: '/session/$sessionId', params: { sessionId: r.session_id } }) } return true
       case 'reasoning': {
         const arg = args.trim().toLowerCase()
         if (!arg) { showToast(`${m.composer_control_reasoning()}: ${reasoning ?? m.reasoning_default()}`, 4000); return true }
@@ -159,7 +159,8 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
   const onBranch = useCallback(async (row: VisibleMessage) => {
     if (!sessionId) return
     const r = await api.branchSession(sessionId, row.index + 1)
-    await navigate({ to: '/session/$sessionId', params: { sessionId: r.session.session_id } })
+    void qc.invalidateQueries({ queryKey: keys.sessions.all })
+    await navigate({ to: '/session/$sessionId', params: { sessionId: r.session_id } })
   }, [sessionId, navigate])
 
   const mode = (settings.data?.chat_activity_display_mode as ActivityMode | undefined) ?? 'compact_worklog'

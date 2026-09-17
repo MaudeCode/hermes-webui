@@ -35,8 +35,12 @@ function isRenderable(msg: Message): boolean {
   return !!(text || msg.attachments?.length)
 }
 
-/** Project raw messages into renderable rows; tool-role results attach to the owning assistant call by id. */
-export function projectMessages(messages: Message[]): VisibleMessage[] {
+/**
+ * Project raw messages into renderable rows; tool-role results attach to the owning assistant call by id.
+ * `base` is the absolute index of `messages[0]` in the session (non-zero when only a window is loaded), so
+ * `row.index` is always the position the truncate/branch `keep_count` contract expects.
+ */
+export function projectMessages(messages: Message[], base = 0): VisibleMessage[] {
   const results = new Map<string, Message>()
   for (const msg of messages) {
     if (msg.role === 'tool') {
@@ -45,7 +49,8 @@ export function projectMessages(messages: Message[]): VisibleMessage[] {
     }
   }
   const rows: VisibleMessage[] = []
-  messages.forEach((message, index) => {
+  messages.forEach((message, i) => {
+    const index = base + i
     if (!isRenderable(message)) return
     const toolResults: Record<string, Message> = {}
     for (const tc of message.tool_calls ?? []) {
@@ -123,7 +128,8 @@ export function useTranscript(sessionId: string | null) {
     return older.length ? [...older, ...current] : current
   }, [session, older])
 
-  const rows = useMemo(() => projectMessages(messages), [messages])
+  const base = Math.max(0, (session?._messages_offset ?? 0) - older.length)
+  const rows = useMemo(() => projectMessages(messages, base), [messages, base])
   const truncated = !!session?._messages_truncated && (session._messages_offset ?? 0) > older.length
   const loadOlder = useCallback(async () => {
     if (!sessionId || !session || loadingOlder) return

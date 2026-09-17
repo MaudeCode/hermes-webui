@@ -203,9 +203,24 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         run: pip install -r ../requirements.txt
 
-      - name: Playwright end-to-end (desktop + mobile, screenshot baselines)
+      # Functional end-to-end checks are required. Screenshot comparisons are not: the committed baselines are
+      # rendered on macOS and Linux text rasterisation differs, so the second step reports diffs as an artifact.
+      - name: Playwright end-to-end (desktop + mobile, functional; screenshots ignored)
         if: needs.changes.outputs.docs_only != 'true'
+        run: npm run e2e -- --ignore-snapshots
+
+      - name: Playwright screenshot comparison (informational, never blocks)
+        if: needs.changes.outputs.docs_only != 'true'
+        continue-on-error: true
         run: npm run e2e
+
+      - name: Upload screenshot comparison report
+        if: ${{ always() && needs.changes.outputs.docs_only != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-screenshots
+          path: frontend/playwright-report
+          retention-days: 7
 
       - name: Upload Playwright report on failure
         if: ${{ failure() && needs.changes.outputs.docs_only != 'true' }}
