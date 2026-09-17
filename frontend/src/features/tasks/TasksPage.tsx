@@ -266,9 +266,9 @@ function TaskDetail({ job, jobs, state, onAction, onEdit, onDuplicate, onDelete 
             {job.last_error && <p className="mt-2 font-mono text-[12px] text-error">{job.last_error}</p>}
             {job.last_delivery_error && <p className="mt-1 font-mono text-[12px] text-error">{job.last_delivery_error}</p>}
             <div className="mt-3 flex flex-wrap gap-2">
-              <Button size="sm" onClick={() => onAction('resume')}>{m.cron_attention_resume()}</Button>
-              <Button size="sm" onClick={() => onAction('run')}>{m.cron_attention_run_once()}</Button>
-              <Button size="sm" onClick={copyDiagnostics}>{m.cron_attention_copy_diagnostics()}</Button>
+              <Button onClick={() => onAction('resume')}>{m.cron_attention_resume()}</Button>
+              <Button onClick={() => onAction('run')}>{m.cron_attention_run_once()}</Button>
+              <Button onClick={copyDiagnostics}>{m.cron_attention_copy_diagnostics()}</Button>
             </div>
           </section>
         )}
@@ -276,7 +276,7 @@ function TaskDetail({ job, jobs, state, onAction, onEdit, onDuplicate, onDelete 
           <section className="rounded-lg border border-border px-4 py-3" role="alert">
             {job.last_error && <div className="text-[13px]"><span className="text-muted">{m.cron_last_error_label()}: </span><span className="font-mono text-[12px] text-error">{job.last_error}</span></div>}
             {job.last_delivery_error && <div className="mt-1 text-[13px]"><span className="text-muted">{m.cron_delivery_error_label()}: </span><span className="font-mono text-[12px] text-error">{job.last_delivery_error}</span></div>}
-            {!readOnly && <div className="mt-2"><Button size="sm" onClick={copyDiagnostics}>{m.cron_attention_copy_diagnostics()}</Button></div>}
+            {!readOnly && <div className="mt-2"><Button onClick={copyDiagnostics}>{m.cron_attention_copy_diagnostics()}</Button></div>}
           </section>
         )}
         <dl className={DL}>
