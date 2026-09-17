@@ -31,6 +31,7 @@ export function SystemSection() {
   const setPassword = useMutation({ mutationFn: (body: Record<string, unknown>) => api.saveSettings(body), onSuccess: async () => { showToast(m.system_password_updated()); setPw(''); setCurrentPw(''); await loadBootstrap(); void qc.invalidateQueries() }, onError: fail })
   const restart = useMutation({ mutationFn: api.restartAgent, onSuccess: () => { showToast(m.saved()); void qc.invalidateQueries({ queryKey: keys.health.agent }) }, onError: fail })
   const shutdown = useMutation({ mutationFn: api.shutdownServer, onSuccess: () => showToast(m.system_shutdown()), onError: fail })
+  const checkNow = useMutation({ mutationFn: api.checkUpdatesNow, onSuccess: (d) => qc.setQueryData(keys.updates.check, d), onError: fail })
   const apply = useMutation({ mutationFn: (action: 'apply' | 'force' | 'clear_lock') => api.applyUpdates(action), onSuccess: (r) => { showToast(r.message ?? r.status ?? m.saved()); void qc.invalidateQueries({ queryKey: keys.updates.check }) }, onError: fail })
   const registerPasskey = useMutation({
     mutationFn: async () => {
@@ -71,7 +72,7 @@ export function SystemSection() {
         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted">
           {updates.data?.disabled ? <span>—</span> : updates.data?.webui?.behind ? <span className="text-accent-text">{m.system_update_available({ name: 'webui', n: updates.data.webui.behind })}</span> : updates.data ? <span>{m.system_up_to_date()}</span> : null}
           {updates.data?.agent?.behind ? <span className="text-accent-text">{m.system_update_available({ name: 'agent', n: updates.data.agent.behind })}</span> : null}
-          <Button size="sm" onClick={() => { void api.fetchUpdatesCheck(true).then((d) => qc.setQueryData(keys.updates.check, d)).catch(fail) }}>{m.system_check_updates()}</Button>
+          <Button size="sm" onClick={() => checkNow.mutate()} disabled={checkNow.isPending}>{checkNow.isPending ? m.settings_checking() : m.system_check_updates()}</Button>
           {canManage && (updates.data?.webui?.behind || updates.data?.agent?.behind) ? <Button size="sm" variant="primary" onClick={() => apply.mutate('apply')} disabled={apply.isPending}>{m.system_apply_update()}</Button> : null}
         </div>
       </section>
