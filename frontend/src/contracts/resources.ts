@@ -175,6 +175,8 @@ export const MemorySchema = z.looseObject({
 export type Memory = z.infer<typeof MemorySchema>
 
 export const CronJobSchema = z.looseObject({
+  read_only: z.boolean().optional(),
+  owner_profile: NullableString.optional(),
   id: z.string().optional(),
   job_id: z.string().optional(),
   name: z.string().optional(),

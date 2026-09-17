@@ -22,7 +22,7 @@ export function useNewChat() {
   }, [navigate, qc])
 }
 
-export async function createSessionNow(opts: { workspace?: string; model?: string; profile?: string } = {}) {
-  const { session } = await api.newSession({ ...(opts.workspace ? { workspace: opts.workspace } : {}), ...(opts.model ? { model: opts.model } : {}), ...(opts.profile ? { profile: opts.profile } : {}), worktree: false })
+export async function createSessionNow(opts: { workspace?: string; model?: string; model_provider?: string | null; profile?: string; enabled_toolsets?: string[] | null } = {}) {
+  const { session } = await api.newSession({ ...(opts.workspace ? { workspace: opts.workspace } : {}), ...(opts.model ? { model: opts.model } : {}), ...(opts.model_provider !== undefined ? { model_provider: opts.model_provider } : {}), ...(opts.profile ? { profile: opts.profile } : {}), ...(opts.enabled_toolsets !== undefined ? { enabled_toolsets: opts.enabled_toolsets } : {}), worktree: false })
   return session
 }

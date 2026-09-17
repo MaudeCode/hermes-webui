@@ -26,6 +26,8 @@ export type BusyMode = 'steer' | 'queue' | 'interrupt'
 export interface ComposerProps {
   sessionId: string | null
   session: Session | null
+  /** Choices made on the unsaved chat, shown by the chips until the session exists. */
+  pendingChoices?: { model?: string; workspace?: string; enabled_toolsets?: string[] | null } | undefined
   live: LiveTurn | null
   settings: Settings | undefined
   onEnsureSession: () => Promise<Session>
@@ -72,7 +74,7 @@ function fileKey(f: File): string {
 let handoff: { text: string; files: File[] } | null = null
 
 export function Composer(props: ComposerProps) {
-  const { sessionId, session, live, settings, onEnsureSession, onLocalCommand, terminalOpen, onToggleTerminal, onModelChange, onWorkspaceChange, onToolsetsChange, onReasoningChange, reasoning, reasoningLevels, reasoningSupported = true, yolo, onToggleYolo, queued, onQueue } = props
+  const { sessionId, session, live, settings, onEnsureSession, onLocalCommand, terminalOpen, onToggleTerminal, onModelChange, onWorkspaceChange, onToolsetsChange, onReasoningChange, reasoning, reasoningLevels, reasoningSupported = true, pendingChoices, yolo, onToggleYolo, queued, onQueue } = props
   const bootstrap = useBootstrap()
   const qc = useQueryClient()
   const [text, setText] = useState(() => (sessionId ? readLocalDraft(sessionId) : ''))
@@ -194,7 +196,14 @@ export function Composer(props: ComposerProps) {
     if (f?.upload?.rollback_token && session) void api.rollbackUpload(session.session_id, [f.upload.rollback_token]).catch(() => undefined)
   }
 
-  const steer = useMutation({ mutationFn: (message: string) => api.steerChat({ session_id: sessionId ?? '', message, mode: 'steer' }) })
+  // Steer: deliver mid-run; if the server did not accept it, the draft stays in the box.
+  const steer = useMutation({ mutationFn: (text: string) => api.steerChat({ session_id: sessionId ?? '', text }) })
+  const trySteer = useCallback(async (text: string): Promise<boolean> => {
+    const r = await steer.mutateAsync(text)
+    if (!r.accepted) { showToast(r.fallback === 'gateway_steer_queued' ? m.steer_leftover_queued() : m.busy_steer_fallback(), 2500); return false }
+    showToast(m.cmd_steer_delivered(), 1500)
+    return true
+  }, [steer])
 
   const send = useCallback(async () => {
     const value = text.trim()
@@ -209,12 +218,12 @@ export function Composer(props: ComposerProps) {
         if (handled) { setText(''); return }
       }
       if (cmd.name === 'queue' && busy) { onQueue(cmd.args); setText(''); return }
-      if (cmd.name === 'steer' && busy && sessionId) { await steer.mutateAsync(cmd.args); setText(''); return }
+      if (cmd.name === 'steer' && busy && sessionId) { if (!cmd.args) { showToast(m.cmd_steer_no_msg(), 2000); return } if (await trySteer(cmd.args)) setText(''); return }
       if (cmd.name === 'interrupt' && busy && sessionId) { await cancelTurn(sessionId); onQueue(cmd.args); setText(''); return }
     }
     if (busy && sessionId) {
       if (busyMode === 'queue') { onQueue(value); setText(''); return }
-      if (busyMode === 'steer') { await steer.mutateAsync(value); setText(''); showToast(m.composer_steer_hint(), 1500); return }
+      if (busyMode === 'steer') { if (await trySteer(value)) setText(''); return }
       await cancelTurn(sessionId)
       onQueue(value)
       setText('')
@@ -235,7 +244,7 @@ export function Composer(props: ComposerProps) {
       setSending(false)
       textarea.current?.focus()
     }
-  }, [text, files, sending, session, onEnsureSession, busy, busyMode, sessionId, steer, onQueue, onLocalCommand, bootstrap.profile, qc])
+  }, [text, files, sending, session, onEnsureSession, busy, busyMode, sessionId, trySteer, onQueue, onLocalCommand, bootstrap.profile, qc])
 
   const applySuggestion = (s: CommandSuggestion) => { setText(`/${s.name} `); textarea.current?.focus() }
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -337,10 +346,10 @@ export function Composer(props: ComposerProps) {
             <button type="button" className={cn('icon-btn has-tooltip', terminalOpen && 'active')} id="btnTerminalInline" data-tooltip={m.composer_terminal_toggle()} aria-label={m.composer_terminal_toggle()} aria-pressed={terminalOpen} onClick={onToggleTerminal}><TerminalSquare size={16} aria-hidden="true" /></button>
             {yolo && !hide('hide_composer_yolo') && <button type="button" onClick={onToggleYolo} className="yolo-pill" id="yoloPill" title={m.yolo_pill_title_active()}><span className="yolo-pill-icon" aria-hidden="true">⚡</span><span className="yolo-pill-label">{m.yolo_pill_label()}</span></button>}
             {!hide('hide_composer_profile') && <div className="composer-profile-wrap" id="profileChipWrap"><ProfileMenu /></div>}
-            {!hide('hide_composer_workspace') && <div className="composer-ws-wrap"><WorkspaceChip value={session?.workspace ?? settings?.default_workspace} onChange={onWorkspaceChange} /></div>}
-            {!hide('hide_composer_model') && <div className="composer-model-wrap"><ModelChip value={session?.model ?? null} defaultModel={settings?.default_model} onChange={onModelChange} /></div>}
+            {!hide('hide_composer_workspace') && <div className="composer-ws-wrap"><WorkspaceChip value={session?.workspace ?? pendingChoices?.workspace ?? settings?.default_workspace} onChange={onWorkspaceChange} /></div>}
+            {!hide('hide_composer_model') && <div className="composer-model-wrap"><ModelChip value={session?.model ?? pendingChoices?.model ?? null} defaultModel={settings?.default_model} onChange={onModelChange} /></div>}
             {!hide('hide_composer_reasoning') && reasoningSupported && <div className="composer-reasoning-wrap"><ReasoningChip value={reasoning} levels={reasoningLevels} onChange={onReasoningChange} /></div>}
-            {!hide('hide_composer_toolsets') && <div className="composer-toolsets-wrap"><ToolsetsChip value={session?.enabled_toolsets ?? null} onChange={onToolsetsChange} /></div>}
+            {!hide('hide_composer_toolsets') && <div className="composer-toolsets-wrap"><ToolsetsChip value={session?.enabled_toolsets ?? pendingChoices?.enabled_toolsets ?? null} onChange={onToolsetsChange} /></div>}
             <button className="icon-btn composer-mobile-config-btn has-tooltip" id="composerMobileConfigBtn" type="button" data-tooltip={m.composer_config_title()} aria-label={m.composer_config_title()} aria-expanded={configOpen} aria-controls="composerMobileConfigPanel" onClick={() => setConfigOpen((o) => !o)}>
               <SlidersHorizontal size={16} aria-hidden="true" />
             </button>
@@ -359,11 +368,11 @@ export function Composer(props: ComposerProps) {
           </div>
           <div className={cn('composer-mobile-config-panel', configOpen && 'open')} id="composerMobileConfigPanel" role="group" aria-label={m.composer_config_title()}>
             {stage === 'burger' && !hide('hide_composer_profile') && <ProfileMenu row />}
-            {stage === 'burger' && !hide('hide_composer_workspace') && <WorkspaceChip row value={session?.workspace ?? settings?.default_workspace} onChange={onWorkspaceChange} />}
-            {stage === 'burger' && !hide('hide_composer_model') && <ModelChip row value={session?.model ?? null} defaultModel={settings?.default_model} onChange={onModelChange} />}
+            {stage === 'burger' && !hide('hide_composer_workspace') && <WorkspaceChip row value={session?.workspace ?? pendingChoices?.workspace ?? settings?.default_workspace} onChange={onWorkspaceChange} />}
+            {stage === 'burger' && !hide('hide_composer_model') && <ModelChip row value={session?.model ?? pendingChoices?.model ?? null} defaultModel={settings?.default_model} onChange={onModelChange} />}
             {stage === 'burger' && !hide('hide_composer_reasoning') && reasoningSupported && <ReasoningChip row value={reasoning} levels={reasoningLevels} onChange={onReasoningChange} />}
             {stage === 'burger' && <button type="button" className={cn('icon-btn', terminalOpen && 'active')} id="btnTerminal" title={m.composer_terminal_toggle()} aria-label={m.composer_terminal_toggle()} aria-pressed={terminalOpen} onClick={() => { setConfigOpen(false); onToggleTerminal() }}><TerminalSquare size={16} aria-hidden="true" /><span className="composer-mobile-config-value">{m.composer_terminal_toggle()}</span></button>}
-            {stage === 'burger' && !hide('hide_composer_toolsets') && <ToolsetsChip row value={session?.enabled_toolsets ?? null} onChange={onToolsetsChange} />}
+            {stage === 'burger' && !hide('hide_composer_toolsets') && <ToolsetsChip row value={session?.enabled_toolsets ?? pendingChoices?.enabled_toolsets ?? null} onChange={onToolsetsChange} />}
             {stage === 'burger' && !hide('hide_composer_context') && <ContextRow used={contextUsed} total={contextTotal} threshold={session?.threshold_tokens} />}
           </div>
         </div>

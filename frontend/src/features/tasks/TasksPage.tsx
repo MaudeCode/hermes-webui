@@ -104,7 +104,10 @@ export function TasksPage() {
                     {job.last_run !== undefined && job.last_run !== null && <span>{m.cron_last()}: {formatDate(job.last_run as number | string)}</span>}
                     {job.profile && <span>{m.tab_profiles()}: {job.profile}</span>}
                   </div>
-                  <JobOutput jobId={id} />
+                  {!job.read_only && <JobOutput jobId={id} />}
+                  {job.read_only ? (
+                    <div className="pt-1 text-xs text-muted">{m.cron_read_only_profile({ profile: job.owner_profile ?? '' })}</div>
+                  ) : (
                   <div className="flex flex-wrap gap-2 pt-1">
                     <Button size="sm" onClick={() => action.mutate({ action: 'run', body: { job_id: id } })}><Play size={12} aria-hidden="true" /> {m.cron_run_now()}</Button>
                     {job.paused || job.enabled === false
@@ -113,6 +116,7 @@ export function TasksPage() {
                     <Button size="sm" onClick={() => setEditing(job)}>{m.edit()}</Button>
                     <Button size="sm" variant="ghost" className="text-error" onClick={() => setConfirmDelete(job)}><Trash2 size={12} aria-hidden="true" /> {m.delete()}</Button>
                   </div>
+                  )}
                 </div>
               )}
             </article>

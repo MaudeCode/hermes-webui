@@ -43,8 +43,10 @@ export type StreamStatus = z.infer<typeof StreamStatusSchema>
 
 export const CancelResponseSchema = z.looseObject({ cancelled: z.boolean().optional(), ok: z.boolean().optional(), error: z.string().optional() })
 
-export const SteerRequestSchema = z.object({ session_id: SessionIdSchema, stream_id: z.string().optional(), message: z.string(), mode: z.enum(['steer', 'queue', 'interrupt']).optional() })
-export const SteerResponseSchema = z.looseObject({ ok: z.boolean().optional(), steer_id: z.string().optional(), queued: z.boolean().optional(), error: z.string().optional() })
+/** `POST /api/chat/steer` (api/streaming.py): `text` is delivered to the running agent; `display_text` is what the transcript shows. */
+export const SteerRequestSchema = z.object({ session_id: SessionIdSchema, text: z.string().min(1), display_text: z.string().optional(), steer_id: z.string().optional() })
+/** `accepted: false` with a `fallback` reason means the message was not delivered (e.g. the run already finished); the caller keeps the draft. */
+export const SteerResponseSchema = z.looseObject({ accepted: z.boolean(), fallback: NullableString.optional(), stream_id: NullableString.optional() })
 
 export const ApprovalPendingSchema = z.looseObject({
   approval_id: z.string().optional(),

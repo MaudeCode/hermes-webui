@@ -78,7 +78,8 @@ export const archiveSession = (session_id: SessionId, archived: boolean) => post
 export const moveSession = (session_id: SessionId, project_id: string | null) => post('api/session/move', { session_id, project_id }, OkSchema.or(SessionEnvelopeSchema), { retries: 0 })
 export const duplicateSession = (session_id: SessionId) => post('api/session/duplicate', { session_id }, SessionEnvelopeSchema, { retries: 0 })
 /** `keep_count`: number of messages (absolute, from the start of the session) to copy or keep. */
-export const branchSession = (session_id: SessionId, keep_count: number) => post('api/session/branch', { session_id, keep_count }, z.looseObject({ session_id: SessionIdSchema, title: z.string().optional(), parent_session_id: NullableString.optional() }), { retries: 0 })
+/** Omit `keep_count` to fork the complete conversation (the server counts raw messages, not rendered rows). */
+export const branchSession = (session_id: SessionId, keep_count?: number) => post('api/session/branch', { session_id, ...(keep_count !== undefined ? { keep_count } : {}) }, z.looseObject({ session_id: SessionIdSchema, title: z.string().optional(), parent_session_id: NullableString.optional() }), { retries: 0 })
 export const truncateSession = (session_id: SessionId, keep_count: number) => post('api/session/truncate', { session_id, keep_count }, SessionEnvelopeSchema.or(OkSchema), { retries: 0 })
 export const undoSession = (session_id: SessionId) => post('api/session/undo', { session_id }, SessionEnvelopeSchema.or(OkSchema), { retries: 0 })
 export const retrySession = (session_id: SessionId) => post('api/session/retry', { session_id }, ChatStartResponseSchema.or(OkSchema), { retries: 0 })

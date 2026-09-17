@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { m } from '../../paraglide/messages.js'
@@ -46,7 +46,10 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
   useEffect(() => { setRightSlot(document.getElementById('rightpanelSlot')) }, [])
   const [workspaceOpen, setWorkspaceOpen] = useState(() => readPersisted('hermes-webui-workspace-panel') === 'open')
   const [queued, setQueued] = useState<string[]>([])
+  const draining = useRef(false)
   const [yolo, setYolo] = useState(false)
+  // Choices made on the unsaved chat (no session yet) apply when the session is created.
+  const [pending, setPending] = useState<{ model?: string; model_provider?: string | null; workspace?: string; enabled_toolsets?: string[] | null }>({})
   useSessionSearch(sessionId)
 
   useEffect(() => {
@@ -63,19 +66,23 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
   useEffect(() => {
     if (!sessionId || !session || !live || !isTerminal(live.status)) return
     const next = queued[0]
-    if (!next) return
-    // Drain asynchronously: the store change that settled the turn is the trigger, not a render.
-    queueMicrotask(() => setQueued((q) => (q[0] === next ? q.slice(1) : q)))
-    void startTurn({ sessionId, message: next, request: { model: session.model ?? undefined, workspace: session.workspace, profile: bootstrap.profile?.name ?? 'default' } }).catch((e: unknown) => showToast(e instanceof Error ? e.message : String(e), 4000, 'error'))
+    if (!next || draining.current) return
+    // One drain in flight at a time; the item leaves the queue only once its turn has started, so a
+    // failed start keeps it and a re-render mid-request cannot start the next item concurrently.
+    draining.current = true
+    void startTurn({ sessionId, message: next, request: { model: session.model ?? undefined, workspace: session.workspace, profile: bootstrap.profile?.name ?? 'default' } })
+      .then(() => setQueued((q) => (q[0] === next ? q.slice(1) : q)))
+      .catch((e: unknown) => showToast(e instanceof Error ? e.message : String(e), 4000, 'error'))
+      .finally(() => { draining.current = false })
   }, [live?.status, sessionId, session, queued, live, bootstrap.profile])
 
   const ensureSession = useCallback(async (): Promise<Session> => {
     if (session) return session
-    const created = await createSessionNow({ ...(settings.data?.default_workspace ? { workspace: settings.data.default_workspace } : {}), profile: bootstrap.profile?.name ?? 'default' })
+    const created = await createSessionNow({ ...(settings.data?.default_workspace ? { workspace: settings.data.default_workspace } : {}), ...pending, profile: bootstrap.profile?.name ?? 'default' })
     qc.setQueryData(keys.sessions.detail(created.session_id), { session: created })
     await navigate({ to: '/session/$sessionId', params: { sessionId: created.session_id }, replace: true })
     return created
-  }, [session, settings.data, bootstrap.profile, qc, navigate])
+  }, [session, settings.data, bootstrap.profile, qc, navigate, pending])
 
   // Reasoning effort is server state shared with the CLI (config.yaml), keyed on the session's model.
   const reasoningKey = ['reasoning', session?.model ?? null, session?.model_provider ?? null] as const
@@ -101,9 +108,9 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
     }
   }, [sessionId, patchSession, refresh])
 
-  const onModelChange = useCallback((model: string, provider: string | null) => { void updateSession({ model, model_provider: provider }) }, [updateSession])
-  const onWorkspaceChange = useCallback((path: string) => { void updateSession({ workspace: path }) }, [updateSession])
-  const onToolsetsChange = useCallback((toolsets: string[] | null) => { if (!sessionId) return; void api.setSessionToolsets(sessionId, toolsets).then(() => refresh()).catch((e: unknown) => showToast(e instanceof Error ? e.message : String(e), 4000, 'error')) }, [sessionId, refresh])
+  const onModelChange = useCallback((model: string, provider: string | null) => { if (!sessionId) { setPending((p) => ({ ...p, model, model_provider: provider })); return } void updateSession({ model, model_provider: provider }) }, [sessionId, updateSession])
+  const onWorkspaceChange = useCallback((path: string) => { if (!sessionId) { setPending((p) => ({ ...p, workspace: path })); return } void updateSession({ workspace: path }) }, [sessionId, updateSession])
+  const onToolsetsChange = useCallback((toolsets: string[] | null) => { if (!sessionId) { setPending((p) => ({ ...p, enabled_toolsets: toolsets })); return } void api.setSessionToolsets(sessionId, toolsets).then(() => refresh()).catch((e: unknown) => showToast(e instanceof Error ? e.message : String(e), 4000, 'error')) }, [sessionId, refresh])
   const onToggleYolo = useCallback(() => { if (!sessionId) return; void api.setSessionYolo(sessionId, !yolo).then((r) => setYolo(!!r.yolo_enabled)).catch((e: unknown) => showToast(e instanceof Error ? e.message : String(e), 4000, 'error')) }, [sessionId, yolo])
 
   const onRegenerate = useCallback(async () => {
@@ -127,7 +134,7 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
       case 'compress': case 'compact': if (sessionId) { await api.compressSession(sessionId); showToast(m.live_compressing()) } return true
       case 'usage': if (sessionId) { const u = await api.fetchSessionUsage(sessionId); showToast(`${(u.input_tokens ?? 0).toLocaleString()} in · ${(u.output_tokens ?? 0).toLocaleString()} out${u.estimated_cost ? ` · $${u.estimated_cost.toFixed(4)}` : ''}`, 4000) } return true
       case 'yolo': onToggleYolo(); return true
-      case 'branch': if (sessionId) { const r = await api.branchSession(sessionId, rows.length); void qc.invalidateQueries({ queryKey: keys.sessions.all }); await navigate({ to: '/session/$sessionId', params: { sessionId: r.session_id } }) } return true
+      case 'branch': if (sessionId) { const r = await api.branchSession(sessionId); void qc.invalidateQueries({ queryKey: keys.sessions.all }); await navigate({ to: '/session/$sessionId', params: { sessionId: r.session_id } }) } return true
       case 'reasoning': {
         const arg = args.trim().toLowerCase()
         if (!arg) { showToast(`${m.composer_control_reasoning()}: ${reasoning ?? m.reasoning_default()}`, 4000); return true }
@@ -146,7 +153,7 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
       case 'voice': showToast(m.voice_error(), 3000); return true
       default: return false
     }
-  }, [sessionId, navigate, refresh, qc, onToggleYolo, rows.length, onModelChange, onWorkspaceChange, onRegenerate])
+  }, [sessionId, navigate, refresh, qc, onToggleYolo, onModelChange, onWorkspaceChange, onRegenerate, reasoning, setReasoning])
 
   const onEdit = useCallback(async (row: VisibleMessage, text: string) => {
     if (!sessionId) return
@@ -161,7 +168,7 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
     const r = await api.branchSession(sessionId, row.index + 1)
     void qc.invalidateQueries({ queryKey: keys.sessions.all })
     await navigate({ to: '/session/$sessionId', params: { sessionId: r.session_id } })
-  }, [sessionId, navigate])
+  }, [sessionId, navigate, qc])
 
   const mode = (settings.data?.chat_activity_display_mode as ActivityMode | undefined) ?? 'compact_worklog'
   const assistantName = bootstrap.profile && !bootstrap.profile.is_default ? bootstrap.profile.name.charAt(0).toUpperCase() + bootstrap.profile.name.slice(1) : bootstrap.bot_name
@@ -240,6 +247,7 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
         <Composer
           sessionId={sessionId}
           session={session}
+          pendingChoices={sessionId ? undefined : pending}
           live={live}
           settings={settings.data}
           onEnsureSession={ensureSession}

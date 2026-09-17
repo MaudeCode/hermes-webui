@@ -12,6 +12,9 @@ const BENIGN = [
   // streams from earlier tests until their disconnect is noticed; EventSource
   // reconnects on 503 by specification, so the UI self-heals.
   /503 GET .*\/api\/sessions\/events$/,
+  // Kanban needs hermes_cli; without it the server answers 503 "kanban unavailable" by
+  // design (api/kanban_bridge.py) and the page shows its unavailable state.
+  /503 GET .*\/api\/kanban\/(boards?|tasks?)(\?|$)/,
 ]
 
 export const test = base.extend<{ errors: string[] }>({
