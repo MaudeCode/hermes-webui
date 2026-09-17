@@ -315,7 +315,7 @@ function TaskDetail({ job, jobs, state, onAction, onEdit, onDuplicate, onDelete 
             ? <><code className="text-[13px]">{job.script || '—'}</code><div className="mt-1 text-[11px] text-muted">{m.cron_script_path_hint()}</div></>
             : <pre className="max-h-64 overflow-auto whitespace-pre-wrap font-sans text-[13px] text-text">{job.prompt || '—'}</pre>}
         </section>
-        {!readOnly && <RunHistory jobId={id} isScript={isScript} />}
+        {!readOnly && <RunHistory key={id} jobId={id} isScript={isScript} />}
       </div>
     </HubPage>
   )
@@ -324,6 +324,8 @@ function TaskDetail({ job, jobs, state, onAction, onEdit, onDuplicate, onDelete 
 function RunHistory({ jobId: id, isScript }: { jobId: string; isScript: boolean }) {
   const history = useQuery({ queryKey: keys.crons.history(id), queryFn: () => api.fetchCronHistory(id), staleTime: 15_000 })
   const [picked, setPicked] = useState<string | null>(null)
+  // The panel starts collapsed on every task; picking a run opens it.
+  const [open, setOpen] = useState(false)
   // The layout row only has a right panel from 901px up; below that the run opens under the table.
   const hasRightPanel = useMediaQuery('(min-width: 901px)')
   const title = m.cron_runs_title()
@@ -331,8 +333,11 @@ function RunHistory({ jobId: id, isScript }: { jobId: string; isScript: boolean 
   if (history.isError) return <ErrorState error={history.error} onRetry={() => { void history.refetch() }} />
   const runs = history.data.runs
   const total = history.data.total ?? runs.length
-  const current = runs.find((r) => r.filename === picked) ?? null
-  const body = current && <RunBody key={current.filename} jobId={id} filename={current.filename} isScript={isScript} />
+  const current = runs.find((r) => r.filename === picked) ?? runs[0] ?? null
+  const pick = (filename: string) => {
+    if (open && filename === current?.filename) { setOpen(false); return }
+    setPicked(filename); setOpen(true)
+  }
   return (
     <section aria-label={title}>
       <h2 className="mb-2 text-xs font-medium text-muted">{title} {runs.length > 0 && `(${total > runs.length ? m.cron_runs_showing({ total, shown: runs.length }) : String(total)})`}</h2>
@@ -342,10 +347,10 @@ function RunHistory({ jobId: id, isScript }: { jobId: string; isScript: boolean 
           <table className="w-full border-collapse text-[13px]">
             <tbody>
               {runs.map((run) => {
-                const active = run.filename === current?.filename
+                const active = open && run.filename === current?.filename
                 return (
-                  <tr key={run.filename} className={cn('cursor-pointer border-b border-border-subtle last:border-b-0 hover:bg-hover', active && 'bg-(--menu-active-bg) text-(--menu-active-fg)')} onClick={() => setPicked(active ? null : run.filename)}>
-                    <td className="px-3 py-2"><button type="button" className="text-left" aria-pressed={active} title={run.filename} onClick={(e) => { e.stopPropagation(); setPicked(active ? null : run.filename) }}>{formatDate(run.modified)}</button></td>
+                  <tr key={run.filename} className={cn('cursor-pointer border-b border-border-subtle last:border-b-0 hover:bg-hover', active && 'bg-(--menu-active-bg) text-(--menu-active-fg)')} onClick={() => pick(run.filename)}>
+                    <td className="px-3 py-2"><button type="button" className="text-left" aria-pressed={active} title={run.filename} onClick={(e) => { e.stopPropagation(); pick(run.filename) }}>{formatDate(run.modified)}</button></td>
                     <td className="px-3 py-2 text-xs text-muted">{isScript ? '' : usageStrip(run.usage)}</td>
                     <td className="px-3 py-2 text-right text-xs text-muted">{formatBytes(run.size)}</td>
                   </tr>
@@ -356,17 +361,13 @@ function RunHistory({ jobId: id, isScript }: { jobId: string; isScript: boolean 
         </div>
       )}
       {current && (hasRightPanel
-        ? <RunPanel title={formatDate(current.modified)} onClose={() => setPicked(null)}>{body}</RunPanel>
-        : <div className="mt-3">{body}</div>)}
+        ? (
+          <RightPanel open={open} onToggle={() => setOpen((o) => !o)} onClose={() => setOpen(false)} label={title} panelId="cron-run" title={title} subtitle={formatDate(current.modified)}>
+            <div className="min-h-0 flex-1 overflow-auto p-3 text-[13px]"><RunBody key={current.filename} jobId={id} filename={current.filename} isScript={isScript} /></div>
+          </RightPanel>
+        )
+        : open && <div className="mt-3"><RunBody key={current.filename} jobId={id} filename={current.filename} isScript={isScript} /></div>)}
     </section>
-  )
-}
-
-function RunPanel({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
-  return (
-    <RightPanel open onClose={onClose} label={m.cron_runs_title()} panelId="cron-run" title={m.cron_runs_title()} subtitle={title}>
-      <div className="min-h-0 flex-1 overflow-auto p-3 text-[13px]">{children}</div>
-    </RightPanel>
   )
 }
 
