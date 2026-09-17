@@ -9,13 +9,14 @@ import { TooltipProvider } from '../ui/Tooltip'
 import { useEffect } from 'react'
 import { registerExtensionSkins, useExtensionManifests } from '../extensions/registry'
 import { reapplyExtensionSkin } from '../app/appearance'
-import { useShellState } from './useShellState'
+import { useIsDesktop, useShellState } from './useShellState'
 import { cn } from '../ui/cn'
 
-/** Titlebar + `.layout` (rail, sidebar, main) on the legacy island shell. Routes supply `sidebar` and render into `children`. */
-export function AppShell({ sidebar, children, title, subtitle, hub, showing }: { sidebar: ReactNode; children: ReactNode; title?: string; subtitle?: string; hub?: boolean; showing?: string }) {
+/** Titlebar + `.layout` (rail, sidebar, main) on the legacy island shell. Routes supply `sidebar` (null for pages without one; the phone drawer then only carries the nav) and render into `children`. */
+export function AppShell({ sidebar, children, title, subtitle, hub, showing }: { sidebar: ReactNode | null; children: ReactNode; title?: string; subtitle?: string; hub?: boolean; showing?: string }) {
   useShortcuts()
   const { collapsed } = useShellState()
+  const isDesktop = useIsDesktop()
   const manifests = useExtensionManifests()
   useEffect(() => {
     if (manifests.data) { registerExtensionSkins(manifests.data.manifests); reapplyExtensionSkin() }
@@ -32,7 +33,7 @@ export function AppShell({ sidebar, children, title, subtitle, hub, showing }: {
       <Titlebar {...(title !== undefined ? { title } : {})} {...(subtitle !== undefined ? { subtitle } : {})} />
       <div className={cn('layout flex w-full flex-[1_1_auto] min-h-0 gap-0 p-0 bg-(--canvas) max-[641px]:overflow-x-clip max-[641px]:box-border max-[641px]:pb-[calc(56px+env(safe-area-inset-bottom,0px))]', collapsed && 'sidebar-collapsed')}>
         <Rail />
-        <Sidebar panel={sidebar} />
+        {(sidebar !== null || !isDesktop) && <Sidebar panel={sidebar} />}
         <main className={cn('main flex flex-1 flex-col overflow-hidden min-w-0 min-h-0 m-0 bg-(--main-surface) border-(length:--island-ring-width) border-(--island-ring) max-[769px]:m-0 min-[901px]:flex-[1_1_420px] min-[901px]:min-w-[420px] max-[769px]:rounded-none max-[769px]:border-0', showing && `showing-${showing}`)} id="main">
           {children}
         </main>

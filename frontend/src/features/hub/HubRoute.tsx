@@ -10,7 +10,6 @@ import { ProfilesPage } from '../profiles/ProfilesPage'
 import { TodosPage } from '../todos/TodosPage'
 import { InsightsPage } from '../insights/InsightsPage'
 import { LogsPage } from '../logs/LogsPage'
-import { SessionListPanel } from '../sessions/SessionListPanel'
 
 export type HubPanel = Exclude<PanelId, 'chat' | 'settings' | 'tasks'>
 
@@ -25,11 +24,11 @@ const PAGES: Record<HubPanel, () => ReactNode> = {
   logs: () => <LogsPage />,
 }
 
-/** Hub layout: the collection is the main view; the sidebar keeps the conversation list so chat stays one click away. */
+/** Hub layout: the collection is the main view; there is no sidebar (the phone drawer still carries the nav). */
 export function HubRoute({ panel }: { panel: HubPanel }) {
   useLocale()
   return (
-    <AppShell sidebar={<SessionListPanel />} hub showing={panel}>
+    <AppShell sidebar={null} hub showing={panel}>
       {PAGES[panel]()}
     </AppShell>
   )
