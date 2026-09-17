@@ -3,8 +3,14 @@ import { m } from '../paraglide/messages.js'
 import { isApiError } from '../contracts/common'
 import { Button } from './Button'
 
+/** Centered live-status line; the pulsing accent dot is the app's "working" idiom (see LiveTurnView). */
 export function LoadingState({ label }: { label?: string }) {
-  return <div className="p-3 text-sm text-muted" role="status" aria-live="polite">{label ?? m.loading()}</div>
+  return (
+    <div className="flex flex-1 items-center justify-center gap-2 p-6 text-[13px] text-muted" role="status" aria-live="polite">
+      <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-accent" aria-hidden="true" />
+      {label ?? m.loading()}
+    </div>
+  )
 }
 
 export function EmptyState({ children }: { children: ReactNode }) {
