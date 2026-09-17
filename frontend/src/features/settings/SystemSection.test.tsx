@@ -8,7 +8,7 @@ import { keys } from '../../api/queryKeys'
 
 vi.mock('../../api/endpoints', () => ({
   restartAgent: vi.fn(), shutdownServer: vi.fn(), passkeyRegisterOptions: vi.fn(), passkeyRegister: vi.fn(), passkeyDelete: vi.fn(),
-  fetchSettings: vi.fn(() => Promise.resolve({ bot_name: 'Hermes', check_for_updates: false })),
+  fetchSettings: vi.fn(() => Promise.resolve({ bot_name: 'Hermes', check_for_updates: false, update_channel: 'experimental' })),
   fetchSystemHealth: vi.fn(() => Promise.resolve({ status: 'ok' })),
   fetchAgentHealth: vi.fn(() => Promise.resolve({ alive: true })),
   fetchUpdatesCheck: vi.fn(() => Promise.resolve({ cached: true, webui: { behind: 0 }, agent: { behind: 0 } })),
@@ -41,6 +41,7 @@ describe('SystemSection "Check now"', () => {
     expect(await screen.findByRole('button', { name: /checking/i })).toBeDisabled()
     await userEvent.click(screen.getByRole('button', { name: /checking/i }))
     expect(api.checkUpdatesNow).toHaveBeenCalledTimes(1)
+    expect(api.checkUpdatesNow).toHaveBeenCalledWith('experimental')
     expect(api.fetchUpdatesCheck).toHaveBeenCalledTimes(1)
     const fresh = { cached: false, webui: { behind: 3 }, agent: { behind: 1 } }
     resolve(fresh)
@@ -49,6 +50,22 @@ describe('SystemSection "Check now"', () => {
     expect(screen.getByText(/webui/i, { selector: '.text-accent-text' })).toBeInTheDocument()
     expect(screen.getByText(/agent/i, { selector: '.text-accent-text' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /update now/i })).toBeInTheDocument()
+  })
+
+  it('sends the channel that is still being saved, not the stale cached one', async () => {
+    let finishSave!: (v: unknown) => void
+    vi.mocked(api.saveSettings).mockImplementation(() => new Promise((r) => { finishSave = r as typeof finishSave }))
+    vi.mocked(api.checkUpdatesNow).mockResolvedValue({ cached: false })
+    renderSystem()
+    await screen.findByText(/up to date/i)
+    const trigger = screen.getByRole('combobox', { name: /update channel/i })
+    expect(trigger).toHaveTextContent(/experimental/i)
+    await userEvent.click(trigger)
+    await userEvent.click(await screen.findByRole('option', { name: /stable/i }))
+    expect(trigger).toHaveTextContent(/stable/i)
+    await userEvent.click(screen.getByRole('button', { name: /check now/i }))
+    await waitFor(() => expect(api.checkUpdatesNow).toHaveBeenCalledWith('stable'))
+    finishSave({ bot_name: 'Hermes', check_for_updates: false, update_channel: 'stable' })
   })
 
   it('restores the control and toasts the error when the forced check fails', async () => {

@@ -48,7 +48,9 @@ describe('typed client against the in-memory adapter', () => {
     const check = adapter.calls.at(-1)!
     expect(check.method).toBe('POST')
     expect(JSON.parse(check.body as string)).toEqual({ force: true })
-    expect(adapter.calls.filter((c) => c.url.pathname.endsWith('/api/updates/check'))).toHaveLength(2)
+    await checkUpdatesNow('experimental')
+    expect(JSON.parse(adapter.calls.at(-1)!.body as string)).toEqual({ force: true, channel: 'experimental' })
+    expect(adapter.calls.filter((c) => c.url.pathname.endsWith('/api/updates/check'))).toHaveLength(3)
   })
 
   it('maps a 404 to a typed http error with the server message', async () => {

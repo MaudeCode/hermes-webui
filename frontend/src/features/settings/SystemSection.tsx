@@ -18,7 +18,7 @@ import { loadBootstrap } from '../../app/bootstrap'
 export function SystemSection() {
   const bootstrap = useBootstrap()
   const qc = useQueryClient()
-  const { settings, str, bool, set } = useSettingField()
+  const { settings, save, str, bool, set } = useSettingField()
   const health = useQuery({ queryKey: keys.health.system, queryFn: api.fetchSystemHealth, staleTime: 30_000 })
   const agent = useQuery({ queryKey: keys.health.agent, queryFn: api.fetchAgentHealth, staleTime: 15_000 })
   const updates = useQuery({ queryKey: keys.updates.check, queryFn: () => api.fetchUpdatesCheck(), staleTime: 60_000 })
@@ -31,7 +31,10 @@ export function SystemSection() {
   const setPassword = useMutation({ mutationFn: (body: Record<string, unknown>) => api.saveSettings(body), onSuccess: async () => { showToast(m.system_password_updated()); setPw(''); setCurrentPw(''); await loadBootstrap(); void qc.invalidateQueries() }, onError: fail })
   const restart = useMutation({ mutationFn: api.restartAgent, onSuccess: () => { showToast(m.saved()); void qc.invalidateQueries({ queryKey: keys.health.agent }) }, onError: fail })
   const shutdown = useMutation({ mutationFn: api.shutdownServer, onSuccess: () => showToast(m.system_shutdown()), onError: fail })
-  const checkNow = useMutation({ mutationFn: api.checkUpdatesNow, onSuccess: (d) => qc.setQueryData(keys.updates.check, d), onError: fail })
+  // A channel save still in flight is the authoritative selection; the cache only catches up on success.
+  const pendingChannel = save.isPending ? save.variables?.update_channel : undefined
+  const channel = typeof pendingChannel === 'string' ? pendingChannel : str('update_channel', 'stable')
+  const checkNow = useMutation({ mutationFn: () => api.checkUpdatesNow(channel), onSuccess: (d) => qc.setQueryData(keys.updates.check, d), onError: fail })
   const apply = useMutation({ mutationFn: (action: 'apply' | 'force' | 'clear_lock') => api.applyUpdates(action), onSuccess: (r) => { showToast(r.message ?? r.status ?? m.saved()); void qc.invalidateQueries({ queryKey: keys.updates.check }) }, onError: fail })
   const registerPasskey = useMutation({
     mutationFn: async () => {
@@ -62,7 +65,7 @@ export function SystemSection() {
         <h2 className="mb-1 text-sm font-semibold text-text">{m.system_updates()}</h2>
         <FieldRow label={m.settings_label_check_updates()} htmlFor="settingsCheckUpdates" inline><Switch id="settingsCheckUpdates" checked={bool('check_for_updates', true)} onCheckedChange={(checked) => set({ check_for_updates: checked })} /></FieldRow>
         <FieldRow label={m.settings_label_update_channel()} htmlFor="settingsUpdateChannel" inline>
-          <Select id="settingsUpdateChannel" value={str('update_channel', 'stable')} onValueChange={(v) => set({ update_channel: v })}>
+          <Select id="settingsUpdateChannel" value={channel} onValueChange={(v) => set({ update_channel: v })}>
             <option value="stable">{m.settings_update_channel_stable()}</option>
             <option value="experimental">{m.settings_update_channel_experimental()}</option>
           </Select>
