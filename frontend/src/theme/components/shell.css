@@ -44,7 +44,9 @@ html[data-session-boot="1"] .empty-state{display:none}
 .icon-btn{opacity:.75}
 .icon-btn:hover{background:var(--icon-btn-hover-bg);color:var(--text);opacity:1}
 .icon-btn{touch-action:manipulation;-webkit-tap-highlight-color:transparent}
-@media (min-width:641px){.layout.sidebar-collapsed .sidebar:not(.mobile-open){width:0 !important;min-width:0;opacity:0;transform:translateX(-14px);border-right-color:transparent;pointer-events:none;overflow:hidden}}
+@media (min-width:641px){.layout.sidebar-collapsed .sidebar:not(.mobile-open){width:0 !important;min-width:0;border-right-color:transparent;pointer-events:none;overflow:visible}}
+@media (min-width:641px){.layout.sidebar-collapsed .sidebar:not(.mobile-open) > :not(.workspace-panel-edge-toggle){visibility:hidden}}
+@media (min-width:641px){.layout.sidebar-collapsed .sidebar:not(.mobile-open) .workspace-panel-edge-toggle{pointer-events:auto}}
 @media (min-width:641px){.layout.sidebar-collapsed .sidebar .resize-handle{display:none}}
 @media (min-width:641px){html[data-sidebar-collapsed="1"] .sidebar:not(.mobile-open){width:0 !important;min-width:0;opacity:0;transform:translateX(-14px);border-right-color:transparent;pointer-events:none;overflow:hidden;transition:none}}
 @media (max-width:640px){.sidebar .resize-handle{display:none}}
@@ -72,6 +74,19 @@ html[data-session-boot="1"] .empty-state{display:none}
 .sidebar .resize-handle:hover{background:linear-gradient(var(--accent),var(--accent)) 3px var(--island-radius)/3px calc(100% - 2 * var(--island-radius)) no-repeat}
 .sidebar:has(> .resize-handle:hover) .seam-tr{background:radial-gradient(circle at 0 100%,transparent calc(var(--island-radius) - .5px),var(--accent) var(--island-radius),var(--accent) calc(var(--island-radius) + 3px),var(--main-surface) calc(var(--island-radius) + 3.5px))}
 .sidebar:has(> .resize-handle:hover) .seam-br{background:radial-gradient(circle at 0 0,transparent calc(var(--island-radius) - .5px),var(--accent) var(--island-radius),var(--accent) calc(var(--island-radius) + 3px),var(--main-surface) calc(var(--island-radius) + 3.5px))}
+.sidebar{overflow:visible}
+.sidebar[data-resizing]{transition:none}
+.sidebar[data-resizing] ~ *,.sidebar[data-resizing] *{pointer-events:none;user-select:none}
+/* Mirror of the right panel's edge tab: on the sidebar's right edge, rounded on its outer side, joins facing left. */
+@media (min-width:641px){.sidebar .workspace-panel-edge-toggle{display:inline-flex;opacity:1;pointer-events:auto;left:auto;right:1px;transform:translate(100%,-50%);border-radius:0 var(--r-md) var(--r-md) 0}}
+.sidebar .edge-tab-join{right:auto;left:1px}
+.sidebar .edge-tab-join-top{background:radial-gradient(circle at 100% 0,transparent calc(var(--r-md) - .5px),var(--canvas) var(--r-md))}
+.sidebar .edge-tab-join-bottom{background:radial-gradient(circle at 100% 100%,transparent calc(var(--r-md) - .5px),var(--canvas) var(--r-md))}
+/* Resize hover runs around the tab instead of behind it (see the right panel's rules in workspace.css). */
+.sidebar .resize-handle:hover{background:linear-gradient(var(--accent),var(--accent)) 3px var(--island-radius)/3px calc(50% - 20px - var(--r-md) - var(--island-radius) + 1px) no-repeat,linear-gradient(var(--accent),var(--accent)) 3px calc(100% - var(--island-radius))/3px calc(50% - 20px - var(--r-md) - var(--island-radius) + 1px) no-repeat}
+.sidebar:has(> .resize-handle:hover) .workspace-panel-edge-toggle{box-shadow:0 0 0 3px var(--accent);clip-path:inset(calc(-1 * var(--r-md) - 3px) -3px calc(-1 * var(--r-md) - 3px) 1px)}
+.sidebar:has(> .resize-handle:hover) .edge-tab-join-top{background:radial-gradient(circle at 100% 0,transparent calc(var(--r-md) - 3.5px),var(--accent) calc(var(--r-md) - 3px),var(--accent) calc(var(--r-md) - .5px),var(--canvas) var(--r-md))}
+.sidebar:has(> .resize-handle:hover) .edge-tab-join-bottom{background:radial-gradient(circle at 100% 100%,transparent calc(var(--r-md) - 3.5px),var(--accent) calc(var(--r-md) - 3px),var(--accent) calc(var(--r-md) - .5px),var(--canvas) var(--r-md))}
 /* z above .composer-wrap (10): the resize handle overlaps the card's left edge, which the composer wrap spans. */
 @media (min-width:641px){.sidebar{z-index:11}}
 main.main > #mainChat,main.main > #mainSettings{display:none}

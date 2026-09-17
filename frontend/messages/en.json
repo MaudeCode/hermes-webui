@@ -501,6 +501,8 @@
 	"workspace_show_hidden_files_desc": "Include .DS_Store, .git, node_modules, and other hidden / system files in the file tree.",
 	"workspace_panel_show": "Show workspace panel",
 	"workspace_panel_hide": "Hide workspace panel",
+	"sidebar_show": "Show sidebar",
+	"sidebar_hide": "Hide sidebar",
 	"workspace_panel_close": "Close workspace panel",
 	"workspace_panel_toggle": "Toggle workspace files panel",
 	"workspace_panel_views": "Workspace panel views",
