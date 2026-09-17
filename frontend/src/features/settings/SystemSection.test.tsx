@@ -66,6 +66,7 @@ describe('SystemSection "Check now"', () => {
     await userEvent.click(await screen.findByRole('option', { name: /stable/i }))
     expect(trigger).toHaveTextContent(/stable/i)
     await userEvent.click(screen.getByRole('switch', { name: /ignore agent updates/i }))
+    expect(trigger).toHaveTextContent(/stable/i)
     await userEvent.click(screen.getByRole('button', { name: /check now/i }))
     expect(screen.getByRole('button', { name: /checking/i })).toBeDisabled()
     await new Promise((r) => setTimeout(r, 120))
@@ -76,6 +77,7 @@ describe('SystemSection "Check now"', () => {
     await waitFor(() => expect(api.checkUpdatesNow).toHaveBeenCalledWith('stable'))
     expect(api.checkUpdatesNow).toHaveBeenCalledTimes(1)
     expect(await screen.findByRole('button', { name: /check now/i })).toBeEnabled()
+    expect(trigger).toHaveTextContent(/stable/i)
   })
 
   it('restores the control and toasts the error when the forced check fails', async () => {

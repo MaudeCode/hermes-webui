@@ -31,9 +31,11 @@ export function SystemSection() {
   const setPassword = useMutation({ mutationFn: (body: Record<string, unknown>) => api.saveSettings(body), onSuccess: async () => { showToast(m.system_password_updated()); setPw(''); setCurrentPw(''); await loadBootstrap(); void qc.invalidateQueries() }, onError: fail })
   const restart = useMutation({ mutationFn: api.restartAgent, onSuccess: () => { showToast(m.saved()); void qc.invalidateQueries({ queryKey: keys.health.agent }) }, onError: fail })
   const shutdown = useMutation({ mutationFn: api.shutdownServer, onSuccess: () => showToast(m.system_shutdown()), onError: fail })
-  // A channel save still in flight is the authoritative selection; the cache only catches up on success.
-  const pendingChannel = save.isPending ? save.variables?.update_channel : undefined
-  const channel = typeof pendingChannel === 'string' ? pendingChannel : str('update_channel', 'stable')
+  // The chosen channel is held locally until its save settles; the cache only catches up on success,
+  // and a later save (e.g. ignore-agent) must not make the Select snap back meanwhile.
+  const [channelDraft, setChannelDraft] = useState<string>()
+  const channel = channelDraft ?? str('update_channel', 'stable')
+  const setChannel = (v: string) => { setChannelDraft(v); save.mutate({ update_channel: v }, { onError: fail, onSettled: () => setChannelDraft(undefined) }) }
   // The server reads persisted settings (channel, ignore-agent) for the forced check, so let every
   // in-flight settings save settle first; the cache then holds whatever actually persisted.
   const settledChannel = () => { const v = qc.getQueryData<Record<string, unknown>>(keys.settings)?.update_channel; return typeof v === 'string' ? v : undefined }
@@ -75,7 +77,7 @@ export function SystemSection() {
         <h2 className="mb-1 text-sm font-semibold text-text">{m.system_updates()}</h2>
         <FieldRow label={m.settings_label_check_updates()} htmlFor="settingsCheckUpdates" inline><Switch id="settingsCheckUpdates" checked={bool('check_for_updates', true)} onCheckedChange={(checked) => set({ check_for_updates: checked })} /></FieldRow>
         <FieldRow label={m.settings_label_update_channel()} htmlFor="settingsUpdateChannel" inline>
-          <Select id="settingsUpdateChannel" value={channel} onValueChange={(v) => set({ update_channel: v })}>
+          <Select id="settingsUpdateChannel" value={channel} onValueChange={setChannel}>
             <option value="stable">{m.settings_update_channel_stable()}</option>
             <option value="experimental">{m.settings_update_channel_experimental()}</option>
           </Select>
