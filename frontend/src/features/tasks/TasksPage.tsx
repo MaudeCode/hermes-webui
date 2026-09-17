@@ -4,18 +4,19 @@
  * can be linked and the browser back button works; the editor is transient.
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearch } from '@tanstack/react-router'
-import { Copy, Pause, Play, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { Copy, Pause, Play, Plus, RefreshCw, Trash2, X } from 'lucide-react'
 import { m } from '../../paraglide/messages.js'
 import * as api from '../../api/endpoints'
 import { keys } from '../../api/queryKeys'
 import type { CronJob } from '../../contracts'
 import { AppShell, HubPage } from '../../shell/AppShell'
 import { PanelHead, PanelHeadButton } from '../../shell/Sidebar'
-import { closeMobileSidebar, openMobileSidebar, useIsDesktop } from '../../shell/useShellState'
+import { closeMobileSidebar, openMobileSidebar, useIsDesktop, useMediaQuery } from '../../shell/useShellState'
 import { useLocale } from '../../i18n/useLocale'
-import { Button } from '../../ui/Button'
+import { Button, IconButton } from '../../ui/Button'
 import { ConfirmDialog } from '../../ui/Dialog'
 import { EmptyState, ErrorState, LoadingState, formatBytes, formatDate } from '../../ui/States'
 import { showToast } from '../toast/toast'
@@ -323,28 +324,30 @@ function TaskDetail({ job, jobs, state, onAction, onEdit, onDuplicate, onDelete 
 function RunHistory({ jobId: id, isScript }: { jobId: string; isScript: boolean }) {
   const history = useQuery({ queryKey: keys.crons.history(id), queryFn: () => api.fetchCronHistory(id), staleTime: 15_000 })
   const [picked, setPicked] = useState<string | null>(null)
+  // The layout row only has a right panel from 901px up; below that the run opens under the table.
+  const hasRightPanel = useMediaQuery('(min-width: 901px)')
   const title = m.cron_runs_title()
   if (history.isPending) return <LoadingState />
   if (history.isError) return <ErrorState error={history.error} onRetry={() => { void history.refetch() }} />
   const runs = history.data.runs
   const total = history.data.total ?? runs.length
-  // Newest run is open by default; the table only switches which one is shown.
-  const current = runs.find((r) => r.filename === picked) ?? runs[0]
+  const current = runs.find((r) => r.filename === picked) ?? null
+  const body = current && <RunBody key={current.filename} jobId={id} filename={current.filename} isScript={isScript} />
   return (
     <section aria-label={title}>
       <h2 className="mb-2 text-xs font-medium text-muted">{title} {runs.length > 0 && `(${total > runs.length ? m.cron_runs_showing({ total, shown: runs.length }) : String(total)})`}</h2>
       {runs.length === 0 && <div className="text-[13px] text-muted">{m.cron_no_runs_yet()}</div>}
       {runs.length > 0 && (
-        <div className="max-h-56 overflow-y-auto rounded-md border border-border">
+        <div className="rounded-md border border-border">
           <table className="w-full border-collapse text-[13px]">
             <tbody>
               {runs.map((run) => {
                 const active = run.filename === current?.filename
                 return (
-                  <tr key={run.filename} aria-selected={active} className={cn('cursor-pointer border-b border-border-subtle last:border-b-0 hover:bg-hover', active && 'bg-(--menu-active-bg) text-(--menu-active-fg)')} onClick={() => setPicked(run.filename)}>
-                    <td className="px-3 py-1.5"><button type="button" className="text-left" title={run.filename}>{formatDate(run.modified)}</button></td>
-                    <td className="px-3 py-1.5 text-xs text-muted">{isScript ? '' : usageStrip(run.usage)}</td>
-                    <td className="px-3 py-1.5 text-right text-xs text-muted">{formatBytes(run.size)}</td>
+                  <tr key={run.filename} className={cn('border-b border-border-subtle last:border-b-0 hover:bg-hover', active && 'bg-(--menu-active-bg) text-(--menu-active-fg)')}>
+                    <td className="p-0"><button type="button" className="w-full px-3 py-2 text-left" aria-pressed={active} title={run.filename} onClick={() => setPicked(active ? null : run.filename)}>{formatDate(run.modified)}</button></td>
+                    <td className="px-3 py-2 text-xs text-muted">{isScript ? '' : usageStrip(run.usage)}</td>
+                    <td className="px-3 py-2 text-right text-xs text-muted">{formatBytes(run.size)}</td>
                   </tr>
                 )
               })}
@@ -352,22 +355,51 @@ function RunHistory({ jobId: id, isScript }: { jobId: string; isScript: boolean 
           </table>
         </div>
       )}
-      {current && <RunBody key={current.filename} jobId={id} filename={current.filename} isScript={isScript} />}
+      {current && (hasRightPanel
+        ? <RunPanel title={formatDate(current.modified)} onClose={() => setPicked(null)}>{body}</RunPanel>
+        : <div className="mt-3">{body}</div>)}
     </section>
+  )
+}
+
+/** The chat page's workspace panel slot, reused for one run's output. */
+function RunPanel({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+  const [slot, setSlot] = useState<HTMLElement | null>(null)
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time DOM lookup after the shell has committed its slot
+  useEffect(() => { setSlot(document.getElementById('rightpanelSlot')) }, [])
+  useEffect(() => {
+    document.documentElement.dataset.workspacePanel = 'open'
+    return () => { document.documentElement.dataset.workspacePanel = 'closed' }
+  }, [])
+  if (!slot) return null
+  return createPortal(
+    <aside className="rightpanel flex shrink-0 flex-col p-(--island-gap)" style={{ width: 460 }} aria-label={m.cron_runs_title()} data-panel="cron-run">
+      <div className="rightpanel-body flex min-h-0 flex-1 flex-col overflow-hidden">
+        <div className="flex min-h-12 items-center justify-between gap-2 border-b border-border px-3 py-2">
+          <div className="min-w-0">
+            <div className="truncate text-sm font-semibold text-text">{m.cron_runs_title()}</div>
+            <div className="truncate text-[11px] text-muted">{title}</div>
+          </div>
+          <IconButton label={m.close_menu()} className="h-7 w-7" onClick={onClose}><X size={14} aria-hidden="true" /></IconButton>
+        </div>
+        <div className="min-h-0 flex-1 overflow-auto p-3 text-[13px]">{children}</div>
+      </div>
+    </aside>,
+    slot,
   )
 }
 
 function RunBody({ jobId: id, filename, isScript }: { jobId: string; filename: string; isScript: boolean }) {
   const run = useQuery({ queryKey: keys.crons.run(id, filename), queryFn: () => api.fetchCronRun(id, filename), staleTime: Infinity })
   if (run.isPending) return <LoadingState />
-  if (run.isError || run.data.error) return <div className="mt-3 text-xs text-error" role="alert">{m.cron_run_load_failed()} {run.isError ? (run.error instanceof Error ? run.error.message : String(run.error)) : run.data.error}</div>
+  if (run.isError || run.data.error) return <div className="text-xs text-error" role="alert">{m.cron_run_load_failed()} {run.isError ? (run.error instanceof Error ? run.error.message : String(run.error)) : run.data.error}</div>
   const body = runResponse(run.data.content ?? run.data.snippet ?? '')
   const usage = usageStrip(run.data.usage)
   return (
-    <div className="mt-3" data-testid="cron-run-output">
+    <div data-testid="cron-run-output">
       {usage && <div className="mb-2 text-[11px] text-muted">{usage}</div>}
       {isScript
-        ? <pre className="max-h-[32rem] overflow-auto whitespace-pre-wrap rounded-md border border-border-subtle bg-code-bg p-3 font-mono text-[12px] text-pre-text">{body}</pre>
+        ? <pre className="overflow-auto whitespace-pre-wrap rounded-md border border-border-subtle bg-code-bg p-3 font-mono text-[12px] text-pre-text">{body}</pre>
         : <Markdown text={body} />}
     </div>
   )
