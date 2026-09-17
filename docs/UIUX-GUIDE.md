@@ -205,6 +205,24 @@ footer control is therefore hidden until the composer is expanded — anything t
 must stay reachable while the user is reading belongs beside the primary action in
 `.composer-right`, or in an action-required surface that blocks the collapse.
 
+### Composer sizing
+
+The composer grows with its content up to a cap. Where the browser supports
+`field-sizing: content` (`textarea#msg` in `frontend/src/theme/components/chat.css`,
+with `field-sizing: fixed` while the placeholder shows) CSS owns that and no
+script runs. Elsewhere the fallback in `frontend/src/features/composer/Composer.tsx`
+measures `scrollHeight` in an effect that runs only when the text changes, never
+on layout or scroll. Keep these invariants when touching it:
+
+- An empty composer keeps its resting height; do not measure the placeholder's
+  wrapped height (a long busy hint would grow an empty composer).
+- The measure reads `scrollHeight`, which forces a synchronous layout of the whole
+  document, so its cost grows with the rendered transcript; never run it from a
+  scroll or resize handler, and prefer letting `field-sizing` do the work.
+- The transcript's live-follow pin is decided by distance from the bottom, not by
+  scroll direction, so a collapse above the tail (worklog fold, thinking card) that
+  shrinks `scrollHeight` cannot unpin a reader who never scrolled.
+
 ## Responsive behavior
 
 Mobile is not an afterthought. The repository documents a responsive layout with

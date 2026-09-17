@@ -1152,6 +1152,8 @@
 	"filter_conversations": "Filtrovat konverzace...",
 	"markdown_table_filter": "Filtrovat tabulku",
 	"markdown_table_sort_column": "Řadit sloupec",
+	"sessions_source_webui": "Relace WebUI ({n})",
+	"sessions_source_cli": "Relace CLI ({n})",
 	"session_time_unknown": "Neznámý",
 	"session_time_minutes_ago": "{n} min",
 	"session_time_hours_ago": "{n} h",

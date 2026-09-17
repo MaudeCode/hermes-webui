@@ -1061,6 +1061,8 @@
 	"filter_conversations": "筛选对话…",
 	"markdown_table_filter": "筛选表格",
 	"markdown_table_sort_column": "列排序",
+	"sessions_source_webui": "WebUI 会话 ({n})",
+	"sessions_source_cli": "CLI 会话 ({n})",
 	"session_time_unknown": "未知",
 	"session_time_minutes_ago": "{n}分钟前",
 	"session_time_hours_ago": "{n}小时前",

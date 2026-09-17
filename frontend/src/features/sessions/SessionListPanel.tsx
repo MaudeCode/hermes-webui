@@ -184,8 +184,8 @@ export function SessionListPanel() {
       <div className="session-list" id="sessionList" role="list">
         {cliCount > 0 && (
           <div className="session-source-tabs">
-            <button type="button" className={cn('session-source-tab', source === 'webui' && 'active')} aria-pressed={source === 'webui'} onClick={() => setSource('webui')}>{m.tab_chat()} ({webuiCount})</button>
-            <button type="button" className={cn('session-source-tab', source === 'cli' && 'active')} aria-pressed={source === 'cli'} onClick={() => setSource('cli')}>CLI ({cliCount})</button>
+            <button type="button" className={cn('session-source-tab', source === 'webui' && 'active')} aria-pressed={source === 'webui'} onClick={() => setSource('webui')}>{m.sessions_source_webui({ n: webuiCount })}</button>
+            <button type="button" className={cn('session-source-tab', source === 'cli' && 'active')} aria-pressed={source === 'cli'} onClick={() => setSource('cli')}>{m.sessions_source_cli({ n: cliCount })}</button>
           </div>
         )}
         {(projectList.length > 0 || hasUnprojected) && (

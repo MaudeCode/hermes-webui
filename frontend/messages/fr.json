@@ -1130,6 +1130,8 @@
 	"filter_conversations": "Filtrer les conversations…",
 	"markdown_table_filter": "Filtrer le tableau",
 	"markdown_table_sort_column": "Trier la colonne",
+	"sessions_source_webui": "Sessions WebUI ({n})",
+	"sessions_source_cli": "Sessions CLI ({n})",
 	"session_time_unknown": "Inconnu",
 	"session_time_minutes_ago": "{n}m",
 	"session_time_hours_ago": "{n}h",

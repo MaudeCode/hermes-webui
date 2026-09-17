@@ -1117,6 +1117,8 @@
 	"filter_conversations": "会話を絞り込み...",
 	"markdown_table_filter": "テーブルをフィルター",
 	"markdown_table_sort_column": "列を並べ替え",
+	"sessions_source_webui": "WebUIセッション ({n})",
+	"sessions_source_cli": "CLIセッション ({n})",
 	"session_time_unknown": "不明",
 	"session_time_minutes_ago": "{n}分前",
 	"session_time_hours_ago": "{n}時間前",

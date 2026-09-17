@@ -1143,6 +1143,8 @@
 	"filter_conversations": "Filtra conversazioni...",
 	"markdown_table_filter": "Filtra tabella",
 	"markdown_table_sort_column": "Ordina colonna",
+	"sessions_source_webui": "Sessioni WebUI ({n})",
+	"sessions_source_cli": "Sessioni CLI ({n})",
 	"session_time_unknown": "Sconosciuto",
 	"session_time_minutes_ago": "{n}m",
 	"session_time_hours_ago": "{n}h",

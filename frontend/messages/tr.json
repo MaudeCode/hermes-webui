@@ -1117,6 +1117,8 @@
 	"filter_conversations": "Konuşmaları filtrele...",
 	"markdown_table_filter": "Tabloyu filtrele",
 	"markdown_table_sort_column": "Sütunu sırala",
+	"sessions_source_webui": "WebUI oturumları ({n})",
+	"sessions_source_cli": "CLI oturumları ({n})",
 	"session_time_unknown": "Bilinmiyor",
 	"session_time_minutes_ago": "{n} dk önce",
 	"session_time_hours_ago": "{n} sa önce",

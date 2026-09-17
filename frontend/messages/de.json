@@ -1074,6 +1074,8 @@
 	"filter_conversations": "Chats filtern...",
 	"markdown_table_filter": "Tabelle filtern",
 	"markdown_table_sort_column": "Spalte sortieren",
+	"sessions_source_webui": "WebUI-Sitzungen ({n})",
+	"sessions_source_cli": "CLI-Sitzungen ({n})",
 	"session_time_unknown": "Unbekannt",
 	"session_time_minutes_ago": "Vor {n} Minuten",
 	"session_time_hours_ago": "Vor {n} Stunden",

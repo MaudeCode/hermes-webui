@@ -1117,6 +1117,8 @@
 	"filter_conversations": "대화 필터…",
 	"markdown_table_filter": "표 필터",
 	"markdown_table_sort_column": "열 정렬",
+	"sessions_source_webui": "WebUI 세션 ({n})",
+	"sessions_source_cli": "CLI 세션 ({n})",
 	"session_time_unknown": "Unknown",
 	"session_time_minutes_ago": "{n}m",
 	"session_time_hours_ago": "{n}h",
