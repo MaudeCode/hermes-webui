@@ -41,7 +41,13 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
 })
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(self.clients.claim())
+  event.waitUntil((async () => {
+    // The pre-HWEB-100 worker kept the legacy shell in `hermes-shell-<version>` caches and only
+    // deleted siblings of its own name; nothing else ever removes them after an upgrade.
+    const legacy = (await caches.keys()).filter((k) => k.startsWith('hermes-shell-'))
+    await Promise.all(legacy.map((k) => caches.delete(k)))
+    await self.clients.claim()
+  })())
 })
 
 function isServerOwned(url: URL, scope: URL): boolean {

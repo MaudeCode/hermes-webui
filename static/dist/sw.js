@@ -985,7 +985,10 @@ N([{"revision":"2826b271bde8cb25b0bc697d1aa21fa2","url":"./assets/_app-iracf9g2.
 	let t = e.data;
 	typeof t == "object" && t && t.type === "SKIP_WAITING" && self.skipWaiting();
 }), self.addEventListener("activate", (e) => {
-	e.waitUntil(self.clients.claim());
+	e.waitUntil((async () => {
+		let e = (await caches.keys()).filter((e) => e.startsWith("hermes-shell-"));
+		await Promise.all(e.map((e) => caches.delete(e))), await self.clients.claim();
+	})());
 });
 function Ee(e, t) {
 	let n = e.pathname.startsWith(t.pathname) ? e.pathname.slice(t.pathname.length) : e.pathname;
