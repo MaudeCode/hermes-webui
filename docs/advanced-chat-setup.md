@@ -120,7 +120,7 @@ To keep normal `ctl.sh` launches on the in-process runtime, store only the
 Gateway connection settings in `.env`, then opt in per development server:
 
 ```bash
-./ctl.sh start --gateway
+./ctl.sh start --remote
 ```
 
 The flag sets `HERMES_WEBUI_CHAT_BACKEND=gateway` for that start only. It does

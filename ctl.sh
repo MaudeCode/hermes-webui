@@ -46,10 +46,10 @@ usage() {
 Usage: ./ctl.sh <command> [args]
 
 Commands:
-  start [--gateway] [bootstrap args...]
+  start [--remote] [bootstrap args...]
                               Start Hermes WebUI as a background daemon
   stop                        Stop the daemon started by ctl.sh
-  restart [--gateway] [bootstrap args...]
+  restart [--remote] [bootstrap args...]
                               Stop, then start again
   status                      Show daemon, host/port, log, and health status
   logs [--lines N] [--follow|--no-follow]
@@ -1044,7 +1044,7 @@ fi
 
 case "${cmd}" in
   start | restart)
-    if [[ "${1:-}" == "--gateway" ]]; then
+    if [[ "${1:-}" == "--remote" ]]; then
       export HERMES_WEBUI_CHAT_BACKEND=gateway
       shift
     fi

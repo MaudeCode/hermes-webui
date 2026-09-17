@@ -285,7 +285,7 @@ def test_start_writes_pid_under_hermes_home_runs_foreground_no_browser_and_logs(
         assert not pid_file.exists()
 
 
-def test_gateway_flag_opts_in_without_changing_default(tmp_path):
+def test_remote_flag_opts_in_without_changing_default(tmp_path):
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     _seed_ctl_repo(repo_root)
@@ -325,7 +325,7 @@ def test_gateway_flag_opts_in_without_changing_default(tmp_path):
             assert_process_exits(pid)
 
     assert "backend=\n" in launch("local", 18992)
-    assert "backend=gateway\n" in launch("gateway", 18993, "--gateway")
+    assert "backend=gateway\n" in launch("gateway", 18993, "--remote")
 
 
 def test_worktree_start_selects_next_free_port_and_reports_it(tmp_path):
