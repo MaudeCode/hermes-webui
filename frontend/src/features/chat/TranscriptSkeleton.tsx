@@ -14,7 +14,7 @@ export function TranscriptSkeleton() {
         <div className="msg-row flex justify-end"><div className="skeleton-user" /></div>
         <div className="msg-row"><div className="skeleton-bar skeleton-role" /><div className="skeleton-bar w-[84%]" /><div className="skeleton-bar w-[40%]" /></div>
       </div>
-      <LoadingState label={m.transcript_loading()} />
+      <LoadingState label={m.transcript_loading()} className="flex-1" />
     </div>
   )
 }
