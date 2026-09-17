@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { m } from '../../paraglide/messages.js'
 import * as api from '../../api/endpoints'
 import { keys } from '../../api/queryKeys'
+import { useSetDefaultModel } from '../../app/queries'
 import { post } from '../../api/client'
 import { OkSchema } from '../../contracts'
 import { Button } from '../../ui/Button'
@@ -18,7 +19,8 @@ export function ProvidersSection() {
   const qc = useQueryClient()
   const providers = useQuery({ queryKey: keys.providers, queryFn: api.fetchProviders, staleTime: 30_000 })
   const quotas = useQuery({ queryKey: keys.providerQuotas, queryFn: () => api.fetchProviderQuotas(false), staleTime: 60_000 })
-  const { str, set } = useSettingField()
+  const { str } = useSettingField()
+  const setDefault = useSetDefaultModel()
   const [editing, setEditing] = useState<string | null>(null)
   const [keyValue, setKeyValue] = useState('')
   const invalidate = () => { void qc.invalidateQueries({ queryKey: keys.providers }); void qc.invalidateQueries({ queryKey: keys.models }) }
@@ -67,7 +69,7 @@ export function ProvidersSection() {
                   <ul className="mt-1 flex flex-wrap gap-1">
                     {p.models.map((mm) => (
                       <li key={mm.id}>
-                        <button type="button" onClick={() => set({ default_model: mm.id })} className={cn('rounded-full border px-2 py-0.5 text-[11px]', mm.id === defaultModel ? 'border-accent bg-accent-bg text-accent-text' : 'border-border text-muted hover:text-text')} title={m.providers_set_default()}>{mm.label ?? mm.id}</button>
+                        <button type="button" onClick={() => setDefault.mutate({ model: mm.id, provider: p.id }, { onError: (e) => showToast(e instanceof Error ? e.message : String(e), 4000, 'error') })} className={cn('rounded-full border px-2 py-0.5 text-[11px]', mm.id === defaultModel ? 'border-accent bg-accent-bg text-accent-text' : 'border-border text-muted hover:text-text')} title={m.providers_set_default()}>{mm.label ?? mm.id}</button>
                       </li>
                     ))}
                   </ul>

@@ -28,6 +28,8 @@ export interface TranscriptProps {
   loadingOlder: boolean
   emptyState: React.ReactNode
   showJumpButtons: boolean
+  /** `virtualize_transcript` setting; off by default because variable-height rows made long chats oscillate. */
+  virtualizeLongTranscripts: boolean
 }
 
 /**
@@ -37,7 +39,7 @@ export interface TranscriptProps {
  * virtualized with TanStack Virtual.
  */
 export function Transcript(props: TranscriptProps) {
-  const { rows, live, assistantName, mode, renderUserMarkdown, autoFollow, sessionId, actions, tts, truncated, onLoadOlder, loadingOlder, emptyState, showJumpButtons } = props
+  const { rows, live, assistantName, mode, renderUserMarkdown, autoFollow, sessionId, actions, tts, truncated, onLoadOlder, loadingOlder, emptyState, showJumpButtons, virtualizeLongTranscripts } = props
   const scrollRef = useRef<HTMLDivElement>(null)
   const [pinned, setPinned] = useState(true)
   const [atTop, setAtTop] = useState(true)
@@ -46,7 +48,7 @@ export function Transcript(props: TranscriptProps) {
   const liveUserText = live?.userText ?? ''
   const showLive = !!live && (!isTerminal(live.status) || (live.doneSession === null && live.status !== 'done') || live.status === 'error' || live.status === 'cancelled')
   const lastAssistantIndex = useMemo(() => { for (let i = rows.length - 1; i >= 0; i--) if (rows[i]?.message.role === 'assistant') return i; return -1 }, [rows])
-  const virtualize = rows.length > VIRTUALIZE_AT
+  const virtualize = virtualizeLongTranscripts && rows.length > VIRTUALIZE_AT
 
   const onScroll = useCallback(() => {
     const el = scrollRef.current

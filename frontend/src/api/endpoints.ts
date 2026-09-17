@@ -48,7 +48,8 @@ export const deleteProfile = (name: string) => post('api/profile/delete', { name
 export const fetchModels = (freshness?: 'session_visit') => get(`api/models${qs({ freshness })}`, ModelsSchema)
 export const refreshModels = () => post('api/models/refresh', {}, ModelsSchema.or(OkSchema), { retries: 0, timeoutMs: 60_000 })
 export const setSessionModel = (body: { session_id: SessionId; model: string; model_provider?: string | null; explicit?: boolean }) => post('api/model/set', body, z.looseObject({ ok: z.boolean().optional(), session: z.unknown().optional(), error: z.string().optional() }), { retries: 0 })
-export const setDefaultModel = (model: string) => post('api/default-model', { model }, OkSchema, { retries: 0 })
+/** config.yaml model.default (and provider): `/api/settings` does not persist `default_model`. */
+export const setDefaultModel = (model: string, provider?: string | null) => post('api/default-model', { model, ...(provider ? { provider } : {}) }, OkSchema, { retries: 0 })
 export const fetchProviders = () => get('api/providers', ProvidersSchema)
 export const fetchProviderQuotas = (refresh = false) => get(`api/provider/quotas${qs({ refresh: refresh ? 1 : undefined })}`, ProviderQuotasSchema, { retries: 0, timeoutMs: 45_000 })
 export const fetchPersonalities = () => get('api/personalities', PersonalitiesSchema)
@@ -93,7 +94,7 @@ export const setSessionYolo = (session_id: SessionId, enabled: boolean) => post(
 export const fetchSessionYolo = (session_id: SessionId) => get(`api/session/yolo${qs({ session_id })}`, z.looseObject({ yolo_enabled: z.boolean() }))
 export const setSessionToolsets = (session_id: SessionId, toolsets: string[] | null) => post('api/session/toolsets', { session_id, toolsets }, OkSchema.or(SessionEnvelopeSchema), { retries: 0 })
 export const compressSession = (session_id: SessionId) => post('api/session/compress/start', { session_id }, z.looseObject({ ok: z.boolean().optional(), job_id: z.string().optional(), error: z.string().optional() }), { retries: 0 })
-export const compressStatus = (session_id: SessionId) => get(`api/session/compress/status${qs({ session_id })}`, z.looseObject({ status: z.string().optional(), new_session_id: z.string().optional(), error: z.string().optional() }))
+export const compressStatus = (session_id: SessionId) => get(`api/session/compress/status${qs({ session_id })}`, z.looseObject({ status: z.enum(['running', 'done', 'error', 'idle']).or(z.string()).optional(), session: z.looseObject({ session_id: SessionIdSchema }).optional(), session_id: NullableString.optional(), error: z.string().optional() }))
 export const handoffSummary = (session_id: SessionId) => post('api/session/handoff-summary', { session_id }, z.looseObject({ ok: z.boolean().optional(), summary: z.string().optional(), error: z.string().optional() }), { retries: 0, timeoutMs: 90_000 })
 export const saveDraft = (body: z.infer<typeof DraftRequestSchema>) => post('api/session/draft', body, DraftResponseSchema, { retries: 0, timeoutMs: 8000 })
 export const worktreeStatus = (session_id: SessionId) => get(`api/session/worktree/status${qs({ session_id })}`, z.looseObject({ status: z.unknown() }))

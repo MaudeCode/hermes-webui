@@ -2,7 +2,8 @@ import { m } from '../../paraglide/messages.js'
 import { Switch, FieldRow, TextInput } from '../../ui/Field'
 import { Select } from '../../ui/Select'
 import { useSettingField } from './useSettingField'
-import { useModelsQuery } from '../../app/queries'
+import { useModelsQuery, useSetDefaultModel } from '../../app/queries'
+import { showToast } from '../toast/toast'
 import { LoadingState, ErrorState } from '../../ui/States'
 import { NAV_ITEMS, FIXED_TABS } from '../../shell/nav'
 import { useState } from 'react'
@@ -21,13 +22,14 @@ function Toggle({ label, hint, settingKey, fallback = false }: { label: string; 
 export function PreferencesSection() {
   const { settings, str, set, bool, num } = useSettingField()
   const models = useModelsQuery()
+  const setDefault = useSetDefaultModel()
   const [botName, setBotName] = useState<string | null>(null)
   if (settings.isPending) return <LoadingState />
   if (settings.isError) return <ErrorState error={settings.error} onRetry={() => { void settings.refetch() }} />
   return (
     <div className="flex flex-col divide-y divide-border-subtle" data-section="preferences">
       <FieldRow label={m.settings_label_model()} hint={m.settings_default_model_hint()} htmlFor="settingsModel" inline>
-        <Select id="settingsModel" value={str('default_model')} onValueChange={(v) => set({ default_model: v })}>
+        <Select id="settingsModel" value={str('default_model')} onValueChange={(v) => { const group = models.data?.groups.find((g) => g.models.some((mm) => mm.id === v)); setDefault.mutate({ model: v, provider: group?.provider_id ?? group?.provider ?? null }, { onError: (e) => showToast(e instanceof Error ? e.message : String(e), 4000, 'error') }) }}>
           {(models.data?.groups ?? []).map((g) => (
             <optgroup key={g.provider} label={g.provider}>
               {g.models.map((mm) => <option key={mm.id} value={mm.id}>{mm.label ?? mm.id}</option>)}

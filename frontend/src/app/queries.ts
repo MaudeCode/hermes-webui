@@ -18,6 +18,12 @@ export function useSaveSettings() {
   })
 }
 
+/** Default model lives in config.yaml; on success the settings and models queries are refetched so every reader agrees. */
+export function useSetDefaultModel() {
+  const qc = useQueryClient()
+  return useMutation({ mutationFn: ({ model, provider }: { model: string; provider?: string | null }) => api.setDefaultModel(model, provider), onSuccess: () => { void qc.invalidateQueries({ queryKey: keys.settings }); void qc.invalidateQueries({ queryKey: keys.models }) } })
+}
+
 export function useProfilesQuery() {
   return useQuery({ queryKey: keys.profiles, queryFn: api.fetchProfiles, staleTime: 30_000 })
 }

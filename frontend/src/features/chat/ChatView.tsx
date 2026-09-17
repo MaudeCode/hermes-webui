@@ -17,7 +17,7 @@ import { dispatch } from '../../stream/store'
 import { isTerminal } from '../../stream/reducer'
 import { useTranscript, type VisibleMessage } from './useTranscript'
 import { Transcript } from './Transcript'
-import { Composer } from '../composer/Composer'
+import { Composer, type QueuedTurn } from '../composer/Composer'
 import { ApprovalCard } from './ApprovalCard'
 import { ClarifyCard } from './ClarifyCard'
 import { TerminalPanel } from '../terminal/TerminalPanel'
@@ -45,7 +45,7 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
   // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time DOM lookup after the shell has committed its slot
   useEffect(() => { setRightSlot(document.getElementById('rightpanelSlot')) }, [])
   const [workspaceOpen, setWorkspaceOpen] = useState(() => readPersisted('hermes-webui-workspace-panel') === 'open')
-  const [queued, setQueued] = useState<string[]>([])
+  const [queued, setQueued] = useState<QueuedTurn[]>([])
   const draining = useRef(false)
   const [yolo, setYolo] = useState(false)
   // Choices made on the unsaved chat (no session yet) apply when the session is created.
@@ -70,11 +70,11 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
     // One drain in flight at a time; the item leaves the queue only once its turn has started, so a
     // failed start keeps it and a re-render mid-request cannot start the next item concurrently.
     draining.current = true
-    void startTurn({ sessionId, message: next, request: { model: session.model ?? undefined, workspace: session.workspace, profile: bootstrap.profile?.name ?? 'default' } })
+    void startTurn({ sessionId, message: next.text, request: { ...next.request, ...(next.attachments.length ? { attachments: next.attachments } : {}) } })
       .then(() => setQueued((q) => (q[0] === next ? q.slice(1) : q)))
       .catch((e: unknown) => showToast(e instanceof Error ? e.message : String(e), 4000, 'error'))
       .finally(() => { draining.current = false })
-  }, [live?.status, sessionId, session, queued, live, bootstrap.profile])
+  }, [live?.status, sessionId, session, queued, live])
 
   const ensureSession = useCallback(async (): Promise<Session> => {
     if (session) return session
@@ -122,6 +122,34 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
     await refresh()
   }, [sessionId, refresh])
 
+  // Manual compression: start, poll the job to done/error, then load the compacted session (a new id when the server forks).
+  const [compressing, setCompressing] = useState(false)
+  const runCompression = useCallback(async (sid: string) => {
+    setCompressing(true)
+    showToast(m.live_compressing())
+    try {
+      await api.compressSession(sid)
+      for (let i = 0; i < 600; i++) {
+        await new Promise((r) => setTimeout(r, 1000))
+        const st = await api.compressStatus(sid)
+        if (st.status === 'running') continue
+        if (st.status === 'error') throw new Error(st.error ?? m.compress_failed_label())
+        if (st.status === 'idle') throw new Error(m.compress_failed_label())
+        const next = st.session?.session_id ?? st.session_id ?? sid
+        showToast(m.compress_complete_label())
+        void qc.invalidateQueries({ queryKey: keys.sessions.all })
+        if (next !== sid) await navigate({ to: '/session/$sessionId', params: { sessionId: next } })
+        else await refresh()
+        return
+      }
+      throw new Error(m.compress_failed_label())
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : String(e), 5000, 'error')
+    } finally {
+      setCompressing(false)
+    }
+  }, [qc, navigate, refresh])
+
   const onLocalCommand = useCallback(async (name: string, args: string): Promise<boolean> => {
     switch (name) {
       case 'stop': if (sessionId) await cancelTurn(sessionId); return true
@@ -131,7 +159,7 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
       case 'title': if (sessionId && args) { await api.renameSession(sessionId, args); await refresh(); void qc.invalidateQueries({ queryKey: keys.sessions.all }) } return true
       case 'retry': if (sessionId) { await onRegenerate() } return true
       case 'undo': if (sessionId) { await api.undoSession(sessionId); await refresh() } return true
-      case 'compress': case 'compact': if (sessionId) { await api.compressSession(sessionId); showToast(m.live_compressing()) } return true
+      case 'compress': case 'compact': if (sessionId) { void runCompression(sessionId) } return true
       case 'usage': if (sessionId) { const u = await api.fetchSessionUsage(sessionId); showToast(`${(u.input_tokens ?? 0).toLocaleString()} in · ${(u.output_tokens ?? 0).toLocaleString()} out${u.estimated_cost ? ` · $${u.estimated_cost.toFixed(4)}` : ''}`, 4000) } return true
       case 'yolo': onToggleYolo(); return true
       case 'branch': if (sessionId) { const r = await api.branchSession(sessionId); void qc.invalidateQueries({ queryKey: keys.sessions.all }); await navigate({ to: '/session/$sessionId', params: { sessionId: r.session_id } }) } return true
@@ -153,7 +181,7 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
       case 'voice': showToast(m.voice_error(), 3000); return true
       default: return false
     }
-  }, [sessionId, navigate, refresh, qc, onToggleYolo, onModelChange, onWorkspaceChange, onRegenerate, reasoning, setReasoning])
+  }, [sessionId, navigate, refresh, qc, onToggleYolo, onModelChange, onWorkspaceChange, onRegenerate, reasoning, setReasoning, runCompression])
 
   const onEdit = useCallback(async (row: VisibleMessage, text: string) => {
     if (!sessionId) return
@@ -237,6 +265,7 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
             loadingOlder={loadingOlder}
             emptyState={query.isPending && !knownEmpty ? null : emptyState}
             showJumpButtons={(settings.data as Record<string, unknown> | undefined)?.session_jump_buttons !== false}
+            virtualizeLongTranscripts={(settings.data as Record<string, unknown> | undefined)?.virtualize_transcript === true}
           />
         )}
         <div className="composer-flyout">
@@ -264,7 +293,8 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
           yolo={yoloOn}
           onToggleYolo={onToggleYolo}
           queued={queued}
-          onQueue={(t) => setQueued((q) => [...q, t])}
+          locked={compressing}
+          onQueue={(entry) => setQueued((q) => [...q, entry])}
         />
         <span className="sr-only" aria-live="polite" id="a11yAnnouncer">{live?.status === 'done' ? m.done() : ''}</span>
       </div>

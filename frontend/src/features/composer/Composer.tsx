@@ -4,7 +4,7 @@ import { Mic, Paperclip, Square, ArrowUp, TerminalSquare, SlidersHorizontal } fr
 import { m } from '../../paraglide/messages.js'
 import * as api from '../../api/endpoints'
 import { keys } from '../../api/queryKeys'
-import type { Session, Settings } from '../../contracts'
+import type { UploadResponse, Session, Settings } from '../../contracts'
 import type { LiveTurn } from '../../stream/reducer'
 import { isTerminal } from '../../stream/reducer'
 import { cancelTurn, startTurn } from '../../stream/connection'
@@ -22,6 +22,8 @@ import { setTheme } from '../../app/appearance'
 import { ThemeSchema } from '../../contracts/persisted'
 
 export type BusyMode = 'steer' | 'queue' | 'interrupt'
+/** A message waiting for the live turn to settle: it owns its text, upload receipts and the request it was composed against. */
+export interface QueuedTurn { text: string; attachments: UploadResponse[]; request: { model?: string | undefined; model_provider?: string | null | undefined; workspace?: string | undefined; profile: string } }
 
 export interface ComposerProps {
   sessionId: string | null
@@ -44,8 +46,10 @@ export interface ComposerProps {
   reasoning: string | null
   yolo: boolean
   onToggleYolo: () => void
-  queued: string[]
-  onQueue: (text: string) => void
+  queued: QueuedTurn[]
+  onQueue: (entry: QueuedTurn) => void
+  /** Sending is disabled (e.g. while a manual compression job runs). */
+  locked?: boolean | undefined
 }
 
 const PHONE = '(max-width: 640px)'
@@ -74,7 +78,7 @@ function fileKey(f: File): string {
 let handoff: { text: string; files: File[] } | null = null
 
 export function Composer(props: ComposerProps) {
-  const { sessionId, session, live, settings, onEnsureSession, onLocalCommand, terminalOpen, onToggleTerminal, onModelChange, onWorkspaceChange, onToolsetsChange, onReasoningChange, reasoning, reasoningLevels, reasoningSupported = true, pendingChoices, yolo, onToggleYolo, queued, onQueue } = props
+  const { sessionId, session, live, settings, onEnsureSession, onLocalCommand, terminalOpen, onToggleTerminal, onModelChange, onWorkspaceChange, onToolsetsChange, onReasoningChange, reasoning, reasoningLevels, reasoningSupported = true, pendingChoices, locked = false, yolo, onToggleYolo, queued, onQueue } = props
   const bootstrap = useBootstrap()
   const qc = useQueryClient()
   const [text, setText] = useState(() => (sessionId ? readLocalDraft(sessionId) : ''))
@@ -205,7 +209,11 @@ export function Composer(props: ComposerProps) {
     return true
   }, [steer])
 
+  // Snapshot of what a send would post right now, for the queue.
+  const queueEntry = useCallback((text: string): QueuedTurn => ({ text, attachments: files.flatMap((f) => (f.status === 'done' && f.upload ? [f.upload] : [])), request: { model: session?.model ?? undefined, model_provider: session?.model_provider ?? undefined, workspace: session?.workspace, profile: bootstrap.profile?.name ?? 'default' } }), [files, session, bootstrap.profile])
+
   const send = useCallback(async () => {
+    if (locked) { showToast(m.live_compressing(), 1500); return }
     const value = text.trim()
     if (sending) return
     if (!value && files.length === 0) return
@@ -217,16 +225,17 @@ export function Composer(props: ComposerProps) {
         const handled = await onLocalCommand(cmd.name, cmd.args)
         if (handled) { setText(''); return }
       }
-      if (cmd.name === 'queue' && busy) { onQueue(cmd.args); setText(''); return }
+      if (cmd.name === 'queue' && busy) { onQueue(queueEntry(cmd.args)); setText(''); setFiles([]); return }
       if (cmd.name === 'steer' && busy && sessionId) { if (!cmd.args) { showToast(m.cmd_steer_no_msg(), 2000); return } if (await trySteer(cmd.args)) setText(''); return }
-      if (cmd.name === 'interrupt' && busy && sessionId) { await cancelTurn(sessionId); onQueue(cmd.args); setText(''); return }
+      if (cmd.name === 'interrupt' && busy && sessionId) { await cancelTurn(sessionId); onQueue(queueEntry(cmd.args)); setText(''); setFiles([]); return }
     }
     if (busy && sessionId) {
-      if (busyMode === 'queue') { onQueue(value); setText(''); return }
+      if (busyMode === 'queue') { onQueue(queueEntry(value)); setText(''); setFiles([]); return }
       if (busyMode === 'steer') { if (await trySteer(value)) setText(''); return }
       await cancelTurn(sessionId)
-      onQueue(value)
+      onQueue(queueEntry(value))
       setText('')
+      setFiles([])
       return
     }
     setSending(true)
@@ -244,7 +253,7 @@ export function Composer(props: ComposerProps) {
       setSending(false)
       textarea.current?.focus()
     }
-  }, [text, files, sending, session, onEnsureSession, busy, busyMode, sessionId, trySteer, onQueue, onLocalCommand, bootstrap.profile, qc])
+  }, [text, files, sending, session, onEnsureSession, busy, busyMode, sessionId, trySteer, locked, queueEntry, onQueue, onLocalCommand, bootstrap.profile, qc])
 
   const applySuggestion = (s: CommandSuggestion) => { setText(`/${s.name} `); textarea.current?.focus() }
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -294,14 +303,14 @@ export function Composer(props: ComposerProps) {
   const compressedEstimate = session?.post_compression_context_tokens_estimate
   const contextUsed = compressedEstimate && compressedEstimate > 0 ? compressedEstimate : (session?.last_prompt_tokens ?? null)
   const contextTotal = session?.context_length ?? null
-  const canSend = (text.trim() !== '' || files.some((f) => f.status === 'done')) && !sending
+  const canSend = (text.trim() !== '' || files.some((f) => f.status === 'done')) && !sending && !locked
 
   return (
     <div className="composer-wrap" id="composerWrap">
       {queued.length > 0 && (
         <div className="queue-card" role="region" aria-label={m.queued_count({ n: queued.length })} aria-live="polite">
           <div className="queue-card-title">{m.queued_count({ n: queued.length })}</div>
-          <ul className="queue-card-list">{queued.map((q, i) => <li key={i}>{q}</li>)}</ul>
+          <ul className="queue-card-list">{queued.map((q, i) => <li key={i}>{q.text}{q.attachments.length ? ` (+${q.attachments.length})` : ''}</li>)}</ul>
         </div>
       )}
       <div
