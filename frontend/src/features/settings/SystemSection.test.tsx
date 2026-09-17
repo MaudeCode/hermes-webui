@@ -9,8 +9,8 @@ import { keys } from '../../api/queryKeys'
 vi.mock('../../api/endpoints', () => ({
   restartAgent: vi.fn(), shutdownServer: vi.fn(), passkeyRegisterOptions: vi.fn(), passkeyRegister: vi.fn(), passkeyDelete: vi.fn(),
   fetchSettings: vi.fn(() => Promise.resolve({ bot_name: 'Hermes', check_for_updates: false })),
-  fetchSystemHealth: vi.fn(() => new Promise(() => {})),
-  fetchAgentHealth: vi.fn(() => new Promise(() => {})),
+  fetchSystemHealth: vi.fn(() => Promise.resolve({ status: 'ok' })),
+  fetchAgentHealth: vi.fn(() => Promise.resolve({ alive: true })),
   fetchUpdatesCheck: vi.fn(() => Promise.resolve({ cached: true, webui: { behind: 0 }, agent: { behind: 0 } })),
   checkUpdatesNow: vi.fn(),
   passkeysList: vi.fn(),
