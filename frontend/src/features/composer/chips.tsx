@@ -82,7 +82,7 @@ export function ToolsetsChip({ value, onChange, row }: { value: string[] | null;
       <form className="flex flex-col gap-2 p-2" onSubmit={(e) => { e.preventDefault(); const list = draft.split(',').map((s) => s.trim()).filter(Boolean); onChange(list.length ? list : null) }}>
         <input value={draft} onChange={(e) => setDraft(e.target.value)} placeholder={m.session_toolsets_placeholder()} aria-label={m.composer_control_toolsets()} className="h-8 w-full rounded-md border border-border bg-input px-2 font-mono text-xs text-text" onKeyDown={(e) => e.stopPropagation()} />
         <div className="text-[11px] text-muted">{m.toolsets_hint()}</div>
-        <button type="submit" className="self-end rounded-md bg-accent px-2.5 py-1 text-xs font-medium text-white">{m.save()}</button>
+        <button type="submit" className="self-end rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg">{m.save()}</button>
       </form>
     </Menu>
   )
