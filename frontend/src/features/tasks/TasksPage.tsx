@@ -4,10 +4,9 @@
  * can be linked and the browser back button works; the editor is transient.
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { createPortal } from 'react-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearch } from '@tanstack/react-router'
-import { Copy, Pause, Play, Plus, RefreshCw, Trash2, X } from 'lucide-react'
+import { Copy, Pause, Play, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { m } from '../../paraglide/messages.js'
 import * as api from '../../api/endpoints'
 import { keys } from '../../api/queryKeys'
@@ -16,7 +15,8 @@ import { AppShell, HubPage } from '../../shell/AppShell'
 import { PanelHead, PanelHeadButton } from '../../shell/Sidebar'
 import { closeMobileSidebar, openMobileSidebar, useIsDesktop, useMediaQuery } from '../../shell/useShellState'
 import { useLocale } from '../../i18n/useLocale'
-import { Button, IconButton } from '../../ui/Button'
+import { Button } from '../../ui/Button'
+import { RightPanel } from '../../shell/RightPanel'
 import { ConfirmDialog } from '../../ui/Dialog'
 import { EmptyState, ErrorState, LoadingState, formatBytes, formatDate } from '../../ui/States'
 import { showToast } from '../toast/toast'
@@ -344,8 +344,8 @@ function RunHistory({ jobId: id, isScript }: { jobId: string; isScript: boolean 
               {runs.map((run) => {
                 const active = run.filename === current?.filename
                 return (
-                  <tr key={run.filename} className={cn('border-b border-border-subtle last:border-b-0 hover:bg-hover', active && 'bg-(--menu-active-bg) text-(--menu-active-fg)')}>
-                    <td className="p-0"><button type="button" className="w-full px-3 py-2 text-left" aria-pressed={active} title={run.filename} onClick={() => setPicked(active ? null : run.filename)}>{formatDate(run.modified)}</button></td>
+                  <tr key={run.filename} className={cn('cursor-pointer border-b border-border-subtle last:border-b-0 hover:bg-hover', active && 'bg-(--menu-active-bg) text-(--menu-active-fg)')} onClick={() => setPicked(active ? null : run.filename)}>
+                    <td className="px-3 py-2"><button type="button" className="text-left" aria-pressed={active} title={run.filename} onClick={(e) => { e.stopPropagation(); setPicked(active ? null : run.filename) }}>{formatDate(run.modified)}</button></td>
                     <td className="px-3 py-2 text-xs text-muted">{isScript ? '' : usageStrip(run.usage)}</td>
                     <td className="px-3 py-2 text-right text-xs text-muted">{formatBytes(run.size)}</td>
                   </tr>
@@ -362,30 +362,11 @@ function RunHistory({ jobId: id, isScript }: { jobId: string; isScript: boolean 
   )
 }
 
-/** The chat page's workspace panel slot, reused for one run's output. */
 function RunPanel({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
-  const [slot, setSlot] = useState<HTMLElement | null>(null)
-  // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time DOM lookup after the shell has committed its slot
-  useEffect(() => { setSlot(document.getElementById('rightpanelSlot')) }, [])
-  useEffect(() => {
-    document.documentElement.dataset.workspacePanel = 'open'
-    return () => { document.documentElement.dataset.workspacePanel = 'closed' }
-  }, [])
-  if (!slot) return null
-  return createPortal(
-    <aside className="rightpanel flex shrink-0 flex-col p-(--island-gap)" style={{ width: 460 }} aria-label={m.cron_runs_title()} data-panel="cron-run">
-      <div className="rightpanel-body flex min-h-0 flex-1 flex-col overflow-hidden">
-        <div className="flex min-h-12 items-center justify-between gap-2 border-b border-border px-3 py-2">
-          <div className="min-w-0">
-            <div className="truncate text-sm font-semibold text-text">{m.cron_runs_title()}</div>
-            <div className="truncate text-[11px] text-muted">{title}</div>
-          </div>
-          <IconButton label={m.close_menu()} className="h-7 w-7" onClick={onClose}><X size={14} aria-hidden="true" /></IconButton>
-        </div>
-        <div className="min-h-0 flex-1 overflow-auto p-3 text-[13px]">{children}</div>
-      </div>
-    </aside>,
-    slot,
+  return (
+    <RightPanel open onClose={onClose} label={m.cron_runs_title()} panelId="cron-run" title={m.cron_runs_title()} subtitle={title}>
+      <div className="min-h-0 flex-1 overflow-auto p-3 text-[13px]">{children}</div>
+    </RightPanel>
   )
 }
 

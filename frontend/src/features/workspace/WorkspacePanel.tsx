@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowUp, ChevronLeft, ChevronRight, Download, Eye, EyeOff, File as FileIcon, Folder, RefreshCw, X } from 'lucide-react'
+import { ArrowUp, Download, Eye, EyeOff, File as FileIcon, Folder, RefreshCw } from 'lucide-react'
 import { m } from '../../paraglide/messages.js'
 import * as api from '../../api/endpoints'
 import { keys } from '../../api/queryKeys'
@@ -10,7 +10,8 @@ import { ErrorState, LoadingState, formatBytes } from '../../ui/States'
 import { showToast } from '../toast/toast'
 import { cn } from '../../ui/cn'
 import { Markdown } from '../chat/render/Markdown'
-import { writePersisted, readPersisted } from '../../lib/persisted'
+import { writePersisted } from '../../lib/persisted'
+import { RightPanel } from '../../shell/RightPanel'
 
 function joinPath(dir: string, name: string): string {
   return dir === '.' || dir === '' ? name : `${dir.replace(/\/$/, '')}/${name}`
@@ -28,28 +29,7 @@ export function WorkspacePanel({ workspace, sessionId, open, onToggle, onClose }
   const [showHidden, setShowHidden] = useState(false)
   const [file, setFile] = useState<string | null>(null)
   const [draft, setDraft] = useState<string | null>(null)
-  // Drag the left edge to resize (legacy initResize on #rightpanelResize: 180..1200px, persisted).
-  const panel = useRef<HTMLElement>(null)
-  const [width, setWidth] = useState(() => Number(readPersisted('hermes-webui-workspace-panel-width')) || 300)
-  const startResize = (e: React.PointerEvent<HTMLDivElement>) => {
-    e.preventDefault()
-    const startX = e.clientX
-    const startW = panel.current?.getBoundingClientRect().width ?? width
-    let next = startW
-    const el = panel.current
-    // Write the width straight to the DOM while dragging: a React render per pointer move (and the panel's width transition) lags the pointer.
-    el?.setAttribute('data-resizing', '1')
-    const move = (ev: PointerEvent) => { next = Math.round(Math.min(1200, Math.max(180, startW - (ev.clientX - startX)))); if (el) el.style.width = `${next}px` }
-    const up = () => {
-      el?.removeAttribute('data-resizing')
-      setWidth(next)
-      writePersisted('hermes-webui-workspace-panel-width', String(Math.round(next)))
-      window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up)
-    }
-    window.addEventListener('pointermove', move)
-    window.addEventListener('pointerup', up)
-  }
-  useEffect(() => { const state = open ? 'open' : 'closed'; writePersisted('hermes-webui-workspace-panel', state); document.documentElement.dataset.workspacePanel = state }, [open])
+  useEffect(() => { writePersisted('hermes-webui-workspace-panel', open ? 'open' : 'closed') }, [open])
   const listing = useQuery({ queryKey: keys.files.list(workspace, dir, showHidden), queryFn: () => api.listDir(sessionId, dir, showHidden), staleTime: 10_000, enabled: open })
   const git = useQuery({ queryKey: keys.files.git(sessionId), queryFn: () => api.fetchGitInfo(sessionId), staleTime: 30_000, retry: false, enabled: open })
   const content = useQuery({ queryKey: keys.files.content(workspace, file ?? ''), queryFn: () => api.readFile(sessionId, file ?? ''), enabled: !!file && open, staleTime: 5_000 })
@@ -59,28 +39,21 @@ export function WorkspacePanel({ workspace, sessionId, open, onToggle, onClose }
   const isMarkdown = !!file && /\.(md|markdown)$/i.test(file)
   const text = draft ?? content.data?.content ?? ''
   return (
-    <aside ref={panel} style={{ width }} className="rightpanel flex w-[300px] shrink-0 flex-col p-(--island-gap) max-[768px]:p-0 max-[768px]:bg-(--sidebar-bg) max-[768px]:absolute max-[768px]:inset-y-0 max-[768px]:right-0 max-[768px]:z-[150] max-[768px]:w-[min(100vw,360px)] max-[768px]:shadow-md" aria-label={m.ws_panel_title()} data-panel="workspace">
-      {/* The edge tab rides on the panel's left edge, so it slides with the panel and sits flush with the screen when closed. */}
-      <button type="button" className="workspace-panel-edge-toggle has-tooltip has-tooltip--left" id="btnWorkspacePanelEdgeToggle" data-tooltip={open ? m.workspace_panel_hide() : m.workspace_panel_show()} aria-label={open ? m.workspace_panel_hide() : m.workspace_panel_show()} aria-expanded={open} onClick={onToggle}>
-        <span className="edge-tab-join edge-tab-join-top" aria-hidden="true" />
-        <span className="edge-tab-join edge-tab-join-bottom" aria-hidden="true" />
-        {open ? <ChevronRight size={12} aria-hidden="true" /> : <ChevronLeft size={12} aria-hidden="true" />}
-      </button>
-      <div className="resize-handle absolute top-0 bottom-0 w-[5px] cursor-col-resize z-10 transition-[background] duration-150 hover:bg-accent" id="rightpanelResize" role="separator" aria-orientation="vertical" aria-label={m.ws_panel_title()} onPointerDown={startResize} />
-      <span className="seam seam-tl" aria-hidden="true" />
-      <span className="seam seam-bl" aria-hidden="true" />
-      <div className="rightpanel-body flex flex-1 min-h-0 flex-col overflow-hidden">
-      <div className="flex min-h-12 items-center justify-between gap-2 border-b border-border px-3 py-2">
-        <div className="min-w-0">
-          <div className="truncate text-sm font-semibold text-text">{m.ws_panel_title()}</div>
-          <div className="truncate font-mono text-[10px] text-muted">{workspace}{g?.is_git && g.branch ? ` · ${g.branch}${g.dirty ? ` (${g.dirty}±)` : ''}` : ''}</div>
-        </div>
-        <div className="flex items-center gap-0.5">
+    <RightPanel
+      open={open}
+      onToggle={onToggle}
+      onClose={onClose}
+      label={m.ws_panel_title()}
+      panelId="workspace"
+      title={m.ws_panel_title()}
+      subtitle={`${workspace}${g?.is_git && g.branch ? ` · ${g.branch}${g.dirty ? ` (${g.dirty}±)` : ''}` : ''}`}
+      actions={
+        <>
           <IconButton label={showHidden ? m.ws_panel_hidden() : m.ws_panel_hidden()} active={showHidden} className="h-7 w-7" onClick={() => setShowHidden((h) => !h)}>{showHidden ? <Eye size={14} aria-hidden="true" /> : <EyeOff size={14} aria-hidden="true" />}</IconButton>
           <IconButton label={m.refresh()} className="h-7 w-7" onClick={() => { void listing.refetch(); void git.refetch() }}><RefreshCw size={14} aria-hidden="true" /></IconButton>
-          <IconButton label={m.close_menu()} className="h-7 w-7" onClick={onClose}><X size={14} aria-hidden="true" /></IconButton>
-        </div>
-      </div>
+        </>
+      }
+    >
       {file ? (
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="flex items-center gap-1 border-b border-border-subtle px-2 py-1 text-xs">
@@ -132,7 +105,6 @@ export function WorkspacePanel({ workspace, sessionId, open, onToggle, onClose }
           </div>
         </div>
       )}
-      </div>
-    </aside>
+    </RightPanel>
   )
 }

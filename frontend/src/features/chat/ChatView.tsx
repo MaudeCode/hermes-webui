@@ -22,7 +22,6 @@ import { Composer, type QueuedTurn } from '../composer/Composer'
 import { ApprovalCard } from './ApprovalCard'
 import { ClarifyCard } from './ClarifyCard'
 import { TerminalPanel } from '../terminal/TerminalPanel'
-import { createPortal } from 'react-dom'
 import { WorkspacePanel } from '../workspace/WorkspacePanel'
 import { workspaceLabel } from '../workspaces/label'
 import { RuntimeNoticeStack } from '../notices/RuntimeNoticeStack'
@@ -41,10 +40,6 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
   const settings = useSettingsQuery()
   const { query, session, rows, live, truncated, loadOlder, loadingOlder, refresh } = useTranscript(sessionId)
   const [terminalOpen, setTerminalOpen] = useState(false)
-  // The workspace panel is a sibling of <main> in the layout row (legacy .rightpanel), so it renders through the shell's slot.
-  const [rightSlot, setRightSlot] = useState<HTMLElement | null>(null)
-  // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time DOM lookup after the shell has committed its slot
-  useEffect(() => { setRightSlot(document.getElementById('rightpanelSlot')) }, [])
   const [workspaceOpen, setWorkspaceOpen] = useState(() => readPersisted('hermes-webui-workspace-panel') === 'open')
   const [queued, setQueued] = useState<QueuedTurn[]>([])
   const draining = useRef(false)
@@ -299,7 +294,7 @@ export function ChatView({ sessionId }: { sessionId: string | null }) {
         <span className="sr-only" aria-live="polite" id="a11yAnnouncer">{live?.status === 'done' ? m.done() : ''}</span>
       </div>
       {/* Always mounted beside main (its queries run only while open) so opening and closing animate and the edge tab is always there. */}
-      {workspace && sessionId && rightSlot && createPortal(<WorkspacePanel key={workspace} workspace={workspace} sessionId={sessionId} open={workspaceOpen} onToggle={() => setWorkspaceOpen((o) => !o)} onClose={() => setWorkspaceOpen(false)} />, rightSlot)}
+      {workspace && sessionId && <WorkspacePanel key={workspace} workspace={workspace} sessionId={sessionId} open={workspaceOpen} onToggle={() => setWorkspaceOpen((o) => !o)} onClose={() => setWorkspaceOpen(false)} />}
     </>
   )
 }
