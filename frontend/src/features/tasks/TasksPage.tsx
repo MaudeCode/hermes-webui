@@ -207,8 +207,8 @@ function TasksEmpty({ missing, unavailable, onNew }: { missing: boolean; unavail
       <EmptyState>
         <div>{missing ? m.cron_task_not_found() : m.cron_select_task()}</div>
         <div className="mt-3 flex justify-center gap-2">
-          {!isDesktop && <Button size="sm" onClick={openMobileSidebar}>{m.cron_browse_tasks()}</Button>}
-          <Button size="sm" variant="primary" onClick={onNew}><Plus size={12} aria-hidden="true" /> {m.cron_new_job()}</Button>
+          {!isDesktop && <Button onClick={openMobileSidebar}>{m.cron_browse_tasks()}</Button>}
+          <Button variant="primary" onClick={onNew}><Plus size={12} aria-hidden="true" /> {m.cron_new_job()}</Button>
         </div>
       </EmptyState>
     </HubPage>
@@ -246,13 +246,13 @@ function TaskDetail({ job, jobs, state, onAction, onEdit, onDuplicate, onDelete 
     ? <div className="text-xs text-muted" role="note">{m.cron_read_only_profile({ profile: ownerProfile })}</div>
     : (
       <div className="flex flex-wrap gap-2" role="group" aria-label={job.name ?? id}>
-        <Button size="sm" onClick={() => onAction('run')}><Play size={12} aria-hidden="true" /> {m.cron_run_now()}</Button>
+        <Button onClick={() => onAction('run')}><Play size={12} aria-hidden="true" /> {m.cron_run_now()}</Button>
         {resumable
-          ? <Button size="sm" onClick={() => onAction('resume')}><Play size={12} aria-hidden="true" /> {m.cron_resume()}</Button>
-          : <Button size="sm" onClick={() => onAction('pause')}><Pause size={12} aria-hidden="true" /> {m.cron_pause()}</Button>}
-        <Button size="sm" onClick={onEdit}>{m.edit()}</Button>
-        <Button size="sm" onClick={onDuplicate}><Copy size={12} aria-hidden="true" /> {m.cron_duplicate()}</Button>
-        <Button size="sm" variant="ghost" className="text-error" onClick={onDelete}><Trash2 size={12} aria-hidden="true" /> {m.delete()}</Button>
+          ? <Button onClick={() => onAction('resume')}><Play size={12} aria-hidden="true" /> {m.cron_resume()}</Button>
+          : <Button onClick={() => onAction('pause')}><Pause size={12} aria-hidden="true" /> {m.cron_pause()}</Button>}
+        <Button onClick={onEdit}>{m.edit()}</Button>
+        <Button onClick={onDuplicate}><Copy size={12} aria-hidden="true" /> {m.cron_duplicate()}</Button>
+        <Button variant="ghost" className="text-error" onClick={onDelete}><Trash2 size={12} aria-hidden="true" /> {m.delete()}</Button>
       </div>
     )
   return (

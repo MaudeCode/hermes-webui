@@ -118,7 +118,7 @@ export function JobForm({ mode, job, jobs, onCancel, onSaved }: { mode: EditorMo
     <HubPage
       title={title}
       id="taskEditor"
-      actions={<><Button size="sm" onClick={onCancel}>{m.cancel()}</Button><Button size="sm" variant="primary" type="submit" form={FORM_ID}>{m.save()}</Button></>}
+      actions={<><Button onClick={onCancel}>{m.cancel()}</Button><Button variant="primary" type="submit" form={FORM_ID}>{m.save()}</Button></>}
     >
       <form id={FORM_ID} onSubmit={(e) => { e.preventDefault(); void form.handleSubmit() }} className="mx-auto max-w-2xl" aria-label={title}>
         <div className={group}>
