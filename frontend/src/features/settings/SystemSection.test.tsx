@@ -6,9 +6,10 @@ import { BootstrapContext } from '../../app/bootstrap'
 import { DEFAULT_BOOTSTRAP } from '../../contracts/adapters/memory'
 import { keys } from '../../api/queryKeys'
 
+let settingsState: Record<string, unknown> = {}
 vi.mock('../../api/endpoints', () => ({
   restartAgent: vi.fn(), shutdownServer: vi.fn(), passkeyRegisterOptions: vi.fn(), passkeyRegister: vi.fn(), passkeyDelete: vi.fn(),
-  fetchSettings: vi.fn(() => Promise.resolve({ bot_name: 'Hermes', check_for_updates: false, update_channel: 'experimental' })),
+  fetchSettings: vi.fn(() => Promise.resolve(settingsState)),
   fetchSystemHealth: vi.fn(() => Promise.resolve({ status: 'ok' })),
   fetchAgentHealth: vi.fn(() => Promise.resolve({ alive: true })),
   fetchUpdatesCheck: vi.fn(() => Promise.resolve({ cached: true, webui: { behind: 0 }, agent: { behind: 0 } })),
@@ -29,7 +30,7 @@ function renderSystem() {
 }
 
 describe('SystemSection "Check now"', () => {
-  beforeEach(() => { vi.mocked(api.checkUpdatesNow).mockReset(); vi.mocked(showToast).mockReset() })
+  beforeEach(() => { settingsState = { bot_name: 'Hermes', check_for_updates: false, update_channel: 'experimental' }; vi.mocked(api.checkUpdatesNow).mockReset(); vi.mocked(showToast).mockReset() })
 
   it('runs one forced POST check, shows Checking… while pending, and renders the fresh result', async () => {
     let resolve!: (v: unknown) => void
@@ -52,9 +53,10 @@ describe('SystemSection "Check now"', () => {
     expect(screen.getByRole('button', { name: /update now/i })).toBeInTheDocument()
   })
 
-  it('sends the channel that is still being saved, not the stale cached one', async () => {
-    let finishSave!: (v: unknown) => void
-    vi.mocked(api.saveSettings).mockImplementation(() => new Promise((r) => { finishSave = r as typeof finishSave }))
+  it('waits for in-flight settings saves, then checks with the channel that actually persisted', async () => {
+    // Saves stay pending until released; each release persists its patch the way the server would.
+    const saves: (() => void)[] = []
+    vi.mocked(api.saveSettings).mockImplementation((patch) => new Promise((r) => { saves.push(() => { settingsState = { ...settingsState, ...patch }; r(settingsState) }) }))
     vi.mocked(api.checkUpdatesNow).mockResolvedValue({ cached: false })
     renderSystem()
     await screen.findByText(/up to date/i)
@@ -63,9 +65,17 @@ describe('SystemSection "Check now"', () => {
     await userEvent.click(trigger)
     await userEvent.click(await screen.findByRole('option', { name: /stable/i }))
     expect(trigger).toHaveTextContent(/stable/i)
+    await userEvent.click(screen.getByRole('switch', { name: /ignore agent updates/i }))
     await userEvent.click(screen.getByRole('button', { name: /check now/i }))
+    expect(screen.getByRole('button', { name: /checking/i })).toBeDisabled()
+    await new Promise((r) => setTimeout(r, 120))
+    expect(api.checkUpdatesNow).not.toHaveBeenCalled()
+    expect(saves).toHaveLength(2)
+    saves[0]!()
+    saves[1]!()
     await waitFor(() => expect(api.checkUpdatesNow).toHaveBeenCalledWith('stable'))
-    finishSave({ bot_name: 'Hermes', check_for_updates: false, update_channel: 'stable' })
+    expect(api.checkUpdatesNow).toHaveBeenCalledTimes(1)
+    expect(await screen.findByRole('button', { name: /check now/i })).toBeEnabled()
   })
 
   it('restores the control and toasts the error when the forced check fails', async () => {

@@ -10,6 +10,7 @@ export function useSettingsQuery() {
 export function useSaveSettings() {
   const qc = useQueryClient()
   return useMutation({
+    mutationKey: keys.settings,
     mutationFn: (patch: Record<string, unknown>) => api.saveSettings(patch),
     onSuccess: (data) => {
       if (data && typeof data === 'object' && 'bot_name' in data) qc.setQueryData(keys.settings, data)

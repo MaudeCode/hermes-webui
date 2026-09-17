@@ -34,7 +34,17 @@ export function SystemSection() {
   // A channel save still in flight is the authoritative selection; the cache only catches up on success.
   const pendingChannel = save.isPending ? save.variables?.update_channel : undefined
   const channel = typeof pendingChannel === 'string' ? pendingChannel : str('update_channel', 'stable')
-  const checkNow = useMutation({ mutationFn: () => api.checkUpdatesNow(channel), onSuccess: (d) => qc.setQueryData(keys.updates.check, d), onError: fail })
+  // The server reads persisted settings (channel, ignore-agent) for the forced check, so let every
+  // in-flight settings save settle first; the cache then holds whatever actually persisted.
+  const settledChannel = () => { const v = qc.getQueryData<Record<string, unknown>>(keys.settings)?.update_channel; return typeof v === 'string' ? v : undefined }
+  const checkNow = useMutation({
+    mutationFn: async () => {
+      while (qc.isMutating({ mutationKey: keys.settings })) await new Promise((r) => setTimeout(r, 50))
+      return api.checkUpdatesNow(settledChannel())
+    },
+    onSuccess: (d) => qc.setQueryData(keys.updates.check, d),
+    onError: fail,
+  })
   const apply = useMutation({ mutationFn: (action: 'apply' | 'force' | 'clear_lock') => api.applyUpdates(action), onSuccess: (r) => { showToast(r.message ?? r.status ?? m.saved()); void qc.invalidateQueries({ queryKey: keys.updates.check }) }, onError: fail })
   const registerPasskey = useMutation({
     mutationFn: async () => {
