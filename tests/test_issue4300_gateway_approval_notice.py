@@ -4,10 +4,6 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 GATEWAY_CHAT = (REPO / "api" / "gateway_chat.py").read_text(encoding="utf-8")
-MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
-
-
 def test_gateway_chat_has_approval_notice_emitted_attribute_check():
     """Verify _approval_notice_emitted attribute is checked before emitting."""
     assert "if not hasattr(s, \"_approval_notice_emitted\"):" in GATEWAY_CHAT
@@ -39,29 +35,6 @@ def test_gateway_chat_event_payload_contains_type_and_message():
     """Verify the event payload has type and message fields."""
     assert "approval_type = \"approval_gateway_unsupported\"" in GATEWAY_CHAT
     assert "approval_message = \"Approvals require a newer gateway. Upgrade the connected Hermes gateway to enable this.\"" in GATEWAY_CHAT
-
-
-def test_messages_js_handles_approval_gateway_unsupported_event():
-    """Verify client-side warning handler recognizes the event type."""
-    assert "d.type==='approval_gateway_unsupported'" in MESSAGES_JS
-
-
-def test_messages_js_references_i18n_key_for_approval_gateway_unsupported():
-    """Verify the i18n key is referenced in messages.js."""
-    # The key should be used in the message handling logic
-    assert "approval_gateway_unsupported" in MESSAGES_JS
-
-
-def test_i18n_js_has_approval_gateway_unsupported_key():
-    """Verify the i18n key exists in at least the English locale (first occurrence)."""
-    assert "approval_gateway_unsupported: 'Approvals require a newer gateway" in I18N_JS
-    lines = I18N_JS.split("\n")
-    en_end = next(i for i, l in enumerate(lines) if l.strip().startswith("zh:"))
-    found_in_english = any(
-        "approval_gateway_unsupported:" in l
-        for l in lines[:en_end]
-    )
-    assert found_in_english, "approval_gateway_unsupported key not found in English i18n locale"
 
 
 if __name__ == "__main__":

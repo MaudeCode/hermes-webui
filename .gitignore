@@ -53,6 +53,8 @@ docs/*
 !docs/rfcs/**
 !docs/architecture/
 !docs/architecture/**
+!docs/examples/
+!docs/examples/**
 
 # Local-only AI assistant context — never committed even under docs/.
 docs/AGENTS.md
@@ -73,9 +75,15 @@ graphify-out/
 
 .venv/
 
-# Dev-only lint tooling (ESLint runtime-error guard) — see TESTING.md
+# Node tooling. The frontend lockfile is authoritative and committed (HWEB-100).
 node_modules/
 package-lock.json
+!frontend/package-lock.json
+frontend/dist/
+frontend/src/paraglide/
+frontend/playwright-report/
+frontend/test-results/
+frontend/.tanstack/
 docs/ui-ux/review-shots/
 
 # Python build metadata (never commit generated egg-info)

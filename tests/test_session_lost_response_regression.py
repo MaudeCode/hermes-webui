@@ -493,15 +493,6 @@ def test_interrupted_marker_distinguishes_lost_worker_bookkeeping(monkeypatch):
     assert "worker bookkeeping no longer had an active run" in marker["content"]
 
 
-def test_messages_js_names_browser_sse_disconnect_separately():
-    repo = models.Path(__file__).parent.parent
-    js = (repo / "static" / "messages.js").read_text(encoding="utf-8")
-
-    assert "Connection interrupted" in js
-    assert "browser lost the live SSE connection" in js
-    assert "Connection lost" not in js
-
-
 def test_server_treats_broken_pipe_as_client_disconnect_not_500():
     server_py = (models.Path(__file__).parent.parent / "server.py").read_text(encoding="utf-8")
 

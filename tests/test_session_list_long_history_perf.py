@@ -228,23 +228,6 @@ def test_sessions_api_internal_typeerror_is_not_hidden_by_legacy_fallback(monkey
         )
 
 
-def test_session_list_fetch_adds_include_archived_only_when_toggle_is_on():
-    src = (pathlib.Path(__file__).parent.parent / "static" / "sessions.js").read_text(encoding="utf-8")
-
-    assert "qs.set('include_archived','1');" in src
-    assert "const archiveLimit=Math.min(" in src
-    assert "SESSION_ARCHIVED_MAX_LOADED_LIMIT" in src
-    assert "qs.set('archived_limit', String(archiveLimit));" in src
-    assert "api('/api/sessions' + sessionListQS" in src
-    assert "if(_showArchived) _archivedRowsLoadedLimit=SESSION_ARCHIVED_PAGE_SIZE;" in src
-    assert "className='session-archive-more'" in src
-    assert "_archivedRowsLoadedLimit=Math.min(" in src
-    assert "Math.max(SESSION_ARCHIVED_PAGE_SIZE, Number(_archivedRowsLoadedLimit)||SESSION_ARCHIVED_PAGE_SIZE)+SESSION_ARCHIVED_PAGE_SIZE" in src
-    assert "_archivedWebuiCount" in src
-    assert "sessData.archived_webui_count ?? sessData.archived_count ?? 0" in src
-    assert "archived_webui_count" in src
-
-
 def test_sessions_api_runtime_overlay_sorts_active_rows_first(monkeypatch):
     payload = {
         "sessions": [
@@ -304,22 +287,3 @@ def test_sessions_api_runtime_overlay_sorts_active_rows_first(monkeypatch):
     ]
     assert body["sessions"][0]["is_streaming"] is True
     assert body["sessions"][0]["updated_at"] == "400"
-
-
-def test_frontend_session_list_sorts_effective_streaming_rows_first():
-    src = (pathlib.Path(__file__).parent.parent / "static" / "sessions.js").read_text(encoding="utf-8")
-
-    assert "function _sessionSidebarSortCompare(a, b)" in src
-    assert "function _sessionRunningSortRank(session)" in src
-    assert "_isSessionEffectivelyStreaming(session)" in src
-    assert "session.active_stream_id && session.has_pending_user_message" in src
-    assert "const orderedSessions=[...sessions].sort(_sessionSidebarSortCompare);" in src
-
-
-def test_frontend_session_date_buckets_use_runtime_sort_timestamp():
-    src = (pathlib.Path(__file__).parent.parent / "static" / "sessions.js").read_text(encoding="utf-8")
-    loop_start = src.index("for(const s of unpinned){")
-    loop_body = src[loop_start:src.index("if(curItems.length) groups.push", loop_start)]
-
-    assert "const ts=_sessionSortTimestampMs(s);" in loop_body
-    assert "_sessionTimeBucketLabel(ts, now)" in loop_body

@@ -8,7 +8,7 @@
 > Prerequisites: SSH tunnel is active on port 8787. Open http://localhost:8787 in browser.
 > Server health check: curl http://127.0.0.1:8787/health should return {"status":"ok"}.
 >
-> Automated coverage: ~11,500 tests collected via `./scripts/test.sh tests/ --collect-only -q`. Tests run on every PR via GitHub Actions on Python 3.13 across five parallel shards, alongside a ruff lint gate, a headless browser smoke test, and a Docker smoke test. The suite covers the bootstrap/static wizard, real provider config persistence (`config.yaml` + `.env`), the `/api/onboarding/*` backend, the onboarding skip/existing-config guard, CSS regression coverage for thinking/tool card animation, streaming session persistence, mobile layout breakpoints, locale parity across 14 languages, and hundreds of issue/PR-pinned regression tests.
+> Automated coverage: ~10,500 tests collected via `./scripts/test.sh tests/ --collect-only -q`. Tests run on every PR via GitHub Actions on Python 3.13 across five parallel shards, alongside a ruff lint gate, the frontend gate (typecheck, lint, Vitest, deterministic build diff, Playwright), and a Docker smoke test. The suite covers the bootstrap/static wizard, real provider config persistence (`config.yaml` + `.env`), the `/api/onboarding/*` backend, the onboarding skip/existing-config guard, CSS regression coverage for thinking/tool card animation, streaming session persistence, mobile layout breakpoints, locale parity across 14 languages, and hundreds of issue/PR-pinned regression tests.
 > Run: `./scripts/test.sh`
 >
 > Local regression focus: verify that a previously closed workspace panel stays visually closed from first paint through boot completion on desktop refresh; there should be no brief open-then-close flash.
@@ -27,26 +27,31 @@ the full collection, and changing the chat provider only moves the active badge.
 
 ---
 
-## Static JS runtime lint (brick-class regression guard)
+## Frontend gate (typecheck, lint, Vitest, deterministic build, Playwright)
 
-Some JS bugs throw a `TypeError`/`ReferenceError` only when a specific function
-actually runs in the browser — `node --check` (lazy syntax check), source-presence
-tests, and even executing the file all miss them. Issue **#3162** was exactly this:
-a `const` binding reassigned inside `_ensureMessagesLoaded` bricked "load conversation
-messages" on every mobile message (v0.51.161–166).
-
-The guard is a curated, zero-false-positive ESLint config (`eslint.runtime-guard.config.mjs`)
-that runs ONLY runtime-error rules (`no-const-assign`, `no-import-assign`) over
-`static/**/*.js`. It is NOT a style linter and has no formatting rules.
+The browser app lives in `frontend/` (TanStack Start, React 19, TypeScript
+strict). Its production build is committed under `static/dist` and CI rebuilds
+it from the lockfile, failing when the committed output differs.
 
 ```bash
-# one-time dev setup (ESLint is a dev-only tool; the app stays pure Python + vanilla JS):
-npm install --no-save --before=<a-date-≥48h-ago> eslint   # package-age guard
-# run the guard:
-npm run lint:runtime
-# or directly:
-npx eslint --no-config-lookup -c eslint.runtime-guard.config.mjs "static/**/*.js"
+cd frontend
+npm ci                    # lockfile is authoritative
+npm run i18n:gate         # every locale carries every English key, placeholders match
+npm run typecheck         # tsc --noEmit, strict + exactOptionalPropertyTypes
+npm run lint              # ESLint: typescript-eslint strict, React hooks/compiler, contract rules
+npm test                  # Vitest: contracts (live fixtures), stream reducer, client, host protocol, components
+npm run build             # gate + compile + deterministic build + service worker
+npm run check-dist        # optional: committed static/dist matches a clean build byte for byte
+npm run e2e               # Playwright against server.py (desktop 1280x800 + mobile 390x844, screenshot baselines)
 ```
+
+The ESLint config forbids `fetch`, `EventSource`, `innerHTML` and
+`dangerouslySetInnerHTML` outside the reviewed modules (`api/client.ts`,
+`api/sse.ts`, `features/chat/render/`), so the typed client is the only HTTP
+path. `npm run e2e` boots two isolated `server.py` instances (open and
+password-protected) with Python from `HERMES_E2E_PYTHON` (default `python3`);
+baselines live in `frontend/e2e/__screenshots__/` and are refreshed with
+`npx playwright test --update-snapshots`.
 
 ## Python lint gate (ruff) — forward-looking, new-code-only
 
@@ -79,29 +84,6 @@ when ruff is present and **skips gracefully** when it isn't — so environments
 without ruff aren't blocked, while CI (which installs ruff) enforces it. The
 diff-scoped gate runs as the `lint` job in `.github/workflows/tests.yml` and is
 also part of the maintainer pre-release pre-gate.
-
-## Automated browser smoke (runtime brick-class gate)
-
-The ESLint guard above catches `const`-reassign / import-assign statically. The
-**browser smoke** catches the same brick class *dynamically* — plus anything else
-that throws only when a real browser executes the page (e.g. a `function X(){}` /
-`window.X = {}` name collision like #2715/#2771, which ESLint can't see).
-
-`tests/browser_smoke.py` boots the real `server.py` (agent-free, on an ephemeral
-port, with an isolated temp state dir) and loads the key pages in headless
-Chromium, failing if **any** console error or uncaught JS exception fires on load.
-It runs in CI (`.github/workflows/browser-smoke.yml`) on every PR and push to
-master, and locally:
-
-```bash
-pip install playwright && python -m playwright install chromium
-python tests/browser_smoke.py
-```
-
-It is intentionally **credential-free**: it strips every `*_API_KEY` from the
-environment before launching the server, needs no secrets, and does not drive a
-real model (it verifies the app *loads and initializes* cleanly — the brick class
-that breaks the page for everyone).
 
 ## Synthetic OIDC login gate (HWEB-72)
 
@@ -231,13 +213,7 @@ Use the jump-to-latest control to resume following the live tail; after that,
 new streamed content should remain visible at the bottom.
 
 
-`tests/test_static_js_runtime_lint.py` runs this automatically when eslint is present
-and **skips gracefully** (clear message) when it isn't — so environments without the
-node toolchain aren't blocked, while the release gate (which installs eslint) enforces it.
-
-To widen the guard, fix the pre-existing intentional hits first (as of 2026-05-30:
-`no-dupe-keys` ×92 i18n locale-fallback, `no-func-assign` ×2 panel override,
-`no-redeclare` ×1) then promote the rule into the config.
+Frontend regressions of this shape are caught by `npm run typecheck`, `npm run lint`, and the Playwright console-error gate (`frontend/e2e/fixtures.ts` fails a test on any console error or page exception).
 
 ---
 
@@ -2117,7 +2093,7 @@ Bridged CLI sessions:
 ---
 
 *Last updated: v0.51.792, July 1, 2026*
-*Total automated tests collected: ~11,500 (run `./scripts/test.sh tests/ --collect-only -q` for the exact current count)*
+*Total automated tests collected: ~10,500 (run `./scripts/test.sh tests/ --collect-only -q` for the exact current count)*
 *Regression gate: tests/test_regressions.py*
 *Run: ./scripts/test.sh*
 *Source: <repo>/*

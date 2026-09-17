@@ -9,8 +9,6 @@ from types import SimpleNamespace
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-COMMANDS_JS = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
-MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 ROUTES_PY = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 STREAMING_PY = (REPO_ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
 
@@ -663,27 +661,6 @@ def test_streaming_goal_hook_emits_evaluating_state_before_judge():
     assert "'state': 'continuing' if decision.get('should_continue') else 'idle'" in STREAMING_PY
 
 
-def test_frontend_has_goal_slash_command_and_status_event_handler():
-    assert "{name:'goal'" in COMMANDS_JS
-    assert "subArgs:['status','pause','resume','clear']" in COMMANDS_JS
-    assert "function cmdGoal" in COMMANDS_JS
-    assert "api('/api/goal'" in COMMANDS_JS
-    assert "stream_id" in COMMANDS_JS
-    assert "goal'" in MESSAGES_JS
-    assert "source.addEventListener('goal'" in MESSAGES_JS
-    assert "source.addEventListener('goal_continue'" in MESSAGES_JS
-    assert "['steer','interrupt','queue','terminal','goal','yolo'].includes(_pc.name)" in MESSAGES_JS
-    assert "queueSessionMessage" in MESSAGES_JS
-
-
-def test_frontend_goal_evaluating_state_uses_calm_composer_indicator():
-    assert "const goalState=String(d.state||'').trim();" in MESSAGES_JS
-    assert "t('goal_evaluating_progress')" in MESSAGES_JS
-    assert "if(goalState==='evaluating')" in MESSAGES_JS
-    assert "setComposerStatus(goalEvaluatingMessage);" in MESSAGES_JS
-    assert "return;" in MESSAGES_JS
-
-
 def test_goal_kickoff_forwards_explicit_model_pick_to_resolver(monkeypatch, tmp_path):
     """#6703: /api/goal must carry explicit_model_pick to the model resolver.
 
@@ -854,21 +831,6 @@ def test_goal_kickoff_defaults_explicit_model_pick_false(monkeypatch, tmp_path):
     assert resolver_kwargs.get("explicit_model_pick") is False
 
 
-def test_frontend_goal_sends_explicit_model_pick():
-    """#6703: cmdGoal must include explicit_model_pick in the /api/goal payload.
-
-    Mirrors the chat/start marker (messages.js) so the server honors a
-    persisted cross-provider session pick instead of reverting to the default.
-    """
-    goal_idx = COMMANDS_JS.find("function cmdGoal")
-    assert goal_idx != -1
-    goal_fn = COMMANDS_JS[goal_idx : COMMANDS_JS.find("\n}", goal_idx)]
-    assert "explicit_model_pick:_explicitPick" in goal_fn
-    assert "api('/api/goal'" in goal_fn
-    assert "_isCrossProviderPick" in goal_fn
-    assert "_readPendingSessionModel" in goal_fn
-
-
 def test_goal_kickoff_stamps_explicit_pick_signature(monkeypatch, tmp_path):
     """#6703: /api/goal must stamp model_explicit_pick_signature on explicit picks.
 
@@ -1017,32 +979,3 @@ def test_goal_kickoff_does_not_stamp_signature_without_explicit_pick(monkeypatch
     assert result["status"] == 200
     # A non-explicit kickoff leaves any prior signature untouched (chat-start parity).
     assert session.model_explicit_pick_signature == "stale-previous-sig"
-
-
-def test_frontend_goal_consumes_only_the_originating_pending_model_marker():
-    """A successful kickoff consumes its exact one-shot marker, not a rewrite."""
-    goal_idx = COMMANDS_JS.find("function cmdGoal")
-    assert goal_idx != -1
-    goal_fn = COMMANDS_JS[goal_idx : COMMANDS_JS.find("\n}", goal_idx)]
-    request_idx = goal_fn.index("const r=await api('/api/goal'")
-    clear_idx = goal_fn.index("_clearPendingSessionModel(activeSid)")
-    owner_check_idx = goal_fn.index("if(!commandOwnerCurrent(ownerCtx))return;", request_idx)
-    assert request_idx < clear_idx < owner_check_idx
-    assert "if(r&&r.stream_id&&_pendingPickMatch" in goal_fn
-    assert "_sameMarkerIdentity" in goal_fn
-    assert "_stillPending.marker_id===_pendingPick.marker_id" in goal_fn
-    assert "_stillPending.model===_goalModel" in goal_fn
-    assert "_stillPending.model_provider" in goal_fn
-
-
-def test_frontend_goal_control_command_keeps_pending_marker():
-    """A control-only /goal has no stream_id and cannot consume the marker."""
-    goal_idx = COMMANDS_JS.find("function cmdGoal")
-    assert goal_idx != -1
-    goal_fn = COMMANDS_JS[goal_idx : COMMANDS_JS.find("\n}", goal_idx)]
-    pre_request = goal_fn.split("const r=await api('/api/goal'")[0]
-    assert "_clearPendingSessionModel" not in pre_request
-    post_request = goal_fn.split("const r=await api('/api/goal'")[1]
-    clear_block = post_request[: post_request.index("if(!commandOwnerCurrent(ownerCtx))return;")]
-    assert "if(r&&r.stream_id&&_pendingPickMatch" in clear_block
-    assert "_clearPendingSessionModel(activeSid)" in clear_block

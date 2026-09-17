@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate favicon and install icons from static/brandmark.svg.
+"""Regenerate favicon and install icons from static/brand/brandmark.svg.
 
 Developer-only: uv run --no-project --with playwright python scripts/generate-brand-icons.py
 Uses Playwright's installed Chromium; the application has no build step.
@@ -12,7 +12,7 @@ from xml.etree import ElementTree as ET
 def main():
     from playwright.sync_api import sync_playwright
 
-    static = Path(__file__).resolve().parents[1] / "static"
+    static = Path(__file__).resolve().parents[1] / "static" / "brand"
     source = ET.parse(static / "brandmark.svg").getroot()
     ET.register_namespace("", "http://www.w3.org/2000/svg")
     shape = "".join(ET.tostring(child, encoding="unicode") for child in source)

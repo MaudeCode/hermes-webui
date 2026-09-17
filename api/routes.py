@@ -911,14 +911,19 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
     scan root explicit so per-client WebUI profile switches do not race on or
     leak through the skills tool's module-global ``SKILLS_DIR``.
     """
-    from agent.skill_utils import iter_skill_index_files
-    from tools.skills_tool import (
-        MAX_DESCRIPTION_LENGTH,
-        _EXCLUDED_SKILL_DIRS,
-        _parse_frontmatter,
-        _sort_skills,
-        skill_matches_platform,
-    )
+    try:
+        from agent.skill_utils import iter_skill_index_files
+        from tools.skills_tool import (
+            MAX_DESCRIPTION_LENGTH,
+            _EXCLUDED_SKILL_DIRS,
+            _parse_frontmatter,
+            _sort_skills,
+            skill_matches_platform,
+        )
+    except ImportError:
+        # No Hermes agent on this install (CI, packaged-only checkouts): the
+        # skills surface is empty rather than a 500 for every skills request.
+        return {"skills": []}
 
     if not skills_dir.exists():
         skills_dir.mkdir(parents=True, exist_ok=True)
@@ -12241,229 +12246,6 @@ def _redact_sidebar_title_fields(item: dict, redact_enabled: bool | None = None)
             item[field] = _redact_text(value, _enabled=redact_enabled)
 
 
-# ── Login page locale strings ─────────────────────────────────────────────────
-# Add entries here to support more languages on the login page.
-# The key must match the 'language' setting value (from static/i18n.js LOCALES).
-_LOGIN_LOCALE = {
-    "en": {
-        "lang": "en",
-        "title": "Sign in",
-        "subtitle": "Enter your password to continue",
-        "placeholder": "Password",
-        "btn": "Sign in",
-        "invalid_pw": "Invalid password",
-        "conn_failed": "Connection failed",
-    },
-    "fr": {
-        "lang": "fr-FR",
-        "title": "Se connecter",
-        "subtitle": "Entrez votre mot de passe pour continuer",
-        "placeholder": "Mot de passe",
-        "btn": "Se connecter",
-        "invalid_pw": "Mot de passe invalide",
-        "conn_failed": "\u00c9chec de la connexion",
-    },
-    "es": {
-        "lang": "es-ES",
-        "title": "Iniciar sesi\u00f3n",
-        "subtitle": "Introduce tu contrase\u00f1a para continuar",
-        "placeholder": "Contrase\u00f1a",
-        "btn": "Entrar",
-        "invalid_pw": "Contrase\u00f1a inv\u00e1lida",
-        "conn_failed": "Error de conexi\u00f3n",
-    },
-    "de": {
-        "lang": "de-DE",
-        "title": "Anmelden",
-        "subtitle": "Geben Sie Ihr Passwort ein, um fortzufahren",
-        "placeholder": "Passwort",
-        "btn": "Anmelden",
-        "invalid_pw": "Ung\u00fcltiges Passwort",
-        "conn_failed": "Verbindung fehlgeschlagen",
-    },
-    "ru": {
-        "lang": "ru-RU",
-        "title": "\u0412\u043e\u0439\u0442\u0438",
-        "subtitle": "\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043f\u0430\u0440\u043e\u043b\u044c, \u0447\u0442\u043e\u0431\u044b \u043f\u0440\u043e\u0434\u043e\u043b\u0436\u0438\u0442\u044c",
-        "placeholder": "\u041f\u0430\u0440\u043e\u043b\u044c",
-        "btn": "\u0412\u043e\u0439\u0442\u0438",
-        "invalid_pw": "\u041d\u0435\u0432\u0435\u0440\u043d\u044b\u0439 \u043f\u0430\u0440\u043e\u043b\u044c",
-        "conn_failed": "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0438\u0442\u044c\u0441\u044f",
-    },
-    "zh": {
-        "lang": "zh-CN",
-        "title": "\u767b\u5f55",
-        "subtitle": "\u8f93\u5165\u5bc6\u7801\u7ee7\u7eed\u4f7f\u7528",
-        "placeholder": "\u5bc6\u7801",
-        "btn": "\u767b\u5f55",
-        "invalid_pw": "\u5bc6\u7801\u9519\u8bef",
-        "conn_failed": "\u8fde\u63a5\u5931\u8d25",
-    },
-    "zh-Hant": {
-        "lang": "zh-TW",
-        "title": "\u767b\u5f55",
-        "subtitle": "\u8f38\u5165\u5bc6\u78bc\u7e7c\u7e8c\u4f7f\u7528",
-        "placeholder": "\u5bc6\u78bc",
-        "btn": "\u767b\u5f55",
-        "invalid_pw": "\u5bc6\u78bc\u932f\u8aa4",
-        "conn_failed": "\u9023\u63a5\u5931\u6557",
-    },
-    # Strings mirror static/i18n.js login_* keys for the corresponding locale.
-    # See issue #1442. When adding a new locale to LOCALES in i18n.js, also add
-    # the matching entry here — tests/test_login_locale_parity.py enforces this.
-    "it": {
-        "lang": "it-IT",
-        "title": "Accedi",
-        "subtitle": "Inserisci la password per continuare",
-        "placeholder": "Password",
-        "btn": "Accedi",
-        "invalid_pw": "Password non valida",
-        "conn_failed": "Connessione fallita",
-    },
-    "ja": {
-        "lang": "ja-JP",
-        "title": "\u30b5\u30a4\u30f3\u30a4\u30f3",
-        "subtitle": "\u30d1\u30b9\u30ef\u30fc\u30c9\u3092\u5165\u529b\u3057\u3066\u7d9a\u884c",
-        "placeholder": "\u30d1\u30b9\u30ef\u30fc\u30c9",
-        "btn": "\u30b5\u30a4\u30f3\u30a4\u30f3",
-        "invalid_pw": "\u30d1\u30b9\u30ef\u30fc\u30c9\u304c\u7121\u52b9\u3067\u3059",
-        "conn_failed": "\u63a5\u7d9a\u5931\u6557",
-    },
-    "pt": {
-        "lang": "pt-BR",
-        "title": "Entrar",
-        "subtitle": "Digite sua senha para continuar",
-        "placeholder": "Senha",
-        "btn": "Entrar",
-        "invalid_pw": "Senha inv\u00e1lida",
-        "conn_failed": "Falha na conex\u00e3o",
-    },
-    "ko": {
-        "lang": "ko-KR",
-        "title": "\ub85c\uadf8\uc778",
-        "subtitle": "\uacc4\uc18d\ud558\ub824\uba74 \ube44\ubc00\ubc88\ud638\ub97c \uc785\ub825\ud558\uc138\uc694",
-        "placeholder": "\ube44\ubc00\ubc88\ud638",
-        "btn": "\ub85c\uadf8\uc778",
-        "invalid_pw": "\ube44\ubc00\ubc88\ud638\uac00 \uc62c\ubc14\ub974\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4",
-        "conn_failed": "\uc5f0\uacb0 \uc2e4\ud328",
-    },
-    "tr": {
-        "lang": "tr-TR",
-        "title": "Oturum a\u00e7",
-        "subtitle": "Devam etmek i\u00e7in \u015fifrenizi girin",
-        "placeholder": "\u015eifre",
-        "btn": "Oturum a\u00e7",
-        "invalid_pw": "Ge\u00e7ersiz \u015fifre",
-        "conn_failed": "Ba\u011flant\u0131 ba\u015far\u0131s\u0131z",
-    },
-    "pl": {
-        "lang": "pl-PL",
-        "title": "Zaloguj si\u0119",
-        "subtitle": "Wpisz has\u0142o, aby kontynuowa\u0107",
-        "placeholder": "Has\u0142o",
-        "btn": "Zaloguj si\u0119",
-        "invalid_pw": "Nieprawid\u0142owe has\u0142o",
-        "conn_failed": "Po\u0142\u0105czenie nie powiod\u0142o si\u0119",
-    },
-    "vi": {
-        "lang": "vi",
-        "title": "\u0110\u0103ng nh\u1eadp",
-        "subtitle": "Nh\u1eadp m\u1eadt kh\u1ea9u c\u1ee7a b\u1ea1n \u0111\u1ec3 ti\u1ebfp t\u1ee5c",
-        "placeholder": "M\u1eadt kh\u1ea9u",
-        "btn": "\u0110\u0103ng nh\u1eadp",
-        "invalid_pw": "M\u1eadt kh\u1ea9u kh\u00f4ng h\u1ee3p l\u1ec7",
-        "conn_failed": "K\u1ebft n\u1ed1i th\u1ea5t b\u1ea1i",
-    },
-    "cs": {
-        "lang": "cs-CZ",
-        "title": "P\u0159ihl\u00e1sit se",
-        "subtitle": "Zadejte heslo pro pokra\u010dov\u00e1n\u00ed",
-        "placeholder": "Heslo",
-        "btn": "P\u0159ihl\u00e1sit se",
-        "invalid_pw": "Neplatn\u00e9 heslo",
-        "conn_failed": "P\u0159ipojen\u00ed selhalo",
-    },
-}
-
-
-def _resolve_login_locale_key(raw_lang: str | None) -> str:
-    """Resolve settings.language to a known _LOGIN_LOCALE key."""
-    if not raw_lang:
-        return "en"
-    lang = str(raw_lang).strip()
-    if not lang:
-        return "en"
-    if lang in _LOGIN_LOCALE:
-        return lang
-
-    normalized = lang.replace("_", "-")
-    lower = normalized.lower()
-
-    # Case-insensitive direct key match first.
-    for key in _LOGIN_LOCALE:
-        if key.lower() == lower:
-            return key
-
-    # Common Chinese aliases.
-    if lower == "zh" or lower.startswith("zh-cn") or lower.startswith("zh-sg") or lower.startswith("zh-hans"):
-        return "zh"
-    if lower.startswith("zh-tw") or lower.startswith("zh-hk") or lower.startswith("zh-mo") or lower.startswith("zh-hant"):
-        return "zh-Hant" if "zh-Hant" in _LOGIN_LOCALE else "zh"
-
-    # Fallback to base language subtag (e.g. en-US -> en).
-    base = lower.split("-", 1)[0]
-    for key in _LOGIN_LOCALE:
-        if key.lower() == base:
-            return key
-    return "en"
-
-# ── Login page (self-contained, no external deps) ────────────────────────────
-_LOGIN_PAGE_HTML = """<!doctype html>
-<html lang="{{LANG}}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{{BOT_NAME}} — {{LOGIN_TITLE}}</title>
-<link rel="icon" type="image/svg+xml" sizes="any" href="static/favicon-dark.svg">
-<link rel="stylesheet" href="static/brandmark.css?v={{WEBUI_VERSION}}">
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:#1a1a2e;color:#e8e8f0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
-  height:100vh;display:flex;align-items:center;justify-content:center}
-.card{background:#16213e;border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:36px 32px;
-  width:320px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.3)}
-.logo{width:48px;height:48px;color:#e8a030;margin:0 auto 12px}
-h1{font-size:18px;font-weight:600;margin-bottom:4px}
-.sub{font-size:12px;color:#8888aa;margin-bottom:24px}
-input{width:100%;padding:10px 14px;border-radius:10px;border:1px solid rgba(255,255,255,.1);
-  background:rgba(255,255,255,.04);color:#e8e8f0;font-size:14px;outline:none;margin-bottom:14px;
-  transition:border-color .15s}
-input:focus{border-color:rgba(124,185,255,.5);box-shadow:0 0 0 3px rgba(124,185,255,.1)}
-button{width:100%;padding:10px;border-radius:10px;border:none;background:rgba(124,185,255,.15);
-  border:1px solid rgba(124,185,255,.3);color:#7cb9ff;font-size:14px;font-weight:600;cursor:pointer;
-  transition:all .15s}
-button:hover{background:rgba(124,185,255,.25)}
-.oidc-login{display:block;margin-top:10px;padding:10px;border-radius:10px;text-decoration:none;
-  background:rgba(255,255,255,.04);border:1px solid rgba(111,214,164,.35);color:#6fd6a4;
-  font-size:14px;font-weight:600;cursor:pointer;transition:all .15s}
-.oidc-login:hover{background:rgba(111,214,164,.12)}
-.passkey-login{margin-top:10px;background:rgba(255,255,255,.04);border-color:rgba(232,160,48,.35);color:#e8a030}
-.err{color:#e94560;font-size:12px;margin-top:10px;display:none}
-</style></head><body>
-<div class="card">
-  <div class="logo brandmark" aria-hidden="true"></div>
-  <h1>{{BOT_NAME}}</h1>
-  <p class="sub">{{LOGIN_SUBTITLE}}</p>
-  <form id="login-form" data-invalid-pw="{{LOGIN_INVALID_PW}}" data-conn-failed="{{LOGIN_CONN_FAILED}}">
-    <input type="password" id="pw" placeholder="{{LOGIN_PLACEHOLDER}}" autofocus>
-    <button type="submit">{{LOGIN_BTN}}</button>
-    <button type="button" id="passkey-login" class="passkey-login" style="display:none">Sign in with passkey</button>
-    {{OIDC_LOGIN_HTML}}
-  </form>
-  <div class="err" id="err"></div>
-</div>
-<!-- Keep login.js relative so subpath mounts load it under the current scope. -->
-<script src="static/login.js?v={{WEBUI_VERSION}}"></script>
-</body></html>"""
-
-
 def _safe_login_redirect_path(raw_path: str | None) -> str:
     path = str(raw_path or "").strip()
     if not path:
@@ -12586,25 +12368,6 @@ def _redirect_no_store(handler, location: str) -> bool:
     _security_headers(handler)
     handler.end_headers()
     return True
-
-
-def _oidc_login_html(parsed) -> str:
-    try:
-        from api.auth_oidc import is_oidc_enabled
-    except Exception:
-        return ""
-    if not is_oidc_enabled():
-        return ""
-    next_path = _safe_login_redirect_path(
-        parse_qs(parsed.query or "").get("next", [""])[0]
-    )
-    href = "/api/auth/oidc/start"
-    if next_path != "/":
-        href += "?next=" + quote(next_path, safe="/")
-    return (
-        '<a id="oidc-login" class="oidc-login" '
-        f'href="{_html.escape(href, quote=True)}">Continue with SSO</a>'
-    )
 
 
 # ── Logs endpoint ─────────────────────────────────────────────────────────────
@@ -14405,28 +14168,6 @@ def _handle_health_restart(handler) -> bool:
     )
 
 
-def _serve_manifest(handler) -> bool:
-    """Serve static/manifest.json with the correct PWA Content-Type.
-
-    Shared by the root (/manifest.json, /manifest.webmanifest) and
-    session-prefixed (/session/manifest.json, /session/manifest.webmanifest)
-    routes so Firefox Android can fetch the manifest when installing from
-    a /session/<id> page.  See #2226.
-    """
-    static_root = api_config.get_static_root()
-    manifest_path = (static_root / "manifest.json").resolve()
-    if manifest_path.exists():
-        data = manifest_path.read_bytes()
-        handler.send_response(200)
-        handler.send_header("Content-Type", "application/manifest+json; charset=utf-8")
-        handler.send_header("Cache-Control", "no-store")
-        handler.send_header("Content-Length", str(len(data)))
-        handler.end_headers()
-        handler.wfile.write(data)
-        return True
-    return j(handler, {"error": "not found"}, status=404)
-
-
 def _saved_prompts_path() -> "Path":
     try:
         from api.profiles import get_active_hermes_home
@@ -14451,72 +14192,20 @@ def _save_saved_prompts(prompts: list) -> None:
     p.write_text(json.dumps(prompts, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-# In-process cache for the app-shell template. The `/`, `/index.html`, and
-# `/session/<id>` routes are the hottest navigations and each re-read the
-# ~190 KB static/index.html from disk and re-ran the two process-constant
-# substitutions (__WEBUI_VERSION__, __MAX_UPLOAD_BYTES__) on every request.
-# Those values are fixed for the process lifetime, so we cache the partially
-# rendered template here, keyed by (size, nanosecond mtime) exactly like
-# _STATIC_CACHE so a redeploy is picked up without a restart. The two values
-# that genuinely vary per request — the per-session CSRF token and the runtime
-# extension tags (inject_extension_tags) — are still applied on each request
-# against the cached base, so caching changes no observable output.
-_INDEX_SHELL_CACHE: dict = {}
-_INDEX_SHELL_CACHE_LOCK = threading.Lock()
-
-
-def _render_index_shell_base() -> str:
-    """Return static/index.html with the process-constant tokens substituted.
-
-    Cached and invalidated on (size, mtime_ns) change. The CSRF token and
-    extension-tag injection are intentionally NOT applied here — they vary per
-    request and are applied by the caller against this base string.
-    """
-    from api.updates import WEBUI_VERSION
-
-    index_path = api_config.get_index_html_path()
-    st = index_path.stat()
-    sig = (index_path, st.st_size, st.st_mtime_ns)
-    with _INDEX_SHELL_CACHE_LOCK:
-        cached = _INDEX_SHELL_CACHE.get("base")
-        if cached and cached[0] == sig:
-            return cached[1]
-    from urllib.parse import quote
-
-    version_token = quote(WEBUI_VERSION, safe="")
-    base = (
-        index_path.read_text(encoding="utf-8")
-        .replace("__WEBUI_VERSION__", version_token)
-        .replace("__MAX_UPLOAD_BYTES__", str(MAX_UPLOAD_BYTES))
-    )
-    with _INDEX_SHELL_CACHE_LOCK:
-        _INDEX_SHELL_CACHE["base"] = (sig, base)
-    return base
-
+_SHELL_LANG_RE = _re.compile(r"^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
 
 
 def _shell_language() -> str:
-    """The server `language` setting, resolved to a locale code, for the shell.
+    """The server ``language`` setting as a BCP 47 tag for the shell ``lang`` attribute.
 
-    boot.js gives the server setting precedence over `hermes-lang` once
-    settings load; emitting it with the shell lets index.html fold it into
-    localStorage before i18n.js reads it, so the locale preload and first paint
-    use the same bundle instead of fetching a stale localStorage locale and
-    then a third one (HWEB-65). The settings read is memoized on file identity,
-    so this costs a stat() per navigation. Returns "" when the stored value
-    resolves to nothing, so the client falls back to localStorage, then
-    English, and emits no bogus `lang=` request.
+    The client applies the resolved locale itself (``/api/bootstrap`` carries the
+    same value); this only seeds the first paint. Returns "" when unset or unsafe.
     """
     try:
-        from api import i18n_assets
-
-        lang = load_settings().get("language")
-        return i18n_assets.resolve_code(
-            api_config.get_static_root() / "i18n.js", lang
-        ) or ""
+        lang = str(load_settings().get("language") or "").strip()
     except Exception:
-        logger.debug("Failed to resolve the shell language", exc_info=True)
         return ""
+    return lang if _SHELL_LANG_RE.match(lang) else ""
 
 
 def _handle_session_get(handler, parsed) -> bool:
@@ -15158,11 +14847,243 @@ def _handle_session_get(handler, parsed) -> bool:
 
 
 
+def _handle_spa_get(handler, parsed):
+    """HWEB-100: serve the production SPA shell and its build artefacts.
+
+    Returns True when handled, None when the request is not a frontend route
+    (the API dispatch below continues).
+    """
+    from api import spa_shell
+
+    path = parsed.path
+    if path == "/sw.js":
+        return spa_shell.serve_service_worker(handler) or j(handler, {"error": "not found"}, status=404)
+    if path in ("/manifest.json", "/manifest.webmanifest", "/session/manifest.json", "/session/manifest.webmanifest"):
+        return spa_shell.serve_manifest(handler) or j(handler, {"error": "not found"}, status=404)
+    if path.startswith("/assets/"):
+        # The shell references hashed assets as ``./assets/<hash>`` relative to
+        # its <base href>, so they live at the mount root, not under /static/.
+        return spa_shell.serve_dist_file(handler, path[1:]) or j(handler, {"error": "not found"}, status=404)
+    if path.startswith("/static/dist/"):
+        rel = path[len("/static/dist/"):]
+        return spa_shell.serve_dist_file(handler, rel) or j(handler, {"error": "not found"}, status=404)
+    if spa_shell.is_spa_path(path):
+        if not spa_shell.dist_available():
+            return _serve_shell_unavailable(handler, RuntimeError("static/dist/index.html is missing; run `npm --prefix frontend run build`"))
+        extra = {"X-Robots-Tag": "noindex, nofollow"} if path == "/share" or path.startswith("/share/") else None
+        try:
+            return spa_shell.serve_shell(handler, path, lang=_shell_language() or "en", extra_headers=extra)
+        except Exception as exc:
+            # Shell routes never answer with JSON: a restart/update race that
+            # breaks the dist read renders the HTML 503 page instead.
+            return _serve_shell_unavailable(handler, exc)
+    return None
+
+
+_DASHBOARD_PLUGIN_PANEL_RE = _re.compile(r"^/dashboard-plugins/(?P<name>[a-z][a-z0-9_-]{0,63})/index\.html$")
+
+# Sandbox directive applied to every HTML document served for an extension or
+# plugin panel (HWEB-100). Without allow-same-origin the document runs with an
+# opaque origin: no cookies, no same-origin API reads, no access to the host DOM.
+from api.extensions import EXTENSION_PANEL_SANDBOX_CSP  # noqa: E402
+
+
+def _dashboard_plugin_panel_name(path: str) -> str | None:
+    match = _DASHBOARD_PLUGIN_PANEL_RE.match(path or "")
+    return match.group("name") if match else None
+
+
+def _serve_dashboard_plugin_panel(handler, plugin_name: str) -> bool:
+    """Serve the sandboxed panel document for a dashboard plugin.
+
+    A plugin that ships ``dashboard/dist/index.html`` is served as-is. A legacy
+    IIFE plugin (``dist/index.js`` plus optional ``dist/style.css``) gets a
+    generated wrapper that loads those assets and the extension SDK inside the
+    sandbox, so the unified protocol replaces the old in-page injection.
+    """
+    if not _dashboard_plugin_enabled(plugin_name):
+        return j(handler, {"error": "not found"}, status=404)
+    from api.plugins import PLUGIN_MANIFESTS, serve_plugin_static
+
+    if plugin_name not in PLUGIN_MANIFESTS:
+        return j(handler, {"error": "not found"}, status=404)
+    served = serve_plugin_static(plugin_name, "dist/index.html")
+    if served:
+        data = served[0]
+    else:
+        has_js = serve_plugin_static(plugin_name, "dist/index.js") is not None
+        if not has_js:
+            return j(handler, {"error": "not found"}, status=404)
+        has_css = serve_plugin_static(plugin_name, "dist/style.css") is not None
+        label = _html.escape(str(PLUGIN_MANIFESTS[plugin_name].get("label") or plugin_name))
+        css_tag = '<link rel="stylesheet" href="dist/style.css">' if has_css else ""
+        data = (
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            f"<title>{label}</title>{css_tag}</head><body>"
+            "<div id=\"root\"></div><div id=\"app\"></div>"
+            "<script src=\"../../static/dist/extension-sdk.js\"></script>"
+            "<script src=\"dist/index.js\"></script></body></html>"
+        ).encode("utf-8")
+    handler.send_response(200)
+    _security_headers(handler)
+    handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Content-Security-Policy", EXTENSION_PANEL_SANDBOX_CSP)
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    handler.wfile.write(data)
+    return True
+
+
+def _auth_status_payload(handler) -> dict:
+    """The public authentication state for this request (``/api/auth/status``, ``/api/bootstrap``)."""
+    from api.auth import (
+        _passkey_feature_flag_enabled,
+        ensure_trusted_auth_session,
+        get_password_hash,
+        is_auth_enabled,
+        is_oidc_auth_enabled,
+        is_trusted_auth_enabled,
+        session_can_manage_server,
+    )
+    from api.passkeys import registered_credentials
+
+    logged_in = False
+    session_info = None
+    auth_enabled = is_auth_enabled()
+    oidc_enabled = is_oidc_auth_enabled()
+    if auth_enabled:
+        session_info = ensure_trusted_auth_session(handler)
+        logged_in = bool(session_info)
+    passkey_flag = _passkey_feature_flag_enabled()
+    passkeys = registered_credentials() if passkey_flag else []
+    password_auth_enabled = get_password_hash() is not None
+    payload = {
+        "auth_enabled": auth_enabled,
+        "logged_in": logged_in,
+        "oidc_enabled": oidc_enabled,
+        "oidc_native_handoff_enabled": oidc_enabled,
+        "password_auth_enabled": password_auth_enabled,
+        "passwordless_enabled": bool(passkeys) and not password_auth_enabled,
+        "passkeys_enabled": bool(passkeys),
+        "passkeys_count": len(passkeys),
+        "passkey_feature_flag": passkey_flag,
+        "auth_disabled_acknowledged": bool(load_settings().get("auth_disabled_acknowledged")) if not auth_enabled else False,
+        "can_manage_server": session_can_manage_server(session_info),
+    }
+    if is_trusted_auth_enabled() or (session_info and session_info.get("auth_type") == "trusted"):
+        payload["trusted_auth_enabled"] = True
+    if session_info and session_info.get("auth_type") in {"trusted", "oidc"}:
+        payload["auth_type"] = session_info.get("auth_type")
+        payload["user"] = session_info.get("username")
+        payload["bound_profile"] = session_info.get("bound_profile")
+    return payload
+
+
+def _bootstrap_payload(handler) -> dict:
+    """``GET /api/bootstrap`` (HWEB-100): public runtime configuration and initial state.
+
+    Replaces the inline ``window.__HERMES_CONFIG__`` / bundle-version / extension
+    globals the legacy shell embedded in HTML. Served without authentication:
+    it carries no secret until a valid session cookie is present, in which case
+    the CSRF token for that session is included.
+    """
+    from api import profiles as profiles_api
+    from api.updates import WEBUI_VERSION
+
+    auth = _auth_status_payload(handler)
+    csrf_token = ""
+    try:
+        from api.auth import csrf_token_for_session, is_auth_enabled, parse_cookie, verify_session
+
+        if is_auth_enabled():
+            cookie_val = parse_cookie(handler) or getattr(handler, "_trusted_auth_session_cookie_value", None)
+            if cookie_val and verify_session(cookie_val):
+                csrf_token = csrf_token_for_session(cookie_val) or ""
+    except Exception:
+        csrf_token = ""
+    authenticated = (not auth["auth_enabled"]) or bool(auth.get("logged_in"))
+    settings = load_settings() if authenticated else {}
+    profile = None
+    onboarding = None
+    features = {
+        "dashboard": False,
+        "terminal_remote_backend": False,
+        "extensions": False,
+        "single_profile_mode": False,
+    }
+    if authenticated:
+        try:
+            active = profiles_api.get_active_profile_name()
+            profile = {"name": active, "is_default": bool(profiles_api._is_root_profile(active))}
+        except Exception:
+            profile = {"name": "default", "is_default": True}
+        try:
+            onboarding = {"completed": bool(get_onboarding_status().get("completed"))}
+        except Exception:
+            onboarding = {"completed": True}
+        try:
+            from api import dashboard_probe
+
+            features["dashboard"] = bool(dashboard_probe.get_dashboard_status().get("running"))
+        except Exception:
+            features["dashboard"] = False
+        try:
+            features["terminal_remote_backend"] = bool(_terminal_remote_backend_enabled())
+        except Exception:
+            features["terminal_remote_backend"] = False
+        try:
+            from api.extensions import get_extension_config
+
+            features["extensions"] = bool(get_extension_config().get("enabled"))
+        except Exception:
+            features["extensions"] = False
+        try:
+            features["single_profile_mode"] = bool(_is_isolated_profile_mode())
+        except Exception:
+            features["single_profile_mode"] = False
+    return {
+        "webui_version": WEBUI_VERSION,
+        "max_upload_bytes": int(MAX_UPLOAD_BYTES),
+        "csrf_token": csrf_token,
+        "language": (_shell_language() or "") if authenticated else "",
+        "bot_name": str(settings.get("bot_name") or "Hermes") if authenticated else "Hermes",
+        "auth": auth,
+        "profile": profile,
+        "onboarding": onboarding,
+        "features": features,
+    }
+
+
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
     proxy_result = _handle_extension_sidecar_proxy(handler, parsed, "GET")
     if proxy_result is not False:
         return proxy_result
+
+    spa_result = _handle_spa_get(handler, parsed)
+    if spa_result is not None:
+        return spa_result
+
+    if parsed.path == "/api/bootstrap":
+        return j(handler, _bootstrap_payload(handler), extra_headers={"Cache-Control": "no-store"})
+
+    if parsed.path == "/api/extensions/manifests":
+        from api.extension_manifests import build_manifests
+        from api.extensions import get_extension_status
+        from api.plugins import PLUGIN_MANIFESTS
+
+        return j(
+            handler,
+            build_manifests(extension_status=get_extension_status(), plugin_manifests=PLUGIN_MANIFESTS, plugin_enabled=_dashboard_plugin_enabled),
+            extra_headers={"Cache-Control": "no-store"},
+        )
+
+    plugin_panel = _dashboard_plugin_panel_name(parsed.path)
+    if plugin_panel is not None:
+        return _serve_dashboard_plugin_panel(handler, plugin_panel)
 
     if parsed.path.startswith("/session/static/"):
         # Strip the leading "/session" so _serve_static() sees a path that
@@ -15170,88 +15091,6 @@ def handle_get(handler, parsed) -> bool:
         # its own path-traversal sandbox via Path.resolve()+relative_to().
         stripped = parsed._replace(path=parsed.path[len("/session"):])
         return _serve_static(handler, stripped)
-
-    # Firefox Android resolves <link rel="manifest"> against the page URL
-    # before the dynamic <base href> script runs when installing from
-    # /session/<id>, producing requests like /session/manifest.json.
-    # Without this guard the catch-all below returns index.html instead of
-    # the manifest, and Firefox falls back to a generated letter icon.
-    # See #2226.
-    if parsed.path in ("/session/manifest.json", "/session/manifest.webmanifest"):
-        return _serve_manifest(handler)
-
-    if parsed.path in ("/", "/index.html", "/sessions") or parsed.path.startswith("/session/"):
-        try:
-            from api.extensions import inject_extension_tags
-
-            csrf_token = ""
-            try:
-                from api.auth import csrf_token_for_session, is_auth_enabled, parse_cookie, verify_session
-
-                if is_auth_enabled():
-                    cookie_val = parse_cookie(handler)
-                    if not cookie_val:
-                        cookie_val = getattr(handler, "_trusted_auth_session_cookie_value", None)
-                    if cookie_val and verify_session(cookie_val):
-                        csrf_token = csrf_token_for_session(cookie_val) or ""
-            except Exception:
-                csrf_token = ""
-
-            # The disk read + process-constant token substitutions are cached;
-            # only the per-session CSRF token, the server language, and the
-            # per-request extension tags are applied here (see
-            # _render_index_shell_base).
-            html = (
-                _render_index_shell_base()
-                .replace("__CSRF_TOKEN_JSON__", json.dumps(csrf_token))
-                .replace("__WEBUI_LANG_JSON__", json.dumps(_shell_language()))
-            )
-            return t(
-                handler,
-                inject_extension_tags(html),
-                content_type="text/html; charset=utf-8",
-            )
-        except Exception as exc:
-            return _serve_shell_unavailable(handler, exc)
-
-    if parsed.path == "/share" or parsed.path.startswith("/share/"):
-        share_path = (Path(__file__).parent.parent / "static" / "share.html").resolve()
-        return t(
-            handler,
-            share_path.read_text(encoding="utf-8"),
-            content_type="text/html; charset=utf-8",
-            extra_headers={
-                "X-Robots-Tag": "noindex, nofollow",
-            },
-        )
-
-    if parsed.path == "/login":
-        _settings = load_settings()
-        _bn = _html.escape(_settings.get("bot_name") or "Hermes")
-        _lang = _settings.get("language", "en")
-        _login_strings = _LOGIN_LOCALE[
-            _resolve_login_locale_key(_lang)
-        ]
-        from urllib.parse import quote
-        from api.updates import WEBUI_VERSION
-        version_token = quote(WEBUI_VERSION, safe="")
-        _page = (
-            _LOGIN_PAGE_HTML.replace("{{BOT_NAME}}", _bn)
-            .replace("{{WEBUI_VERSION}}", version_token)
-            .replace("{{LANG}}", _html.escape(_login_strings["lang"]))
-            .replace("{{LOGIN_TITLE}}", _html.escape(_login_strings["title"]))
-            .replace("{{LOGIN_SUBTITLE}}", _html.escape(_login_strings["subtitle"]))
-            .replace(
-                "{{LOGIN_PLACEHOLDER}}", _html.escape(_login_strings["placeholder"])
-            )
-            .replace("{{LOGIN_BTN}}", _html.escape(_login_strings["btn"]))
-            .replace("{{LOGIN_INVALID_PW}}", _html.escape(_login_strings["invalid_pw"]))
-            .replace(
-                "{{LOGIN_CONN_FAILED}}", _html.escape(_login_strings["conn_failed"])
-            )
-            .replace("{{OIDC_LOGIN_HTML}}", _oidc_login_html(parsed))
-        )
-        return t(handler, _page, content_type="text/html; charset=utf-8")
 
     if parsed.path == "/api/auth/oidc/start":
         from api.auth_oidc import OIDCAuthError, OIDCConfigError, build_authorization_redirect
@@ -15395,47 +15234,7 @@ def handle_get(handler, parsed) -> bool:
         return True
 
     if parsed.path == "/api/auth/status":
-        from api.auth import (
-            _passkey_feature_flag_enabled,
-            ensure_trusted_auth_session,
-            get_password_hash,
-            is_auth_enabled,
-            is_oidc_auth_enabled,
-            is_trusted_auth_enabled,
-            session_can_manage_server,
-        )
-        from api.passkeys import registered_credentials
-
-        logged_in = False
-        session_info = None
-        auth_enabled = is_auth_enabled()
-        oidc_enabled = is_oidc_auth_enabled()
-        if auth_enabled:
-            session_info = ensure_trusted_auth_session(handler)
-            logged_in = bool(session_info)
-        passkey_flag = _passkey_feature_flag_enabled()
-        passkeys = registered_credentials() if passkey_flag else []
-        password_auth_enabled = get_password_hash() is not None
-        payload = {
-            "auth_enabled": auth_enabled,
-            "logged_in": logged_in,
-            "oidc_enabled": oidc_enabled,
-            "oidc_native_handoff_enabled": oidc_enabled,
-            "password_auth_enabled": password_auth_enabled,
-            "passwordless_enabled": bool(passkeys) and not password_auth_enabled,
-            "passkeys_enabled": bool(passkeys),
-            "passkeys_count": len(passkeys),
-            "passkey_feature_flag": passkey_flag,
-            "auth_disabled_acknowledged": bool(load_settings().get("auth_disabled_acknowledged")) if not auth_enabled else False,
-            "can_manage_server": session_can_manage_server(session_info),
-        }
-        if is_trusted_auth_enabled() or (session_info and session_info.get("auth_type") == "trusted"):
-            payload["trusted_auth_enabled"] = True
-        if session_info and session_info.get("auth_type") in {"trusted", "oidc"}:
-            payload["auth_type"] = session_info.get("auth_type")
-            payload["user"] = session_info.get("username")
-            payload["bound_profile"] = session_info.get("bound_profile")
-        return j(handler, payload)
+        return j(handler, _auth_status_payload(handler))
 
     if parsed.path.startswith("/api/share/"):
         token = parsed.path[len("/api/share/"):].strip()
@@ -15451,35 +15250,9 @@ def handle_get(handler, parsed) -> bool:
             },
         )
 
-    if parsed.path in ("/manifest.json", "/manifest.webmanifest"):
-        return _serve_manifest(handler)
-
-    if parsed.path == "/sw.js":
-        static_root = api_config.get_static_root()
-        sw_path = (static_root / "sw.js").resolve()
-        if sw_path.exists():
-            # Inject the current git-derived version as the cache name so the
-            # service worker cache busts automatically on every new deploy.
-            from urllib.parse import quote
-            from api.updates import WEBUI_VERSION
-            version_token = quote(WEBUI_VERSION, safe="")
-            text = sw_path.read_text(encoding="utf-8").replace(
-                "__WEBUI_VERSION__", version_token
-            )
-            data = text.encode("utf-8")
-            handler.send_response(200)
-            handler.send_header("Content-Type", "application/javascript; charset=utf-8")
-            handler.send_header("Cache-Control", "no-store")
-            handler.send_header("Service-Worker-Allowed", "/")
-            handler.send_header("Content-Length", str(len(data)))
-            handler.end_headers()
-            handler.wfile.write(data)
-            return True
-        return j(handler, {"error": "not found"}, status=404)
-
     if parsed.path == "/favicon.ico":
         static_root = api_config.get_static_root()
-        ico_path = (static_root / "favicon.ico").resolve()
+        ico_path = (static_root / "brand" / "favicon.ico").resolve()
         if ico_path.exists() and ico_path.is_file():
             data = ico_path.read_bytes()
             handler.send_response(200)
@@ -19995,41 +19768,24 @@ def _serve_static(handler, parsed):
     st = static_file.stat()
     sig = (st.st_size, st.st_mtime_ns)
     cache_key = str(static_file)
-    # i18n.js is authored as one file holding every locale but served split:
-    # the English core, or one on-demand locale bundle (HWEB-37). The variant is
-    # part of the cache key and the ETag so the two never alias each other.
-    variant = None
-    if static_file.name == "i18n.js" and static_file.parent == static_root:
-        from api import i18n_assets
-
-        variant = i18n_assets.resolve_variant(
-            static_file, parse_qs(parsed.query).get("lang", [""])[0]
-        )
-        cache_key = f"{cache_key}#{variant}"
     raw = gz = etag = None
     with _STATIC_CACHE_LOCK:
         cached = _STATIC_CACHE.get(cache_key)
         if cached and cached[0] == sig:
             _, raw, gz, etag = cached
     if raw is None:
-        raw = (
-            i18n_assets.render(static_file, variant, sig)
-            if variant is not None
-            else static_file.read_bytes()
-        )
-        # Weak ETag: equality semantics, derived from filesystem identity
-        # (plus the served variant, for the split i18n.js).
-        etag = f'W/"{sig[0]:x}-{sig[1]:x}{("-" + variant) if variant else ""}"'
+        raw = static_file.read_bytes()
+        # Weak ETag: equality semantics, derived from filesystem identity.
+        etag = f'W/"{sig[0]:x}-{sig[1]:x}"'
         gz = (gzip.compress(raw, compresslevel=6)
               if ct in _COMPRESSIBLE_MIME and len(raw) > 1024
               else None)
         with _STATIC_CACHE_LOCK:
             _STATIC_CACHE[cache_key] = (sig, raw, gz, etag)
 
-    # The page template substitutes __WEBUI_VERSION__ at request time (see the
-    # `/`/`/index.html`/`/session/` branch above), and static/sw.js's
-    # SHELL_ASSETS list relies on the same convention. So a fingerprinted URL
-    # is safe to cache aggressively: any redeploy changes the URL.
+    # Files under static/ outside dist/ (brand icons, extension SDK) are
+    # requested with a ``?v=<version>`` fingerprint. A fingerprinted URL is
+    # safe to cache aggressively: any redeploy changes the URL.
     #
     # Two version tokens are NOT fingerprints, and caching either for a year
     # would strand clients on stale JS/CSS against a new backend with no way to

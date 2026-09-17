@@ -37,28 +37,6 @@ def _function_block(source: str, marker: str) -> str:
     return source[start:i]
 
 
-def test_load_session_follows_backend_continuation_hint():
-    """Reloading a stale pre-compression URL should follow the backend continuation hint.
-
-    The continuation is followed by re-entering loadSession() with the hinted id;
-    URL/localStorage are updated by that successful inner load, NOT written
-    speculatively up-front (so a rejected/cross-profile continuation can't poison
-    restore state with an unusable id — #2980 hardening).
-    """
-    src = SESSIONS_JS.read_text(encoding="utf-8")
-    load_session = _function_block(src, "async function loadSession")
-
-    assert "continuation_session_id" in load_session
-    assert "loadSession(continuationSid" in load_session
-    assert "skipContinuationResolve" in load_session
-    # The re-entrant follow must pass skipContinuationResolve:true to prevent recursion.
-    assert "skipContinuationResolve:true" in load_session
-    # Restore-state safety: the continuation id must NOT be written to localStorage/URL
-    # before the inner load proves it is loadable.
-    assert "localStorage.setItem('hermes-webui-session',continuationSid)" not in load_session
-    assert "_setActiveSessionUrl(continuationSid)" not in load_session
-
-
 def test_continuation_lookup_is_profile_scoped(tmp_path, monkeypatch):
     """#2980 hardening: a continuation in a DIFFERENT profile must NOT be resolved.
 

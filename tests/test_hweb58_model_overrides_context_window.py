@@ -165,25 +165,6 @@ def test_absent_or_empty_overrides_change_nothing(monkeypatch, tmp_path):
             assert _resolve(monkeypatch, tmp_path, overrides, model) == baseline
 
 
-def test_override_moves_the_rendered_ring(monkeypatch, tmp_path):
-    """End to end: the override reaches the percentage the ring actually renders."""
-    prompt_tokens = 20_000
-    overrides = {"anthropic": {CATALOG_MODEL: {"context_window": 25_000}}}
-
-    def render(context_length):
-        return _run_context_indicator(
-            {"last_prompt_tokens": prompt_tokens, "context_length": context_length}
-        )
-
-    catalog_ring = render(_resolve(monkeypatch, tmp_path, None, CATALOG_MODEL))
-    override_ring = render(_resolve(monkeypatch, tmp_path, overrides, CATALOG_MODEL))
-
-    assert catalog_ring["percent"] == "20"
-    assert catalog_ring["tokens"].endswith("20000 / 100000 tokens used")
-    assert override_ring["percent"] == "80"
-    assert override_ring["tokens"].endswith("20000 / 25000 tokens used")
-
-
 # ── Agent-free halves: these run everywhere, including CI ──────────────────
 
 
@@ -191,13 +172,6 @@ def _render_ring(prompt_tokens, context_length):
     return _run_context_indicator(
         {"last_prompt_tokens": prompt_tokens, "context_length": context_length}
     )
-
-
-def test_ring_divides_by_the_denominator_it_is_handed():
-    """The resolved window drives the rendered percentage, whatever its source."""
-    assert _render_ring(20_000, 100_000)["percent"] == "20"
-    assert _render_ring(20_000, 25_000)["percent"] == "80"
-    assert _render_ring(20_000, 25_000)["tokens"].endswith("20000 / 25000 tokens used")
 
 
 def test_resolver_hands_provider_and_model_to_the_override_aware_lookup(monkeypatch):

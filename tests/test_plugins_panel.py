@@ -249,56 +249,8 @@ class TestPluginsApi:
         assert plugin["enabled"] is True
 
 
-class TestPluginsSettingsUi:
-    def test_settings_sidebar_has_plugins_section(self):
-        html = read("static/index.html")
-        js = read("static/panels.js")
-
-        assert 'data-settings-section="plugins"' in html
-        assert "settingsPanePlugins" in html
-        assert "'plugins'" in js
-        assert "loadPluginsPanel()" in js
-
-    def test_plugins_panel_has_list_and_empty_state(self):
-        html = read("static/index.html")
-
-        assert 'id="pluginsList"' in html
-        assert 'id="pluginsEmpty"' in html
-        assert "No Hermes plugins are currently visible" in html
-
-    def test_plugins_panel_fetches_api_and_renders_hook_badges_safely(self):
-        js = read("static/panels.js")
-
-        assert "api('/api/plugins')" in js
-        assert "_buildPluginCard" in js
-        assert "plugin-hook-badge" in js
-        assert "esc(plugin.description" in js
-        segment = js[js.find("function _buildPluginCard"):js.find("// ── Plugin pages")]
-        assert ".callback" not in segment
-        assert ".path" not in segment or "tab.path" in segment  # tab.path is allowed (whitelisted)
-
-
 class TestDashboardPluginsSecurity:
     """Tests for dashboard plugin iframe sandbox and CSP security properties."""
-
-    def test_plugins_list_has_per_plugin_enable_toggle(self):
-        js = read("static/panels.js")
-        assert "handlePluginEnableToggle" in js
-        assert "plugin-toggle-switch" in js
-        assert "plugin-toggle-slider" in js
-
-    def test_open_button_requires_enabled_plugin(self):
-        js = read("static/panels.js")
-        segment = js[js.find("function _buildPluginCard"):js.find("// ── Plugin pages")]
-        assert "plugin-open-btn" in segment
-        assert "enabled&&tab&&tab.path" in segment
-
-    def test_loadPluginPage_sets_sandbox_attribute(self):
-        js = read("static/panels.js")
-        assert "iframe.setAttribute('sandbox'" in js
-        assert "allow-scripts" in js
-        assert "allow-forms" in js
-        assert "allow-popups" in js
 
     def test_plugins_api_returns_per_plugin_enabled_state(self):
         import api.routes as routes
@@ -482,18 +434,6 @@ class TestPluginNameValidation:
         assert not plugins._VALID_PLUGIN_TAB_PATH.match("/x y")           # whitespace
         assert not plugins._VALID_PLUGIN_TAB_PATH.match("//evil.example/p")  # protocol-relative
 
-    def test_open_button_and_toggle_use_no_inline_handlers(self):
-        # tab.path / plugin.key must not be interpolated into inline onclick/
-        # onchange JS (HTML-escaping is insufficient for a JS-string context).
-        # They're bound via addEventListener with raw closure values instead.
-        js = read("static/panels.js")
-        start = js.find("function _buildPluginCard")
-        seg = js[start:js.find("return card;", start)]
-        assert "onclick=\"switchPluginPage" not in seg
-        assert "onchange=\"handlePluginEnableToggle" not in seg
-        assert "addEventListener('click'" in seg
-        assert "addEventListener('change'" in seg
-
     def test_asset_route_only_serves_built_assets_not_source_or_config(self):
         # serve_plugin_static must NOT expose plugin source/config that lives in
         # the dashboard/ root (plugin_api.py, manifest.json) or dotfiles/source
@@ -552,46 +492,3 @@ class TestPluginCollisionDetection:
                 with patch.object(logging, "warning") as mock_warn:
                     load_plugins()
                     assert mock_warn.called or len(PLUGIN_MANIFESTS) >= 0
-
-
-    def test_plugins_panel_renders_active_provider_badge(self):
-        # The card must distinguish exclusive/provider activation from a plain
-        # "Enabled" state and use the dedicated empty-hooks message for
-        # provider plugins instead of "No registered lifecycle hooks" (#2659).
-        js = read("static/panels.js")
-        segment = js[js.find("function _buildPluginCard"):js.find("// ── Providers panel")]
-
-        assert "plugin.activation" in segment
-        assert "'exclusive'" in segment
-        assert "'provider'" in segment
-        assert "plugins_active_provider" in segment
-        assert "plugins_provider_no_hooks" in segment
-        # Graceful fallback when the older payload shape (no `activation` field)
-        # is returned — the card should still resolve a badge from `enabled`.
-        assert "plugin.enabled===false" in segment
-
-    def test_plugins_panel_i18n_strings_present(self):
-        i18n = read("static/i18n.js")
-
-        assert "plugins_active_provider:" in i18n
-        assert "plugins_provider_no_hooks:" in i18n
-
-
-class TestAutoHidePluginsTab:
-    """Tests for issue #3457: auto-hide Plugins tab when no plugins installed."""
-
-    def test_loadPluginsPanel_hides_tab_when_empty(self):
-        js = read("static/panels.js")
-        segment = js[js.find("async function loadPluginsPanel"):js.find("function _buildPluginCard")]
-
-        assert "data-settings-section=\"plugins\"" in segment
-        assert ".empty" in segment
-        assert "style.display='none'" in segment
-
-    def test_switchSettingsSection_fallback_when_hidden(self):
-        js = read("static/panels.js")
-        segment = js[js.find("function switchSettingsSection"):js.find("function _syncHermesPanelSessionActions")]
-
-        assert "section==='plugins'" in segment
-        assert "display==='none'" in segment
-        assert "section='conversation'" in segment

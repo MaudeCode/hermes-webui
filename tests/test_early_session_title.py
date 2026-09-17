@@ -154,15 +154,3 @@ def test_prompt_prefix_manual_title_is_not_treated_as_provisional():
     assert provisional.startswith(manual_prefix)
     assert manual_prefix != provisional
     assert not _is_provisional_title(manual_prefix, messages)
-
-
-def test_messages_js_applies_chat_start_title():
-    src = Path("static/messages.js").read_text(encoding="utf-8")
-    assert "applySessionTitleUpdate" in src
-    assert "startData.title" in src or "provisional_title" in src
-    assert "addEventListener('title'" in src
-    assert "_sessionTitleLooksDefaultOrProvisional" in src
-    assert "options.force" in src
-    assert "_sessionTitleProvisionalBySid" in src
-    assert "rememberProvisional:true" in src
-    assert "provisionalText:displayText.slice(0,64)" in src

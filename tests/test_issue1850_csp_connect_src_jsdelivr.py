@@ -17,16 +17,6 @@ def _policy() -> str:
 class TestCSPConnectSrcJsdelivr:
     """connect-src must allow cdn.jsdelivr.net for xterm source map fetches."""
 
-    def test_connect_src_includes_jsdelivr(self):
-        """connect-src must include https://cdn.jsdelivr.net."""
-        policy = _policy()
-        connect_match = re.search(r"connect-src\s+([^;]+);", policy)
-        assert connect_match, "connect-src directive must exist in CSP"
-        assert "https://cdn.jsdelivr.net" in connect_match.group(1), (
-            "connect-src must allow cdn.jsdelivr.net — xterm.js source maps are "
-            "fetched from that origin and the CSP blocks them without this entry"
-        )
-
     def test_connect_src_still_includes_self(self):
         """connect-src must still include 'self' alongside the new jsdelivr entry."""
         policy = _policy()

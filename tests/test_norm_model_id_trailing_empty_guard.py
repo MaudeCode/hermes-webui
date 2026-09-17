@@ -1,21 +1,7 @@
-"""Opus pre-release follow-up for stage-267:
-
-#1454/#1474 split(':')[-1] trailing-empty guard — when a malformed configured model id
-has a trailing colon (e.g. `@custom:foo:bar:`), the new normalization would collapse
-two distinct ids to the empty string. Defensive `parts[-1] or s` falls back to the
-original input so distinct ids stay distinct in the configured-model badge filter.
-
-Mirrors:
-  api/config.py        _norm_model_id
-  static/ui.js         _normalizeConfiguredModelKey
-"""
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
 CONFIG_PY = (REPO_ROOT / "api" / "config.py").read_text(encoding="utf-8")
-UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
-
-
 def _exec_norm():
     """Re-execute the _norm_model_id closure body via a synthetic def, returning the function."""
     # Extract source between `def _norm_model_id(model_id: str) -> str:` and the next `def _build_configured_model_badges`
@@ -67,21 +53,3 @@ def test_norm_model_id_simple_inputs_unchanged():
     assert norm("provider/model-name") == "model.name"
     assert norm("") == ""
     assert norm(None) == ""
-
-
-def test_ui_js_mirror_has_trailing_empty_guard():
-    """Frontend _normalizeConfiguredModelKey must mirror the backend guard."""
-    # The colon branch now uses indexOf(':',1)+slice to strip only @provider: prefix
-    assert "indexOf(':',1)" in UI_JS, "ui.js no longer uses indexOf-slice pattern for colon branch"
-    snippet = UI_JS[UI_JS.find("function _normalizeConfiguredModelKey"):UI_JS.find("function _normalizeConfiguredModelKey") + 1800]
-    assert "cand||s" in snippet, "ui.js missing trailing-empty guard `||s` fallback on colon branch"
-    # The slash branch now uses replace(/^[^/]+\//, '') instead of split('/').pop()
-    # to preserve multi-slash vendor hierarchy (#3360).  Verify the new pattern
-    # and its trailing-empty guard (the `||s` suffix).
-    assert "replace(/^[^/]+\\/" in snippet, (
-        "ui.js slash branch should use replace(/^[^/]+\\//) pattern (#3360)"
-    )
-    assert "'')||s" in snippet, (
-        "ui.js slash branch should have ||s trailing-empty guard (#3360)"
-    )
-

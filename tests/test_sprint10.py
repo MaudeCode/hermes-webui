@@ -88,12 +88,6 @@ def test_session_crud_still_works(cleanup_test_sessions):
     assert data["session"]["session_id"] == sid
     post("/api/session/delete", {"session_id": sid})
 
-def test_static_files_still_served(cleanup_test_sessions):
-    for f in ["ui.js", "workspace.js", "sessions.js", "messages.js", "panels.js", "boot.js"]:
-        src, status = get_text(f"/static/{f}")
-        assert status == 200, f"/static/{f} returned {status}"
-        assert len(src) > 100
-
 # ── Cancel endpoint ────────────────────────────────────────────────────────
 
 def test_cancel_requires_stream_id(cleanup_test_sessions):
@@ -108,16 +102,6 @@ def test_cancel_nonexistent_stream(cleanup_test_sessions):
     assert status == 200
     assert data["ok"] is True
     assert data["cancelled"] is False
-
-def test_send_button_in_html(cleanup_test_sessions):
-    src, _ = get_text("/")
-    assert "btnSend" in src                   # single primary action button present
-    assert 'id="btnCancel"' not in src        # deprecated composer cancel button removed
-
-def test_cancel_function_in_boot_js(cleanup_test_sessions):
-    src, _ = get_text("/static/boot.js")
-    assert "async function cancelStream(" in src
-    assert "api/chat/cancel" in src
 
 # ── Cron history ───────────────────────────────────────────────────────────
 
@@ -172,18 +156,6 @@ def test_crons_output_still_returns_valid_job_outputs(monkeypatch, tmp_path):
     assert body["job_id"] == "job_123"
     assert body["outputs"] == [{"filename": "run.md", "content": "# Cron Job\n\n## Response\nexpected output\n"}]
 
-def test_cron_history_button_in_panels_js(cleanup_test_sessions):
-    src, _ = get_text("/static/panels.js")
-    # After the main-view refactor, cron runs load inline into the detail card
-    # via _loadCronDetailRuns() instead of a separate "All runs" button.
-    assert "_loadCronDetailRuns" in src
-    assert "cron_last_output" in src  # i18n key used by the runs card
-
-def test_cron_output_snippet_helper(cleanup_test_sessions):
-    src, _ = get_text("/static/panels.js")
-    assert "_cronOutputSnippet" in src
-
-
 def test_cron_output_usage_metadata_parses_optional_fields(cleanup_test_sessions):
     from api.routes import _cron_output_usage_metadata
 
@@ -206,16 +178,6 @@ def test_cron_output_usage_metadata_parses_optional_fields(cleanup_test_sessions
     assert usage["total_tokens"] == 13023
     assert usage["estimated_cost_usd"] == 0.0123
     assert usage["duration_seconds"] == 42.5
-
-
-def test_cron_output_usage_strip_render_hook(cleanup_test_sessions):
-    src, _ = get_text("/static/panels.js")
-    css, _ = get_text("/static/style.css")
-
-    assert "_formatCronRunUsageStrip(run.usage)" in src
-    assert "_formatCronRunUsageStrip(data.usage)" in src
-    assert "cron-run-usage-strip" in src
-    assert ".cron-run-usage-strip" in css
 
 
 def test_cron_output_window_preserves_response_after_large_prompt(cleanup_test_sessions):
@@ -252,26 +214,3 @@ def test_cron_output_window_without_response_uses_tail(cleanup_test_sessions):
     assert "old prompt" not in window
 
 # ── Tool card polish ───────────────────────────────────────────────────────
-
-def test_tool_card_running_dot_in_css(cleanup_test_sessions):
-    src, _ = get_text("/static/style.css")
-    assert "tool-card-running-dot" in src
-
-def test_tool_card_show_more_in_ui_js(cleanup_test_sessions):
-    src, _ = get_text("/static/ui.js")
-    assert "Show more" in src
-    assert "tool-card-more" in src
-
-def test_tool_card_smart_truncation_in_ui_js(cleanup_test_sessions):
-    src, _ = get_text("/static/ui.js")
-    assert "displaySnippet" in src
-    assert "lastBreak" in src
-
-def test_cancel_sse_event_handler_in_messages_js(cleanup_test_sessions):
-    src, _ = get_text("/static/messages.js")
-    assert "addEventListener('cancel'" in src
-    assert "Task cancelled" in src
-
-def test_active_stream_id_tracked(cleanup_test_sessions):
-    src, _ = get_text("/static/messages.js")
-    assert "S.activeStreamId" in src

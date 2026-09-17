@@ -8,11 +8,6 @@ from types import SimpleNamespace
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(REPO_ROOT))
 
-PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
-STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
-INDEX_HTML = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
-
-
 class _FakeHandler:
     def __init__(self):
         self.status = None
@@ -144,43 +139,6 @@ def test_insights_model_breakdown_tracks_tokens_cost_and_shares(monkeypatch, tmp
     assert cheap["cost"] == 0.05
 
 
-def test_insights_frontend_renders_daily_token_chart_and_model_usage_table():
-    assert "daily_tokens" in PANELS_JS
-    assert "insights_daily_tokens" in PANELS_JS
-    assert "insights-daily-token-chart" in PANELS_JS
-    assert "insights-daily-bar-input" in PANELS_JS
-    assert "insights-daily-bar-output" in PANELS_JS
-    assert "insights_model_tokens" in PANELS_JS
-    assert "insights_model_cache" in PANELS_JS
-    assert "insights_cache_hit" in PANELS_JS
-    assert "insights_model_cost" in PANELS_JS
-    assert "insights_model_share" in PANELS_JS
-    assert "insights_model_team" not in PANELS_JS
-    assert "m.profile || m.team" not in PANELS_JS
-    assert "insights_no_usage_data" in PANELS_JS
-
-
-def test_insights_frontend_has_daily_chart_styles_and_range_switching_hooks():
-    assert "insightsPeriod" in INDEX_HTML
-    assert 'option value="7"' in INDEX_HTML
-    assert 'option value="30"' in INDEX_HTML
-    assert 'option value="90"' in INDEX_HTML
-    assert "loadInsights()" in INDEX_HTML
-    assert "/api/insights?days=${period}" in PANELS_JS
-    assert ".insights-daily-token-chart" in STYLE_CSS
-    assert ".insights-daily-bar-output" in STYLE_CSS
-    assert ".insights-model-cost" in STYLE_CSS
-    assert ".insights-model-team" not in STYLE_CSS
-
-
-def test_insights_period_select_uses_shared_chevron_styles():
-    assert 'id="insightsPeriod" class="insights-period-select"' in INDEX_HTML
-    assert 'id="insightsPeriod" onchange="loadInsights()" style=' not in INDEX_HTML
-    assert ".insights-period-select" in STYLE_CSS
-    assert "width:auto" in STYLE_CSS.split(".insights-period-select", 1)[1].split("}", 1)[0]
-    assert "padding:6px 28px 6px 10px" in STYLE_CSS
-
-
 def _make_daily_rows(n):
     rows = []
     for i in range(n):
@@ -236,28 +194,6 @@ def _py_bucket(rows):
     return result
 
 
-def test_insights_bucketing_helper_preserves_short_ranges():
-    # _bucketDailyTokensForChart must exist in panels.js
-    assert '_bucketDailyTokensForChart' in PANELS_JS
-
-    # 7-day: unchanged (≤ 30 threshold)
-    rows7 = _make_daily_rows(7)
-    bucketed7 = _py_bucket(rows7)
-    assert len(bucketed7) == 7, f'7-day should stay 7 bars, got {len(bucketed7)}'
-    assert bucketed7[0]['input_tokens'] == 100
-
-    # 30-day: exactly 30 → unchanged
-    rows30 = _make_daily_rows(30)
-    bucketed30 = _py_bucket(rows30)
-    assert len(bucketed30) == 30, f'30-day should stay 30 bars, got {len(bucketed30)}'
-
-    # 31-day: bucketed
-    rows31 = _make_daily_rows(31)
-    bucketed31 = _py_bucket(rows31)
-    assert len(bucketed31) < 31, f'31-day should be bucketed, got {len(bucketed31)}'
-    assert len(bucketed31) <= 16  # ceil(31/2)
-
-
 def test_insights_bucketing_helper_bounds_long_ranges():
     # 90-day → 2-day buckets → 45 bars
     rows90 = _make_daily_rows(90)
@@ -290,51 +226,6 @@ def test_insights_bucketing_helper_preserves_label_and_title_fields():
     assert 'title' in bucketed90[0], 'bucket row must have .title'
     assert '2026-01-01' in bucketed90[0]['title'], f'title should include start date, got {bucketed90[0]["title"]}'
     assert len(bucketed90[0]['label']) <= 12, f'label should be short, got {bucketed90[0]["label"]}'
-
-
-def test_insights_render_loop_uses_bucket_helper():
-    src = PANELS_JS
-    daily_section_start = src.find('// Daily token trend')
-    daily_section_end = src.find('// Models table', daily_section_start)
-    daily_section = src[daily_section_start:daily_section_end]
-
-    assert '_bucketDailyTokensForChart' in daily_section, '_bucketDailyTokensForChart must be called in the render loop'
-    assert 'const chartRows' in daily_section, 'chartRows variable must be used instead of dailyTokens.map directly'
-
-
-def test_insights_css_chart_shrink_safe():
-    assert '.insights-daily-token-chart' in STYLE_CSS
-    chart_line = [line for line in STYLE_CSS.splitlines() if '.insights-daily-token-chart' in line][0]
-    # minmax(0,1fr) instead of minmax(12px,1fr) lets long-range bars shrink to fit the card
-    assert 'minmax(0,1fr)' in chart_line, f'chart must use minmax(0,1fr) for shrink-safe columns, got: {chart_line}'
-    assert 'overflow:hidden' in chart_line, 'chart must have overflow:hidden to prevent horizontal scroll'
-    assert 'max-width:100%' in chart_line or 'max-width' in chart_line, 'chart should constrain max-width'
-
-
-def test_insights_mobile_layout_stacks_usage_grid():
-    # Regression test for issue #2104: Token Breakdown + Models should
-    # stack on mobile instead of being side-by-side causing horizontal overflow
-    assert 'insights-usage-grid' in PANELS_JS
-    # Scoped mobile breakpoint that forces single-column layout
-    assert '@media (max-width: 640px)' in STYLE_CSS
-    assert '.insights-usage-grid' in STYLE_CSS
-    assert 'grid-template-columns: 1fr' in STYLE_CSS
-
-
-def test_insights_mobile_models_table_has_contained_overflow():
-    # Regression test for issue #2104: Models table should have contained
-    # horizontal scrolling instead of pushing the whole page off-screen
-    assert 'insights-model-table' in PANELS_JS
-    # The mobile rule should include overflow-x handling for the models card/table
-    # Search for the specific mobile rule that contains insights-usage-grid
-    insights_mobile = '/* ── Mobile layout for Token Breakdown + Models'
-    assert insights_mobile in STYLE_CSS, 'Issue #2104 mobile rules should exist in CSS'
-    # Get the block from our specific mobile section to the next section comment
-    section_start = STYLE_CSS.find(insights_mobile)
-    section_end = STYLE_CSS.find('/* ── Checkpoints', section_start)
-    section_block = STYLE_CSS[section_start:section_end]
-    assert 'overflow-x' in section_block, 'Mobile rule should include overflow-x handling'
-    assert 'insights-model-table' in section_block or 'insights-card' in section_block
 
 
 # ── #3189: CLI/gateway sessions in Insights + webui double-count guard ──────
@@ -515,4 +406,3 @@ def test_insights_cache_hit_rate_is_none_without_cache_reads(monkeypatch, tmp_pa
     assert data["models"][0]["cache_read_tokens"] == 0
     assert data["models"][0]["cache_hit_percent"] is None
     assert data["total_cache_hit_percent"] is None
-

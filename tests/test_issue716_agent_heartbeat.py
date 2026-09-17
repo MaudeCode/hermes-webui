@@ -9,9 +9,6 @@ import types
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 
-UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
-INDEX_HTML = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
-STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
 ROUTES_PY = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 
 
@@ -196,42 +193,6 @@ def test_agent_health_route_is_registered_with_tri_state_payload_shape():
     assert '"alive"' in src
     assert '"checked_at"' in src
     assert '"details"' in src
-
-
-def test_agent_health_banner_markup_and_styles_exist():
-    # HWEB-11 folded the standalone #agentHealthBanner into the shared
-    # #chatRuntimeNotice stack. The alert role now lives on the sr-only announcer
-    # and the restart/dismiss actions are published with the notice record.
-    assert 'id="chatRuntimeNotice"' in INDEX_HTML
-    assert 'id="agentHealthBanner"' not in INDEX_HTML
-    assert 'role="alert"' in INDEX_HTML
-    assert 'aria-live="assertive"' in INDEX_HTML
-    assert "kind:'agent_unavailable'," in UI_JS
-    assert "onClick:()=>dismissAgentHealthAlert()}" in UI_JS
-    assert "id:'btnRestartGateway'," in UI_JS
-    assert ".chat-runtime-notice{" in STYLE_CSS
-    assert ".chat-runtime-notice-error .chat-runtime-notice-action" in STYLE_CSS
-
-
-def test_agent_health_frontend_polls_only_visible_and_distinguishes_states():
-    assert "const AGENT_HEALTH_INTERVAL_MS=30000" in UI_JS
-    assert "api('/api/health/agent',{timeoutToast:false})" in UI_JS
-    assert "document.visibilityState !== 'visible'" in UI_JS
-    assert "document.addEventListener('visibilitychange',_syncAgentHealthMonitorVisibility)" in UI_JS
-    assert "if(payload.alive === true)" in UI_JS
-    assert "if(payload.alive === false)" in UI_JS
-    assert "if(payload.alive == null)" in UI_JS
-    assert "_showAgentHealthAlert(payload)" in UI_JS
-    assert "_hideAgentHealthAlert()" in UI_JS
-
-
-def test_agent_health_dismiss_persists_until_recovery():
-    assert "const AGENT_HEALTH_DISMISSED_KEY='agent-health-dismissed'" in UI_JS
-    assert "localStorage.setItem(AGENT_HEALTH_DISMISSED_KEY,'1')" in UI_JS
-    assert "localStorage.removeItem(AGENT_HEALTH_DISMISSED_KEY)" in UI_JS
-    assert "function dismissAgentHealthAlert()" in UI_JS
-    assert "if(_agentHealthDismissed()) return;" in UI_JS
-    assert "_setAgentHealthDismissed(false)" in UI_JS
 
 
 def test_agent_health_backend_does_not_use_shell_or_expose_raw_process_fields():

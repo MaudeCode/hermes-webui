@@ -221,29 +221,3 @@ def test_file_move_rejects_symlinked_source_entry():
     finally:
         import shutil
         shutil.rmtree(real_ws, ignore_errors=True)
-
-
-class TestIssue3402WorkspaceTreeMoveUi:
-    def test_render_tree_items_bind_move_drop_on_dirs(self):
-        src = _src("ui.js")
-        assert "_bindWorkspaceMoveDropTarget(el,item.path)" in src
-
-    def test_move_drop_stops_propagation(self):
-        src = _src("ui.js")
-        block = src[src.index("function _bindWorkspaceMoveDropTarget"):src.index("function _renderTreeItems")]
-        assert block.count("e.stopPropagation()") >= 3
-
-    def test_move_calls_file_move_api(self):
-        src = _src("ui.js")
-        assert "await api('/api/file/move'" in src
-
-    def test_composer_ws_path_drag_still_copy(self):
-        src = _src("ui.js")
-        m = re.search(r"el\.ondragstart=\(e\)=>\{[^}]+\}", src)
-        assert m
-        assert "effectAllowed='copy'" in m.group(0)
-
-    def test_move_drop_css_classes_exist(self):
-        css = open("static/style.css", encoding="utf-8").read()
-        assert ".file-item.dragging" in css
-        assert ".file-item.drag-over" in css

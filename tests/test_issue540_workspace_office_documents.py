@@ -35,7 +35,6 @@ from api.office_documents import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKSPACE_JS = (ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 
@@ -323,39 +322,6 @@ def test_xlsx_preview_preflight_measures_actual_bytes_when_zip_claims_zero(monke
         preview_office_document("budget.xlsx", b"placeholder")
 
 
-def _office_state_block() -> str:
-    marker = "if(data.preview_kind==='office'){"
-    start = WORKSPACE_JS.find(marker)
-    assert start >= 0, "office preview state block not found in static/workspace.js"
-    depth = 0
-    for idx in range(start, len(WORKSPACE_JS)):
-        char = WORKSPACE_JS[idx]
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return WORKSPACE_JS[start:idx + 1]
-    raise AssertionError("could not find balanced office preview state block")
-
-
-def _run_office_state_block(payload: dict) -> dict:
-    js = (
-        "const data = " + json.dumps(payload) + ";\n"
-        + "const path = 'report';\n"
-        + "let _previewRawContent = null;\n"
-        + "let _previewRawContentPath = null;\n"
-        + "let _previewServerEditable = null;\n"
-        + "let _previewPreviewKind = '';\n"
-        + "let _previewOfficeFormat = '';\n"
-        + "let _previewSaveRoute = '/api/file/save';\n"
-        + _office_state_block()
-        + "\nconsole.log(JSON.stringify({_previewRawContent,_previewRawContentPath,_previewServerEditable,_previewPreviewKind,_previewOfficeFormat,_previewSaveRoute}));\n"
-    )
-    result = subprocess.run([NODE, "-e", js], check=True, capture_output=True, text=True, timeout=30)
-    return json.loads(result.stdout.strip())
-
-
 def test_xlsx_stays_preview_only():
     path = "budget.xlsx"
     raw = _simple_xlsx_bytes()
@@ -485,32 +451,6 @@ def test_custom_section_docx_stays_preview_only():
 
     with pytest.raises(ValueError):
         save_office_document(path, raw, "edited text")
-
-
-@pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_workspace_office_state_block_routes_all_office_formats_through_office_save():
-    xlsx_state = _run_office_state_block(
-        {
-            "preview_kind": "office",
-            "office_format": "xlsx",
-            "editable": False,
-            "content": "sheet preview",
-        }
-    )
-    docx_state = _run_office_state_block(
-        {
-            "preview_kind": "office",
-            "office_format": "docx",
-            "editable": True,
-            "content": "doc preview",
-        }
-    )
-
-    assert xlsx_state["_previewSaveRoute"] == "/api/file/office-save"
-    assert xlsx_state["_previewServerEditable"] is False
-    assert xlsx_state["_previewOfficeFormat"] == "xlsx"
-    assert docx_state["_previewSaveRoute"] == "/api/file/office-save"
-    assert docx_state["_previewServerEditable"] is True
 
 
 # ---------------------------------------------------------------------------

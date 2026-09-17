@@ -47,50 +47,6 @@ def test_get_provider_cost_budget_defined():
     )
 
 
-def test_attach_budget_controls_defined():
-    src = _read("static/panels.js")
-    assert "function _attachBudgetControls" in src, (
-        "_attachBudgetControls must be defined in panels.js"
-    )
-
-
-def test_attach_budget_controls_called_in_data_branch():
-    src = _read("static/panels.js")
-    # Must be called in the hasData branch (after body.appendChild(wrap))
-    assert src.count("_attachBudgetControls") >= 2, (
-        "_attachBudgetControls must be called in both the data and no-data branches"
-    )
-
-
-def test_budget_dom_classes_in_panels_js():
-    src = _read("static/panels.js")
-    for cls in ("provider-cost-budget-row", "provider-cost-budget-bar", "provider-cost-budget-input"):
-        assert cls in src, f"DOM class '{cls}' must appear in panels.js"
-
-
-def test_budget_dom_classes_in_style_css():
-    src = _read("static/style.css")
-    for cls in ("provider-cost-budget-row", "provider-cost-budget-bar", "provider-cost-budget-input"):
-        assert cls in src, f"CSS class '{cls}' must appear in style.css"
-
-
-def test_budget_i18n_keys_in_i18n_js():
-    src = _read("static/i18n.js")
-    for key in (
-        "provider_cost_budget_label",
-        "provider_cost_budget_pct",
-        "provider_cost_budget_save_failed",
-    ):
-        assert key in src, f"i18n key '{key}' must appear in i18n.js"
-
-
-def test_settings_post_in_panels_js_for_budget():
-    src = _read("static/panels.js")
-    assert "provider_cost_budget" in src, (
-        "panels.js must POST provider_cost_budget to /api/settings for budget save"
-    )
-
-
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 

@@ -29,9 +29,6 @@ ROUTES_SRC = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 _ROUTE_APPROVALS = REPO_ROOT / "api" / "route_approvals.py"
 APPROVAL_SRC = _ROUTE_APPROVALS.read_text(encoding="utf-8") if _ROUTE_APPROVALS.exists() else ""
 ROUTES_SRC_FULL = ROUTES_SRC + APPROVAL_SRC
-MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # 1. Static-analysis tests (no server needed)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -161,56 +158,6 @@ class TestSSEStaticAnalysis:
         """Unsubscribe must remove empty session keys from the dict."""
         assert "_approval_sse_subscribers.pop(session_id, None)" in ROUTES_SRC_FULL, \
             "_approval_sse_unsubscribe must pop session_id when subscriber list is empty"
-
-
-class TestFrontendSSEImplementation:
-    """Verify the frontend approval prompt transport.
-
-    As of #3913 the frontend no longer opens an approval-stream EventSource:
-    six persistent SSE connections exhausted the browser's 6-per-origin
-    HTTP/1.1 pool, hanging the approval POST itself ("Request timed out").
-    ``startApprovalPolling`` now routes straight to the HTTP fallback poller.
-    The backend SSE route remains for compatibility (its tests are above);
-    these assertions pin the poll-only frontend so the regression can't return.
-    """
-
-    def _approval_polling_body(self):
-        start = MESSAGES_JS.index("function startApprovalPolling(")
-        end = MESSAGES_JS.index("\nfunction ", start + 1)
-        return MESSAGES_JS[start:end]
-
-    def test_frontend_does_not_open_approval_stream(self):
-        """startApprovalPolling must NOT create an approval-stream EventSource (#3913)."""
-        body = self._approval_polling_body()
-        assert "api/approval/stream" not in body, \
-            "Frontend must not open the approval-stream EventSource (browser conn-pool exhaustion, #3913)"
-        assert "new EventSource(" not in body, \
-            "startApprovalPolling must not construct an EventSource — it polls over HTTP now"
-
-    def test_routes_directly_to_fallback_poll(self):
-        """startApprovalPolling must call _startApprovalFallbackPoll directly."""
-        body = self._approval_polling_body()
-        assert "_startApprovalFallbackPoll(sid)" in body, \
-            "startApprovalPolling must route to the HTTP fallback poller"
-
-    def test_fallback_poll_hits_pending_endpoint(self):
-        """The fallback poller must GET the approval/pending endpoint relative to the mount."""
-        assert 'api("/api/approval/pending?session_id="' in MESSAGES_JS, \
-            "Fallback poll must query /api/approval/pending"
-        assert "EventSource('/api/approval/stream" not in MESSAGES_JS, \
-            "No root-absolute approval EventSource may remain (subpath-mount safety)"
-
-    def test_fallback_poll_interval(self):
-        """Approval fallback polling interval must keep the 1500ms cadence."""
-        assert "1500" in MESSAGES_JS, \
-            "Approval fallback polling interval must be 1500ms (degraded-mode parity with v0.50.247)"
-
-    def test_stop_defensively_closes_any_eventsource(self):
-        """stopApprovalPolling must still defensively close a lingering EventSource handle."""
-        # The _approvalEventSource var stays declared (always null now) and the
-        # null-guarded close() remains so any future re-introduction stays safe.
-        assert "_approvalEventSource" in MESSAGES_JS, \
-            "stopApprovalPolling must keep the defensive _approvalEventSource cleanup"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

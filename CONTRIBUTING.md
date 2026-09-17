@@ -2,7 +2,7 @@
 
 Thanks for contributing.
 
-Hermes WebUI is intentionally simple to work on: Python on the server, vanilla JS in the browser, no build step, no bundler, no frontend framework. The best pull requests preserve that simplicity while solving a real problem cleanly.
+Hermes WebUI is intentionally simple to operate: Python on the server, a committed production build of the TanStack Start / React / TypeScript frontend in `static/dist`, and no Node.js at runtime. The best pull requests preserve that shape while solving a real problem cleanly.
 
 ## Before You Start
 
@@ -152,7 +152,7 @@ Hermes WebUI is deliberately:
 
 - No build step
 - No bundler
-- No frontend framework
+- One frontend: the TanStack Start app under `frontend/`, built deterministically and committed
 - Easy to modify from a terminal
 
 Do not introduce new infrastructure or dependencies unless the gain is clear and the tradeoff is justified.
@@ -160,7 +160,7 @@ Do not introduce new infrastructure or dependencies unless the gain is clear and
 ### Match the Existing Shape of the Codebase
 
 - Server logic belongs in `api/` with `server.py` staying thin
-- Frontend behavior belongs in the existing `static/*.js` modules
+- Frontend behavior belongs in `frontend/src` (routes, features, contracts); rebuild `static/dist` with `npm run build` and commit it with the source change
 - Prefer extending current patterns over introducing parallel abstractions
 - Keep changes legible to future contributors working directly from the repo in a terminal
 
@@ -194,7 +194,7 @@ Example:
 
 Another example:
 
-> - Hermes WebUI is intentionally a simple Python + vanilla JS application
+> - Hermes WebUI is intentionally a simple Python server plus one committed frontend build
 > - The right panel is used for workspace browsing and previews
 > - On mobile, panel state changes need to be obvious and touch-friendly
 > - The existing close affordance was inconsistent with the bottom-nav flow

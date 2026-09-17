@@ -127,23 +127,3 @@ def test_delete_guards_each_session_save():
 
 
 # ── Frontend: the '+ New project and move' shortcut guards the new 503 ──
-
-SESSIONS_JS = (Path(__file__).parent.parent / "static" / "sessions.js").read_text(encoding="utf-8")
-
-
-def test_new_project_and_move_shortcut_guards_503():
-    """The '+ New project and move' shortcut must catch a failed move (e.g. 503
-    when the session is streaming) instead of leaving an unhandled rejection (#3746)."""
-    idx = SESSIONS_JS.find("Guard the move so a 503")
-    assert idx > 0, "the new-project-and-move shortcut guard not found"
-    block = SESSIONS_JS[idx:idx + 700]
-    assert "try{" in block and "}catch(e){" in block, (
-        "the new-project-and-move move call must be wrapped in try/catch (#3746)"
-    )
-    assert "move failed" in block.lower(), (
-        "a failed move must surface an actionable toast (#3746)"
-    )
-    # The authoritative refetch (#2551) must remain in the success path.
-    assert "await renderSessionList()" in block, (
-        "the shortcut must keep its authoritative /api/sessions refetch (#2551)"
-    )

@@ -128,9 +128,13 @@ function collectRenderViolations(scopeSelector, options) {
   }
 
   function findOverflowHiddenAncestor(node) {
+    // Stop at the nearest scroll container: content below its fold is reachable by
+    // scrolling, so an overflow-hidden ancestor further up cannot clip it.
     var cur = node.parentElement
     while (cur && cur !== root.parentElement) {
       var cs = getComputed(cur)
+      var scrolls = (cs.overflowY === "auto" || cs.overflowY === "scroll" || cs.overflowX === "auto" || cs.overflowX === "scroll")
+      if (scrolls) return null
       if (cs.overflowX === "hidden" || cs.overflowY === "hidden") return cur
       cur = cur.parentElement
     }
@@ -228,7 +232,11 @@ function collectRenderViolations(scopeSelector, options) {
       }
 
       if (enabled("container-escape")) {
-        var ancestor = findOverflowHiddenAncestor(child)
+        // Visually hidden a11y proxies (1px clip, opacity 0, off-screen native inputs behind
+        // a custom control) sit outside their container by design and are not clipped content.
+        var childCs = getComputed(child)
+        var a11yProxy = (child.tagName === "INPUT" || child.tagName === "SELECT") && (child.getAttribute("aria-hidden") === "true" || childCs.opacity === "0" || childCs.clip !== "auto" || (childCs.clipPath && childCs.clipPath !== "none") || ((childCs.position === "absolute" || childCs.position === "fixed") && (childCs.width === "1px" || childCs.height === "1px")))
+        var ancestor = a11yProxy ? null : findOverflowHiddenAncestor(child)
         if (ancestor) {
           var cr = child.getBoundingClientRect()
           var ar = ancestor.getBoundingClientRect()

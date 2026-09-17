@@ -8,7 +8,7 @@
 > Keep this document updated as architecture changes are made.
 
 > Current shipped build: `v0.51.792` (July 1, 2026).
-> Automated coverage: ~11,500 tests via `pytest tests/ --collect-only -q`. CI runs on
+> Automated coverage: ~10,500 tests via `pytest tests/ --collect-only -q`. CI runs on
 > Python 3.13 across five parallel shards against every PR, plus a ruff
 > lint gate, a headless browser smoke test, and a Docker smoke test.
 >
@@ -25,15 +25,15 @@ and a demand-driven right panel used for workspace browsing and preview surfaces
 The right panel is closed by default on desktop and opens only when it is actively
 being used for browsing or previewing content.
 
-To prevent a visible first-paint mismatch on refresh, `static/index.html` preloads the
-saved workspace panel state into `document.documentElement.dataset.workspacePanel`
-before the main stylesheet loads. Desktop CSS honors that preload marker immediately,
-and `static/boot.js` keeps the dataset synchronized with the runtime panel state machine.
+To prevent a visible first-paint mismatch on refresh, the client entry
+(`frontend/src/client.tsx`) applies the persisted theme, skin, font size and
+panel state to `document.documentElement` before React renders; the shell HTML
+contains no inline script, so this runs from the module entry.
 
-The design philosophy is deliberately minimal. There is no build step, no bundler, no
-frontend framework. The Python server is split into a routing shell (server.py) and
-business logic modules (api/). The frontend is seven vanilla JS modules loaded from static/.
-This makes the code easy to modify from a terminal or by an agent.
+The design philosophy is deliberately minimal at runtime: the Python server is
+split into a routing shell (server.py) and business logic modules (api/), and
+it serves one committed, deterministic build of the TanStack Start frontend
+from `static/dist`. Node.js is a build-time tool only.
 
 Hermes-level chrome is intentionally consolidated: the sidebar has no dedicated brand header.
 Instead, the footer exposes a single "Hermes WebUI" launch button that opens one tabbed
@@ -64,32 +64,38 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       profiles.py          Profile state management, hermes_cli wrapper
       onboarding.py        First-run onboarding status, real provider config writes, OAuth linking, readiness detection
       routes.py            All GET + POST route handlers (if/elif dispatch, no decorators)
+      spa_shell.py         SPA route allowlist, <base href>/lang substitution, hashed asset + sw + manifest serving
+      extension_manifests.py  Sanitized extension/plugin manifest projection for the sandboxed panel protocol
       startup.py           Startup helpers: auto_install_agent_deps(), deferred startup behind the bind
       state_sync.py        /insights sync — message_count to the agent's state.db
       streaming.py         SSE engine, run_agent, cancel, compression, HERMES_HOME save/restore
       updates.py           Self-update check and release notes
       upload.py            Multipart parser, file upload handler
       workspace.py         File ops: list_dir, read_file_content, git detection, workspace helpers
+    frontend/
+      package.json         Frontend toolchain (Vite 8, TanStack Start/Router/Query/Form, React 19,
+                           TypeScript strict, Tailwind 4, Base UI, Paraglide, Streamdown, Vitest, Playwright)
+      src/routes/          File-based routes: /, /session/$id, hubs, /settings/$section, /login, /share/$token, /ext/$id
+      src/contracts/       Zod schemas for API payloads, SSE events, persisted keys (+ live fixtures)
+      src/api/             Typed client (CSRF, dedupe, retries, 401 redirect), SSE helpers, endpoints, query keys
+      src/stream/          Chat stream reducer, connection lifecycle, store
+      src/features/        Chat, composer, sessions, settings, hubs, extensions, voice, terminal, share
+      src/extensions/      Sandboxed extension host, SDK source, registry (protocol v1)
+      src/i18n/            Paraglide runtime helpers; messages/<locale>.json hold the catalog
+      src/theme/           skins.ts (token vocabulary, 21 skins as data, renderThemeCss), theme.css (root typography,
+                           preferences, skin traits), tailwind.css (@theme map, px spacing, layer order), keyframes.css,
+                           components/*.css (component rules on tokens, @layer app), boot.ts, fonts/
+      src/sw.ts            Service worker source (Workbox)
+      scripts/             finalize-dist, build-sw, check-dist, i18n-gate, generate-routes, css-convert (legacy CSS -> layers + ledger),
+                           css-computed-diff (compare computed styles between two builds)
+      e2e/                 Playwright suite + screenshot baselines
     static/
-      index.html           HTML template
-      style.css            All CSS incl. mobile responsive, themes + skins, KaTeX
-      ui.js                DOM helpers, renderMd, tool cards, context indicator, file tree
-      workspace.js         File preview, file ops, git badge, central api() fetch wrapper
-      sessions.js          Session CRUD, list rendering, collapsible groups, search, SSE sync
-      messages.js          send(), SSE event handlers, approval/clarify, transcript, recovery
-      panels.js            Cron, skills, memory, profiles, todo, settings (Control Center)
-      commands.js          Slash command registry, parser, autocomplete dropdown
-      boot.js              Event wiring, mobile nav, voice input, theme/skin boot, bfcache handler
-      onboarding.js        First-run wizard overlay, provider setup flow
-      i18n.js              Localization catalog (en, es, de, zh, zh-Hant, ru, …).
-                           Authored as one file; served split by api/i18n_assets.py
-                           as an English core plus one `?lang=` bundle per client.
-      login.js             Login page + open-redirect guard
-      icons.js             Lucide icon path registry
-      sw.js                Service worker: offline shell cache, version-pinned assets
+      dist/                Committed production build served by Python (index.html shell,
+                           assets/<hash>.js|css, sw.js, manifest.webmanifest, extension-sdk.js, FILES.txt)
+      brand/               Icons and brandmark
     tests/
       conftest.py          Isolated test server/state fixtures
-      ~1,150 test files    ~11,500 tests collected via pytest (run `pytest --collect-only -q` for exact)
+      ~980 test files    ~10,500 tests collected via pytest (run `pytest --collect-only -q` for exact)
       test_regressions.py  Permanent regression gate
     CONTRIBUTING.md        Contributor workflow and PR expectations.
     ROADMAP.md             Feature and product roadmap document.
@@ -521,268 +527,132 @@ than a second WebUI implementation.
 
 ### 5.1 Structure
 
-The frontend is served from static/ as separate files: one HTML template, one CSS file,
-and multiple JavaScript modules. External dependencies include Prism.js (syntax
-highlighting), Mermaid.js (diagrams), xterm.js, and KaTeX assets loaded with the
-current static template's integrity/CSP assumptions.
+The browser app is a TanStack Start single-page app (React 19, TypeScript
+strict) under `frontend/`. Its production build is committed under
+`static/dist` and served by the Python server; there is no Node.js at runtime,
+no server-side rendering, and no Node process at runtime. The shell (`index.html`) is
+prerendered once at build time with placeholders (`__BASE_HREF__`, `__LANG__`,
+`__WEBUI_VERSION__`) that `api/spa_shell.py` substitutes per request. It
+contains no inline scripts, so the CSP `script-src` has no `'unsafe-inline'`.
 
-Core JS modules loaded by the app include:
-  1. ui.js         (~7216 lines) DOM helpers, renderMd, tool card rendering, global state
-  2. workspace.js  (~369 lines) File tree, preview, file operations
-  3. sessions.js  (~3517 lines) Session CRUD, list rendering, search, SVG icons, dropdown actions, project picker
-  4. messages.js  (~2301 lines) send(), SSE event handlers, approval, transcript
-  5. panels.js    (~6480 lines) Cron, skills, memory, workspace, profiles, todo, settings
-  6. commands.js  (~1302 lines) Slash command registry, parser, autocomplete dropdown
-  7. boot.js      (~1607 lines) Event wiring + boot IIFE
+    frontend/src/
+      client.tsx         Entry: freeze the mount root from <base href>, apply persisted appearance,
+                         fetch /api/bootstrap, mount the router inside QueryClientProvider
+      router.tsx         createRouter with basepath derived from document.baseURI
+      routes/            __root (shell/head, error + not-found boundaries), _app (auth/onboarding guards),
+                         _app.index, _app.session.$sessionId, hub routes, settings, ext, login, onboarding, share
+      contracts/         Zod schemas: bootstrap, session, chat, sse, resources, persisted, extension, url
+      api/client.ts      The only fetch(): Zod-validated responses, CSRF header, in-flight dedupe keyed by
+                         mutation sequence, bounded retries, 401 -> /login?next= once, typed ApiError
+      api/sse.ts         The only EventSource(): chat stream, global sessions/events stream
+      stream/reducer.ts  Pure reducer for one LiveTurn per session (ownership, terminal-once, seq dedupe)
+      stream/connection.ts  startTurn / attachToStream / cancel / teardown / reconnect with backoff
+      features/          Feature folders (chat, composer, sessions, settings, tasks, kanban, skills, memory,
+                         workspaces, workspace panel, profiles, todos, insights, logs, share, onboarding,
+                         extensions, voice, terminal, notices, toast)
+      shell/             AppShell, Rail, Sidebar, Titlebar, MobileNav, ProfileMenu, shortcuts, shell state
+      extensions/        ExtensionHost (MessageChannel protocol v1), sdk.ts (built to static/dist/extension-sdk.js),
+                         registry (manifests, skins, TTS engines, lifecycle bridge)
+      i18n/              Paraglide runtime (locale switch, hermes-lang persistence), locale metadata, tool text
+      theme/             skins.ts (BASE tokens + 21 SkinSpec entries + renderThemeCss), theme.css, keyframes.css, components/*.css
+                         (component rules on tokens, @layer app), tailwind.css (@theme mapping, px spacing scale, layer order), boot.ts
+      ui/                Base UI wrappers: Button, Dialog, Field, Menu, Tooltip, States
 
-sessions.js defines an `ICONS` constant at module level with hardcoded SVG strings for all
-session action buttons (pin, unpin, folder, archive, unarchive, duplicate, trash). All icons
-inherit `currentColor` for consistent theming.
+Layout: rail (desktop) + sidebar (sessions or hub navigation) + main on the
+legacy island shell. Mobile uses a drawer and the bottom tab bar.
 
-Three-panel layout (in static/index.html):
+Styling is Tailwind v4 on a real theme system (`src/theme/skins.ts`):
 
-    <aside class="sidebar">    Left panel: session list, nav tabs, sidebar-footer Hermes WebUI trigger
-    <main class="main">        Center: topbar, messages area, approval card, composer
-    <aside class="rightpanel"> Right panel: workspace file tree and file preview
+- One token vocabulary in three tiers sharing the `--name` namespace: palette
+  (`--bg`, `--accent`, `--border`, ...), semantic (`--accent-fg`, `--link-color`,
+  `--selection-bg`, ...), and component knobs (`--composer-bg`,
+  `--session-active-fg`, `--rail-active-bg`, ...). `BASE` gives every token its
+  light value plus dark overrides.
+- Skins are data: each `SkinSpec` has a key, name, picker swatch, `tokens`
+  (both schemes) and `dark` overrides, and may opt into a structural trait
+  (`square-controls`, `card-sessions`, rules in `theme.css`). No component rule
+  mentions a skin or a theme; the unit test in `skins.test.ts` fails if a sheet
+  scopes a rule to `[data-skin]`/`.dark` or carries a colour of its own (black
+  and white alpha shadows are ink, not palette).
+- `renderThemeCss` produces the `:root` / `:root.dark` / `[data-skin]` cascade;
+  the `hermesTheme` Vite plugin serves it as `virtual:hermes-theme.css`, imported
+  by the client entry next to `tailwind.css`. `tailwind.css` maps the same
+  names into utilities (`bg-surface`, `text-muted`, `bg-(--rail-bg)`).
+- Extension skins use the same vocabulary (`SKIN_TOKEN_NAMES`), with the
+  protocol-v1 names kept as aliases (`SKIN_TOKEN_ALIASES`); they are applied as
+  inline custom properties on `<html>`, which beats every layer.
 
-Composer footer layout (current):
+The shell chrome (layout, rail, sidebar, panel heads, titlebar, tab bar, chat
+header, transcript containers, composer box, settings frame, pickers) carries
+its structural declarations as utilities in JSX and keeps the legacy class
+names as hooks. The component sheets under `theme/components/` sit in
+`@layer app`, ordered after `utilities`, so state and descendant rules keep
+winning over the structural utilities. The spacing scale is px-based
+(`--spacing: 4px`) because the design is specified in px on a 14px root.
+`docs/architecture/css-conversion-ledger.md` records how the legacy stylesheet
+was converted (every legacy rule has a disposition); `scripts/css-convert.mjs`
+is the history tool that produced the first cut of those sheets.
+`e2e/skins.spec.ts` screenshots every skin in both schemes on a seeded
+transcript.
 
-    left cluster   attach button, mic button, per-conversation model selector
-    right cluster  compact circular context-usage badge, send button
+### 5.2 State
 
-The model selector is still the authoritative control for new-session creation
-and session updates; it was moved out of the sidebar so model choice feels scoped
-to the active conversation rather than a global app setting.
+- **Server state** lives in TanStack Query. Query keys are centralised in
+  `api/queryKeys.ts`; mutations invalidate by key prefix. The sidebar
+  invalidates on `sessions_changed` from `GET /api/sessions/events` plus a
+  visibility-gated 60 s poll.
+- **Stream state** lives in a small external store (`stream/store.ts`) driven by
+  the pure reducer. Invariants: one live turn per session, a terminal event
+  settles exactly once, events are deduplicated by `stream:seq`, and teardown
+  (route change, profile switch) is passive: it releases the EventSource
+  without cancelling the backend run.
+- **Persisted browser state** goes through `lib/persisted.ts` with Zod
+  validation (`contracts/persisted.ts`); the legacy key names are kept where
+  semantics are unchanged (`hermes-theme`, `hermes-skin`, `hermes-lang`,
+  `hermes-webui-session`, …). No HTML snapshots are cached.
+- **Bootstrap** (`/api/bootstrap`) carries the auth state, CSRF token, active
+  profile, language, upload limit and onboarding status in one public request;
+  nothing is embedded in HTML.
 
-### 5.2 Global State
+### 5.3 Rendering
 
-    const S = {
-      session:      null,   // current Session compact dict (includes model, workspace, title)
-      messages:     [],     // full messages array for current session
-      entries:      [],     // current directory listing
-      busy:         false,  // true while agent is running (disables Send button)
-      pendingFiles: []      // File objects queued for upload with next message
-    }
+Markdown is rendered by Streamdown with the code (Shiki), math (KaTeX),
+mermaid and CJK plugins, all bundled. `features/chat/render/` is the only
+directory allowed to touch raw HTML (ESLint rule). Transcripts are windowed
+(`msg_limit`/`msg_before`) and virtualised with TanStack Virtual; the live turn
+renders reasoning blocks, tool cards, a worklog summary and the final answer.
 
-    const INFLIGHT = {}
-    // keyed by session_id while a request is in-flight for that session
-    // value: {messages: [...snapshot...], uploaded: [...filenames...]}
-    // Purpose: if user switches sessions while a request is pending,
-    //   switching back shows the in-progress state instead of the saved state
+### 5.4 Extensions
 
-### 5.3 Key Functions Reference
+Extension UIs run in sandboxed iframes (opaque origin) and talk to the host over
+a nonce-bound MessageChannel with capability-gated methods. See
+`docs/architecture/extension-protocol-v1.md` and the migration guide next to
+it. The server refuses `/api/*` requests with `Origin: null` before auth.
 
-Session management:
-    newSession()          POST /api/session/new, update S.session, save to localStorage
-    loadSession(sid)      GET /api/session?session_id=X, check INFLIGHT first, update S
-    deleteSession(sid)    POST /api/session/delete, handle active/inactive cases correctly
-    renderSessionList()   GET /api/sessions, rebuild #sessionList DOM
+### 5.5 Build and serving
 
-Chat:
-    send()                Main action: upload files, POST /api/chat/start, open EventSource
-    uploadPendingFiles()  Upload each file in S.pendingFiles, return filenames array
-    appendThinking()      Adds three-dot animation to message list
-    removeThinking()      Removes thinking dots (called on first token or on error)
-
-Chat/session durability invariants:
-    Composer draft mutations carry a monotonic browser revision. The server persists
-    that revision in the draft sidecar and rejects stale/conflicting writes, while
-    session deletion and draft persistence revalidate ownership under the same
-    per-session lock. A deleted session must never be recreated by a delayed autosave.
-    Live chat EventSources are owned by an in-memory session/stream generation and
-    reconnect replacement uses expected-source compare-and-swap semantics. A delayed
-    reconnect probe must not replace or close a newer transport after session switching.
-    New Chat is a pane navigation: it snapshots the departing live turn, persists its
-    composer draft, and only detaches the old EventSource after the new session is
-    created successfully. Successful deletion is terminal browser cleanup (live SSE,
-    polling cards, INFLIGHT state, and persisted handoff state); the server rejects a
-    delete while ACTIVE_RUNS or an authoritative active stream still owns the session.
-    Worker age is never treated as proof that a cancelled worker has exited.
-    Async composer actions (slash preprocessing, edit, and regenerate) capture a session
-    owner before awaiting and revalidate both the visible session and pending navigation
-    before mutating the transcript or sending.
-    Run-journal sequence reservation and physical append share one per-path critical
-    section. When the run journal is available, stateful writers keep their append
-    handle open and flush each event before it can enter the live SSE queue; they close
-    deterministically at teardown and fsync according to the configured durability
-    mode. Journal initialization/append failure is an explicit degraded path: it is
-    logged and live delivery continues without claiming an event id or replay guarantee.
-    Turn-journal stream-to-turn lookup uses a bounded in-process cache with durable-
-    history fallback after restart.
-    Sidebar project metadata is cached for at most 30 seconds per profile scope and is
-    invalidated immediately by local CRUD, project session events, and focus/visibility
-    recovery; ordinary session polling does not reread projects on every refresh.
-    The sidebar session list has its own, much shorter freshness window (2 seconds,
-    keyed on the full request identity: profile, all-profiles flag and query string).
-    It exists only to collapse the burst of `renderSessionList()` calls a single
-    stream-lifecycle transition emits; the 30-second streaming poll, every
-    `refreshSessionList(..., {force:true})` caller (SSE session events,
-    focus/visibility resume, pull-to-refresh), and any read whose snapshot predates
-    the last completed write all bypass it. `api()` advances a write generation on the
-    completion of every non-idempotent request, so no mutating call site has to
-    remember to invalidate; reads compare that generation for equality, so it is a
-    counter rather than a clock and two writes inside one millisecond can never read
-    as none. `noteWorkspaceMutationsFromToolCalls()` advances the same generation,
-    because an agent tool changes the workspace without any client write. Panel data loaded by `switchPanel()` has an equivalent
-    15-second window keyed by panel plus the client state its loaders read — active
-    profile, session and session workspace — so toggling between two panels no longer
-    reloads each one on every entry. An entry is only usable while the profile,
-    session and workspace that produced it are still current and no `api()` request
-    has failed since it was dispatched, and expired entries are swept on each stamp.
-    Kanban is deliberately outside the gate: it is the only panel whose loader owns a
-    lifecycle (`_kanbanStartPolling()`) that `switchPanel()` stops on the way out.
-    When the optional Talaria Relay publisher is configured, `ACTIVE_RUNS` remains the
-    sole run-liveness owner. An owner registers one server-wide Ed25519 publisher key;
-    authenticated users then enroll opaque profile scopes without receiving publisher
-    administration. `api/talaria_relay.py` listens to the existing session-list invalidation
-    signal, coalesces changes on one daemon worker, and sends a separately signed complete
-    snapshot for each enrolled profile. Approval/clarify queues are read only to derive attention state;
-    the publisher never creates a parallel queue. Terminal events are retained in-process
-    for the relay's 15-minute terminal window so completion/failure alerts survive worker
-    teardown. The relay grants each Apple-backed account one profile scope per publisher,
-    so a profile's session identifiers, titles, phases, counts, and alerts never enter
-    another account. Publication is best-effort and never blocks an agent or browser stream.
-    Alert eligibility is decided from genuine activity: `static/presence.js` renews a per-tab
-    lease through `POST /api/talaria/presence` only on trusted keyboard, pointer, or wheel input
-    in a visible, focused tab (throttled to one renewal per 15s) and revokes it on hide, blur, or
-    pagehide; a profile switch revokes the old-profile lease before the cookie flips. Each update
-    carries a strictly increasing per-tab sequence so the server can dispatch a revocation
-    immediately during pagehide yet reject a late lower-seq renewal that would otherwise resurrect
-    the lease. The server keeps a bounded in-memory registry keyed by canonical profile and tab,
-    expires each lease 90s after the last renewal it received, and stamps `alertEligible: false`
-    on every state in a snapshot built while that profile holds a fresh lease. Restart, eviction,
-    malformed heartbeats, lookup failures, and a relay that rejects the field all fall back to
-    eligible; the rejected snapshot is re-sent without the field and stamping stops until restart.
-    The publisher registry lock protects only pointer snapshots/swaps. Pairing HTTP,
-    initial publication, listener changes, start/stop, and terminal callbacks run after
-    releasing it; a separate transition lock preserves configure/start/stop ordering.
-
-Rendering:
-    renderMessages()      Full rebuild of #msgInner from S.messages
-    renderMd(raw)         Homegrown markdown renderer (see 5.4 for known gaps)
-    syncTopbar()          Updates topbar title, meta, model chip, workspace chip
-    renderTray()          Updates attach tray showing pending files
-
-Approval:
-    showApprovalCard(p)   Shows the approval card with command/description text
-    hideApprovalCard()    Hides approval card, clears text
-    respondApproval(ch)   POST /api/approval/respond, hide card
-    toggleApprovalMoreMenu / closeApprovalMoreMenu
-                          Opens/closes the overflow holding the policy choices
-                          (Allow session, Always allow, Skip all); Allow once
-                          and Deny stay in the button row
-    startApprovalPolling  setInterval 1500ms GET /api/approval/pending
-    stopApprovalPolling   clearInterval
-
-UI helpers:
-    setStatus(t)          Fallback helper: shows a toast for non-chat status/error messages
-    setComposerStatus(t)  Updates the inline composer status label for turn-scoped states
-    setBusy(v)            Sets S.busy, disables/enables Send button, clears status on false
-    showToast(msg, ms)    Bottom-center fade toast (default 2800ms)
-    showConfirmDialog(o)  Shared in-app confirmation modal, resolves true/false
-    showPromptDialog(o)   Shared in-app input modal, resolves string/null
-    autoResize()          Auto-resize #msg textarea up to 200px
-
-Dialog policy:
-    Native browser confirm()/prompt() are not used in the Web UI.
-    Destructive actions use showConfirmDialog(...), then a toast on success.
-    Lightweight naming flows (new file/folder/project) use showPromptDialog(...).
-
-Files:
-    loadDir(path)         GET /api/list, rebuild #fileTree
-    openFile(path)        GET /api/file, show in #previewArea
-
-Transcript:
-    transcript()          Builds markdown string from S.messages for download
-
-Boot IIFE:
-    localStorage key 'hermes-webui-session' stores last session_id
-    On load: try to loadSession(saved), fall back to empty state if missing or fails
-    NEVER auto-creates a session on boot
-
-### 5.4 Markdown Renderer (renderMd)
-
-A hand-rolled regex chain with HTML safety. Processes in this order:
-
-Pre-pass (v0.18.1):
-0a. Stash fenced code blocks and backtick spans (fence_stash array)
-0b. Convert safe HTML tags to markdown equivalents:
-    <strong>/<b> -> **text**, <em>/<i> -> *text*, <code> -> `text`, <br> -> newline
-0c. Restore stashed code blocks
-
-Pipeline:
-1. Mermaid blocks (```mermaid ... ```) -> <div class="mermaid-block">
-2. Code blocks (``` lang ... ```) -> <pre><code> with language header
-3. Inline code (`...`) -> <code>
-4. Bold+italic (***..***) -> <strong><em>
-5. Bold (**...**) -> <strong>
-6. Italic (*...*) -> <em>
-7. Headings (# ## ###) -> <h1> <h2> <h3> (uses inlineMd() for content)
-8. Horizontal rules (---+) -> <hr>
-9. Blockquotes (> ...) -> <blockquote> (uses inlineMd() for content)
-10. Unordered lists (- or * or + at line start) -> <ul><li> (uses inlineMd())
-11. Ordered lists (N. at line start) -> <ol><li> (uses inlineMd())
-12. Links ([text](https://...)) -> <a href target=_blank>
-13. Tables (| col | col |) -> <table>
-14. Safety net: escape any HTML tag not in SAFE_TAGS allowlist via esc()
-15. Paragraph wrapping: remaining double-newline-separated blocks -> <p>
-
-inlineMd() helper (v0.18.1):
-    Processes inline bold/italic/code/links within list items, blockquotes,
-    and headings. Escapes unknown tags via SAFE_INLINE allowlist. Replaces
-    the old direct esc() calls which would double-escape pre-pass output.
-
-SAFE_TAGS allowlist:
-    strong, em, code, pre, h1-6, ul, ol, li, table, thead, tbody, tr, th,
-    td, hr, blockquote, p, br, a, div. Everything else is escaped.
-
-Known gaps:
-- Nested lists: single regex pass, multi-level indentation not handled
-- Mixed bold+link in same line: may produce garbled output
-
-### 5.5 Model Label Resolution (Fixed in Sprint 1, reused by composer selector)
-
-B3 was resolved in Sprint 1. Current code uses a MODEL_LABELS dict:
-
-    const MODEL_LABELS = {
-      'openai/gpt-5.4-mini': 'GPT-5.4 Mini', 'openai/gpt-4o': 'GPT-4o',
-      'openai/o3': 'o3', 'openai/o4-mini': 'o4-mini',
-      'anthropic/claude-sonnet-4.6': 'Sonnet 4.6', 'anthropic/claude-sonnet-4-5': 'Sonnet 4.5',
-      'anthropic/claude-haiku-3-5': 'Haiku 3.5', 'google/gemini-2.5-pro': 'Gemini 2.5 Pro',
-      'deepseek/deepseek-chat-v3-0324': 'DeepSeek V3', 'meta-llama/llama-4-scout': 'Llama 4 Scout',
-    };
-    getModelLabel(m) => MODEL_LABELS[m] || (m.split('/').pop() || 'Unknown');
-
-Fallback: any unlisted model shows its short ID (after the last /) rather than a wrong label.
-To add a new model: add an entry to MODEL_LABELS and add an <option> to the composer footer <select>.
+`npm run build` runs the locale parity gate, Paraglide compile, strict
+TypeScript, ESLint, the Vite/TanStack Start prerender, `finalize-dist` (strips
+inline framework scripts, makes asset URLs relative, injects the placeholders,
+copies to `static/dist`), and `build-sw` (Workbox injectManifest). CI runs
+`npm ci && npm run build:fast`; `npm run check-dist` is available to verify the
+committed output locally.
+Python serves `static/dist/index.html` for allowlisted routes with a
+depth-relative `<base href>` so subpath mounts need no configuration, hashed
+assets at `<mount>/assets/*` with immutable caching, `/sw.js` with
+`Service-Worker-Allowed: /`, and the web manifest. Unknown paths stay 404.
 
 ### 5.6 Session Delete Rules (from skill)
 
-These rules are critical. GPT-5.4-mini has repeatedly re-introduced broken versions.
+Sessions must never be deleted server-side without an explicit user action;
+the client confirms destructive session actions in a dialog before calling the
+API and invalidates the list afterwards.
 
-1. deleteSession() NEVER calls newSession(). Deleting does not create.
-2. If deleted session was active AND other sessions exist: load sessions[0] (most recent).
-3. If deleted session was active AND no sessions remain: show empty state.
-4. If deleted session was not active: just re-render the list.
-5. Always show toast("Conversation deleted") after any delete.
+### 5.7 Send Guard
 
-### 5.7 Send() Session Guard
-
-Before any async operations in send():
-    const activeSid = S.session.session_id;
-
-After the agent completes:
-    if (S.session && S.session.session_id === activeSid) {
-      // apply result, re-render
-      setBusy(false);
-    } else {
-      // user switched sessions mid-flight
-      // only refresh sidebar, do NOT call setBusy(false) on the new session
-      await renderSessionList();
-    }
-
-This prevents a session switch mid-flight from either clobbering the new session's state
-or unlocking the Send button on the wrong session.
+`stream/connection.ts` refuses to start a turn while the session already owns
+a live stream, and the reducer ignores events for a stream it does not own,
+which is the React equivalent of the legacy `send()` session guard.
 
 ---
 
@@ -891,17 +761,17 @@ growing" in `docs/troubleshooting.md` for the retention policy and its env vars.
 
 While the gate is closed, every `/api/` request waits on it for up to
 `STARTUP_WAIT_SECONDS` (10s) and then returns **503 with `Retry-After: 5`** and a
-body carrying `condition: "startup_recovery"` plus the phase. `api()` in
-`static/workspace.js` retries that specific condition for up to
-`API_STARTUP_RETRY_BUDGET_MS` (120s), so one-shot bootstrap fetches wait for an
-authoritative answer instead of committing fallback settings. The worker-overflow
+body carrying `condition: "startup_recovery"` plus the phase. The typed client
+(`frontend/src/api/client.ts`) retries that specific condition with a bounded
+budget, so one-shot bootstrap fetches wait for an authoritative answer instead
+of committing fallback settings. The worker-overflow
 503 is real backpressure and is deliberately *not* retried there.
 
 Never gated: `/health`, the UI shell, the WebUI's own static assets,
 `/api/health/restart`, `/api/csp-report`, and every path in `api.auth.PUBLIC_PATHS`
 — the auth surface is public precisely because it authenticates a caller rather
 than reading session state, so gating it would lock users out for the whole
-recovery window (`static/login.js` posts with a bare `fetch()` and never sees the
+recovery window (the login form posts with `retries: 0` and never sees the
 retry). Dashboard-plugin assets are the exception; see `PLUGINS_READY` below.
 
 Two bounds keep the gate from becoming its own outage:
@@ -1019,7 +889,7 @@ Current structure:
         ui.js, workspace.js, sessions.js, messages.js, panels.js, commands.js, boot.js
       tests/
         conftest.py           Isolated test server/state fixtures
-        ~1,150 test files     ~11,500 tests collected
+        ~980 test files     ~10,500 tests collected
         test_regressions.py   Permanent regression gate
 
 Route extraction to api/routes.py completed in Sprint 11. server.py remains a
@@ -1102,7 +972,7 @@ Optional password gate for non-SSH-tunnel deployments.
 
 ### Phase I: Test Infrastructure -- COMPLETE
 
-~11,500 tests across ~1,150 test files + regression gates. The pytest fixture derives
+~10,500 tests across ~980 test files + regression gates. The pytest fixture derives
 an isolated port and state directory from the repo path unless
 `HERMES_WEBUI_TEST_PORT` / `HERMES_WEBUI_TEST_STATE_DIR` pin them explicitly.
 Production data never touched.
@@ -1215,8 +1085,9 @@ POST:
       body: JSON.stringify({field: value})
     });
 
-The api() helper, in outline (the real one in `static/workspace.js` also owns
-timeouts, 401 redirects and the startup-503 budget described in section 7b):
+The client, in outline (the real one in `frontend/src/api/client.ts` also owns
+Zod validation, CSRF, dedupe, timeouts, 401 redirects and the startup-503
+budget described in section 7b):
 
     async function api(path, opts={}) {
       const r = await fetch(path, {headers:{'Content-Type':'application/json'},...opts});

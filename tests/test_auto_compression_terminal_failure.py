@@ -281,37 +281,6 @@ def test_assistant_tool_call_turn_followed_by_final_text_is_successful_answer():
     assert _session_lacks_final_assistant_answer(messages) is False
 
 
-def test_compression_exhausted_apperror_clears_reference_ui_and_labels_error():
-    src = _read("static/messages.js")
-    start = src.find("source.addEventListener('apperror'")
-    assert start != -1, "apperror listener not found"
-    end = src.find("source.addEventListener('warning'", start)
-    assert end != -1, "warning listener after apperror not found"
-    block = src[start:end]
-
-    assert "const isCompressionExhausted=d.type==='compression_exhausted';" in block
-    assert "isCompressionExhausted?'Context compression exhausted'" in block
-    assert "if(typeof clearCompressionUi==='function') clearCompressionUi();" in block
-    assert "window._compressionUi=null;" in block
-    assert "const eventSid=d.old_session_id||d.session_id||'';" in block
-    assert "const continuationSid=(d.session&&d.session.session_id)||d.new_session_id||d.continuation_session_id||'';" in block
-    assert "if(d.session&&typeof d.session==='object')" in block
-    assert "S.session=d.session;" in block
-
-
-def test_apperror_matches_only_current_or_continuation_session_for_background_errors():
-    src = _read("static/messages.js")
-    start = src.find("source.addEventListener('apperror'")
-    assert start != -1, "apperror listener not found"
-    end = src.find("source.addEventListener('warning'", start)
-    assert end != -1, "warning listener after apperror not found"
-    block = src[start:end]
-
-    assert "const eventSid=d.old_session_id||d.session_id||'';" in block
-    assert "const continuationSid=(d.session&&d.session.session_id)||d.new_session_id||d.continuation_session_id||'';" in block
-    assert "const eventMatchesCurrent=!!(currentSid&&(eventSid===currentSid||continuationSid===currentSid));" in block
-
-
 def test_apperror_payload_enriched_before_enqueue(tmp_path, monkeypatch):
     class _CaptureQueue:
         def __init__(self):

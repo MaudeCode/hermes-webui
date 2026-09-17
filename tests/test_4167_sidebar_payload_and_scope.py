@@ -36,17 +36,3 @@ def test_sidebar_response_item_preserves_read_only_flag():
     assert row.get("read_only") is True
     assert row.get("gateway_routing") == {"provider": "anthropic", "model": "claude"}
     assert "not_allowed_field" not in row
-
-
-def test_failed_refresh_clears_cache_on_profile_scope_change():
-    """The catch path must reject cached rows from a mismatched sidebar scope."""
-    src = (_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
-    assert "_allSessionsScope" in src, "cache is not scope-tagged"
-    assert re.search(r"_scopeMatches", src), "catch path does not gate fallback on scope match"
-    assert re.search(r"_allSessions\s*=\s*\[\]", src), "catch path does not clear stale rows on scope mismatch"
-    assert "excludeHidden: _sessionListExcludeHiddenEnabled()" in src, (
-        "scope tagging must include the hidden-filter query mode"
-    )
-    assert "_allSessionsScope.excludeHidden === _curScope.excludeHidden" in src, (
-        "catch path must reject cached rows fetched under the wrong hidden-filter mode"
-    )

@@ -235,16 +235,6 @@ def test_subagent_child_session_mutation_still_refused(monkeypatch):
         routes._get_or_materialize_session("child-session-1")
 
 
-def test_no_delegation_control_plane_shipped():
-    """No steer / stop-early / running-children surface came along for the ride."""
-    routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
-    ui_src = UI_JS_PATH.read_text(encoding="utf-8")
-    for forbidden in ("steer_subagent", "stop_subagent", "list_running_children"):
-        assert forbidden not in routes_src
-        assert forbidden not in ui_src
-    assert not re.search(r"""["']/api/[^"']*(?:delegation|subagent)[^"']*["']""", ui_src)
-
-
 # ── The card ────────────────────────────────────────────────────────────────
 
 _DRIVER_SRC = r"""
@@ -339,82 +329,6 @@ def _stable(html: str) -> str:
 def _cost_chip(html: str) -> str | None:
     match = re.search(r'<span class="tool-card-cost"[^>]*>(.*?)</span>', html, re.S)
     return match.group(1).strip() if match else None
-
-
-def test_delegation_card_renders_the_cost(driver_path):
-    out = _run(
-        driver_path,
-        {"name": "delegate_task", "args": {"goal": "audit"}, "snippet": "done", "done": True,
-         "cost_usd": 0.4213},
-    )
-    assert _cost_chip(out["html"]) == "~$0.42"
-    assert "Estimated cost" in out["html"]
-
-
-def test_sub_cent_delegation_keeps_four_decimals(driver_path):
-    out = _run(
-        driver_path,
-        {"name": "delegate_task", "snippet": "done", "done": True, "cost_usd": 0.0032},
-    )
-    assert _cost_chip(out["html"]) == "~$0.0032"
-
-
-@pytest.mark.parametrize("cost", [None, 0, 0.0, "not-a-number", float("-1")])
-def test_delegation_without_a_cost_renders_the_card_unchanged(driver_path, cost):
-    base = {"name": "delegate_task", "args": {"goal": "audit"}, "snippet": "done", "done": True}
-    baseline = _run(driver_path, dict(base))["html"]
-    out = _run(driver_path, {**base, "cost_usd": cost})
-
-    assert out["cost"] is None
-    assert _cost_chip(out["html"]) is None
-    assert "tool-card-cost" not in out["html"]
-    assert "undefined" not in out["html"]
-    assert "$0.00" not in out["html"]
-    assert _stable(out["html"]) == _stable(baseline)
-
-
-def test_non_delegation_tool_never_gets_a_cost_chip(driver_path):
-    out = _run(
-        driver_path,
-        {"name": "run_shell", "snippet": "ok", "done": True, "cost_usd": 3.5},
-    )
-    assert "tool-card-cost" not in out["html"]
-
-
-def test_restored_card_keeps_the_cost_after_reload(driver_path):
-    row = {
-        "role": "tool",
-        "status": "completed",
-        "tool_call_id": "call_1",
-        "tool": {
-            "id": "call_1",
-            "name": "delegate_task",
-            "args": {"goal": "audit"},
-            "snippet": "done",
-            "done": True,
-            "cost_usd": 1.5,
-        },
-        "payload": {"tid": "call_1", "name": "delegate_task", "snippet": "done", "cost_usd": 1.5},
-    }
-    out = _run(driver_path, row, mode="restored")
-    assert _cost_chip(out["html"]) == "~$1.50"
-
-
-def test_card_cost_uses_the_shared_session_cost_format(driver_path):
-    """One formatter, not a second one: sub-cent keeps 4 decimals, else 2."""
-    samples = [0.0032, 0.009999, 0.01, 0.4213, 12.5]
-    out = _run(
-        driver_path,
-        {"name": "delegate_task", "snippet": "done", "done": True, "cost_usd": samples[0]},
-        format_samples=samples,
-    )
-    assert out["formatted"] == ["$0.0032", "$0.0100", "$0.01", "$0.42", "$12.50"]
-
-    ui_src = UI_JS_PATH.read_text(encoding="utf-8")
-    assert "toFixed(4):cost.toFixed(2)" not in ui_src, (
-        "a second inline cost format survived — every USD display must go "
-        "through _fmtCostUsd()"
-    )
 
 
 # ── Both live completion paths report the cost ───────────────────────────────
@@ -869,31 +783,3 @@ def _settle(settled_driver, live_call):
     assert result.returncode == 0, result.stderr
     rows = json.loads(result.stdout)
     return next(r for r in rows if r["name"] == "delegate_task")
-
-
-def test_fresh_settlement_keeps_the_delegation_cost(settled_driver):
-    """messages[].tool_calls never carries a cost; the live entry is the source.
-
-    Settlement rebuilds the row from the persisted tool_calls and dedupes the
-    matching live S.toolCalls entry away, so a rebuild that drops cost_usd
-    persists an anchor scene without it and the chip disappears.
-    """
-    row = _settle(settled_driver, {
-        "id": "call-1", "name": "delegate_task", "assistant_msg_idx": 1,
-        "started_at": 100, "args": {"goal": "audit"}, "snippet": "done",
-        "cost_usd": 0.6125,
-    })
-    assert row["toolCost"] == 0.6125
-    assert row["payloadCost"] == 0.6125
-    assert row["cardCost"] == 0.6125
-
-
-def test_fresh_settlement_adds_no_cost_key_when_there_is_none(settled_driver):
-    row = _settle(settled_driver, {
-        "id": "call-1", "name": "delegate_task", "assistant_msg_idx": 1,
-        "started_at": 100, "args": {"goal": "audit"}, "snippet": "done",
-    })
-    assert row["toolHasCost"] is False
-    assert row["payloadHasCost"] is False
-    # undefined in JS, so JSON.stringify drops the key entirely
-    assert "cardCost" not in row

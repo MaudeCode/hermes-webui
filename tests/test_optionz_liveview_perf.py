@@ -339,13 +339,6 @@ def test_start_session_turn_emits_server_turn_started():
     assert "get_session_channel" in src
 
 
-def test_frontend_attaches_renderer_on_server_turn_started():
-    js = (REPO_ROOT / "static" / "messages.js").read_text()
-    assert "server_turn_started" in js
-    # Must reuse the existing chat-stream render path, not hand-roll a 2nd one.
-    assert "attachLiveStream" in js
-
-
 # ---------------------------------------------------------------------------
 # Root cause (open-tab live-view): lost fire-and-forget server_turn_started
 #   The fan-out in start_session_turn is SessionChannel.emit with NO replay
@@ -457,21 +450,6 @@ def test_session_sse_handler_wires_on_subscribe_recovery():
     assert handler_src.index("subscribe_to_session_channel(") < handler_src.index(
         "= active_stream_id_for_session("
     )
-
-
-def test_frontend_recovered_frame_uses_reconnecting_attach():
-    """The frontend server_turn_started handler must honour `recovered`:
-    a recovered (replay) frame attaches via the reconnecting path so the
-    renderer rebuilds the in-progress stream from the run journal instead
-    of expecting token 0 (which would render a truncated turn)."""
-    js = (REPO_ROOT / "static" / "messages.js").read_text()
-    assert "recovered" in js
-    h_ix = js.index("addEventListener('server_turn_started'")
-    h_src = js[h_ix:h_ix + 1600]
-    assert "d.recovered" in h_src
-    assert "reconnecting" in h_src
-    # Still reuses the single renderer — no second hand-rolled stream.
-    assert "attachLiveStream" in h_src
 
 
 # ---------------------------------------------------------------------------
@@ -613,21 +591,6 @@ def test_emit_to_session_streams_skip_unknown_owner_documented_in_source():
 # `(session_id, event_id)`. The handler in static/messages.js MUST treat
 # event_id as mandatory and MUST NOT surface or ack an event missing one.
 # ---------------------------------------------------------------------------
-
-
-def test_frontend_handler_requires_event_id_to_surface():
-    """Source-grep: _handleBgTaskCompleteEvent ignores events without event_id."""
-    js = (REPO_ROOT / "static" / "messages.js").read_text()
-    fn_ix = js.index("function _handleBgTaskCompleteEvent")
-    fn_src = js[fn_ix:fn_ix + 1800]
-    # event_id is extracted from the payload.
-    assert "d.event_id" in fn_src
-    # Missing event_id short-circuits before any dedupe / ack.
-    assert "if (!evt_id) return;" in fn_src or "if(!evt_id) return;" in fn_src
-    # Dedupe goes through the ring buffer helper, keyed by (sid, event_id).
-    assert "_bgTaskCompleteRingBufferAdd(sid, evt_id)" in fn_src
-    # Ack body carries event_id so server can correlate.
-    assert "event_id: evt_id" in fn_src
 
 
 # ---------------------------------------------------------------------------
@@ -776,64 +739,3 @@ def test_sse_handler_uses_shared_emit_gate_not_inline_comparison():
     gate_src = handler_src[max(0, su_ix - 1200):su_ix]
     assert "should_emit_session_updated(" in gate_src
     assert "> subscriber_known_count" not in gate_src
-
-
-def test_frontend_subscribes_with_known_count_and_handles_session_updated():
-    """Source-grep: the frontend must (a) append &known_count from the
-    session's FULL message_count (not the rendered tail S.messages.length), and
-    (b) handle the `session-updated` frame via the keepStaleUntilLoaded
-    swap-in-place loadSession path (no clear+refetch → no blank-gap jump)."""
-    js = (REPO_ROOT / "static" / "messages.js").read_text()
-    # (a) known_count is sent on subscribe, sourced from S.session.message_count.
-    assert "known_count" in js
-    ss_ix = js.index("function startSessionStream")
-    ss_src = js[ss_ix:ss_ix + 4000]
-    assert "known_count=" in ss_src
-    assert "S.session.message_count" in ss_src
-    # Must NOT key the reported count on S.messages.length (tail window) — that
-    # would false-trigger a reload on every reconnect for long sessions.
-    knc_ix = ss_src.index("_knownCount")
-    knc_src = ss_src[knc_ix:knc_ix + 400]
-    assert "S.messages.length" not in knc_src
-    # (b) the session-updated listener routes through the swap-in-place path.
-    su_ix = js.index("addEventListener('session-updated'")
-    su_src = js[su_ix:su_ix + 1400]
-    assert "keepStaleUntilLoaded: true" in su_src or "keepStaleUntilLoaded:true" in su_src
-    assert "loadSession(" in su_src
-    # Idle-only: must bail when a live turn is rendering (that path owns its own
-    # message updates) and when the session isn't the one on screen.
-    assert "S.activeStreamId" in su_src
-    assert "isCurrent" in su_src
-
-
-def test_loadsession_idle_cleanup_does_not_clobber_concurrent_live_stream():
-    """Self-heal-vs-live-render race guard (maintainer/Codex-reproduced; verified
-    in an isolated instance).
-
-    The `session-updated` self-heal calls `loadSession(force, keepStaleUntilLoaded)`,
-    which awaits `_ensureMessagesLoaded`. A server-initiated turn can fire
-    `server_turn_started` DURING that await and set `S.activeStreamId` for the
-    same sid. The post-await branch must NOT clear `S.activeStreamId`/`S.busy`
-    based only on the stale `activeStreamId` snapshot taken before the await —
-    that silently kills the live turn's render. It must re-read the LIVE state and
-    prefer a concurrently-attached same-session stream over the stale snapshot.
-    """
-    js = (REPO_ROOT / "static" / "sessions.js").read_text()
-    compact = js.replace(" ", "").replace("\n", "")
-    # `activeStreamId` is declared `let` (not const) so it can be re-read.
-    assert "letactiveStreamId=S.session.active_stream_id||null" in compact, (
-        "activeStreamId must be `let` so the race-guard can re-read it post-await"
-    )
-    # Before the attach/idle branch, fold a concurrently-attached same-session
-    # live stream into activeStreamId so a mid-reload server_turn_started is
-    # preserved (attached), not clobbered by the idle cleanup.
-    assert "activeStreamId=activeStreamId||((S.activeStreamId&&S.session&&S.session.session_id===sid)?S.activeStreamId:null)" in compact, (
-        "missing the post-await race-guard re-read that folds a concurrent "
-        "same-session live stream into activeStreamId before the idle branch"
-    )
-    # The re-read must sit BEFORE the attach/idle decision (`if(activeStreamId){`).
-    reread_ix = compact.find("activeStreamId=activeStreamId||((S.activeStreamId")
-    branch_ix = compact.find("if(activeStreamId){")
-    assert reread_ix != -1 and branch_ix != -1 and reread_ix < branch_ix, (
-        "race-guard re-read must precede the attach/idle branch"
-    )

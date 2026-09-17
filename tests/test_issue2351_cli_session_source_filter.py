@@ -6,52 +6,6 @@ SESSIONS_JS = ROOT / "static" / "sessions.js"
 STYLE_CSS = ROOT / "static" / "style.css"
 
 
-def test_sidebar_has_separate_webui_and_cli_session_source_tabs():
-    src = SESSIONS_JS.read_text(encoding="utf-8")
-    assert "let _sessionSourceFilter = 'webui'" in src
-    assert "hermes-session-source-filter" in src
-    assert "session-source-tabs" in src
-    assert "t('sessions_source_webui', n)" in src
-    assert "t('sessions_source_cli', n)" in src
-    assert "_sessionSourceFilter==='cli'" in src
-
-
-def test_session_source_labels_are_locale_keys_with_number_placeholder():
-    """Issue #7580: source tab labels must come from t() with {0}-interpolated
-    counts, not hardcoded English template literals."""
-    i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
-    assert "sessions_source_webui: 'WebUI sessions ({0})'" in i18n  # en bundle
-    assert "sessions_source_cli: 'CLI sessions ({0})'" in i18n  # en bundle
-    assert "sessions_source_webui: 'Сеансы WebUI ({0})'" in i18n  # ru bundle
-    assert "sessions_source_cli: 'Сеансы CLI ({0})'" in i18n  # ru bundle
-    sessions_src = SESSIONS_JS.read_text(encoding="utf-8")
-    assert "t('sessions_source_cli', n)" in sessions_src
-    assert "t('sessions_source_webui', n)" in sessions_src
-    # The template-literal fallback must be gone: labels now come from the locale.
-    assert "`CLI sessions (${n})`" not in sessions_src
-    assert "`WebUI sessions (${n})`" not in sessions_src
-
-
-def test_cli_filter_keeps_cli_rows_out_of_default_webui_list():
-    src = SESSIONS_JS.read_text(encoding="utf-8")
-    assert "function _partitionSidebarSessionRows(allMatched, activeSidForSidebar)" in src
-    assert "cliSessionCount" in src
-    assert "const showCliOnly=_sessionSourceFilter==='cli';" in src
-    assert "const webuiProfileFiltered=[];" in src
-    assert "const cliProfileFiltered=[];" in src
-    assert "const webuiSessionsRaw=[];" in src
-    assert "const cliSessionsRaw=[];" in src
-    assert "profileFiltered: showCliOnly ? cliProfileFiltered : webuiProfileFiltered," in src
-    assert "sessionsRaw: showCliOnly ? cliSessionsRaw : webuiSessionsRaw," in src
-
-
-def test_session_source_tabs_have_dedicated_sidebar_styles():
-    css = STYLE_CSS.read_text(encoding="utf-8")
-    assert ".session-source-tabs" in css
-    assert ".session-source-tab.active" in css
-    assert ".session-empty-note" in css
-
-
 def test_webui_state_db_mirror_does_not_become_cli_sidebar_row():
     from api.routes import _merge_cli_sidebar_metadata
 

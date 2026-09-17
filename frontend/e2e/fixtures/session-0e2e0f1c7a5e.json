@@ -1,0 +1,85 @@
+{
+ "session_id": "0e2e0f1c7a5e",
+ "title": "Skin rendering sample",
+ "workspace": "/tmp/e2e-workspace",
+ "created_workspace": "/tmp/e2e-workspace",
+ "model": "sample-model",
+ "model_provider": "sample",
+ "created_at": 1735732800.0,
+ "updated_at": 1735732860.0,
+ "pinned": false,
+ "archived": false,
+ "project_id": null,
+ "profile": "default",
+ "input_tokens": 120,
+ "output_tokens": 340,
+ "estimated_cost": null,
+ "cache_read_tokens": 0,
+ "cache_write_tokens": 0,
+ "personality": null,
+ "active_stream_id": null,
+ "pending_user_message": null,
+ "pending_attachments": [],
+ "context_length": 128000,
+ "threshold_tokens": 0,
+ "last_prompt_tokens": 460,
+ "llm_title_generated": false,
+ "manual_title": true,
+ "parent_session_id": null,
+ "is_cli_session": false,
+ "read_only": false,
+ "messages": [
+  {
+   "role": "user",
+   "content": "Show me how the transcript renders headings, code, tables and a tool call.",
+   "timestamp": 1735732800.0,
+   "id": 1
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "reasoning": "The user wants a rendering sample. List the theme directory first, then answer with markdown that covers every block type.",
+   "timestamp": 1735732805.0,
+   "id": 2,
+   "tool_calls": [
+    {
+     "id": "call_1",
+     "call_id": "call_1",
+     "type": "function",
+     "function": {
+      "name": "terminal",
+      "arguments": "{\"command\": \"ls src/theme\"}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_1",
+   "name": "terminal",
+   "content": "{\"output\": \"boot.ts\\ncomponents\\nfonts\\nkeyframes.css\\ntailwind.css\\ntheme.css\"}",
+   "timestamp": 1735732806.0,
+   "id": 3,
+   "tool_name": "terminal"
+  },
+  {
+   "role": "assistant",
+   "content": "## Rendering sample\n\nThe transcript shows **strong**, *emphasis*, `inline code`, and a [link](https://example.com/docs).\n\n```python\ndef greet(name: str) -> str:\n    return f\"Hello, {name}!\"\n```\n\n| Token | Light | Dark |\n|---|---|---|\n| accent | #B8860B | #FFD700 |\n| surface | #F3EEE3 | #1A1A1D |\n\n- first item\n- second item with `code`\n\n> A short quote to exercise the blockquote rail.\n",
+   "timestamp": 1735732812.0,
+   "id": 4,
+   "_turnDuration": 7.2
+  },
+  {
+   "role": "user",
+   "content": "Thanks, that covers it.",
+   "timestamp": 1735732840.0,
+   "id": 5
+  },
+  {
+   "role": "assistant",
+   "content": "Any time.",
+   "timestamp": 1735732842.0,
+   "id": 6
+  }
+ ]
+}

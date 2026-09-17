@@ -685,7 +685,11 @@ def test_browser_sso_login_sets_secure_cookie_and_authenticates(stack: Stack):
         page.on("request", lambda req: urls.append(req.url))
         page.goto(base + "/login?next=/session/hweb72", wait_until="domcontentloaded")
         link = page.locator("#oidc-login")
-        assert link.get_attribute("href") == "/api/auth/oidc/start?next=/session/hweb72"
+        # The SPA renders the href resolved against the mount root; compare the resolved path and query.
+        from urllib.parse import parse_qs, urlparse
+        href = urlparse(link.get_attribute("href") or "")
+        assert href.path.endswith("/api/auth/oidc/start")
+        assert parse_qs(href.query).get("next") == ["/session/hweb72"]
         link.click()
         page.wait_for_url(base + "/session/hweb72", wait_until="commit", timeout=15000)
 

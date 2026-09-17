@@ -844,30 +844,3 @@ class TestServerSummaryAndPanel:
         assert disabled["health"] == "not_checked"
         assert invalid["health"] == "not_checked"
         assert broken["health"] == "not_checked"
-
-    def test_panel_badges_only_the_two_actionable_verdicts(self):
-        js = (ROOT / "static/panels.js").read_text(encoding="utf-8")
-        assert "function _mcpHealthBadge" in js
-        assert "${_mcpHealthBadge(s)}" in js
-        assert "mcp_health_unhealthy" in js
-        assert "mcp_health_needs_auth" in js
-        # Bounded re-read for a cold cache, never an unbounded poll loop.
-        assert "MCP_HEALTH_REREADS" in js
-        assert "_mcpHealthRereads>=MCP_HEALTH_REREADS" in js
-        assert "_scheduleMcpHealthReread(r.health_pending)" in js
-        assert "setInterval" not in js.split("function loadMcpServers")[1][:1500]
-        i18n = (ROOT / "static/i18n.js").read_text(encoding="utf-8")
-        assert "mcp_health_unhealthy:" in i18n
-        assert "mcp_health_needs_auth:" in i18n
-        css = (ROOT / "static/style.css").read_text(encoding="utf-8")
-        assert ".mcp-health-unhealthy" in css
-        assert ".mcp-health-needs_auth" in css
-
-    def test_out_of_scope_features_did_not_ship(self):
-        """HWEB-62 is health checks only: no usage overlay, deep links, or drag-in import."""
-        js = (ROOT / "static/panels.js").read_text(encoding="utf-8")
-        routes = (ROOT / "api/routes.py").read_text(encoding="utf-8")
-        assert "hermes://" not in js
-        assert "hermes://" not in routes
-        assert "mcp-cost-overlay" not in js
-        assert "mcp_usage_30d" not in js

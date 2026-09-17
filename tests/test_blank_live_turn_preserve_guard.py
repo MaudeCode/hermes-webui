@@ -78,24 +78,6 @@ def _preserve_guard_src():
 
 
 class TestBlankLiveTurnPreserveGuard:
-    def test_guard_requires_live_owner_not_dom_content(self):
-        guard = _preserve_guard_src()
-        assert "_paneOwnsSession" in guard
-        assert "_loadingSessionId!==sid" in guard
-        assert "_currentOwnerStreamId" in guard
-        assert "S.session.active_stream_id" in guard
-        assert "_inflightStreamId" in guard
-        assert "_streamOwnerMatches" in guard
-        assert "_hasLiveAssistantProjection" in guard
-        assert "S.messages" in guard
-        assert "role==='assistant'" in guard
-        assert "m._live" in guard and "_activityBurstId" in guard and "_liveSegmentSeq" in guard
-        assert re.search(
-            r"if\(_paneOwnsSession&&_streamOwnerMatches&&\(S\.activeStreamId\|\|_hasLiveAssistantProjection\)\)\{\s*_preservedLiveTurn=_lt;",
-            guard,
-        )
-        assert "_hasRealLiveContent" not in guard
-
     def test_runtime_rejects_dead_shell_preserves_live(self):
         node = shutil.which("node")
         if not node:

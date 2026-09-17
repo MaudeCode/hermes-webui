@@ -1,27 +1,7 @@
-"""Regression test for #4729 — reasoning SSE coalescing throttle.
-
-The bug: during the reasoning/thinking phase of models like DeepSeek the server
-emitted one SSE `reasoning` event per token (tens of thousands per turn), each
-triggering a full-text scan in the frontend renderer and freezing the JS main thread.
-
-The fix throttles reasoning SSE events to ~10 Hz. The SUBTLE correctness requirement
-(the reason the first attempt was bounced): reasoning deltas are INCREMENTAL and the
-frontend APPENDS them (`reasoningText += text` in static/messages.js), so the throttle
-must COALESCE — accumulate dropped deltas into a buffer and flush the buffer, NOT drop
-deltas — otherwise live reasoning text is permanently lost. And the tail (the last
-sub-100ms window) must be flushed when the reasoning phase ends, or it's lost too.
-
-These are source-structure assertions on the on_reasoning closure in api/streaming.py
-(the closure isn't unit-testable in isolation), pinning the three properties so the
-coalescing contract can't silently regress to the drop-based version.
-"""
 import pathlib
 
 REPO = pathlib.Path(__file__).parent.parent
 STREAMING = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
-MESSAGES = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
-
-
 def _on_reasoning_body() -> str:
     """Extract the body of the on_reasoning closure by brace/indent scanning."""
     start = STREAMING.index("def on_reasoning(text):")
@@ -140,13 +120,3 @@ def test_unstable_local_reasoning_events_do_not_materialize_the_segment():
     ]
     assert 'reasoning_event_payload(\n                        _reasoning_buffer[0],\n                        "",' in body
     assert '_current_reasoning_text() if stable else ""' in flush
-
-
-
-def test_frontend_appends_reasoning_deltas():
-    # The whole coalesce requirement hinges on the frontend APPENDING (not replacing).
-    # If this ever changes to assignment, the throttle design must change with it.
-    assert "reasoningText += text" in MESSAGES, (
-        "frontend reasoning handler must append deltas — if this changes, revisit the "
-        "server-side coalescing throttle (#4729)"
-    )

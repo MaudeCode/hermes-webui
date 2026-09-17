@@ -9,12 +9,6 @@ from tests._pytest_port import BASE
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CONFIG_PY = (ROOT / "api" / "config.py").read_text(encoding="utf-8")
-INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
-PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
-BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
-SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
-
-
 def get(path):
     with urllib.request.urlopen(BASE + path, timeout=10) as response:
         return json.loads(response.read())
@@ -51,22 +45,6 @@ def make_session(created, title):
     sid = d["session"]["session_id"]
     created.append(sid)
     return sid
-
-
-def test_pin_limit_setting_is_exposed_and_wired_through_ui():
-    assert '"pinned_sessions_limit": 3' in CONFIG_PY
-    assert '"pinned_sessions_limit": (1, 99)' in CONFIG_PY
-    assert 'id="settingsPinnedSessionsLimit"' in INDEX_HTML
-    assert 'type="number"' in INDEX_HTML
-    assert 'min="1"' in INDEX_HTML
-    assert 'max="99"' in INDEX_HTML
-    assert 'payload.pinned_sessions_limit=parseInt(pinnedLimitField.value,10)' in PANELS_JS
-    assert "settings.pinned_sessions_limit" in PANELS_JS
-    assert "window._pinnedSessionsLimit=parseInt(s.pinned_sessions_limit||3,10)||3" in BOOT_JS
-    assert "function _getPinnedSessionsLimit()" in SESSIONS_JS
-    assert "function _pinnedSessionsLimit()" not in SESSIONS_JS
-    assert "_pinnedSessionCount()>=_getPinnedSessionsLimit()" not in SESSIONS_JS
-    assert "await api('/api/session/pin'" in SESSIONS_JS
 
 
 def test_settings_api_persists_integer_pin_limit_and_rejects_invalid_values():

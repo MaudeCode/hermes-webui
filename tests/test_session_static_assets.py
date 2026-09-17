@@ -45,36 +45,6 @@ class _FakeHandler:
         return None
 
 
-def test_session_static_css_returns_text_css_mime(monkeypatch):
-    """/session/<id>/static/style.css must return Content-Type: text/css, not text/html.
-
-    This is the exact failure mode PR #1505 fixes: strict-MIME browsers refuse to apply
-    a stylesheet served as text/html.
-    """
-    from api.routes import handle_get
-
-    handler = _FakeHandler()
-    parsed = urlparse("http://example.com/session/static/style.css")
-    assert handle_get(handler, parsed) is True
-    assert handler.status == 200
-    ct = handler.header("Content-Type") or ""
-    assert ct.startswith("text/css"), f"expected text/css, got {ct!r}"
-    # Sanity: real CSS bytes, not the 100KB HTML index page
-    assert b"<!doctype html>" not in handler.body[:200].lower()
-
-
-def test_session_static_js_returns_javascript_mime(monkeypatch):
-    """/session/<id>/static/ui.js must return application/javascript, not text/html."""
-    from api.routes import handle_get
-
-    handler = _FakeHandler()
-    parsed = urlparse("http://example.com/session/static/ui.js")
-    assert handle_get(handler, parsed) is True
-    assert handler.status == 200
-    ct = handler.header("Content-Type") or ""
-    assert ct.startswith("application/javascript"), f"expected application/javascript, got {ct!r}"
-
-
 def test_session_html_route_still_serves_index():
     """Sibling regression: /session/<id> (no /static/) must still return the HTML index.
 
@@ -131,25 +101,3 @@ def test_session_static_auth_exemption(monkeypatch):
     # And confirm a non-static /session/* path still requires auth
     handler = _FakeHandler()
     assert check_auth(handler, SimpleNamespace(path="/session/abc123", query="")) is False
-
-
-def test_session_static_favicon_512_returns_png():
-    """/session/static/favicon-512.png must return image/png with a PNG signature.
-
-    Firefox Android fetches PWA icons from the manifest's icon URLs. When the
-    page is /session/<id>, the manifest's relative icon paths resolve to
-    /session/static/favicon-512.png. This test ensures the existing
-    /session/static/* alias serves the real PNG icon, not the HTML index.
-    See #2226.
-    """
-    from api.routes import handle_get
-
-    handler = _FakeHandler()
-    parsed = urlparse("http://example.com/session/static/favicon-512.png")
-    assert handle_get(handler, parsed) is True
-    assert handler.status == 200
-    ct = handler.header("Content-Type") or ""
-    assert ct.startswith("image/png"), f"expected image/png, got {ct!r}"
-    # PNG signature: first 8 bytes are \x89PNG\r\n\x1a\n
-    body = bytes(handler.body)
-    assert body[:4] == b"\x89PNG", "favicon-512.png must start with PNG signature"

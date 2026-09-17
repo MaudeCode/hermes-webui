@@ -102,19 +102,3 @@ def _function_body(src: str, signature: str) -> str:
             if depth == 0:
                 return src[start : j + 1]
     raise AssertionError(f"could not find end of {signature}")
-
-
-def test_profile_dropdown_filters_hidden_profiles_but_preserves_active():
-    body = _function_body(_panels_js(), "function renderProfileDropdown(data)")
-
-    assert "data = data || {};" in body
-    assert "const allProfiles = (Array.isArray(data.profiles) ? data.profiles : []).filter(p => p && typeof p.name === 'string');" in body
-    assert "allProfiles.some(p => p.name === S.activeProfile)" in body
-    assert "const profiles = allProfiles.filter(p => p && (p.visible !== false || p.name === active));" in body
-
-
-def test_profiles_management_panel_still_renders_all_profiles():
-    body = _function_body(_panels_js(), "async function loadProfilesPanel()")
-
-    assert "for (const p of data.profiles)" in body
-    assert "visible !== false" not in body

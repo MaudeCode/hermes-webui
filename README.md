@@ -3,7 +3,7 @@
 [Hermes Agent](https://hermes-agent.nousresearch.com/) is a sophisticated autonomous agent that lives on your server, accessed via a terminal or messaging apps, that remembers what it learns and gets more capable the longer it runs.
 
 Hermes WebUI is a lightweight, dark-themed web app interface in your browser for [Hermes Agent](https://hermes-agent.nousresearch.com/).
-Full parity with the CLI experience - everything you can do from a terminal, you can do from this UI. No build step, no framework, no bundler. Just Python and vanilla JS.
+Full parity with the CLI experience - everything you can do from a terminal, you can do from this UI. A Python standard-library server serves a committed, deterministic build of a TanStack Start / React / TypeScript single-page app: no Node.js at runtime, no server-side rendering, no server functions.
 
 Layout: three-panel. Left sidebar for sessions and navigation, center for chat,
 right for workspace file browsing. The **composer footer** keeps the controls the
@@ -633,15 +633,19 @@ system/Homebrew interpreter.
 
 Tests run against an isolated server with a separate state directory.
 Production data and real cron jobs are never touched. Current snapshot:
-**~11,500 tests collected** across **~1,150 test files**, run in CI on Python 3.13
+**~10,500 tests collected** across **~980 test files**, run in CI on Python 3.13
 across five parallel shards.
 
 ---
 
 ## Architecture
 
-No build step, no framework, no bundler — a Python standard-library HTTP server
-and vanilla JS. The backend lives in `api/`, the frontend in `static/`.
+A Python standard-library HTTP server (`server.py` + `api/`) is the only
+runtime. The browser app is a TanStack Start single-page app (React 19,
+TypeScript strict) whose production build is committed under `static/dist`
+and served by Python; the source lives in `frontend/`. There is no Node.js at
+runtime and no server-side rendering: the shell is prerendered once at build
+time and the client fetches everything from the JSON API.
 
 **Backend (`api/`)**
 
@@ -650,11 +654,13 @@ server.py         HTTP routing shell + auth middleware
 api/
   auth.py         Optional password authentication, signed cookies, passkeys
   config.py       Discovery, globals, model detection, reloadable config
-  helpers.py      HTTP helpers, security headers
+  helpers.py      HTTP helpers, security headers (CSP without inline scripts)
   models.py       Session model + CRUD + CLI/state.db bridge
   onboarding.py   First-run onboarding wizard, OAuth provider support
   profiles.py     Profile state management, hermes_cli wrapper
   routes.py       All GET + POST route handlers (if/elif dispatch, no decorators)
+  spa_shell.py    SPA route allowlist, <base href> substitution, hashed asset serving
+  extension_manifests.py  Sanitized extension/plugin manifests for the sandboxed panel protocol
   state_sync.py   /insights sync — message_count to state.db
   streaming.py    SSE engine, run_agent, cancellation, compression
   updates.py      Self-update check and release notes
@@ -662,28 +668,37 @@ api/
   workspace.py    File ops, workspace helpers, git detection
 ```
 
-**Frontend (`static/`)**
+**Frontend (`frontend/` source, `static/dist` committed build)**
 
 ```
-index.html        HTML template
-style.css         All CSS incl. mobile responsive, themes + skins
-ui.js             DOM helpers, renderMd, tool cards, context indicator
-workspace.js      File preview, file ops, git badge, central api() fetch wrapper
-sessions.js       Session CRUD, collapsible groups, search, reload recovery
-messages.js       send(), SSE handlers, live streaming, session recovery
-panels.js         Cron, skills, memory, profiles, settings (Control Center)
-commands.js       Slash command autocomplete
-boot.js           Mobile nav, voice input, theme/skin boot, bfcache handler
+frontend/src/
+  routes/         TanStack Router file routes (/, /session/$id, /tasks, /settings/$section, /login, /share/$token, /ext/$id …)
+  api/            Typed client (Zod-validated responses, CSRF, dedupe, 401 redirect), SSE helpers
+  contracts/      Zod schemas for every API payload, SSE event and persisted key
+  stream/         Chat stream reducer, connection lifecycle, store
+  features/       Chat, composer, sessions, settings, hubs, extensions, voice, terminal
+  shell/          Rail, sidebar, titlebar, mobile nav, shortcuts
+  extensions/     Sandboxed extension host, SDK, registry (protocol v1)
+  i18n/           Paraglide runtime; messages live in frontend/messages/*.json
+  theme/          Design tokens (CSS custom properties), Tailwind theme, boot appearance
+  sw.ts           Service worker (Workbox precache of the shell, runtime cache for assets)
+static/dist/      Committed build: index.html shell, hashed assets/, sw.js, manifest, extension-sdk.js
+static/brand/     Icons
 ```
+
+Build and verify the frontend with `npm ci && npm run build` in `frontend/`
+(`npm run check-dist` diffs the committed output against a clean build when you want to verify it). See
+[`docs/architecture/frontend-migration.md`](docs/architecture/frontend-migration.md).
 
 **Tests + packaging**
 
 ```
-tests/            Pytest suite (~11,500 tests; isolated server/state fixtures)
+tests/            Pytest suite (~10,500 tests; isolated server/state fixtures)
 pyproject.toml    Standard build metadata plus the Ruff lint gate; checkout launch surface still centers on bootstrap.py / start.sh / ctl.sh
 Dockerfile        python:3.12-slim container image
 docker-compose.yml  Compose with named volume and optional auth
-.github/workflows/  CI: ruff + sharded pytest, browser smoke, Docker smoke,
+.github/workflows/  CI: ruff + sharded pytest, frontend gate (typecheck, lint,
+                    Vitest, deterministic build diff, Playwright), Docker smoke,
                     multi-arch Docker build + GitHub Release on tag
 ```
 

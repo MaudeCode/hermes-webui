@@ -142,30 +142,93 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true' && always()
         run: python3 scripts/ruff_lint.py --all
 
-      # Static-JS runtime-error guards. These catch brick-class bugs that throw only
-      # when the browser executes the code — node --check, source-presence tests, and
-      # the mocked pytest suite all miss them. Two complementary ESLint passes:
-      #   * runtime-guard config: no-const-assign / no-import-assign (#3162 class)
-      #   * scope_undef_gate.py: no-undef across the shared classic-<script> global
-      #     scope, catching a function defined nested but called from a sibling
-      #     scope (#3696 — ReferenceError: _sessionAttentionState is not defined).
-      - name: Set up Node for ESLint runtime guards
+  frontend:
+    needs: changes
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Docs-only short-circuit
+        if: needs.changes.outputs.docs_only == 'true'
+        run: echo "Docs-only change set — skipping the frontend build gate."
+
+      - uses: actions/checkout@v4
+        if: needs.changes.outputs.docs_only != 'true'
+
+      - name: Set up Node
         if: needs.changes.outputs.docs_only != 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
-      - name: Install ESLint
+      - name: Clean install (lockfile is authoritative)
         if: needs.changes.outputs.docs_only != 'true'
-        run: npm install --no-save eslint@^10
+        run: npm ci --no-audit --no-fund
 
-      - name: ESLint runtime-error gate (no-const-assign / no-import-assign, #3162)
+      - name: Locale parity gate
         if: needs.changes.outputs.docs_only != 'true'
-        run: npx eslint --no-config-lookup -c eslint.runtime-guard.config.mjs "static/**/*.js"
+        run: npm run i18n:gate
 
-      - name: Scope / undefined-reference gate (#3696)
+      - name: Strict TypeScript
         if: needs.changes.outputs.docs_only != 'true'
-        run: python3 scripts/scope_undef_gate.py
+        run: npm run typecheck
+
+      - name: ESLint (TypeScript, React, service worker, contract rules)
+        if: needs.changes.outputs.docs_only != 'true'
+        run: npm run lint
+
+      - name: Vitest
+        if: needs.changes.outputs.docs_only != 'true'
+        run: npm test
+
+      - name: Deterministic production build
+        if: needs.changes.outputs.docs_only != 'true'
+        run: npm run build:fast
+
+      - name: Install Playwright Chromium
+        if: needs.changes.outputs.docs_only != 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Set up Python for the end-to-end server
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install server dependencies
+        if: needs.changes.outputs.docs_only != 'true'
+        run: pip install -r ../requirements.txt
+
+      # Functional end-to-end checks are required. Screenshot comparisons are not: the committed baselines are
+      # rendered on macOS and Linux text rasterisation differs, so the second step reports diffs as an artifact.
+      - name: Playwright end-to-end (desktop + mobile, functional; screenshots ignored)
+        if: needs.changes.outputs.docs_only != 'true'
+        run: npm run e2e -- --ignore-snapshots
+
+      - name: Playwright screenshot comparison (informational, never blocks)
+        if: needs.changes.outputs.docs_only != 'true'
+        continue-on-error: true
+        run: npm run e2e
+
+      - name: Upload screenshot comparison report
+        if: ${{ always() && needs.changes.outputs.docs_only != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-screenshots
+          path: frontend/playwright-report
+          retention-days: 7
+
+      - name: Upload Playwright report on failure
+        if: ${{ failure() && needs.changes.outputs.docs_only != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: frontend/playwright-report
+          retention-days: 7
 
   test:
     needs: changes

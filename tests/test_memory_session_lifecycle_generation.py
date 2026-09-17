@@ -231,16 +231,6 @@ def test_shutdown_drain_waits_for_inflight_commit_and_flushes_new_generation():
     assert lifecycle.has_uncommitted_work(sid) is False
 
 
-def test_frontend_new_session_sends_previous_session_id_boundary():
-    src = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
-    start = src.index("async function newSession")
-    end = src.index("const data=await api('/api/session/new'", start)
-    body = src[start:end]
-
-    assert "prev_session_id" in body
-    assert "S.session" in body and "session_id" in body
-
-
 # ── Follow-up review fix tests ──────────────────────────────────────────────
 
 

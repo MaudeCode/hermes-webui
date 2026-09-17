@@ -35,16 +35,17 @@ def test_handler_adds_content_security_policy_report_only(monkeypatch):
     }
 
 
-def test_csp_report_only_keeps_legacy_inline_allowances_for_current_ui():
+def test_csp_report_only_mirrors_the_bundled_spa_policy():
     policy = Handler.csp_report_only_policy()
 
-    assert "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net" in policy
-    assert "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net" in policy
-    # unsafe-eval was dropped after Opus stage-339 verification — no production
-    # JS uses eval(), new Function(), or string-form setTimeout/setInterval.
+    # HWEB-100: no inline scripts, no CDN; inline styles remain for the
+    # rendering libraries' style attributes.
+    assert "script-src 'self' https://static.cloudflareinsights.com;" in policy
+    assert "'unsafe-inline'" not in policy.split("style-src")[0]
+    assert "style-src 'self' 'unsafe-inline';" in policy
     assert "'unsafe-eval'" not in policy
     assert "img-src 'self' data:" in policy
-    assert "font-src 'self' data: https://fonts.gstatic.com" in policy
+    assert "font-src 'self' data:;" in policy
     assert "connect-src 'self'" in policy
 
 

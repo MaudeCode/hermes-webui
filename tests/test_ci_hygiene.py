@@ -215,9 +215,3 @@ def test_local_test_runner_rejects_venv_without_accepted_python_path(tmp_path):
     assert "does not contain bin/python or Scripts/python.exe" in result.stderr
     assert not proof.exists()
     assert not (repo / ".venv").exists()
-
-def test_live_model_success_log_is_debug_not_default_console_log():
-    ui = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
-
-    assert "console.debug('[hermes] Live models loaded" in ui
-    assert "console.log('[hermes] Live models loaded" not in ui

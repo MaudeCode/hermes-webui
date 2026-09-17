@@ -162,66 +162,7 @@ def test_show_webhook_sessions_invalidates_session_cache_on_settings_save():
 
 # --- static/index.html string-scan ---
 
-def test_settings_show_cron_sessions_in_html():
-    src = _read("static/index.html")
-    assert "settingsShowCronSessions" in src, (
-        "settingsShowCronSessions checkbox must appear in static/index.html"
-    )
-
-
-def test_settings_show_webhook_sessions_in_html():
-    src = _read("static/index.html")
-    assert "settingsShowWebhookSessions" in src, (
-        "settingsShowWebhookSessions checkbox must appear in static/index.html"
-    )
-
-
-def test_settings_show_kanban_sessions_in_html():
-    src = _read("static/index.html")
-    assert "settingsShowKanbanSessions" in src, (
-        "settingsShowKanbanSessions checkbox must appear in static/index.html"
-    )
-
-
 # --- static/panels.js string-scans ---
-
-def test_panels_save_wiring():
-    src = _read("static/panels.js")
-    # Both save paths (autosave _preferencesPayloadFromUi + explicit saveSettings)
-    # must gate background sessions on the CLI-sessions checkbox so neither can
-    # persist true while show_cli_sessions=false (#3514).
-    assert "payload.show_cron_sessions=!!(showCliCb&&showCliCb.checked&&showCronCb.checked)" in src, (
-        "autosave wiring must gate show_cron_sessions on settingsShowCliSessions in static/panels.js"
-    )
-    assert "body.show_cron_sessions=showCliSessions&&showCronSessions" in src, (
-        "explicit saveSettings() must gate show_cron_sessions on showCliSessions in static/panels.js"
-    )
-    assert "payload.show_webhook_sessions=!!(showCliCb&&showCliCb.checked&&showWebhookCb.checked)" in src, (
-        "autosave wiring must gate show_webhook_sessions on settingsShowCliSessions in static/panels.js"
-    )
-    assert "body.show_webhook_sessions=showCliSessions&&showWebhookSessions" in src, (
-        "explicit saveSettings() must gate show_webhook_sessions on showCliSessions in static/panels.js"
-    )
-    assert "payload.show_kanban_sessions=!!(showCliCb&&showCliCb.checked&&showKanbanCb.checked)" in src, (
-        "autosave wiring must gate show_kanban_sessions on settingsShowCliSessions in static/panels.js"
-    )
-    assert "body.show_kanban_sessions=showCliSessions&&showKanbanSessions" in src, (
-        "explicit saveSettings() must gate show_kanban_sessions on showCliSessions in static/panels.js"
-    )
-
-
-def test_panels_load_wiring():
-    src = _read("static/panels.js")
-    assert "show_cron_sessions" in src, (
-        "load wiring for show_cron_sessions must appear in static/panels.js"
-    )
-    assert "show_webhook_sessions" in src, (
-        "load wiring for show_webhook_sessions must appear in static/panels.js"
-    )
-    assert "show_kanban_sessions" in src, (
-        "load wiring for show_kanban_sessions must appear in static/panels.js"
-    )
-
 
 # --- #6780 gate-fix regressions: cron/webhook parity for kanban ---
 

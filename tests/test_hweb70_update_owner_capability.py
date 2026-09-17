@@ -19,10 +19,7 @@ import pytest
 import api.auth as auth
 import api.passkeys as passkeys
 import api.routes as routes
-from tests.js_source_extract import extract_function
-
 ROOT = Path(__file__).resolve().parents[1]
-UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 
@@ -234,27 +231,6 @@ __FUNCTIONS__
 """
 
 
-def _run(actions, *, auth=None, updates=None, update_data=None):
-    if NODE is None:
-        pytest.skip("node not available")
-    functions = "\n".join(extract_function(UI_JS, name, prefix) for name, prefix in _FUNCTIONS)
-    scenario = {
-        "actions": actions,
-        "auth": auth if auth is not None else [{"can_manage_server": True}],
-        "updates": updates or [],
-        "updateData": update_data or {"webui": {"behind": 2}, "agent": {"behind": 1}},
-    }
-    result = subprocess.run(
-        [NODE, "-e", _HARNESS.replace("__FUNCTIONS__", functions), json.dumps(scenario)],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"node harness failed: {result.stderr or result.stdout}")
-    return json.loads(result.stdout.strip().splitlines()[-1])
-
-
 def _mutations(out):
     return [c["path"] for c in out["apiCalls"] if c["path"].startswith("/api/updates/")]
 
@@ -264,109 +240,3 @@ def _assert_locked_out(out):
     assert out["forceDisabled"] is True
     assert out["clearLockDisabled"] is True
     assert out["noteDisplay"] == "block"
-
-
-def test_bound_session_sees_explanation_and_sends_no_mutation():
-    out = _run(["banner", "settle", "apply", "force", "clearLock"], auth=[{"can_manage_server": False}])
-    assert _mutations(out) == []
-    _assert_locked_out(out)
-    assert "owner session" in out["noteText"]
-    assert out["retryDisplay"] == "none"
-    assert out["inFlight"] is False and out["lockInFlight"] is False
-
-
-def test_owner_session_keeps_existing_multi_target_apply():
-    out = _run(["banner", "settle", "apply"], updates=[{"ok": True}, {"ok": True}])
-    assert [c["body"]["target"] for c in out["apiCalls"]] == ["agent", "webui"]
-    assert out["waitCalls"] == 1
-    assert out["noteDisplay"] == "none"
-    # The pre-mutation capability re-read must not re-enable Update Now mid-flight.
-    assert all(c["applyDisabled"] is True for c in out["apiCalls"])
-
-
-def test_owner_force_and_clear_lock_still_send_requests():
-    out = _run(["banner", "settle", "force", "clearLock"], updates=[{"ok": True}, {"ok": True}])
-    assert _mutations(out) == ["/api/updates/force", "/api/updates/clear_lock"]
-    assert out["waitCalls"] == 2
-    assert out["apiCalls"][1]["clearLockDisabled"] is True
-
-
-@pytest.mark.parametrize("status", [{}, {"can_manage_server": "true"}, {"can_manage_server": None}, None])
-def test_missing_or_non_boolean_capability_never_enables(status):
-    out = _run(["banner", "settle", "apply", "force", "clearLock"], auth=[status])
-    assert _mutations(out) == []
-    _assert_locked_out(out)
-    assert out["canManage"] is False
-
-
-def test_failed_capability_fetch_disables_and_retry_recovers():
-    out = _run(["banner", "settle"], auth=[{"throwMessage": "Failed to fetch"}])
-    _assert_locked_out(out)
-    assert out["canManage"] == "error"
-    assert out["retryDisplay"] == ""
-    assert "Could not confirm" in out["noteText"]
-
-    out = _run(["banner", "settle", "retry", "apply"], auth=[{"throwMessage": "Failed to fetch"}, {"can_manage_server": True}], updates=[{"ok": True}, {"ok": True}])
-    assert len(_mutations(out)) == 2
-    assert out["noteDisplay"] == "none"
-    assert out["retryDisplay"] == "none"
-
-
-def test_loading_state_keeps_controls_disabled_until_answer():
-    out = _run(["banner"], auth=[{"can_manage_server": True}])
-    assert out["canManage"] == "undefined"
-    _assert_locked_out(out)
-    assert "Checking" in out["noteText"]
-
-
-def test_permission_lost_between_banner_and_click_blocks_apply():
-    out = _run(["banner", "settle", "apply"], auth=[{"can_manage_server": True}, {"can_manage_server": False}])
-    assert _mutations(out) == []
-    _assert_locked_out(out)
-    assert out["applyText"] == "Update Now"
-    assert out["inFlight"] is False
-
-
-@pytest.mark.parametrize("action, path", [("apply", "/api/updates/apply"), ("force", "/api/updates/force"), ("clearLock", "/api/updates/clear_lock")])
-def test_stale_capability_then_403_disables_and_explains(action, path):
-    # banner -> true, pre-mutation recheck -> true, post-403 re-read -> false
-    auth = [{"can_manage_server": True}, {"can_manage_server": True}, {"can_manage_server": False}]
-    out = _run(["banner", "settle", action], auth=auth, updates=[{"httpStatus": 403, "message": "Owner session required"}])
-    assert _mutations(out) == [path]
-    assert out["waitCalls"] == 0
-    assert out["canManage"] is False
-    _assert_locked_out(out)
-    assert "owner session" in out["noteText"]
-    assert "Owner session required" in out["errorText"]
-    assert out["inFlight"] is False and out["lockInFlight"] is False
-
-
-def test_non_403_failure_reset_reenables_only_for_owner():
-    out = _run(["banner", "settle", "apply"], updates=[{"httpStatus": 500, "message": "boom"}])
-    assert out["canManage"] is True
-    assert out["applyDisabled"] is False
-    assert out["inFlight"] is False
-
-
-@pytest.mark.parametrize("action", ["apply", "force", "clearLock"])
-def test_403_from_another_gate_does_not_lock_out_a_still_owner(action):
-    """A CSRF/origin 403 must not be mistaken for loss of owner permission."""
-    out = _run(["banner", "settle", action], updates=[{"httpStatus": 403, "message": "CSRF token mismatch"}])
-    assert out["canManage"] is True
-    assert out["applyDisabled"] is False
-    assert out["forceDisabled"] is False
-    assert out["clearLockDisabled"] is False
-    assert out["noteDisplay"] == "none"
-    assert "CSRF token mismatch" in out["errorText"]
-    assert out["inFlight"] is False and out["lockInFlight"] is False
-
-
-@pytest.mark.parametrize("status", [{"can_manage_server": False}, {"throwMessage": "Failed to fetch"}])
-def test_manual_only_banner_shows_no_permission_copy(status):
-    """No in-app apply target means no owner note and no retry button (Codex P2)."""
-    manual_only = {"webui": {"behind": 1, "manual_update": True, "no_git": True}, "agent": None}
-    out = _run(["banner", "settle"], auth=[status], update_data=manual_only)
-    assert out["noteDisplay"] == "none"
-    assert out["noteText"] == ""
-    assert out["retryDisplay"] == "none"
-    assert out["applyDisabled"] is True

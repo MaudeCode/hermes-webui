@@ -519,26 +519,3 @@ def test_openai_tts_rejects_oversized_upstream_audio(monkeypatch):
 
     assert h.status == 502
     assert "OpenAI TTS generation failed" in (h.payload() or {}).get("error", "")
-
-
-def test_openai_option_in_html():
-    src = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    assert '<option value="openai">OpenAI TTS (server)</option>' in src
-
-
-def test_openai_voice_placeholder_in_panels():
-    src = (STATIC_DIR / "panels.js").read_text(encoding="utf-8")
-    assert "engine==='openai'" in src
-    assert 'OpenAI voice (server-configured)' in src
-
-
-def test_play_openai_tts_exists_in_ui_js():
-    src = (STATIC_DIR / "ui.js").read_text(encoding="utf-8")
-    assert 'function _playOpenaiTts(text, btn)' in src
-    assert "body:JSON.stringify({text:text, engine:'openai'})" in src
-
-
-def test_boot_js_handles_openai_engine():
-    src = (STATIC_DIR / "boot.js").read_text(encoding="utf-8")
-    assert 'if(engine==="openai")' in src
-    assert "body: JSON.stringify({text: clean, engine: 'openai'})" in src

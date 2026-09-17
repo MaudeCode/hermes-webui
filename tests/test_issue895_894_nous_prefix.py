@@ -127,29 +127,6 @@ class TestSetDefaultModelPreservesAtPrefix:
             f"{saved['model']['default']!r}"
         )
 
-    def test_settings_picker_applies_saved_default_via_smart_matcher(self):
-        """The Settings picker must use `_applyModelToDropdown()` (smart matcher),
-        not raw `modelSel.value = ...`, when initialising from the saved default.
-
-        Raw `.value =` silently fails if no option matches exactly — blank picker
-        on reopen for any saved default whose canonical form doesn't equal an option
-        value (e.g. CLI-saved `anthropic/claude-opus-4.6` vs Nous dropdown option
-        `@nous:anthropic/claude-opus-4.6`). `_applyModelToDropdown()` normalises
-        on both sides and picks the matching option.
-        """
-        js = (Path(__file__).resolve().parent.parent / "static" / "panels.js").read_text()
-        # Find the block that sets _settingsHermesDefaultModelOnOpen
-        anchor = "_settingsHermesDefaultModelOnOpen=(models&&models.default_model)||"
-        idx = js.find(anchor)
-        assert idx != -1, "Settings default-model initialisation not found in panels.js"
-        block = js[idx:idx + 1200]
-        assert "_applyModelToDropdown" in block, (
-            "Settings picker must use _applyModelToDropdown() so a saved bare form "
-            "(e.g. anthropic/claude-opus-4.6) still selects the matching "
-            "@nous:anthropic/claude-opus-4.6 option. A raw .value assignment leaves "
-            "the picker blank when the saved ID doesn't match an option verbatim."
-        )
-
     def test_save_does_not_return_full_model_catalog(self, tmp_path, monkeypatch):
         """set_hermes_default_model must return a lightweight ack, not call get_available_models (#895)."""
         config_file = tmp_path / "config.yaml"

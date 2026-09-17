@@ -25,60 +25,6 @@ def test_inline_preview_param_in_file_raw():
     )
 
 
-def test_iframe_uses_inline_param():
-    """workspace.js must pass &inline=1 when setting the preview iframe src."""
-    content = _get_workspace_js()
-    assert "inline=1" in content, (
-        "workspace.js must pass ?inline=1 to api/file/raw for the HTML preview iframe"
-    )
-
-
-def test_open_in_browser_uses_unconditional_inline_param():
-    """Workspace Open in browser must use the explicit inline/sandbox open path."""
-    content = _get_workspace_js()
-    idx = content.find("function openInBrowser()")
-    assert idx != -1, "openInBrowser() must exist"
-    block = content[idx:idx + 700]
-    assert "&inline=1" in block, (
-        "openInBrowser() must include inline=1 so HTML opens instead of downloading"
-    )
-    assert "download=1" not in block, (
-        "openInBrowser() must not reuse the Download button path"
-    )
-    assert "window.open(url,'_blank','noopener')" in block or 'window.open(url,"_blank","noopener")' in block, (
-        "openInBrowser() should use noopener for the new tab"
-    )
-
-
-def test_html_preview_iframe_exists_in_html():
-    """The previewHtmlIframe element must be present in index.html."""
-    content = _get_index_html()
-    assert "previewHtmlIframe" in content, (
-        "index.html must contain the previewHtmlIframe element"
-    )
-
-
-def test_html_exts_defined_in_workspace_js():
-    """HTML_EXTS set must include .html and .htm."""
-    content = _get_workspace_js()
-    assert "HTML_EXTS" in content, "workspace.js must define HTML_EXTS"
-    assert "'.html'" in content or '".html"' in content, "HTML_EXTS must include .html"
-    assert "'.htm'" in content or '".htm"' in content, "HTML_EXTS must include .htm"
-
-
-def test_sandbox_allows_scripts_only():
-    """iframe sandbox must not include allow-same-origin (XSS risk)."""
-    content = _get_index_html()
-    # Find the sandbox attribute value
-    import re
-    sandboxes = re.findall(r'sandbox="([^"]*)"', content)
-    preview_sandboxes = [s for s in sandboxes if "allow" in s]
-    for sb in preview_sandboxes:
-        assert "allow-same-origin" not in sb, (
-            "HTML preview iframe must not have allow-same-origin (would expose parent cookies)"
-        )
-
-
 def test_mime_map_includes_html_and_htm():
     """MIME_MAP must map .html/.htm to text/html — without this, _handle_file_raw
     falls back to application/octet-stream and browsers refuse to render the

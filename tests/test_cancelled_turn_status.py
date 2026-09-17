@@ -144,20 +144,6 @@ class TestCancelledTurnFinalizer:
         assert not temp_session.exists()
 
 
-    def test_message_renderer_allows_non_provider_details_label(self):
-        src = _read("static/ui.js")
-        assert "provider_details_label||'Provider details'" in src
-        assert "provider-error-details" in src
-
-    def test_cancel_error_carrier_is_not_folded_into_worklog(self):
-        src = _read("static/ui.js")
-        start = src.index("function _assistantMessageBelongsInWorklog")
-        end = src.index("function _assistantThinkingBelongsInWorklog", start)
-        block = src[start:end]
-
-        assert "if(m._error) return false;" in block
-
-
 class TestCancelledTurnPersistenceGuards:
     def test_cancel_marker_patterns_are_centralized_for_dedupe(self):
         assert _CANCEL_MARKER_PATTERNS == ('task cancelled', 'task canceled', 'response interrupted')
@@ -231,37 +217,6 @@ class TestCancelledTurnPersistenceGuards:
             "Ephemeral cancels must clean up their temporary session before returning."
         )
         assert "return" in block
-
-    def test_frontend_has_cancelled_and_interrupted_labels_for_apperror_fallbacks(self):
-        src = _read("static/messages.js")
-        start = src.find("source.addEventListener('apperror'")
-        end = src.find("source.addEventListener('warning'", start)
-        assert start != -1 and end != -1, "apperror handler not found"
-        block = src[start:end]
-
-        assert "d.type==='cancelled'" in block or 'd.type==="cancelled"' in block
-        assert "d.type==='interrupted'" in block or 'd.type==="interrupted"' in block
-        assert "Task cancelled" in block
-        assert "Response interrupted" in block
-        assert "No response from provider" in block
-        assert "Cancellation details" in block
-        assert "Interruption details" in block
-
-    def test_frontend_cancel_prefers_embedded_session_payload(self):
-        src = _read("static/messages.js")
-        start = src.find("source.addEventListener('cancel'")
-        end = src.find("for(const _runJournalEventName", start)
-        assert start != -1 and end != -1, "cancel handler not found"
-        block = src[start:end]
-
-        assert "const _applyCancelSessionPayload=(sessionPayload)=>" in block
-        assert "const _cancelSessionPayload=_cancelData&&typeof _cancelData.session==='object'?_cancelData.session:null;" in block
-        assert "if(_applyCancelSessionPayload(_cancelSessionPayload)) return;" in block
-        assert "const data=await api(_terminalSessionPath(activeSid));" in block
-        assert block.index("if(_applyCancelSessionPayload(_cancelSessionPayload)) return;") < block.index("const data=await api("), (
-            "Cancel handler must apply the terminal SSE session payload before falling back "
-            "to /api/session so captured _partial reasoning/tool rows are visible immediately."
-        )
 
     def test_worker_cancel_events_do_not_embed_session_payload(self):
         src = _read("api/streaming.py")

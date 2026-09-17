@@ -13,9 +13,6 @@ from api.gateway_chat import _run_gateway_chat_streaming
 
 REPO = Path(__file__).resolve().parents[1]
 GATEWAY_CHAT = (REPO / "api" / "gateway_chat.py").read_text(encoding="utf-8")
-MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
-
-
 def _run_gateway_warning_case(unavailable_reason: str) -> list:
     events = []
     q = MagicMock()
@@ -239,14 +236,6 @@ def test_gateway_chat_keeps_unsupported_warning_for_timeout_capabilities_probe()
         isinstance(item, tuple) and item[0] == "warning" and item[1].get("type") == "approval_gateway_offline"
         for item in events
     )
-
-
-def test_messages_js_handles_offline_warning_without_touching_unsupported_branch():
-    assert "d.type==='approval_gateway_offline'" in MESSAGES_JS
-    assert "Gateway offline" in MESSAGES_JS
-    assert "d.type==='approval_gateway_unsupported'" in MESSAGES_JS
-    assert "Approvals not supported" in MESSAGES_JS
-    assert "setComposerStatus(`${d.message||'Warning'}`,d.type==='fallback'?4000:undefined);" in MESSAGES_JS
 
 
 def test_gateway_chat_source_mentions_offline_warning_type():

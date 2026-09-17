@@ -11,41 +11,7 @@ import re
 
 REPO_ROOT = Path(__file__).parent.parent
 ROUTES_PY = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
-SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
-I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
-
-
 # --- SF-1 (#1450): child-count UI uses i18n key ---
-
-def test_sf1_child_count_uses_i18n_in_sessions_js():
-    """The child-count badge and meta line must call t('session_meta_children', ...).
-
-    Pre-fix, the strings were hardcoded as `${childCount} child${childCount===1?'':'ren'}`
-    which rendered English in all 9 locales.
-    """
-    # Two callsites
-    assert "t('session_meta_children', childCount)" in SESSIONS_JS, (
-        "session_meta_children i18n key not used in sessions.js — child-count UI "
-        "would render English in non-English locales"
-    )
-    # Negative: hardcoded form must be gone
-    assert "${childCount} child${childCount===1?'':'ren'}" not in SESSIONS_JS, (
-        "hardcoded English child-count string still present — removes locale support"
-    )
-
-
-def test_sf1_session_meta_children_present_in_all_locales():
-    """Every locale block in i18n.js that has session_meta_messages must also
-    have session_meta_children — they're the analogous sidebar meta strings."""
-    msg_count = len(re.findall(r"session_meta_messages:", I18N_JS))
-    child_count = len(re.findall(r"session_meta_children:", I18N_JS))
-    assert msg_count == child_count, (
-        f"session_meta_messages appears {msg_count} times but "
-        f"session_meta_children appears {child_count} — must be in every locale"
-    )
-    # Sanity: 10 known locales (en, it, ja, ru, es, de, zh, zh-Hant, plus the legacy zh-tw/zh-hk aliases)
-    assert child_count >= 10, f"expected >=10 locales with session_meta_children, got {child_count}"
-
 
 # --- SF-2 (#1462): duplicate carries per-session settings ---
 

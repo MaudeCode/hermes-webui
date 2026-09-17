@@ -77,8 +77,8 @@ def test_sw_js_serves_the_version_the_app_currently_reports(tmp_path, monkeypatc
     import api.config as api_config
 
     static_root = tmp_path / "static"
-    static_root.mkdir()
-    (static_root / "sw.js").write_text(
+    (static_root / "dist").mkdir(parents=True)
+    (static_root / "dist" / "sw.js").write_text(
         "const version = '__WEBUI_VERSION__';\n", encoding="utf-8"
     )
     monkeypatch.setattr(api_config, "get_static_root", lambda: static_root)

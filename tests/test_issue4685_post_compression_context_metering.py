@@ -37,20 +37,6 @@ console.log(JSON.stringify({{percent: nodes.ctxPercent.textContent, label: nodes
     return json.loads(result.stdout)
 
 
-def test_context_indicator_uses_post_compression_estimate():
-    indicator = _run_context_indicator(
-        {
-            "last_prompt_tokens": 100_000,
-            "post_compression_context_tokens_estimate": 4_096,
-            "context_length": 128_000,
-        }
-    )
-
-    assert indicator["percent"] == "3"
-    assert indicator["label"].startswith("Estimated next model context")
-    assert indicator["usage"].startswith("Estimated next model context")
-
-
 def test_post_compression_estimate_uses_pruned_request_and_preserves_last_prompt(monkeypatch):
     from api.streaming import _estimate_post_compression_context_tokens
 
@@ -150,28 +136,3 @@ def test_estimate_lineage_matrix(tmp_path, monkeypatch):
     assert child.post_compression_context_tokens_estimate is None
     assert cron.post_compression_context_tokens_estimate is None
     assert "post_compression_context_tokens_estimate" not in child.compact() or child.compact()["post_compression_context_tokens_estimate"] is None
-
-
-def test_context_indicator_without_estimate_preserves_current_behavior():
-    historical = _run_context_indicator({"last_prompt_tokens": 100_000, "context_length": 128_000})
-    no_data = _run_context_indicator({"input_tokens": 100_000, "output_tokens": 1})
-
-    assert historical["percent"] == "78"
-    assert historical["label"].startswith("Context window 78% used")
-    assert no_data["percent"] == "\N{MIDDLE DOT}"
-
-
-def test_reload_hydration_passes_post_compression_estimate_to_context_indicator():
-    expected = "post_compression_context_tokens_estimate"
-    for path, expected_calls in ((ROOT / "static" / "boot.js", 1), (ROOT / "static" / "sessions.js", 3)):
-        source = path.read_text(encoding="utf-8")
-        calls = source.split("_syncCtxIndicator({")[1:]
-
-        assert len(calls) == expected_calls
-        for call in calls:
-            assert expected in call.split("});", 1)[0]
-
-    boot = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
-    sessions = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
-    assert "S.session.post_compression_context_tokens_estimate=data.session.post_compression_context_tokens_estimate||null;" in boot
-    assert "S.session.post_compression_context_tokens_estimate=data.session.post_compression_context_tokens_estimate||null;" in sessions

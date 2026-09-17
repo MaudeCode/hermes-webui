@@ -129,13 +129,6 @@ def test_share_revoke_endpoint_hides_share_token_from_session():
         post("/api/session/delete", {"session_id": sid})
 
 
-def test_share_page_serves_public_html():
-    body, status, _ = get("/share/example-token")
-    assert status == 200
-    assert "Hermes Shared Conversation" in body
-    assert "static/share.js" in body
-
-
 def test_share_create_supports_raw_messaging_session_without_webui_sidecar():
     from tests.test_gateway_sync import _ensure_state_db, _insert_gateway_session, _remove_test_sessions
 

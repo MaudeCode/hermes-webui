@@ -229,37 +229,6 @@ def _read_ui_js():
     return (REPO_ROOT / 'static' / 'ui.js').read_text(encoding='utf-8')
 
 
-def test_whats_new_link_resets_display_and_contents_on_every_render():
-    """Without reset, a stale link from a prior banner can stay visible after
-    a re-render where the new payload has current_sha=None.
-    """
-    src = _read_ui_js()
-    idx = src.find("function _renderUpdateWhatsNewLinks(data)")
-    assert idx != -1, "What's-new link renderer not found"
-    block = src[idx:idx + 1200]
-
-    clear_idx = block.find("container.replaceChildren()")
-    hide_idx = block.find("container.style.display='none'")
-    show_idx = block.find("container.style.display='block'")
-
-    assert clear_idx != -1, "Missing container contents reset on every render"
-    assert hide_idx != -1, "Missing display='none' reset when no safe links exist"
-    assert clear_idx < show_idx, "contents reset must precede link rendering"
-    assert hide_idx < show_idx, "hidden state must be handled before visible rendering"
-
-
-def test_whats_new_link_suppressed_when_current_sha_falsy():
-    """The legacy fallback must guard on all three of repo_url/current_sha/latest_sha."""
-    src = _read_ui_js()
-    idx = src.find("function _updateCompareUrl(info)")
-    assert idx != -1, "Compare URL helper not found"
-    block = src[idx:idx + 500]
-    compact = re.sub(r"\s+", "", block)
-    assert "if(!(repo_url&&currentSha&&latestSha))returnnull;" in compact
-    assert "constfallbackUrl=repo_url+'/compare/'+currentSha+'...'+latestSha;" in compact
-    assert "return_isSafeUpdateCompareUrl(fallbackUrl)?fallbackUrl:null;" in compact
-
-
 # ── 3. End-to-end: simulate the exact reporter URL shape ──
 
 def test_reporter_url_shape_no_longer_produces_invalid_compare_url(tmp_path, upd):

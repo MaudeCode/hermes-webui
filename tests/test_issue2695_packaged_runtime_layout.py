@@ -77,10 +77,13 @@ def test_wheel_build_contains_runtime_tree(extracted_wheel):
         assert "api/config.py" in names
         assert "api/_scm_version.py" in names
         assert "static/__init__.py" in names
-        assert "static/index.html" in names
-        assert "static/ui.js" in names
-        assert "static/style.css" in names
-        assert "static/vendor/smd.min.js" in names
+        # HWEB-100: the committed frontend build ships inside the wheel.
+        assert "static/dist/index.html" in names
+        assert "static/dist/sw.js" in names
+        assert "static/dist/manifest.webmanifest" in names
+        assert "static/brand/favicon.ico" in names
+        assert any(n.startswith("static/dist/assets/") and n.endswith(".js") for n in names)
+        assert not any(n.startswith("static/vendor/") or n == "static/index.html" for n in names)
 
 
 def test_extracted_wheel_resolves_static_root_without_console_entrypoint_contract_change(extracted_wheel):
@@ -90,7 +93,7 @@ import api.config as api_config
 from api.updates import WEBUI_VERSION
 print(api_config.__file__)
 print(api_config.get_static_root())
-print(api_config.get_index_html_path())
+print(api_config.get_static_root() / "dist" / "index.html")
 print(WEBUI_VERSION)
 """
     env = os.environ.copy()
@@ -109,7 +112,7 @@ print(WEBUI_VERSION)
     assert lines == [
         str((extract_dir / "api" / "config.py").resolve()),
         str((extract_dir / "static").resolve()),
-        str((extract_dir / "static" / "index.html").resolve()),
+        str((extract_dir / "static" / "dist" / "index.html").resolve()),
         "v0.52.2695",
     ]
     assert Path(lines[0]).exists()
@@ -121,4 +124,4 @@ def test_checkout_static_root_stays_repo_relative():
     import api.config as api_config
 
     assert api_config.get_static_root() == ROOT / "static"
-    assert api_config.get_index_html_path() == ROOT / "static" / "index.html"
+    assert (ROOT / "static" / "dist" / "index.html").is_file()

@@ -144,14 +144,3 @@ def test_named_custom_provider_models_endpoint_network_error_uses_short_timeout(
     assert group["models_endpoint_error"]["kind"] == "network"
     assert observed_timeouts == [config.CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS]
     assert max(observed_timeouts) <= 5.0
-
-
-def test_frontend_model_picker_renders_provider_endpoint_hint():
-    ui = open("static/ui.js", encoding="utf-8").read()
-    css = open("static/style.css", encoding="utf-8").read()
-
-    assert "models_endpoint_error" in ui
-    assert "dataset.modelsEndpointError" in ui
-    assert "model-provider-hint" in ui
-    assert "entry.modelsEndpointError.message" in ui
-    assert ".model-provider-hint" in css

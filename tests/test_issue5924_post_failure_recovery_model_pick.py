@@ -26,10 +26,6 @@ from pathlib import Path
 import api.routes as routes
 
 ROOT = Path(__file__).resolve().parents[1]
-UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
-COMMANDS_JS = (ROOT / "static" / "commands.js").read_text(encoding="utf-8")
-
-
 def _function_body(src: str, name: str) -> str:
     # Match either "async function NAME" or plain "function NAME".
     start = src.find(f"async function {name}")
@@ -50,64 +46,6 @@ def _function_body(src: str, name: str) -> str:
 
 
 # ── WebUI layer: recovery paths re-arm the marker before send() ──────────────
-
-
-def test_submit_edit_rearms_pending_pick_before_send():
-    """Edit-resubmit must re-arm the explicit-pick marker before ``await send()``."""
-    body = _function_body(UI_JS, "submitEdit")
-    assert "_reArmRecoveryPick(" in body, (
-        "submitEdit must re-arm via _reArmRecoveryPick (#5924); otherwise the "
-        "recovery send loses explicit_model_pick and the server re-reverts the model"
-    )
-    rearm_idx = body.index("_reArmRecoveryPick(")
-    send_idx = body.rindex("await send()")
-    assert rearm_idx < send_idx, "the re-arm must happen BEFORE await send()"
-
-
-def test_cmd_retry_rearms_pending_pick_before_send():
-    """/retry must re-arm the explicit-pick marker before ``await send()``."""
-    body = _function_body(COMMANDS_JS, "cmdRetry")
-    assert "_reArmRecoveryPick(" in body, (
-        "cmdRetry must re-arm via _reArmRecoveryPick (#5924); otherwise /retry "
-        "re-sends the failed model instead of the freshly-picked one"
-    )
-    rearm_idx = body.index("_reArmRecoveryPick(")
-    send_idx = body.rindex("await send()")
-    assert rearm_idx < send_idx, "the re-arm must happen BEFORE await send()"
-
-
-def test_recovery_rearm_sources_deliberate_pick_helper():
-    """The re-arm must source the deliberate-pick signal from the shared helper.
-
-    Both recovery paths capture ``_deliberateSessionModelPick(<sid>)`` (a non-default
-    session-model signal that is inference-free and survives the failed send's marker
-    consumption) BEFORE any await, rather than comparing ``_chatPayloadModel()`` to
-    itself (which false-negatives an already-applied pick and false-positives on
-    provider inference — the round-2 gate finding).
-    """
-    for body in (_function_body(UI_JS, "submitEdit"), _function_body(COMMANDS_JS, "cmdRetry")):
-        assert "_deliberateSessionModelPick(" in body, (
-            "recovery paths must derive the pick via _deliberateSessionModelPick"
-        )
-
-
-def test_deliberate_pick_helper_ignores_default_and_inference():
-    """The helper only reports a pick for a genuine NON-DEFAULT session model.
-
-    It must key off the session's own model vs the profile default (window._defaultModel
-    / _activeProvider) — NOT provider inference on an unchanged model, and NOT a
-    self-comparison. A session on the profile default returns null (no re-arm), so the
-    server's compatible-model resolution runs for a no-real-pick recovery.
-    """
-    body = _function_body(UI_JS, "_deliberateSessionModelPick")
-    assert "window._defaultModel" in body and "window._activeProvider" in body, (
-        "the pick signal must compare against the profile default, not infer a provider"
-    )
-    assert "return null" in body, "a default-model session must return null (no re-arm)"
-    # must NOT resurrect the round-2 false-positive: no provider inference in the signal
-    assert "_providerFromModelValue" not in body and "_chatPayloadModelProvider" not in body, (
-        "the deliberate-pick signal must not use provider inference (round-2 false-positive)"
-    )
 
 
 # ── Server layer: explicit pick is honored; repair path preserved (#3737) ────
@@ -171,85 +109,3 @@ def test_non_explicit_send_still_normalizes_stale_model():
 
 
 # ── #5924 gate re-fixes: gated re-arm + session-race guards ──────────────────
-
-
-def test_recovery_rearm_is_gated_on_a_genuine_deliberate_pick():
-    """The re-arm must be CONDITIONAL on a real pick, not unconditional.
-
-    Codex round-1 CORE: re-arming on EVERY recovery send (even with no fresh pick)
-    forced explicit_model_pick=true and suppressed the server's compatible-model
-    resolution. Both recovery paths now derive `_recoveryPick` from the shared
-    _deliberateSessionModelPick helper and re-arm only via _reArmRecoveryPick,
-    which no-ops on a null/absent pick.
-    """
-    for body in (_function_body(UI_JS, "submitEdit"), _function_body(COMMANDS_JS, "cmdRetry")):
-        assert "_recoveryPick" in body, "recovery re-arm must be gated on _recoveryPick"
-        assert "_deliberateSessionModelPick(" in body, (
-            "the pick must come from _deliberateSessionModelPick, not an inline comparison"
-        )
-        assert "_reArmRecoveryPick(" in body, (
-            "the re-arm must go through _reArmRecoveryPick (fire-time safety guards)"
-        )
-
-
-def test_rearm_helper_guards_stale_pick_and_newer_marker():
-    """_reArmRecoveryPick must not re-arm a stale pick or clobber a newer marker.
-
-    Codex round-3 SILENT: a same-session model change DURING the recovery awaits
-    made the pre-await captured pick stale; re-arming it overwrote the newer
-    pending marker and restored the old model on a later session load. The helper
-    must (1) require the current session model/provider to still equal the pick,
-    and (2) not overwrite a different existing pending marker.
-    """
-    body = _function_body(UI_JS, "_reArmRecoveryPick")
-    # still-matches-current-state guard
-    assert "S.session.model" in body and "pick.model" in body, (
-        "must confirm the current session model still equals the captured pick"
-    )
-    # newer-marker guard
-    assert "_readPendingSessionModel(" in body, (
-        "must read the existing pending marker and refuse to clobber a newer one"
-    )
-    # session-scope guard
-    assert "S.session.session_id!==sessionId" in body.replace(" ", ""), (
-        "must confirm the session is still the captured one before re-arming"
-    )
-
-
-def test_recovery_pick_is_captured_before_the_first_await():
-    """_recoveryPick must be captured BEFORE any awaited network call so a session
-
-    switch during the recovery's round-trips can't make it read the wrong
-    session's selector state. The `_recoveryPick` assignment must appear before
-    the first awaited call expression (``await api(`` / ``await _ensure`` / ``await send``).
-    """
-    import re as _re
-    for body in (_function_body(UI_JS, "submitEdit"), _function_body(COMMANDS_JS, "cmdRetry")):
-        pick_idx = body.index("const _recoveryPick")
-        # match a real awaited call, not the word "await" inside a comment
-        m = _re.search(r"await\s+\w", body)
-        assert m is not None, "expected an awaited call in the recovery path"
-        assert pick_idx < m.start(), (
-            "_recoveryPick must be captured before the first awaited call (pre-await snapshot)"
-        )
-
-
-def test_recovery_reguards_active_session_after_each_await():
-    """After each await, a session-switch guard must re-check the captured sid.
-
-    Codex gate SILENT findings: switching sessions during the retry GET await (or
-    the edit truncate await) let session A's recovery intent apply to session B —
-    in /retry it wrote B's model into A's pending marker. Each recovery path must
-    re-assert its captured session id AFTER its post-network await, before
-    mutating messages / re-arming / calling send().
-    """
-    retry = _function_body(COMMANDS_JS, "cmdRetry")
-    # cmdRetry: guard after the session GET await, before the render/re-arm/send
-    assert retry.count("commandOwnerCurrent(ownerCtx)") >= 3, (
-        "cmdRetry must use the pending-navigation-aware owner guard after each await"
-    )
-    edit = _function_body(UI_JS, "submitEdit")
-    # submitEdit: guard after the truncate await, before slice/re-arm/send
-    assert edit.count("S.session.session_id !== initialSid") >= 2, (
-        "submitEdit must re-guard initialSid after the truncate await (>=2 guards total)"
-    )

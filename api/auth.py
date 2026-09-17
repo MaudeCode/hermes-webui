@@ -69,6 +69,7 @@ def _resolve_session_sliding() -> bool:
 # ── Public paths (no auth required) ─────────────────────────────────────────
 PUBLIC_PATHS = frozenset({
     '/login', '/health', '/favicon.ico', '/sw.js',
+    '/api/bootstrap',
     '/api/auth/login', '/api/auth/status',
     '/api/auth/oidc/start', '/api/auth/oidc/callback',
     '/api/auth/oidc/native/start', '/api/auth/oidc/native/exchange',
@@ -1241,6 +1242,7 @@ def is_public_path(path: str) -> bool:
             and path not in {'/api/share/create', '/api/share/revoke'}
         )
         or path.startswith('/static/')
+        or path.startswith('/assets/')
         or path.startswith('/session/static/')
     )
 
