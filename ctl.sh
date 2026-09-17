@@ -46,9 +46,11 @@ usage() {
 Usage: ./ctl.sh <command> [args]
 
 Commands:
-  start [bootstrap args...]   Start Hermes WebUI as a background daemon
+  start [--gateway] [bootstrap args...]
+                              Start Hermes WebUI as a background daemon
   stop                        Stop the daemon started by ctl.sh
-  restart [bootstrap args...] Stop, then start again
+  restart [--gateway] [bootstrap args...]
+                              Stop, then start again
   status                      Show daemon, host/port, log, and health status
   logs [--lines N] [--follow|--no-follow]
                               Show the daemon log (defaults to tail -n 100 -f)
@@ -1039,6 +1041,15 @@ cmd="${1:-}"
 if [[ $# -gt 0 ]]; then
   shift
 fi
+
+case "${cmd}" in
+  start | restart)
+    if [[ "${1:-}" == "--gateway" ]]; then
+      export HERMES_WEBUI_CHAT_BACKEND=gateway
+      shift
+    fi
+    ;;
+esac
 
 case "${cmd}" in
   start) start_cmd "$@" ;;

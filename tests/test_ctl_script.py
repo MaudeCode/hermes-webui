@@ -46,6 +46,7 @@ def run_ctl(
         "HERMES_WEBUI_CTL_ISOLATE_WORKTREE",
         "HERMES_WEBUI_CTL_DETACH_WORKTREE",
         "HERMES_WEBUI_NO_DOTENV",
+        "HERMES_WEBUI_CHAT_BACKEND",
         "XDG_RUNTIME_DIR",
     ):
         merged.pop(key, None)
@@ -76,7 +77,7 @@ def write_fake_python(path: Path) -> None:
             """
             #!/usr/bin/env bash
             printf 'fake-python args:%s\n' "$*" >> "${FAKE_PYTHON_LOG}"
-            printf 'host=%s port=%s state=%s\n' "${HERMES_WEBUI_HOST:-}" "${HERMES_WEBUI_PORT:-}" "${HERMES_WEBUI_STATE_DIR:-}" >> "${FAKE_PYTHON_LOG}"
+            printf 'host=%s port=%s state=%s backend=%s\n' "${HERMES_WEBUI_HOST:-}" "${HERMES_WEBUI_PORT:-}" "${HERMES_WEBUI_STATE_DIR:-}" "${HERMES_WEBUI_CHAT_BACKEND:-}" >> "${FAKE_PYTHON_LOG}"
             trap 'printf "terminated\n" >> "${FAKE_PYTHON_LOG}"; exit 0' TERM INT
             while true; do sleep 0.1; done
             """
@@ -282,6 +283,49 @@ def test_start_writes_pid_under_hermes_home_runs_foreground_no_browser_and_logs(
         _kill_tree(pid)
         assert_process_exits(pid)
         assert not pid_file.exists()
+
+
+def test_gateway_flag_opts_in_without_changing_default(tmp_path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    _seed_ctl_repo(repo_root)
+    (repo_root / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://gateway.example:8642\n"
+        "HERMES_WEBUI_GATEWAY_API_KEY=test-gateway-key\n",
+        encoding="utf-8",
+    )
+
+    def launch(home_name: str, port: int, *args: str) -> str:
+        home = tmp_path / home_name
+        fake_python = home / "fake-python"
+        fake_log = home / "fake-python.log"
+        home.mkdir()
+        write_fake_python(fake_python)
+        result = run_ctl(
+            home,
+            "start",
+            *args,
+            env={
+                "HERMES_WEBUI_PYTHON": str(fake_python),
+                "FAKE_PYTHON_LOG": str(fake_log),
+                "HERMES_WEBUI_PORT": str(port),
+                "HERMES_WEBUI_CTL_ALLOW_LAUNCHD_CONFLICT": "1",
+            },
+            repo_root=repo_root,
+            load_dotenv=True,
+        )
+        assert result.returncode == 0, result.stderr + result.stdout
+        pid = wait_for_pid_file(home / ".hermes" / "webui.pid")
+        try:
+            return wait_for_file_text(fake_log, contains="backend=")
+        finally:
+            stop = run_ctl(home, "stop", repo_root=repo_root)
+            assert stop.returncode == 0, stop.stderr + stop.stdout
+            _kill_tree(pid)
+            assert_process_exits(pid)
+
+    assert "backend=\n" in launch("local", 18992)
+    assert "backend=gateway\n" in launch("gateway", 18993, "--gateway")
 
 
 def test_worktree_start_selects_next_free_port_and_reports_it(tmp_path):

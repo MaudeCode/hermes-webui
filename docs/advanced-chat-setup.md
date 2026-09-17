@@ -116,6 +116,16 @@ HERMES_WEBUI_GATEWAY_API_KEY=... \
 ./ctl.sh restart
 ```
 
+To keep normal `ctl.sh` launches on the in-process runtime, store only the
+Gateway connection settings in `.env`, then opt in per development server:
+
+```bash
+./ctl.sh start --gateway
+```
+
+The flag sets `HERMES_WEBUI_CHAT_BACKEND=gateway` for that start only. It does
+not modify `.env` or change later `./ctl.sh start` commands.
+
 Gateway-backed approval prompts need one more explicit opt-in because they use the Gateway runs API path:
 
 ```bash

@@ -139,6 +139,13 @@ For self-hosted VM or homelab installs, `ctl.sh` wraps the common daemon lifecyc
 ./ctl.sh stop
 ```
 
+When Gateway connection settings are already in `.env`, opt one development
+server into Gateway-backed chat without changing the default for other starts:
+
+```bash
+./ctl.sh start --gateway
+```
+
 In a linked Git worktree, `ctl.sh start` keeps PID, log, and WebUI state separate
 from other worktrees, selects the first free port starting at 8787, and prints
 `HERMES_WEBUI_PORT` plus local/LAN URLs for agent callers. Passing a port (for
