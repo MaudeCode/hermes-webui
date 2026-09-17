@@ -81,7 +81,7 @@ function SkillDetail({ name, onBack }: { name: string; onBack: () => void }) {
   const del = useMutation({ mutationFn: () => api.deleteSkill(name), onSuccess: () => { void qc.invalidateQueries({ queryKey: keys.skills.all }); onBack() }, onError: (e) => showToast(e instanceof Error ? e.message : String(e), 4000, 'error') })
   const text = draft ?? content.data?.content ?? ''
   return (
-    <HubPage title={name} actions={<Button size="sm" variant="ghost" onClick={onBack}><ChevronLeft size={14} aria-hidden="true" /> {m.back()}</Button>}>
+    <HubPage title={name} actions={<Button variant="ghost" onClick={onBack}><ChevronLeft size={14} aria-hidden="true" /> {m.back()}</Button>}>
       {content.isPending && <LoadingState />}
       {content.isError && <ErrorState error={content.error} onRetry={() => { void content.refetch() }} />}
       {content.isSuccess && (

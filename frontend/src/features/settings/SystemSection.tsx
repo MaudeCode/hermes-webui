@@ -71,8 +71,8 @@ export function SystemSection() {
         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted">
           {updates.data?.disabled ? <span>—</span> : updates.data?.webui?.behind ? <span className="text-accent-text">{m.system_update_available({ name: 'webui', n: updates.data.webui.behind })}</span> : updates.data ? <span>{m.system_up_to_date()}</span> : null}
           {updates.data?.agent?.behind ? <span className="text-accent-text">{m.system_update_available({ name: 'agent', n: updates.data.agent.behind })}</span> : null}
-          <Button size="sm" onClick={() => { void api.fetchUpdatesCheck(true).then((d) => qc.setQueryData(keys.updates.check, d)).catch(fail) }}>{m.system_check_updates()}</Button>
-          {canManage && (updates.data?.webui?.behind || updates.data?.agent?.behind) ? <Button size="sm" variant="primary" onClick={() => apply.mutate('apply')} disabled={apply.isPending}>{m.system_apply_update()}</Button> : null}
+          <Button onClick={() => { void api.fetchUpdatesCheck(true).then((d) => qc.setQueryData(keys.updates.check, d)).catch(fail) }}>{m.system_check_updates()}</Button>
+          {canManage && (updates.data?.webui?.behind || updates.data?.agent?.behind) ? <Button variant="primary" onClick={() => apply.mutate('apply')} disabled={apply.isPending}>{m.system_apply_update()}</Button> : null}
         </div>
       </section>
       <section>
@@ -85,7 +85,7 @@ export function SystemSection() {
         )}
         <div className="mt-1 flex items-center gap-2 text-xs text-muted">
           <span>{m.system_agent_health()}: {agent.data?.alive === true ? 'ok' : agent.data?.alive === false ? (agent.data.details?.reason ?? 'down') : agent.data?.details?.state ?? '—'}</span>
-          {canManage && <Button size="sm" onClick={() => restart.mutate()} disabled={restart.isPending}>{m.system_restart_agent()}</Button>}
+          {canManage && <Button onClick={() => restart.mutate()} disabled={restart.isPending}>{m.system_restart_agent()}</Button>}
         </div>
       </section>
       {canManage && (
@@ -98,8 +98,8 @@ export function SystemSection() {
               {bool('password_auth_enabled') && <TextInput type="password" autoComplete="current-password" value={currentPw} onChange={(e) => setCurrentPw(e.target.value)} placeholder={m.current_password_placeholder()} aria-label={m.current_password_placeholder()} />}
               <TextInput type="password" autoComplete="new-password" value={pw} onChange={(e) => setPw(e.target.value)} placeholder={m.password_placeholder()} aria-label={m.settings_label_password()} />
               <div className="flex gap-2">
-                <Button type="submit" size="sm" variant="primary" disabled={!pw.trim() || setPassword.isPending}>{m.system_password_set()}</Button>
-                {bool('password_auth_enabled') && <Button size="sm" variant="ghost" className="text-error" onClick={() => setPassword.mutate({ _clear_password: true, ...(currentPw ? { _current_password: currentPw } : {}) })}>{m.system_password_clear()}</Button>}
+                <Button type="submit" variant="primary" disabled={!pw.trim() || setPassword.isPending}>{m.system_password_set()}</Button>
+                {bool('password_auth_enabled') && <Button variant="ghost" className="text-error" onClick={() => setPassword.mutate({ _clear_password: true, ...(currentPw ? { _current_password: currentPw } : {}) })}>{m.system_password_clear()}</Button>}
               </div>
             </form>
           )}
@@ -113,15 +113,15 @@ export function SystemSection() {
           <h2 className="mb-1 text-sm font-semibold text-text">{m.system_passkeys()}</h2>
           <ul className="text-sm">
             {(passkeys.data?.passkeys ?? []).map((k) => (
-              <li key={k.id} className="flex items-center justify-between gap-2 py-1"><span>{k.name ?? k.id}</span><Button size="sm" variant="ghost" className="text-error" onClick={() => deletePasskey.mutate(k.id)}>{m.delete()}</Button></li>
+              <li key={k.id} className="flex items-center justify-between gap-2 py-1"><span>{k.name ?? k.id}</span><Button variant="ghost" className="text-error" onClick={() => deletePasskey.mutate(k.id)}>{m.delete()}</Button></li>
             ))}
           </ul>
-          {passkeysSupported() && <Button size="sm" onClick={() => registerPasskey.mutate()} disabled={registerPasskey.isPending}>{m.system_passkey_register()}</Button>}
+          {passkeysSupported() && <Button onClick={() => registerPasskey.mutate()} disabled={registerPasskey.isPending}>{m.system_passkey_register()}</Button>}
         </section>
       )}
       <section className="flex flex-wrap gap-2">
-        {bootstrap.auth.auth_enabled && <Button size="sm" onClick={() => { void logout() }}>{m.system_logout()}</Button>}
-        {canManage && <Button size="sm" variant="ghost" className="text-error" onClick={() => setConfirmShutdown(true)}>{m.system_shutdown()}</Button>}
+        {bootstrap.auth.auth_enabled && <Button onClick={() => { void logout() }}>{m.system_logout()}</Button>}
+        {canManage && <Button variant="ghost" className="text-error" onClick={() => setConfirmShutdown(true)}>{m.system_shutdown()}</Button>}
       </section>
       <ConfirmDialog open={confirmShutdown} onOpenChange={setConfirmShutdown} title={m.system_shutdown()} description={m.system_shutdown_confirm()} confirmLabel={m.system_shutdown()} cancelLabel={m.cancel()} danger onConfirm={() => shutdown.mutate()} />
     </div>

@@ -26,7 +26,7 @@ export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () =>
     <div role="alert" className="flex flex-col gap-2 rounded-lg border border-error/40 bg-surface p-3 text-sm">
       <div className="font-medium text-text">{m.error_generic()}</div>
       <div className="break-words text-xs text-muted" data-error-kind={kind}>{detail}</div>
-      {onRetry && <div><Button size="sm" onClick={onRetry}>{m.retry()}</Button></div>}
+      {onRetry && <div><Button onClick={onRetry}>{m.retry()}</Button></div>}
     </div>
   )
 }

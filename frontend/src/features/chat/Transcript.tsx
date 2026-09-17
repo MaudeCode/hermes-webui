@@ -99,7 +99,7 @@ export function Transcript(props: TranscriptProps) {
           <div className="messages-inner mx-auto w-full flex flex-col max-w-(--msg-max) pt-5 pb-7 max-[641px]:pt-3 max-[641px]:pb-5 max-[641px]:max-w-full max-[641px]:overflow-x-clip max-[641px]:[word-break:break-word] max-[641px]:min-w-0" id="msgInner">
             {truncated && (
               <div className="flex justify-center py-2">
-                <Button size="sm" variant="ghost" onClick={onLoadOlder} disabled={loadingOlder}>{loadingOlder ? m.loading() : m.load_older()}</Button>
+                <Button variant="ghost" onClick={onLoadOlder} disabled={loadingOlder}>{loadingOlder ? m.loading() : m.load_older()}</Button>
               </div>
             )}
             {virtualize ? (

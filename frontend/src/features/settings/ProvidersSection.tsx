@@ -33,7 +33,7 @@ export function ProvidersSection() {
     <div className="flex flex-col gap-3" data-section="providers">
       <div className="flex items-center justify-between text-xs text-muted">
         <span>{m.providers_active()}: <strong className="text-text">{active ?? '—'}</strong></span>
-        <Button size="sm" onClick={() => { void api.fetchProviderQuotas(true).then((d) => qc.setQueryData(keys.providerQuotas, d)).catch(() => undefined) }}>{m.providers_quota_refresh()}</Button>
+        <Button onClick={() => { void api.fetchProviderQuotas(true).then((d) => qc.setQueryData(keys.providerQuotas, d)).catch(() => undefined) }}>{m.providers_quota_refresh()}</Button>
       </div>
       <ul className="flex flex-col gap-2">
         {providers.data.providers.map((p) => {
@@ -51,16 +51,16 @@ export function ProvidersSection() {
                   {p.auth_error && <div className="text-[11px] text-error">{p.auth_error}</div>}
                 </div>
                 {p.configurable !== false && !p.is_oauth && (
-                  <Button size="sm" onClick={() => { setEditing(isEditing ? null : p.id); setKeyValue('') }}>{m.providers_key_set()}</Button>
+                  <Button onClick={() => { setEditing(isEditing ? null : p.id); setKeyValue('') }}>{m.providers_key_set()}</Button>
                 )}
                 {p.has_key && p.configurable !== false && !p.is_oauth && (
-                  <Button size="sm" variant="ghost" className="text-error" onClick={() => saveKey.mutate({ id: p.id, key: null })}>{m.providers_key_remove()}</Button>
+                  <Button variant="ghost" className="text-error" onClick={() => saveKey.mutate({ id: p.id, key: null })}>{m.providers_key_remove()}</Button>
                 )}
               </div>
               {isEditing && (
                 <form onSubmit={(e) => { e.preventDefault(); if (keyValue.trim()) saveKey.mutate({ id: p.id, key: keyValue.trim() }) }} className="mt-2 flex gap-2">
                   <TextInput type="password" autoComplete="off" autoFocus value={keyValue} onChange={(e) => setKeyValue(e.target.value)} placeholder={p.has_key ? m.providers_key_placeholder_replace() : m.providers_key_placeholder_new()} aria-label={`${p.display_name ?? p.id} API key`} />
-                  <Button type="submit" size="sm" variant="primary" disabled={saveKey.isPending}>{m.save()}</Button>
+                  <Button type="submit" variant="primary" disabled={saveKey.isPending}>{m.save()}</Button>
                 </form>
               )}
               {p.models && p.models.length > 0 && (

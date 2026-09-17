@@ -47,7 +47,7 @@ export function PreferencesSection() {
       <FieldRow label={m.settings_label_bot_name()} htmlFor="settingsBotName">
         <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (botName !== null) { set({ bot_name: botName.trim() || 'Hermes' }); setBotName(null) } }}>
           <TextInput id="settingsBotName" value={botName ?? str('bot_name', 'Hermes')} onChange={(e) => setBotName(e.target.value)} maxLength={64} />
-          <Button type="submit" size="sm" disabled={botName === null}>{m.save()}</Button>
+          <Button type="submit" disabled={botName === null}>{m.save()}</Button>
         </form>
       </FieldRow>
       <Toggle label={m.settings_label_workspace_panel_open()} settingKey="workspace_panel_open" />

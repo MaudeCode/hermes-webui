@@ -54,7 +54,7 @@ export function ExtensionsSection() {
           {gallery.filter((g) => g.id).map((g) => (
             <li key={g.id} className="flex items-center gap-3 py-2 text-sm">
               <div className="min-w-0 flex-1"><div className="font-medium text-text">{g.name ?? g.id}{g.version ? <span className="ml-1 text-[11px] text-muted">v{g.version}</span> : null}</div><div className="truncate text-[11px] text-muted">{g.description ?? ''}</div></div>
-              {installed.has(g.id ?? '') ? <span className="text-[11px] text-muted">{m.extensions_installed()}</span> : canManage && <Button size="sm" onClick={() => act.mutate({ action: 'install', body: { id: g.id, download_url: g.download_url, sha256: g.sha256 } })} disabled={act.isPending}>{m.extensions_install()}</Button>}
+              {installed.has(g.id ?? '') ? <span className="text-[11px] text-muted">{m.extensions_installed()}</span> : canManage && <Button onClick={() => act.mutate({ action: 'install', body: { id: g.id, download_url: g.download_url, sha256: g.sha256 } })} disabled={act.isPending}>{m.extensions_install()}</Button>}
             </li>
           ))}
         </ul>
@@ -77,7 +77,7 @@ function ExtensionRow({ ext, canManage, onToggle, onConsent, onUninstall }: { ex
         {canManage && ext.source !== 'plugin' && !ext.legacy_injection && (
           <label className="flex items-center gap-1 text-xs text-muted"><Switch checked={ext.enabled} onCheckedChange={(checked) => onToggle(checked)} aria-label={`${ext.name}: ${ext.enabled ? m.plugins_enabled() : m.plugins_disabled()}`} /> {ext.enabled ? m.plugins_enabled() : m.plugins_disabled()}</label>
         )}
-        {canManage && ext.source === 'gallery' && <Button size="sm" variant="ghost" className="text-error" onClick={onUninstall}>{m.extensions_uninstall()}</Button>}
+        {canManage && ext.source === 'gallery' && <Button variant="ghost" className="text-error" onClick={onUninstall}>{m.extensions_uninstall()}</Button>}
       </div>
       <div className="mt-2 flex flex-wrap gap-1 text-[10px] uppercase tracking-wider text-muted">
         {ext.capabilities.map((c) => <span key={c} className="rounded-full border border-border px-1.5">{c}</span>)}

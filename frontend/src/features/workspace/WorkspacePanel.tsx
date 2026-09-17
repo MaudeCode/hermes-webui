@@ -84,7 +84,7 @@ export function WorkspacePanel({ workspace, sessionId, open, onToggle, onClose }
       {file ? (
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="flex items-center gap-1 border-b border-border-subtle px-2 py-1 text-xs">
-            <Button size="sm" variant="ghost" onClick={() => { setFile(null); setDraft(null) }}><ArrowUp size={12} aria-hidden="true" /> {m.back()}</Button>
+            <Button variant="ghost" onClick={() => { setFile(null); setDraft(null) }}><ArrowUp size={12} aria-hidden="true" /> {m.back()}</Button>
             <span className="min-w-0 flex-1 truncate font-mono text-muted">{file}</span>
             <a className="text-muted hover:text-text" href={appUrl(api.rawFileUrl(sessionId, file)).href} download aria-label={m.download_folder()}><Download size={14} aria-hidden="true" /></a>
           </div>
@@ -99,9 +99,9 @@ export function WorkspacePanel({ workspace, sessionId, open, onToggle, onClose }
                 <textarea value={text} onChange={(e) => setDraft(e.target.value)} spellCheck={false} aria-label={m.ws_panel_preview()} className="min-h-0 flex-1 resize-none bg-code-bg p-3 font-mono text-[12px] text-pre-text outline-none" />
               )}
               <div className="flex items-center gap-2 border-t border-border-subtle px-2 py-1.5">
-                {isMarkdown && draft === null && <Button size="sm" variant="ghost" onClick={() => setDraft(text)}>{m.edit()}</Button>}
-                <Button size="sm" variant="primary" disabled={draft === null || save.isPending} onClick={() => { if (draft !== null) save.mutate(draft) }}>{m.save()}</Button>
-                {draft !== null && <Button size="sm" variant="ghost" onClick={() => setDraft(null)}>{m.cancel()}</Button>}
+                {isMarkdown && draft === null && <Button variant="ghost" onClick={() => setDraft(text)}>{m.edit()}</Button>}
+                <Button variant="primary" disabled={draft === null || save.isPending} onClick={() => { if (draft !== null) save.mutate(draft) }}>{m.save()}</Button>
+                {draft !== null && <Button variant="ghost" onClick={() => setDraft(null)}>{m.cancel()}</Button>}
                 <span className="ml-auto text-[11px] text-muted">{content.data.truncated ? m.logs_truncated({ n: content.data.lines ?? 0 }) : formatBytes(content.data.size)}</span>
               </div>
             </div>
