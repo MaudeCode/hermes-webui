@@ -20,7 +20,8 @@ import { ConfirmDialog } from '../../ui/Dialog'
 import { EmptyState, ErrorState, LoadingState, formatBytes, formatDate } from '../../ui/States'
 import { showToast } from '../toast/toast'
 import { cn } from '../../ui/cn'
-import { contextFromList, cronDiagnostics, cronState, jobId, needsAttention, runningIds, scheduleText, usageStrip, type CronState } from './cronJob'
+import { contextFromList, cronDiagnostics, cronState, jobId, needsAttention, runResponse, runningIds, scheduleText, usageStrip, type CronState } from './cronJob'
+import { Markdown } from '../chat/render/Markdown'
 import { JobForm, type EditorMode } from './JobForm'
 
 type CronAction = Parameters<typeof api.cronAction>[0]
@@ -224,7 +225,7 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
   )
 }
 
-const DL = 'grid grid-cols-[max-content_1fr] gap-x-6 gap-y-1.5 text-[13px] max-[480px]:grid-cols-1 max-[480px]:gap-y-0.5 max-[480px]:[&>dd]:mb-2'
+const DL = 'grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1.5 text-[13px]'
 
 function TaskDetail({ job, jobs, state, onAction, onEdit, onDuplicate, onDelete }: {
   job: CronJob; jobs: CronJob[]; state: CronState; onAction: (action: CronAction) => void; onEdit: () => void; onDuplicate: () => void; onDelete: () => void
@@ -279,35 +280,40 @@ function TaskDetail({ job, jobs, state, onAction, onEdit, onDuplicate, onDelete 
             {!readOnly && <div className="mt-2"><Button onClick={copyDiagnostics}>{m.cron_attention_copy_diagnostics()}</Button></div>}
           </section>
         )}
-        <dl className={DL}>
-          <Row label={m.cron_status_label()}><span className={st.tone}>{st.label}</span>{job.paused_reason && <span className="text-muted"> · {job.paused_reason}</span>}</Row>
-          <Row label={m.cron_schedule_preset_label()}><code>{scheduleText(job)}</code></Row>
-          <Row label={m.cron_next()}>{job.next_run_at ? formatDate(job.next_run_at) : m.not_available()}</Row>
-          <Row label={m.cron_last()}>{job.last_run_at ? formatDate(job.last_run_at) : m.never()}</Row>
-          <Row label={m.cron_deliver_label()}>{job.deliver || 'local'}</Row>
-          <Row label={m.cron_profile_label()}>{profileLabel}{readOnly && ownerProfile && <span className="text-muted"> · {m.cron_owner_profile_label()}: {ownerProfile}</span>}</Row>
-        </dl>
+        <div className="grid gap-x-10 gap-y-6 md:grid-cols-2">
+          <section>
+            <h2 className="mb-2 text-xs font-medium text-muted">{m.cron_schedule_preset_label()}</h2>
+            <dl className={DL}>
+              <Row label={m.cron_status_label()}><span className={st.tone}>{st.label}</span>{job.paused_reason && <span className="text-muted"> · {job.paused_reason}</span>}</Row>
+              <Row label={m.cron_schedule_preset_label()}><code>{scheduleText(job)}</code></Row>
+              <Row label={m.cron_next()}>{job.next_run_at ? formatDate(job.next_run_at) : m.not_available()}</Row>
+              <Row label={m.cron_last()}>{job.last_run_at ? formatDate(job.last_run_at) : m.never()}</Row>
+              <Row label={m.cron_deliver_label()}>{job.deliver || 'local'}</Row>
+              <Row label={m.cron_profile_label()}>{profileLabel}{readOnly && ownerProfile && <span className="text-muted"> · {m.cron_owner_profile_label()}: {ownerProfile}</span>}</Row>
+            </dl>
+          </section>
+          <section>
+            <h2 className="mb-2 text-xs font-medium text-muted">{m.cron_configuration()}</h2>
+            <dl className={DL}>
+              <Row label={m.cron_mode_label()}>{isScript ? m.cron_mode_script() : m.cron_mode_agent()}</Row>
+              {!isScript && <Row label={m.cron_model_label()}>{model ? <code>{model}</code> : m.cron_model_use_default()}</Row>}
+              {!isScript && <Row label={m.cron_skills_label()}>{job.skills?.length ? job.skills.join(', ') : '—'}</Row>}
+              {job.script && <Row label={m.cron_script_path_label()}><code>{job.script}</code></Row>}
+              {job.workdir && <Row label={m.cron_workdir_label()}><code>{job.workdir}</code></Row>}
+              {job.monitor && <Row label={m.cron_monitor_label()}><code>{job.monitor}</code></Row>}
+              {!isScript && <Row label={m.cron_continuity_label()}>{job.continuity ? m.cron_toast_notifications_enabled() : m.cron_toast_notifications_disabled()}</Row>}
+              {contextFrom.length > 0 && <Row label={m.cron_context_from_label()}>{contextFrom.join(', ')}</Row>}
+              {job.reasoning_effort && <Row label={m.cron_reasoning_effort_label()}>{job.reasoning_effort}</Row>}
+              <Row label={m.cron_toast_notifications_label()}>{job.toast_notifications === false ? m.cron_toast_notifications_disabled() : m.cron_toast_notifications_enabled()}</Row>
+            </dl>
+          </section>
+        </div>
         <section>
-          <h2 className="mb-1 text-xs font-medium text-muted">{isScript ? m.cron_script_card_title() : m.cron_prompt_label()}</h2>
+          <h2 className="mb-1 text-xs font-medium text-muted">{m.cron_prompt_label()}</h2>
           {isScript
             ? <><code className="text-[13px]">{job.script || '—'}</code><div className="mt-1 text-[11px] text-muted">{m.cron_script_path_hint()}</div></>
             : <pre className="max-h-64 overflow-auto whitespace-pre-wrap font-sans text-[13px] text-text">{job.prompt || '—'}</pre>}
         </section>
-        <details>
-          <summary className="cursor-pointer text-xs font-medium text-muted">{m.cron_configuration()}</summary>
-          <dl className={cn(DL, 'mt-2')}>
-            <Row label={m.cron_mode_label()}>{isScript ? m.cron_mode_script() : m.cron_mode_agent()}</Row>
-            {!isScript && <Row label={m.cron_model_label()}>{model ? <code>{model}</code> : m.cron_model_use_default()}</Row>}
-            {!isScript && <Row label={m.cron_skills_label()}>{job.skills?.length ? job.skills.join(', ') : '—'}</Row>}
-            {!isScript && job.script && <Row label={m.cron_script_path_label()}><code>{job.script}</code></Row>}
-            {job.workdir && <Row label={m.cron_workdir_label()}><code>{job.workdir}</code></Row>}
-            {job.monitor && <Row label={m.cron_monitor_label()}><code>{job.monitor}</code></Row>}
-            {!isScript && <Row label={m.cron_continuity_label()}>{job.continuity ? m.cron_toast_notifications_enabled() : m.cron_toast_notifications_disabled()}</Row>}
-            {contextFrom.length > 0 && <Row label={m.cron_context_from_label()}>{contextFrom.join(', ')}</Row>}
-            {job.reasoning_effort && <Row label={m.cron_reasoning_effort_label()}>{job.reasoning_effort}</Row>}
-            <Row label={m.cron_toast_notifications_label()}>{job.toast_notifications === false ? m.cron_toast_notifications_disabled() : m.cron_toast_notifications_enabled()}</Row>
-          </dl>
-        </details>
         {!readOnly && <RunHistory jobId={id} isScript={isScript} />}
       </div>
     </HubPage>
@@ -316,45 +322,53 @@ function TaskDetail({ job, jobs, state, onAction, onEdit, onDuplicate, onDelete 
 
 function RunHistory({ jobId: id, isScript }: { jobId: string; isScript: boolean }) {
   const history = useQuery({ queryKey: keys.crons.history(id), queryFn: () => api.fetchCronHistory(id), staleTime: 15_000 })
-  const [openRun, setOpenRun] = useState<string | null>(null)
+  const [picked, setPicked] = useState<string | null>(null)
   const title = m.cron_runs_title()
   if (history.isPending) return <LoadingState />
   if (history.isError) return <ErrorState error={history.error} onRetry={() => { void history.refetch() }} />
   const runs = history.data.runs
   const total = history.data.total ?? runs.length
+  // Newest run is open by default; the table only switches which one is shown.
+  const current = runs.find((r) => r.filename === picked) ?? runs[0]
   return (
     <section aria-label={title}>
-      <h2 className="mb-1 text-xs font-medium text-muted">{title} {runs.length > 0 && `(${total > runs.length ? m.cron_runs_showing({ total, shown: runs.length }) : String(total)})`}</h2>
+      <h2 className="mb-2 text-xs font-medium text-muted">{title} {runs.length > 0 && `(${total > runs.length ? m.cron_runs_showing({ total, shown: runs.length }) : String(total)})`}</h2>
       {runs.length === 0 && <div className="text-[13px] text-muted">{m.cron_no_runs_yet()}</div>}
-      <ul className="flex flex-col divide-y divide-border-subtle">
-        {runs.map((run) => {
-          const open = openRun === run.filename
-          const usage = isScript ? '' : usageStrip(run.usage)
-          return (
-            <li key={run.filename}>
-              <button type="button" className="flex w-full items-center justify-between gap-3 py-2 text-left text-[13px] hover:text-text" aria-expanded={open} onClick={() => setOpenRun(open ? null : run.filename)} title={run.filename}>
-                <span className="text-text">{formatDate(run.modified)}</span>
-                <span className="truncate text-xs text-muted">{usage}</span>
-                <span className="shrink-0 text-xs text-muted">{formatBytes(run.size)}</span>
-              </button>
-              {open && <RunBody jobId={id} filename={run.filename} />}
-            </li>
-          )
-        })}
-      </ul>
+      {runs.length > 0 && (
+        <div className="max-h-56 overflow-y-auto rounded-md border border-border">
+          <table className="w-full border-collapse text-[13px]">
+            <tbody>
+              {runs.map((run) => {
+                const active = run.filename === current?.filename
+                return (
+                  <tr key={run.filename} aria-selected={active} className={cn('cursor-pointer border-b border-border-subtle last:border-b-0 hover:bg-hover', active && 'bg-(--menu-active-bg) text-(--menu-active-fg)')} onClick={() => setPicked(run.filename)}>
+                    <td className="px-3 py-1.5"><button type="button" className="text-left" title={run.filename}>{formatDate(run.modified)}</button></td>
+                    <td className="px-3 py-1.5 text-xs text-muted">{isScript ? '' : usageStrip(run.usage)}</td>
+                    <td className="px-3 py-1.5 text-right text-xs text-muted">{formatBytes(run.size)}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {current && <RunBody key={current.filename} jobId={id} filename={current.filename} isScript={isScript} />}
     </section>
   )
 }
 
-function RunBody({ jobId: id, filename }: { jobId: string; filename: string }) {
+function RunBody({ jobId: id, filename, isScript }: { jobId: string; filename: string; isScript: boolean }) {
   const run = useQuery({ queryKey: keys.crons.run(id, filename), queryFn: () => api.fetchCronRun(id, filename), staleTime: Infinity })
   if (run.isPending) return <LoadingState />
-  if (run.isError || run.data.error) return <div className="pb-2 text-xs text-error" role="alert">{m.cron_run_load_failed()} {run.isError ? (run.error instanceof Error ? run.error.message : String(run.error)) : run.data.error}</div>
+  if (run.isError || run.data.error) return <div className="mt-3 text-xs text-error" role="alert">{m.cron_run_load_failed()} {run.isError ? (run.error instanceof Error ? run.error.message : String(run.error)) : run.data.error}</div>
+  const body = runResponse(run.data.content ?? run.data.snippet ?? '')
   const usage = usageStrip(run.data.usage)
   return (
-    <div className="pb-3">
-      <pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded-md border border-border-subtle bg-code-bg p-3 font-mono text-[12px] text-pre-text">{run.data.content ?? run.data.snippet ?? ''}</pre>
-      {usage && <div className="mt-1 text-[11px] text-muted">{usage}</div>}
+    <div className="mt-3" data-testid="cron-run-output">
+      {usage && <div className="mb-2 text-[11px] text-muted">{usage}</div>}
+      {isScript
+        ? <pre className="max-h-[32rem] overflow-auto whitespace-pre-wrap rounded-md border border-border-subtle bg-code-bg p-3 font-mono text-[12px] text-pre-text">{body}</pre>
+        : <Markdown text={body} />}
     </div>
   )
 }

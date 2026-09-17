@@ -113,3 +113,11 @@ export function splitModelOption(value: string, providerOf: (id: string) => stri
   if (prefixed) return { model: prefixed[2] ?? null, provider: prefixed[1] ?? null }
   return { model: value, provider }
 }
+
+/** The agent's reply from a run file: everything after the `## Response` heading, else the whole text. */
+export function runResponse(content: string): string {
+  const idx = content.search(/^#{1,2} Response\s*$/m)
+  if (idx < 0) return content.trim()
+  const afterHeading = content.indexOf('\n', idx)
+  return afterHeading < 0 ? '' : content.slice(afterHeading + 1).trim()
+}

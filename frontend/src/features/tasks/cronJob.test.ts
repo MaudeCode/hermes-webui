@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { CronJob } from '../../contracts'
-import { cronDiagnostics, cronState, modelOptionFor, splitModelOption, usageStrip } from './cronJob'
+import { cronDiagnostics, cronState, modelOptionFor, runResponse, splitModelOption, usageStrip } from './cronJob'
 
 // Persisted shape from cron.jobs.create_job with the WebUI projections applied.
 const recurring: CronJob = {
@@ -62,5 +62,12 @@ describe('model option mapping', () => {
     expect(splitModelOption('gpt-oss:20b', providerOf)).toEqual({ model: 'gpt-oss:20b', provider: 'custom' })
     expect(splitModelOption('@gone:model', providerOf)).toEqual({ model: 'model', provider: 'gone' })
     expect(splitModelOption('', providerOf)).toEqual({ model: null, provider: null })
+  })
+})
+
+describe('runResponse', () => {
+  it('drops the run file front-matter and keeps the reply verbatim', () => {
+    expect(runResponse('# Cron run: x\n\n**Model:** m\n\n## Response\n\n# Title\n\n| a |\n')).toBe('# Title\n\n| a |')
+    expect(runResponse('plain stdout\n')).toBe('plain stdout')
   })
 })
