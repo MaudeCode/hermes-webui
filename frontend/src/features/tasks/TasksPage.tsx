@@ -21,7 +21,7 @@ import { ConfirmDialog } from '../../ui/Dialog'
 import { EmptyState, ErrorState, LoadingState, formatBytes, formatDate } from '../../ui/States'
 import { showToast } from '../toast/toast'
 import { cn } from '../../ui/cn'
-import { contextFromList, cronDiagnostics, cronState, jobId, needsAttention, runResponse, runningIds, scheduleText, usageStrip, type CronState } from './cronJob'
+import { contextFromList, cronDiagnostics, cronState, jobId, lastRunAt, needsAttention, nextRunAt, runResponse, runningIds, scheduleText, usageStrip, type CronState } from './cronJob'
 import { Markdown } from '../chat/render/Markdown'
 import { JobForm, type EditorMode } from './JobForm'
 
@@ -82,7 +82,7 @@ export function useTasksWorkbench(selectedId: string | null, onSelect: (id: stri
   }, [running, qc])
   const selected = selectedId ? jobs.find((j) => jobId(j) === selectedId) ?? null : null
   // A new last_run_at on the selected job means a run wrote its output: refetch that job's history.
-  const lastRun = selected?.last_run_at ?? null
+  const lastRun = selected ? lastRunAt(selected) : null
   const seenRun = useRef({ id: selectedId, lastRun })
   useEffect(() => {
     const changed = seenRun.current.id === selectedId && seenRun.current.lastRun !== lastRun
@@ -254,6 +254,8 @@ function TaskDetail({ job, jobs, state, onAction, onEdit, onDuplicate, onDelete 
   const attention = needsAttention(state)
   const resumable = attention || state === 'paused' || state === 'off'
   const isScript = !!job.no_agent
+  const nextRun = nextRunAt(job)
+  const lastRun = lastRunAt(job)
   const st = statusLabel(state)
   const ownerProfile = (job.owner_profile ?? job.profile ?? '').trim()
   const profileLabel = (job.profile ?? '').trim() || m.cron_profile_server_default()
@@ -305,8 +307,8 @@ function TaskDetail({ job, jobs, state, onAction, onEdit, onDuplicate, onDelete 
             <dl className={DL}>
               <Row label={m.cron_status_label()}><span className={st.tone}>{st.label}</span>{job.paused_reason && <span className="text-muted"> · {job.paused_reason}</span>}</Row>
               <Row label={m.cron_schedule_preset_label()}><code>{scheduleText(job)}</code></Row>
-              <Row label={m.cron_next()}>{job.next_run_at ? formatDate(job.next_run_at) : m.not_available()}</Row>
-              <Row label={m.cron_last()}>{job.last_run_at ? formatDate(job.last_run_at) : m.never()}</Row>
+              <Row label={m.cron_next()}>{nextRun ? formatDate(nextRun) : m.not_available()}</Row>
+              <Row label={m.cron_last()}>{lastRun ? formatDate(lastRun) : m.never()}</Row>
               <Row label={m.cron_deliver_label()}>{job.deliver || 'local'}</Row>
               <Row label={m.cron_profile_label()}>{profileLabel}{readOnly && ownerProfile && <span className="text-muted"> · {m.cron_owner_profile_label()}: {ownerProfile}</span>}</Row>
             </dl>

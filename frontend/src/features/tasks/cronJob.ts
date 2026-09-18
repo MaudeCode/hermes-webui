@@ -27,12 +27,20 @@ function hasUnlimitedRepeat(job: CronJob): boolean {
   return !!job.repeat && typeof job.repeat === 'object' && job.repeat.times == null
 }
 
+/** Legacy `next_run` / `last_run` (epoch or ISO) fall back for the `*_at` timestamps of newer agents. */
+export function nextRunAt(job: CronJob): string | number | null {
+  return job.next_run_at ?? (typeof job.next_run === 'number' || typeof job.next_run === 'string' ? job.next_run : null)
+}
+export function lastRunAt(job: CronJob): string | number | null {
+  return job.last_run_at ?? (typeof job.last_run === 'number' || typeof job.last_run === 'string' ? job.last_run : null)
+}
+
 export function cronState(job: CronJob, running = false): CronState {
-  // Older agents report `paused` / `status` instead of `state` / `last_status`; both stay supported.
+  // Older agents report `paused` / `status` / `running` on the job instead of `state` / `last_status` / the status map; all stay supported.
   const errored = job.state === 'error' || job.last_status === 'error' || job.status === 'error'
-  if (running) return 'running'
-  if (isRecurring(job) && hasUnlimitedRepeat(job) && job.enabled === false && job.state === 'completed' && !job.next_run_at) return 'needs_attention'
-  if (isRecurring(job) && !job.next_run_at && errored) return 'schedule_error'
+  if (running || job.running) return 'running'
+  if (isRecurring(job) && hasUnlimitedRepeat(job) && job.enabled === false && job.state === 'completed' && !nextRunAt(job)) return 'needs_attention'
+  if (isRecurring(job) && !nextRunAt(job) && errored) return 'schedule_error'
   if (job.state === 'paused' || job.paused) return 'paused'
   if (job.enabled === false) return 'off'
   if (errored) return 'error'

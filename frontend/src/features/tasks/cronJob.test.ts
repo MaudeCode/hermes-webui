@@ -31,6 +31,9 @@ describe('cronState', () => {
     expect(cronState({ ...legacy, paused: true })).toBe('paused')
     expect(cronState({ ...legacy, status: 'error' })).toBe('error')
     expect(cronState({ ...legacy, status: 'error', next_run_at: null })).toBe('schedule_error')
+    expect(cronState({ ...legacy, running: true })).toBe('running')
+    // Legacy next_run keeps a recurring job out of the attention states.
+    expect(cronState({ ...legacy, status: 'error', next_run_at: null, next_run: 1_789_600_000 })).toBe('error')
     expect(cronState(recurring, true)).toBe('running')
     expect(cronState(recurring)).toBe('active')
   })
