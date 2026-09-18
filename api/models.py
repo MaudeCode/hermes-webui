@@ -2804,16 +2804,17 @@ def _find_existing_assistant_for_journal_content(
 ) -> int | None:
     """Index of a visible assistant row that already carries ``content``.
 
-    With ``stream_id``, rows recovered from another stream are never
-    candidates: they are that run's output, and claiming one here would leave
-    this stream's own row unprojected (HWEB-78). Untagged rows (sidecar or
-    live output) remain claimable.
+    With ``stream_id``, the stream's own row wins over an untagged one
+    (sidecar or live output) with the same text, and rows recovered from
+    another stream are never candidates: they are that run's output, and
+    claiming either would leave this stream's own row unprojected (HWEB-78).
     """
     candidate = _normalize_journal_recovery_text(content)
     if not candidate:
         return None
     messages = session.messages or []
     stop = len(messages) if max_index is None else min(len(messages), max_index)
+    untagged_match = None
     substring_match = None
     for idx in range(stop):
         if excluded_indexes and idx in excluded_indexes:
@@ -2830,10 +2831,13 @@ def _find_existing_assistant_for_journal_content(
         if not existing:
             continue
         if existing == candidate:
-            return idx
-        if substring_match is None and len(candidate) >= 24 and candidate in existing:
+            if not stream_id or owner == stream_id:
+                return idx
+            if untagged_match is None:
+                untagged_match = idx
+        elif substring_match is None and len(candidate) >= 24 and candidate in existing:
             substring_match = idx
-    return substring_match
+    return untagged_match if untagged_match is not None else substring_match
 
 
 def _journal_tool_already_present(

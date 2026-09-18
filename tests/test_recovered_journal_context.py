@@ -229,3 +229,35 @@ def test_dedupe_pass_backfills_context_from_its_own_stream_row(hermes_home):
         assert _append_journaled_partial_output(session, "stream-b", dedupe_existing=True) is False
         streams = [m.get("_recovered_stream_id") for m in session.context_messages if m.get("role") == "assistant"]
         assert streams == ["stream-a", "stream-b"]
+
+
+def test_dedupe_pass_prefers_its_own_stream_row_over_untagged_history(hermes_home):
+    """An older untagged reply with the same text must not win the claim over
+    the stream's own row, or the stream's context deficit is never consumed."""
+    sid = "recovered_context_untagged_history"
+    append_run_event(sid, "stream-b", "token", {"text": "Still checking."})
+
+    row_b = {
+        "role": "assistant", "content": "Still checking.",
+        "_recovered_from_run_journal": True, "_recovered_stream_id": "stream-b",
+    }
+    session = Session(
+        session_id=sid,
+        title="repro",
+        messages=[
+            {"role": "user", "content": "check"},
+            {"role": "assistant", "content": "Still checking."},
+            {"role": "user", "content": "check again", "_recovered": True},
+            dict(row_b),
+        ],
+        context_messages=[
+            {"role": "user", "content": "check"},
+            {"role": "assistant", "content": "Still checking."},
+            {"role": "user", "content": "check again", "_recovered": True},
+        ],
+    )
+
+    for _ in range(2):
+        assert _append_journaled_partial_output(session, "stream-b", dedupe_existing=True) is False
+        streams = [m.get("_recovered_stream_id") for m in session.context_messages if m.get("role") == "assistant"]
+        assert streams == [None, "stream-b"]
