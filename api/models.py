@@ -1061,10 +1061,39 @@ def _recovered_model_context_projection(message: dict) -> dict | None:
     return projected
 
 
+def _recovered_context_row_key(message: dict) -> tuple:
+    return (message.get('role'), _normalize_journal_recovery_text(message.get('content')))
+
+
+def _recovered_context_deficit(session, context_messages: list, stream_id) -> collections.Counter:
+    """Rows `messages` holds for ``stream_id`` that ``context_messages`` lacks, by row key.
+
+    The visible transcript already decided how many rows a stream owns with a
+    given text (a run may legitimately repeat a progress line; an older turn
+    may hold the same reply). The context is a projection of it, so it carries
+    the same count. A replay pass builds this once and keeps it current as it
+    projects rows (HWEB-78), instead of rescanning both lists per row.
+    """
+    deficit: collections.Counter = collections.Counter()
+    for message in getattr(session, 'messages', None) or []:
+        if not isinstance(message, dict) or message.get('_recovered_stream_id') != stream_id:
+            continue
+        projected = _recovered_model_context_projection(message)
+        if projected is not None:
+            deficit[_recovered_context_row_key(projected)] += 1
+    for message in context_messages:
+        if isinstance(message, dict) and message.get('_recovered_stream_id') == stream_id:
+            deficit[_recovered_context_row_key(message)] -= 1
+    return deficit
+
+
 def _append_recovered_context_projection(
     session,
     context_messages: list,
     recovered: dict,
+    *,
+    stream_deficit: collections.Counter | None = None,
+    fresh: bool = False,
 ) -> None:
     recovered_text = _normalize_journal_recovery_text(recovered.get('content'))
     if recovered_text:
@@ -1078,23 +1107,18 @@ def _append_recovered_context_projection(
             ):
                 return
         elif recovered.get('_recovered_stream_id'):
-            # HWEB-78: the visible transcript already decided how many rows
-            # this stream owns with this text (a run may legitimately repeat a
-            # progress line; an older turn may hold the same reply). The
-            # context is a projection of it, so it carries the same count:
-            # append only while it has fewer such rows than `messages`.
-            def _same_row(message: dict) -> bool:
-                return (
-                    isinstance(message, dict)
-                    and message.get('role') == recovered.get('role')
-                    and message.get('_recovered_stream_id') == recovered.get('_recovered_stream_id')
-                    and _normalize_journal_recovery_text(message.get('content')) == recovered_text
+            # Stream-owned rows project by count, see `_recovered_context_deficit`.
+            key = _recovered_context_row_key(recovered)
+            if stream_deficit is None:
+                stream_deficit = _recovered_context_deficit(
+                    session, context_messages, recovered.get('_recovered_stream_id'),
                 )
-
-            visible_count = sum(1 for m in getattr(session, 'messages', None) or [] if _same_row(m))
-            projected_count = sum(1 for m in context_messages if _same_row(m))
-            if projected_count >= visible_count:
+            elif fresh:
+                # Appended to `messages` after the pass built its deficit.
+                stream_deficit[key] += 1
+            if stream_deficit[key] <= 0:
                 return
+            stream_deficit[key] -= 1
         else:
             for existing in reversed(context_messages[-8:]):
                 if not isinstance(existing, dict) or existing.get('role') != recovered.get('role'):
@@ -1112,17 +1136,22 @@ def _seed_recovered_context_from_messages(session, context_messages: list) -> No
         context_messages.append(projected)
 
 
-def _append_recovered_turn_to_context(session, recovered: dict) -> None:
+def _recovered_context_messages(session) -> list:
     context_messages = getattr(session, 'context_messages', None)
     if not isinstance(context_messages, list):
         context_messages = []
         session.context_messages = context_messages
     if not context_messages:
         _seed_recovered_context_from_messages(session, context_messages)
+    return context_messages
+
+
+def _append_recovered_turn_to_context(session, recovered: dict, **projection_kwargs) -> None:
+    context_messages = _recovered_context_messages(session)
     projected = _recovered_model_context_projection(recovered)
     if projected is None:
         return
-    _append_recovered_context_projection(session, context_messages, projected)
+    _append_recovered_context_projection(session, context_messages, projected, **projection_kwargs)
 
 
 def _append_recovered_pending_turn(session, *, timestamp: float | None = None) -> dict | None:
@@ -3542,6 +3571,10 @@ def _append_journaled_partial_output(
     events = [event for event in journal.get('events') or [] if isinstance(event, dict)]
     if not events and not carry:
         return False
+    if 'context_deficit' not in dedupe_state:
+        dedupe_state['context_deficit'] = _recovered_context_deficit(
+            session, _recovered_context_messages(session), stream_id,
+        )
 
     appended_any = False
     assistant_parts: list[str] = [str(carry['assistant_text'])] if carry.get('assistant_text') else []
@@ -3596,10 +3629,13 @@ def _append_journaled_partial_output(
             return False
         return True
 
-    def append_context_projection(message: dict) -> None:
+    def append_context_projection(message: dict, *, fresh: bool = False) -> None:
         context_projection = dict(message)
         context_projection.pop('reasoning', None)
-        _append_recovered_turn_to_context(session, context_projection)
+        _append_recovered_turn_to_context(
+            session, context_projection,
+            stream_deficit=dedupe_state['context_deficit'], fresh=fresh,
+        )
 
     def attach_display_reasoning(message: dict, reasoning: str) -> bool:
         if not reasoning:
@@ -3673,7 +3709,7 @@ def _append_journaled_partial_output(
         }
         attach_display_reasoning(recovered_assistant, reasoning)
         session.messages.append(recovered_assistant)
-        append_context_projection(recovered_assistant)
+        append_context_projection(recovered_assistant, fresh=True)
         current_assistant_idx = len(session.messages) - 1
         assistant_started_at = None
         appended_any = True
