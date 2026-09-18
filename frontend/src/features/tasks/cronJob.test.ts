@@ -33,6 +33,9 @@ describe('cronState', () => {
     expect(cronState({ ...legacy, status: 'error' })).toBe('error')
     expect(cronState({ ...legacy, status: 'error', next_run_at: null })).toBe('schedule_error')
     expect(cronState({ ...legacy, running: true })).toBe('running')
+    // String schedule + unlimited repeat is recurring, so the stalled case still surfaces.
+    expect(cronState({ ...recurring, schedule: '0 9 * * *', enabled: false, state: 'completed', next_run_at: null })).toBe('needs_attention')
+    expect(cronState({ ...recurring, schedule: '2026-12-24T09:00:00', repeat: { times: 1, completed: 1 }, enabled: false, state: 'completed', next_run_at: null })).toBe('off')
     expect(CronJobSchema.parse({ ...recurring, last_run_at: 1_789_600_000, next_run_at: 1_789_686_400 }).next_run_at).toBe(1_789_686_400)
     // Legacy next_run keeps a recurring job out of the attention states.
     expect(cronState({ ...legacy, status: 'error', next_run_at: null, next_run: 1_789_600_000 })).toBe('error')

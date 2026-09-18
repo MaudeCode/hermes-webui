@@ -18,8 +18,9 @@ export function scheduleText(job: CronJob): string {
 }
 
 function isRecurring(job: CronJob): boolean {
-  const kind = typeof job.schedule === 'object' && job.schedule ? job.schedule.kind : undefined
-  return kind === 'cron' || kind === 'interval'
+  if (typeof job.schedule === 'object' && job.schedule) return job.schedule.kind === 'cron' || job.schedule.kind === 'interval'
+  // Legacy string schedules carry no kind; an unlimited repeat record marks the job recurring (a one-shot has times: 1).
+  return typeof job.schedule === 'string' && hasUnlimitedRepeat(job)
 }
 
 /** `repeat.times == null` means "forever" in the store; a missing record is not unlimited. */
