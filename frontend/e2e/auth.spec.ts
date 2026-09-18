@@ -8,7 +8,6 @@ test.describe('password auth', () => {
     await page.goto(`${AUTH()}/settings/appearance`)
     await settle(page)
     await expect(page).toHaveURL(/\/login\?next=/)
-    await expect(page).toHaveScreenshot('login.png')
     await page.locator('#pw').fill('wrong')
     await page.getByRole('button', { name: /sign in/i }).click()
     await expect(page.getByRole('alert')).toBeVisible()

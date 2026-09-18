@@ -68,7 +68,7 @@ Deferred rows need the product decision recorded in the PR before merge.
 | C6 | Live sidebar sync (`sessions_changed`) | `sessions.js` | `features/sessions/SessionListPanel.tsx` via `api/sse.ts` `openSessionListStream` on `GET /api/sessions/events` | sidebar | pw (console gate), manual | pass | Invalidates the session list query; one EventSource per panel plus a visibility-gated poll. |
 | C7 | Rename, duplicate, delete, move to project, pin, archive, export, import (JSON and CLI), regenerate title, branch/fork, truncate, undo, retry | `sessions.js`, context menu | `features/sessions/SessionContextMenu.tsx` (Base UI Menu) | sidebar, chat header | manual | partial | Truncate, undo and retry are not in the menu; the rest is. |
 | C8 | Project groups create/rename/delete | `sessions.js` | `api/endpoints.ts` (`/api/projects`), `SessionContextMenu.tsx` move-to-project | sidebar | manual | partial | Move to project is available; project create/rename/delete UI is not. |
-| C9 | Sidebar collapse, resize handle, mobile drawer, hidden/reordered tabs | `boot.js`, inline scripts | `shell/Sidebar.tsx`, `shell/Rail.tsx`, `shell/nav.ts`, `lib/persisted.ts` | app shell | pw (desktop + mobile screenshots), manual | pass | Persisted as validated JSON; applied before first paint by the entry module (`data-*` on `<html>`). |
+| C9 | Sidebar collapse, resize handle, mobile drawer, hidden/reordered tabs | `boot.js`, inline scripts | `shell/Sidebar.tsx`, `shell/Rail.tsx`, `shell/nav.ts`, `lib/persisted.ts` | app shell | manual | pass | Persisted as validated JSON; applied before first paint by the entry module (`data-*` on `<html>`). |
 | C10 | Composer drafts per session (`/api/session/draft`) | `sessions.js` | `features/composer/useDraft.ts` | chat | manual | pass | |
 | C11 | Session status polling, stream reattach on return, bfcache reattach | `messages.js` | `stream/connection.ts` | chat | vitest (`reducer.test.ts`), manual | partial | Reattach on route entry and after reconnect backoff is implemented; there is no `pageshow`/`visibilitychange` hook for bfcache restores. |
 | C12 | Public share create/revoke and read-only share page | `panels.js`, `share.html`, `share.js` | `routes/share.$token.tsx`, `features/share/SharePage.tsx`, `SharedTranscript.tsx` | `/share/$token` | py (`noindex` shell), manual | pass | Share page is a route of the same SPA; unauthenticated shell allowed for `/share/*`. |
@@ -116,7 +116,7 @@ Deferred rows need the product decision recorded in the PR before merge.
 | D32 | Workspace chip and dropdown, workspace files panel toggle | `workspace.js` | `features/composer/chips.tsx`, `ChatView.tsx` | composer | manual | pass | |
 | D33 | Provider quota chip | `ui.js` | `settings/ProvidersSection.tsx` | `/settings/providers` | manual | partial | Quotas are shown in Settings, Providers, not as a composer chip. |
 | D34 | Send key preference (Enter vs Ctrl+Enter), Shift+Enter newline, busy input modes | `boot.js` | `features/composer/Composer.tsx` | composer | manual | pass | |
-| D35 | Hero composer (empty state) docking after first message, workspace-aware headline | `ui.js` HWEB-1 | `features/chat/ChatView.tsx` | chat | pw (home screenshot) | pass | |
+| D35 | Hero composer (empty state) docking after first message, workspace-aware headline | `ui.js` HWEB-1 | `features/chat/ChatView.tsx` | chat | pw (home), manual | pass | |
 | D36 | Keyboard shortcuts (new chat, focus composer, toggle sidebar, escape) | `boot.js` | `shell/useShortcuts.ts` | app shell | manual | pass | Same key map. |
 
 ## 5. Rendering
@@ -149,7 +149,7 @@ Deferred rows need the product decision recorded in the PR before merge.
 | F8 | Todos panel | `panels.js` | `routes/_app.todos.tsx`, `features/todos/TodosPage.tsx` | `/todos` | pw (route) | pass | |
 | F9 | Insights (usage by day, provider cost history, wiki status/browse) | `panels.js` | `routes/_app.insights.tsx`, `features/insights/InsightsPage.tsx` | `/insights` | pw (route), manual | partial | Usage and cost history are rendered as accessible tables with inline SVG bars; wiki status/browse is not implemented. |
 | F10 | Logs (file select, tail, refresh, hint) | `panels.js` | `routes/_app.logs.tsx`, `features/logs/LogsPage.tsx` | `/logs` | pw (route), manual | pass | |
-| F11 | Settings: appearance, conversation, preferences, providers, plugins, extensions, system, help | `panels.js`, `index.html` `#panelSettings` | `routes/_app.settings.*.tsx`, `features/settings/*` | `/settings`, `/settings/$section` | pw (`settings-appearance` screenshot), manual | partial | Appearance, conversation, preferences (send key, bot name, visibility), providers (list, quotas, delete, default), plugins (read-only), extensions, system (health, updates, password, passkeys, shutdown/restart) and help are implemented. Not implemented: language is set from Appearance only, auto-scroll preference, self-hosted provider add, auxiliary models, MCP servers/tools. Unknown section renders not-found. |
+| F11 | Settings: appearance, conversation, preferences, providers, plugins, extensions, system, help | `panels.js`, `index.html` `#panelSettings` | `routes/_app.settings.*.tsx`, `features/settings/*` | `/settings`, `/settings/$section` | pw (settings route), manual | partial | Appearance, conversation, preferences (send key, bot name, visibility), providers (list, quotas, delete, default), plugins (read-only), extensions, system (health, updates, password, passkeys, shutdown/restart) and help are implemented. Not implemented: language is set from Appearance only, auto-scroll preference, self-hosted provider add, auxiliary models, MCP servers/tools. Unknown section renders not-found. |
 | F12 | Hermes Dashboard link (rail) | `boot.js` `openHermesDashboard` | `shell/Rail.tsx` from `/api/dashboard/status` | rail | manual | pass | |
 | F13 | Dashboard plugins (`/plugins/<name>`, manifest tabs) | `api/plugins.py`, `panels.js` | Unified extension platform: plugin manifests surfaced as extension manifests with one sandboxed iframe panel (`/dashboard-plugins/<name>/index.html`) | `/ext/$extensionId` | py (`test_hweb100_extension_platform.py`), manual | pass | Legacy IIFE injection into the core page is gone. |
 | F14 | Hub layout (collection as the main view, detail with Back) | `hub.js` | `features/hub/HubRoute.tsx` | native routes | pw (rail navigation) | partial | Hubs are single-page collections; detail views are inline rather than routed with Back. |
@@ -162,13 +162,13 @@ Deferred rows need the product decision recorded in the PR before merge.
 | ID | Capability | Legacy source | New owner | Route | Verification | Status | Notes |
 |---|---|---|---|---|---|---|---|
 | G1 | Theme axis (light, dark, system) and legacy theme aliases (`slate`, `solarized`, `monokai`, `nord`, `oled`) | inline `<head>` script, `boot.js` | `theme/boot.ts` runs first in the entry module; `theme/tokens.css` | all | vitest (`boot.test.ts`), pw (theme persists across reload) | pass | No inline script: the entry module applies the class before React renders and CSS `color-scheme` avoids a flash under `prefers-color-scheme`. |
-| G2 | Skin axis (all 21 skins) as CSS custom properties consumed by Tailwind utilities | `style.css` | `theme/skins.ts` (tokens and skins as data, rendered by the `hermesTheme` Vite plugin), `theme/tailwind.css` `@theme` mapping | all | pw screenshots of all 21 skins in both schemes (`skins.spec.ts`) | pass | Swatch picker reads the skin data. |
+| G2 | Skin axis (all 21 skins) as CSS custom properties consumed by Tailwind utilities | `style.css` | `theme/skins.ts` (tokens and skins as data, rendered by the `hermesTheme` Vite plugin), `theme/tailwind.css` `@theme` mapping | all | vitest (`skins.test.ts`), manual | pass | Swatch picker reads the skin data. |
 | G3 | Font size preference, full-width chat | inline scripts, `style.css` | `app/appearance.ts`, tokens | all | manual | pass | |
 | G4 | RTL: persisted state, `dir` attribute, mirrored layout | inline script, `boot.js` | `app/appearance.ts`, logical CSS properties | all | manual | pass | |
 | G5 | Languages: 15 locales with fallback to English, interpolation, plural helpers, runtime switch, server `language` setting and `hermes-lang` persistence | `i18n.js`, `api/i18n_assets.py` | Paraglide JS (`frontend/messages/*.json`, `project.inlang/`), `i18n/runtime.ts` | all | vitest (`locales.test.ts`), build gate (`i18n-gate.mjs`) | pass | Build fails on missing English keys, placeholder mismatch, or locale key drift. |
 | G6 | Speech locale (`_speech`) per language | `i18n.js` | `i18n/locales.ts` | voice | vitest | pass | |
 | G7 | PWA: manifest, install prompt, standalone classes, offline shell, update activation, scope and subpath | `manifest.json`, `sw.js`, `pwa-startup.js` | `scripts/build-sw.mjs` (Workbox injectManifest), `frontend/src/sw.ts`, `public/manifest.webmanifest` | all | py (`/sw.js`, manifest routes), manual | partial | Shell precache, runtime asset cache, `SKIP_WAITING` activation and `Service-Worker-Allowed` are implemented; there is no in-app install prompt. |
-| G8 | Responsive: desktop rail + sidebar, narrow, mobile drawer, bottom tab bar and composer config sheet, safe areas, touch targets | `style.css`, `boot.js`, `hub.js` tab bar | `shell/*` utilities, `theme/components/shell.css`, `MobileNav.tsx`, `Tabbar.tsx` | all | pw screenshots at 1280x800 and 390x844 | pass | |
+| G8 | Responsive: desktop rail + sidebar, narrow, mobile drawer, bottom tab bar and composer config sheet, safe areas, touch targets | `style.css`, `boot.js`, `hub.js` tab bar | `shell/*` utilities, `theme/components/shell.css`, `MobileNav.tsx`, `Tabbar.tsx` | all | manual | pass | |
 | G9 | Accessibility: accessible names, live regions, focus management, keyboard menus/dialogs, reduced motion | `index.html`, `ui.js` | Base UI primitives (`ui/*`), `aria-live` regions in chat and notices | all | vitest (`ApprovalCard.test.tsx` roles), manual | pass | |
 | G10 | Presence lease (HWEB-97) | `presence.js` | `api/client.ts` presence header | app shell | manual | partial | Presence is sent with requests; there is no dedicated lease renewal loop. |
 | G11 | Client event log (`/api/client-events/log`) and CSP report | `ui.js` | `api/client.ts`, `api/endpoints.ts` | all | vitest (`client.test.ts` CSRF exemption) | pass | |
@@ -197,9 +197,9 @@ removed with this migration rather than ported:
 | File | Ticket / issue | Behaviour | Now covered by |
 |---|---|---|---|
 | `test_hweb1_composer_hero.py` | HWEB-1 | Composer as the new-conversation hero | C-rows, `shell.spec.ts` home |
-| `test_hweb2_chat_column.py` | HWEB-2 | One shared reading column | `skins.spec.ts` |
+| `test_hweb2_chat_column.py` | HWEB-2 | One shared reading column | manual |
 | `test_hweb3_user_message_collapse.py` | HWEB-3 | User bubble width and folding | X5 (bubbles redesigned) |
-| `test_hweb6_chat_code_and_tables.py` | HWEB-6 | Quiet code blocks and tables | E-rows, `skins.spec.ts` |
+| `test_hweb6_chat_code_and_tables.py` | HWEB-6 | Quiet code blocks and tables | E-rows, manual |
 | `test_hweb7_composer_overflow.py` | HWEB-7 | Composer overflow panel | C-rows (fit stages), manual |
 | `test_hweb9_scroll_to_end_pill.py` | HWEB-9 | Scroll-to-end pill | D-rows (jump buttons) |
 | `test_hweb10_mobile_composer_collapse.py` | HWEB-10 | Phone composer collapse | C-rows (`cf-collapsed`), manual |
@@ -215,10 +215,9 @@ resolved URL), `test_layout_helpers.py` (waits for `main.main`, canonical
 paths), `test_issue1361_cancel_data_loss.py`, `test_docker_docs_and_readonly.py`,
 `test_issue6066_workspace_sort_*`. The legacy `browser-smoke` and
 `conversation-lifecycle` workflows (which drove the legacy UI) are removed; the
-Node suite runs in the `frontend` job. Screenshot comparisons there are
-informational: the committed baselines are rendered on macOS and Linux text
-rasterisation differs, so CI runs the functional checks with `--ignore-snapshots`
-and publishes the comparison report as an artifact.
+Node suite runs once in the `frontend` job. It checks browser behavior and
+console errors without screenshot comparisons. UI changes still require PR
+before/after evidence and manual responsive review.
 
 ## 9. Intentional differences
 
