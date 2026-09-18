@@ -134,6 +134,16 @@ describe('TasksPage', () => {
     await waitFor(() => expect(api.fetchCronHistory).toHaveBeenCalledTimes(2))
   })
 
+  it('lets a job whose skills supply the payload be saved without a prompt', async () => {
+    const detail = await openJob('Digest')
+    await userEvent.click(detail.getByRole('button', { name: /^edit/i }))
+    const dialog = await screen.findByRole('form', { name: /edit job/i })
+    await userEvent.clear(within(dialog).getByLabelText(/^prompt$/i))
+    await userEvent.click(within(dialog).getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(api.cronAction).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(api.cronAction).mock.calls[0]![1]).toMatchObject({ job_id: 'ab12cd34ef56', prompt: '', script: 'collect.sh' })
+  })
+
   it('duplicates into a new editable copy that never reuses the original id', async () => {
     const detail = await openJob('Digest')
     await userEvent.click(detail.getByRole('button', { name: /duplicate/i }))

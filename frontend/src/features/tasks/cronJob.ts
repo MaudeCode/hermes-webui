@@ -40,8 +40,9 @@ export function cronState(job: CronJob, running = false): CronState {
   const errored = job.state === 'error' || job.last_status === 'error' || job.status === 'error'
   if (running || job.running) return 'running'
   if (isRecurring(job) && hasUnlimitedRepeat(job) && job.enabled === false && job.state === 'completed' && !nextRunAt(job)) return 'needs_attention'
-  if (isRecurring(job) && !nextRunAt(job) && errored) return 'schedule_error'
+  // A paused job keeps the last run's error and has no next run; that is not a schedule failure.
   if (job.state === 'paused' || job.paused) return 'paused'
+  if (isRecurring(job) && !nextRunAt(job) && errored) return 'schedule_error'
   if (job.enabled === false) return 'off'
   if (errored) return 'error'
   return 'active'

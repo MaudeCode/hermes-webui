@@ -19,6 +19,7 @@ describe('cronState', () => {
   })
   it('does not misclassify paused, one-shot, or plain disabled jobs', () => {
     expect(cronState({ ...recurring, enabled: false, state: 'paused', next_run_at: null })).toBe('paused')
+    expect(cronState({ ...recurring, enabled: false, state: 'paused', next_run_at: null, last_status: 'error', last_error: 'boom' })).toBe('paused')
     expect(cronState({ ...recurring, schedule: { kind: 'once', run_at: '2026-09-01T00:00:00Z' }, repeat: { times: 1, completed: 1 }, enabled: false, state: 'completed', next_run_at: null })).toBe('off')
     expect(cronState({ ...recurring, repeat: { times: 3, completed: 3 }, enabled: false, state: 'completed', next_run_at: null })).toBe('off')
     expect(cronState({ ...recurring, enabled: false, state: 'scheduled', next_run_at: null })).toBe('off')

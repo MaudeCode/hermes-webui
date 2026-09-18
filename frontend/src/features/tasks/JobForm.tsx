@@ -66,7 +66,9 @@ export function JobForm({ mode, job, jobs, onCancel, onSaved }: { mode: EditorMo
       setError(null)
       const v = { ...value, name: value.name.trim(), schedule: value.schedule.trim(), prompt: value.prompt.trim(), script: value.script.trim(), monitor: value.monitor.trim(), repeat: value.repeat.trim() }
       if (!v.schedule) { setError(m.cron_schedule_required_example()); return }
-      if (!v.no_agent && !v.prompt) { setError(m.cron_prompt_required()); return }
+      // Same payload rule as the server's create handler: at least one of prompt, script or skills.
+      const skillList = v.skills.split(',').map((s) => s.trim()).filter(Boolean)
+      if (!v.no_agent && !v.prompt && !v.script && skillList.length === 0) { setError(m.cron_prompt_required()); return }
       if (v.no_agent && !v.script) { setError(m.cron_no_agent_script_required()); return }
       // docs/scheduled-jobs.md: the save is blocked, never one of the two silently dropped; the monitor stays editable so it can be cleared.
       if (v.no_agent && v.monitor) { setError(m.cron_monitor_no_agent_conflict()); return }
@@ -90,7 +92,6 @@ export function JobForm({ mode, job, jobs, onCancel, onSaved }: { mode: EditorMo
           // Omitted when unset so agent-side defaults still apply.
           const body: Record<string, unknown> = { schedule: v.schedule, prompt: v.prompt, deliver: v.deliver || 'local', profile: v.profile, toast_notifications: v.toast_notifications }
           if (v.name) body.name = v.name
-          const skillList = v.skills.split(',').map((s) => s.trim()).filter(Boolean)
           if (skillList.length) body.skills = skillList
           if (v.script) body.script = v.script
           if (v.no_agent) body.no_agent = true
