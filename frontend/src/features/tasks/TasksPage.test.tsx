@@ -120,6 +120,15 @@ describe('TasksPage', () => {
     expect(vi.mocked(api.fetchCrons).mock.calls.length).toBeGreaterThan(listCalls)
   })
 
+  it('refetches the runs when a scheduled run bumps last_run_at on the selected job', async () => {
+    await openJob('Digest')
+    await waitFor(() => expect(api.fetchCronHistory).toHaveBeenCalledTimes(1))
+    // The next list poll (every 30s in the app) carries the new last_run_at; the status map never saw this run.
+    vi.mocked(api.fetchCrons).mockResolvedValue({ jobs: [{ ...full, last_run_at: '2026-09-18T09:00:00+02:00' }, feed], active_profile: 'work', all_profiles: false, other_profile_count: 0 })
+    await qc.refetchQueries({ queryKey: keys.crons.list(false) })
+    await waitFor(() => expect(api.fetchCronHistory).toHaveBeenCalledTimes(2))
+  })
+
   it('duplicates into a new editable copy that never reuses the original id', async () => {
     const detail = await openJob('Digest')
     await userEvent.click(detail.getByRole('button', { name: /duplicate/i }))

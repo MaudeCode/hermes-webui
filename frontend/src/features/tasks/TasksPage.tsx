@@ -56,7 +56,9 @@ export function useTasksWorkbench(selectedId: string | null, onSelect: (id: stri
   const [allProfiles, setAllProfiles] = useState(false)
   const [editor, setEditor] = useState<Editor | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<CronJob | null>(null)
-  const crons = useQuery({ queryKey: keys.crons.list(allProfiles), queryFn: () => api.fetchCrons(allProfiles), staleTime: 15_000 })
+  // The list polls because it carries `last_run_at`, the only completion signal that covers scheduled runs
+  // (the status map below only tracks runs started from the UI).
+  const crons = useQuery({ queryKey: keys.crons.list(allProfiles), queryFn: () => api.fetchCrons(allProfiles), staleTime: 15_000, refetchInterval: 30_000 })
   const status = useQuery({ queryKey: keys.crons.status, queryFn: api.fetchCronStatus, refetchInterval: 10_000, staleTime: 5_000 })
   const invalidate = () => qc.invalidateQueries({ queryKey: keys.crons.all })
   const action = useMutation({
@@ -79,6 +81,14 @@ export function useTasksWorkbench(selectedId: string | null, onSelect: (id: stri
     if (finished) void qc.invalidateQueries({ queryKey: keys.crons.all })
   }, [running, qc])
   const selected = selectedId ? jobs.find((j) => jobId(j) === selectedId) ?? null : null
+  // A new last_run_at on the selected job means a run wrote its output: refetch that job's history.
+  const lastRun = selected?.last_run_at ?? null
+  const seenRun = useRef({ id: selectedId, lastRun })
+  useEffect(() => {
+    const changed = seenRun.current.id === selectedId && seenRun.current.lastRun !== lastRun
+    seenRun.current = { id: selectedId, lastRun }
+    if (changed && selectedId) void qc.invalidateQueries({ queryKey: keys.crons.history(selectedId) })
+  }, [selectedId, lastRun, qc])
   const run = (act: CronAction, job: CronJob) => action.mutate({ action: act, body: { job_id: jobId(job) } })
   const select = (id: string | null) => { setEditor(null); onSelect(id); closeMobileSidebar() }
   const startEditor = (mode: EditorMode, job: CronJob | null) => { setEditor({ mode, job }); closeMobileSidebar() }
