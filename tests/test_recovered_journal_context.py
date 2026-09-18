@@ -191,3 +191,41 @@ def test_repeated_text_within_one_stream_keeps_every_context_row(hermes_home):
     assert _append_journaled_partial_output(session, stream_id, dedupe_existing=True) is False
     assert assistants(session.messages) == ["Checking again."] * 2
     assert assistants(session.context_messages) == ["Checking again."] * 2
+
+
+def test_dedupe_pass_backfills_context_from_its_own_stream_row(hermes_home):
+    """A retry for stream B must not claim stream A's identical row: B's own
+    visible row is what the context lacks, and repeated retries must not grow
+    ``context_messages`` with copies tagged for A."""
+    sid = "recovered_context_cross_stream"
+    append_run_event(sid, "stream-b", "token", {"text": "Still checking."})
+
+    row_a = {
+        "role": "assistant", "content": "Still checking.",
+        "_recovered_from_run_journal": True, "_recovered_stream_id": "stream-a",
+    }
+    row_b = {
+        "role": "assistant", "content": "Still checking.",
+        "_recovered_from_run_journal": True, "_recovered_stream_id": "stream-b",
+    }
+    session = Session(
+        session_id=sid,
+        title="repro",
+        messages=[
+            {"role": "user", "content": "check", "_recovered": True},
+            dict(row_a),
+            {"role": "user", "content": "check again", "_recovered": True},
+            dict(row_b),
+        ],
+        # Pre-HWEB-78 state: B's row was content-deduped out of the context.
+        context_messages=[
+            {"role": "user", "content": "check", "_recovered": True},
+            dict(row_a),
+            {"role": "user", "content": "check again", "_recovered": True},
+        ],
+    )
+
+    for _ in range(2):
+        assert _append_journaled_partial_output(session, "stream-b", dedupe_existing=True) is False
+        streams = [m.get("_recovered_stream_id") for m in session.context_messages if m.get("role") == "assistant"]
+        assert streams == ["stream-a", "stream-b"]

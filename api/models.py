@@ -2800,7 +2800,15 @@ def _find_existing_assistant_for_journal_content(
     *,
     max_index: int | None = None,
     excluded_indexes: set[int] | None = None,
+    stream_id: str | None = None,
 ) -> int | None:
+    """Index of a visible assistant row that already carries ``content``.
+
+    With ``stream_id``, rows recovered from another stream are never
+    candidates: they are that run's output, and claiming one here would leave
+    this stream's own row unprojected (HWEB-78). Untagged rows (sidecar or
+    live output) remain claimable.
+    """
     candidate = _normalize_journal_recovery_text(content)
     if not candidate:
         return None
@@ -2814,6 +2822,9 @@ def _find_existing_assistant_for_journal_content(
         if not isinstance(message, dict) or message.get('role') != 'assistant':
             continue
         if message.get('_error'):
+            continue
+        owner = message.get('_recovered_stream_id')
+        if stream_id and owner and owner != stream_id:
             continue
         existing = _normalize_journal_recovery_text(message.get('content'))
         if not existing:
@@ -3664,6 +3675,7 @@ def _append_journaled_partial_output(
                     content,
                     max_index=initial_message_count,
                     excluded_indexes=search_excluded,
+                    stream_id=stream_id,
                 )
                 if candidate_idx is None:
                     break
