@@ -1061,10 +1061,63 @@ def _recovered_model_context_projection(message: dict) -> dict | None:
     return projected
 
 
+def _recovered_context_row_key(message: dict) -> tuple:
+    return (message.get('role'), _normalize_journal_recovery_text(message.get('content')))
+
+
+def _align_recovered_context(session, context_messages: list, stream_id) -> None:
+    """Insert projections of ``stream_id`` rows that ``context_messages`` lacks, in transcript order.
+
+    The visible transcript already decided how many rows a stream owns and
+    where (a run may legitimately repeat a progress line; an older turn may
+    hold the same reply). The context is a projection of it, so it mirrors
+    those rows one for one: a missing projection goes before the projection
+    of the next visible row of the same stream, never at the tail (HWEB-78).
+    A replay pass aligns once before it appends anything, so rows it adds
+    itself never need this walk.
+    """
+    ctx_idx = 0
+    ctx_len = len(context_messages)
+
+    def is_stream_row(message) -> bool:
+        return isinstance(message, dict) and message.get('_recovered_stream_id') == stream_id
+
+    for message in getattr(session, 'messages', None) or []:
+        if not is_stream_row(message):
+            continue
+        projected = _recovered_model_context_projection(message)
+        if projected is None:
+            continue
+        key = _recovered_context_row_key(projected)
+        while ctx_idx < ctx_len and not is_stream_row(context_messages[ctx_idx]):
+            ctx_idx += 1
+        if ctx_idx < ctx_len and _recovered_context_row_key(context_messages[ctx_idx]) == key:
+            ctx_idx += 1
+            continue
+        # A context row this stream no longer has visibly: skip past it when
+        # the visible row is projected further on, otherwise fill the gap here.
+        later = next(
+            (
+                idx for idx in range(ctx_idx, ctx_len)
+                if is_stream_row(context_messages[idx])
+                and _recovered_context_row_key(context_messages[idx]) == key
+            ),
+            None,
+        )
+        if later is not None:
+            ctx_idx = later + 1
+            continue
+        context_messages.insert(ctx_idx, projected)
+        ctx_idx += 1
+        ctx_len += 1
+
+
 def _append_recovered_context_projection(
     session,
     context_messages: list,
     recovered: dict,
+    *,
+    fresh: bool = False,
 ) -> None:
     recovered_text = _normalize_journal_recovery_text(recovered.get('content'))
     if recovered_text:
@@ -1076,6 +1129,15 @@ def _append_recovered_context_projection(
                 recovered.get('_source'),
                 recovered.get('attachments'),
             ):
+                return
+        elif recovered.get('_recovered_stream_id'):
+            # Stream-owned rows mirror the visible transcript; a row the
+            # caller just appended there is appended here, anything else is
+            # placed by `_align_recovered_context`.
+            if not fresh:
+                _align_recovered_context(
+                    session, context_messages, recovered.get('_recovered_stream_id'),
+                )
                 return
         else:
             for existing in reversed(context_messages[-8:]):
@@ -1094,17 +1156,22 @@ def _seed_recovered_context_from_messages(session, context_messages: list) -> No
         context_messages.append(projected)
 
 
-def _append_recovered_turn_to_context(session, recovered: dict) -> None:
+def _recovered_context_messages(session) -> list:
     context_messages = getattr(session, 'context_messages', None)
     if not isinstance(context_messages, list):
         context_messages = []
         session.context_messages = context_messages
     if not context_messages:
         _seed_recovered_context_from_messages(session, context_messages)
+    return context_messages
+
+
+def _append_recovered_turn_to_context(session, recovered: dict, **projection_kwargs) -> None:
+    context_messages = _recovered_context_messages(session)
     projected = _recovered_model_context_projection(recovered)
     if projected is None:
         return
-    _append_recovered_context_projection(session, context_messages, projected)
+    _append_recovered_context_projection(session, context_messages, projected, **projection_kwargs)
 
 
 def _append_recovered_pending_turn(session, *, timestamp: float | None = None) -> dict | None:
@@ -2753,12 +2820,21 @@ def _find_existing_assistant_for_journal_content(
     *,
     max_index: int | None = None,
     excluded_indexes: set[int] | None = None,
+    stream_id: str | None = None,
 ) -> int | None:
+    """Index of a visible assistant row that already carries ``content``.
+
+    With ``stream_id``, the stream's own row wins over an untagged one
+    (sidecar or live output) with the same text, and rows recovered from
+    another stream are never candidates: they are that run's output, and
+    claiming either would leave this stream's own row unprojected (HWEB-78).
+    """
     candidate = _normalize_journal_recovery_text(content)
     if not candidate:
         return None
     messages = session.messages or []
     stop = len(messages) if max_index is None else min(len(messages), max_index)
+    untagged_match = None
     substring_match = None
     for idx in range(stop):
         if excluded_indexes and idx in excluded_indexes:
@@ -2768,14 +2844,20 @@ def _find_existing_assistant_for_journal_content(
             continue
         if message.get('_error'):
             continue
+        owner = message.get('_recovered_stream_id')
+        if stream_id and owner and owner != stream_id:
+            continue
         existing = _normalize_journal_recovery_text(message.get('content'))
         if not existing:
             continue
         if existing == candidate:
-            return idx
-        if substring_match is None and len(candidate) >= 24 and candidate in existing:
+            if not stream_id or owner == stream_id:
+                return idx
+            if untagged_match is None:
+                untagged_match = idx
+        elif substring_match is None and len(candidate) >= 24 and candidate in existing:
             substring_match = idx
-    return substring_match
+    return untagged_match if untagged_match is not None else substring_match
 
 
 def _journal_tool_already_present(
@@ -3524,6 +3606,12 @@ def _append_journaled_partial_output(
     events = [event for event in journal.get('events') or [] if isinstance(event, dict)]
     if not events and not carry:
         return False
+    if not dedupe_state.get('context_aligned'):
+        # Once per pass: earlier passes (or the pre-HWEB-78 content dedupe)
+        # may have left this stream's rows unprojected; place them first so
+        # this pass only ever appends its own new rows.
+        _align_recovered_context(session, _recovered_context_messages(session), stream_id)
+        dedupe_state['context_aligned'] = True
 
     appended_any = False
     assistant_parts: list[str] = [str(carry['assistant_text'])] if carry.get('assistant_text') else []
@@ -3581,7 +3669,7 @@ def _append_journaled_partial_output(
     def append_context_projection(message: dict) -> None:
         context_projection = dict(message)
         context_projection.pop('reasoning', None)
-        _append_recovered_turn_to_context(session, context_projection)
+        _append_recovered_turn_to_context(session, context_projection, fresh=True)
 
     def attach_display_reasoning(message: dict, reasoning: str) -> bool:
         if not reasoning:
@@ -3610,6 +3698,7 @@ def _append_journaled_partial_output(
                     content,
                     max_index=initial_message_count,
                     excluded_indexes=search_excluded,
+                    stream_id=stream_id,
                 )
                 if candidate_idx is None:
                     break
@@ -3623,7 +3712,7 @@ def _append_journaled_partial_output(
                 assistant_started_at = None
                 if 0 <= existing_idx < len(session.messages):
                     existing_message = session.messages[existing_idx]
-                    append_context_projection(existing_message)
+                    # Its projection was placed by the pass-start alignment.
                     if attach_display_reasoning(existing_message, reasoning):
                         appended_any = True
                 return existing_idx

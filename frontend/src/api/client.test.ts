@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { configureClient, get, post, request, resetClientForTests } from './client'
 import { createMemoryAdapter, makeSession } from '../contracts/adapters/memory'
-import { fetchSession, renameSession } from './endpoints'
+import { checkUpdatesNow, fetchSession, fetchUpdatesCheck, renameSession } from './endpoints'
 import { isApiError } from '../contracts/common'
 import { resetAppRootForTests } from '../lib/appRoot'
 
@@ -35,6 +35,22 @@ describe('typed client against the in-memory adapter', () => {
     expect(call.method).toBe('POST')
     expect(call.headers.get('X-Hermes-CSRF-Token')).toBe('csrf-test-token')
     expect(call.credentials).toBe('include')
+  })
+
+  it('reads update status with a passive GET and runs a manual check only via POST {force:true}', async () => {
+    const adapter = createMemoryAdapter({ routes: { 'GET /api/updates/check': () => [200, { cached: true }], 'POST /api/updates/check': (_req, body) => [200, { cached: false, echoed: body }] } })
+    configureClient({ transport: adapter, csrfToken: 'csrf-test-token' })
+    await expect(fetchUpdatesCheck()).resolves.toMatchObject({ cached: true })
+    const read = adapter.calls.at(-1)!
+    expect(read.method).toBe('GET')
+    expect(read.url.searchParams.has('force')).toBe(false)
+    await expect(checkUpdatesNow()).resolves.toMatchObject({ cached: false, echoed: { force: true } })
+    const check = adapter.calls.at(-1)!
+    expect(check.method).toBe('POST')
+    expect(JSON.parse(check.body as string)).toEqual({ force: true })
+    await checkUpdatesNow('experimental')
+    expect(JSON.parse(adapter.calls.at(-1)!.body as string)).toEqual({ force: true, channel: 'experimental' })
+    expect(adapter.calls.filter((c) => c.url.pathname.endsWith('/api/updates/check'))).toHaveLength(3)
   })
 
   it('maps a 404 to a typed http error with the server message', async () => {

@@ -139,12 +139,23 @@ For self-hosted VM or homelab installs, `ctl.sh` wraps the common daemon lifecyc
 ./ctl.sh stop
 ```
 
-When Gateway connection settings are already in `.env`, opt one development
-server into Gateway-backed chat without changing the default for other starts:
+For frontend development against a deployed WebUI and its real Agent state, set
+
+```bash
+HERMES_WEBUI_DEV_PROXY=http://webui-host:8787
+```
+
+in the ignored `.env`, install `frontend/` dependencies, then run:
 
 ```bash
 ./ctl.sh start --remote
 ```
+
+This starts only the local Vite frontend with hot reload and proxies its API and
+static requests to the configured WebUI. It stays attached; press Ctrl-C to stop
+it. Local Python backend changes are not used in this mode. Password login is
+supported; passkey-only authentication cannot work from a loopback development
+origin because WebAuthn credentials are bound to the deployed hostname.
 
 In a linked Git worktree, `ctl.sh start` keeps PID, log, and WebUI state separate
 from other worktrees, selects the first free port starting at 8787, and prints

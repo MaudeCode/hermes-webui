@@ -202,7 +202,10 @@ export const fetchDashboardStatus = () => get('api/dashboard/status', DashboardS
 export const fetchAgentHealth = () => get('api/health/agent', AgentHealthSchema, { dedupe: false, retries: 0 })
 export const restartAgent = () => post('api/health/restart', {}, OkSchema.or(z.looseObject({})), { retries: 0, timeoutMs: 120_000 })
 export const fetchSystemHealth = () => get('api/system/health', SystemHealthSchema)
-export const fetchUpdatesCheck = (force = false) => get(`api/updates/check${qs({ force: force ? 1 : undefined })}`, UpdatesCheckSchema, { timeoutMs: 45_000 })
+/** Passive reader: the server answers from cache and never fetches, even with `?force=1` (see routes.py GET /api/updates/check). */
+export const fetchUpdatesCheck = () => get('api/updates/check', UpdatesCheckSchema, { timeoutMs: 45_000 })
+/** Manual "Check now": only POST `{force:true}` runs a real update check, and it bypasses the automatic-check toggle. An explicit `channel` wins over the persisted setting so a check right after a channel switch does not answer for the old channel. */
+export const checkUpdatesNow = (channel?: string) => post('api/updates/check', { force: true, ...(channel ? { channel } : {}) }, UpdatesCheckSchema, { retries: 0, timeoutMs: 120_000 })
 export const fetchUpdatesSummary = () => get('api/updates/summary', UpdatesSummarySchema, { timeoutMs: 60_000 })
 export const applyUpdates = (action: 'apply' | 'force' | 'clear_lock') => post(`api/updates/${action}`, {}, UpdateApplySchema, { retries: 0, timeoutMs: 300_000 })
 export const fetchPlugins = () => get('api/plugins', PluginsSchema)
