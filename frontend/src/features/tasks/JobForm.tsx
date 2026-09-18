@@ -64,11 +64,11 @@ export function JobForm({ mode, job, jobs, onCancel, onSaved }: { mode: EditorMo
     } satisfies FormValues,
     onSubmit: async ({ value }) => {
       setError(null)
-      const v = { ...value, name: value.name.trim(), schedule: value.schedule.trim(), prompt: value.prompt.trim(), script: value.script.trim(), monitor: value.monitor.trim(), repeat: value.repeat.trim() }
+      // The monitor input is disabled for script-only jobs, so a stale value is dropped rather than rejected.
+      const v = { ...value, name: value.name.trim(), schedule: value.schedule.trim(), prompt: value.prompt.trim(), script: value.script.trim(), monitor: value.no_agent ? '' : value.monitor.trim(), repeat: value.repeat.trim() }
       if (!v.schedule) { setError(m.cron_schedule_required_example()); return }
       if (!v.no_agent && !v.prompt) { setError(m.cron_prompt_required()); return }
       if (v.no_agent && !v.script) { setError(m.cron_no_agent_script_required()); return }
-      if (v.no_agent && v.monitor) { setError(m.cron_monitor_no_agent_conflict()); return }
       if (v.repeat && !(/^\d+$/.test(v.repeat) && Number(v.repeat) >= 1)) { setError(m.cron_repeat_invalid()); return }
       const { model, provider } = splitModelOption(v.model, providerOf)
       try {
@@ -79,12 +79,11 @@ export function JobForm({ mode, job, jobs, onCancel, onSaved }: { mode: EditorMo
           // turns continuity off, null clears the model pin). `repeat` and
           // `skills` are create-only in the store.
           const body: Record<string, unknown> = {
-            job_id: sourceId, schedule: v.schedule, deliver: v.deliver || 'local', profile: v.profile, toast_notifications: v.toast_notifications,
+            job_id: sourceId, name: v.name, schedule: v.schedule, deliver: v.deliver || 'local', profile: v.profile, toast_notifications: v.toast_notifications,
             script: v.script, no_agent: v.no_agent, monitor: v.monitor, continuity: v.continuity, context_from: v.context_from,
             reasoning_effort: v.reasoning_effort, model, provider,
           }
           if (!v.no_agent) body.prompt = v.prompt
-          if (v.name) body.name = v.name
           res = await api.cronAction('update', body)
         } else {
           // Omitted when unset so agent-side defaults still apply.

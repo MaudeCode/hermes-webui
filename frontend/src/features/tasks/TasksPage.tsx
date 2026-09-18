@@ -3,7 +3,7 @@
  * selected job (or the create/edit form). Selection lives in `?job=` so a task
  * can be linked and the browser back button works; the editor is transient.
  */
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { Copy, Pause, Play, Plus, RefreshCw, Trash2 } from 'lucide-react'
@@ -70,6 +70,14 @@ export function useTasksWorkbench(selectedId: string | null, onSelect: (id: stri
   })
   const jobs = useMemo(() => crons.data?.jobs ?? [], [crons.data])
   const running = useMemo(() => runningIds(status.data), [status.data])
+  // A run that just finished has written its output file and updated last_run/last_status:
+  // the mutation's invalidation fired when /run started, so refetch again when the running set shrinks.
+  const wasRunning = useRef(running)
+  useEffect(() => {
+    const finished = [...wasRunning.current].some((id) => !running.has(id))
+    wasRunning.current = running
+    if (finished) void qc.invalidateQueries({ queryKey: keys.crons.all })
+  }, [running, qc])
   const selected = selectedId ? jobs.find((j) => jobId(j) === selectedId) ?? null : null
   const run = (act: CronAction, job: CronJob) => action.mutate({ action: act, body: { job_id: jobId(job) } })
   const select = (id: string | null) => { setEditor(null); onSelect(id); closeMobileSidebar() }

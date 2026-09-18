@@ -11,6 +11,7 @@ vi.mock(import('../../api/endpoints'), async (importOriginal) => ({
   fetchCronDeliveryOptions: vi.fn(), fetchSkills: vi.fn(), fetchProfiles: vi.fn(), fetchModels: vi.fn(),
 }))
 import * as api from '../../api/endpoints'
+import { keys } from '../../api/queryKeys'
 import { useTasksWorkbench } from './TasksPage'
 
 // Persisted shape: cron.jobs.create_job record plus _cron_job_for_api projections
@@ -34,9 +35,10 @@ function Workbench() {
   return <><aside data-testid="sidebar">{sidebar}</aside><main data-testid="main">{main}</main><div id="rightpanelSlot" /></>
 }
 
+let qc: QueryClient
 function renderPage(jobs: CronJob[]) {
   vi.mocked(api.fetchCrons).mockResolvedValue({ jobs, active_profile: 'work', all_profiles: false, other_profile_count: 0 })
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(<QueryClientProvider client={qc}><Workbench /></QueryClientProvider>)
 }
 
@@ -90,6 +92,32 @@ describe('TasksPage', () => {
       deliver: 'telegram', profile: 'work', toast_notifications: false, monitor: 'https://example.com/status', continuity: true,
       context_from: ['feed0000feed'], reasoning_effort: 'high', model: 'gpt-5.6-sol', provider: 'openai-codex',
     })
+  })
+
+  it('sends a cleared name and drops the monitor when a job becomes script-only', async () => {
+    const detail = await openJob('Digest')
+    await userEvent.click(detail.getByRole('button', { name: /^edit/i }))
+    const dialog = await screen.findByRole('form', { name: /edit job/i })
+    await userEvent.clear(within(dialog).getByLabelText(/^name$/i))
+    // Base UI puts the id on its hidden input, so the switch has no accessible name: it is the first switch in the form.
+    await userEvent.click(within(dialog).getAllByRole('switch')[0]!)
+    expect(within(dialog).getByLabelText(/monitor/i)).toBeDisabled()
+    await userEvent.click(within(dialog).getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(api.cronAction).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(api.cronAction).mock.calls[0]![1]).toMatchObject({ job_id: 'ab12cd34ef56', name: '', no_agent: true, monitor: '' })
+    expect(vi.mocked(api.cronAction).mock.calls[0]![1]).not.toHaveProperty('prompt')
+  })
+
+  it('refetches the job and its runs once a run leaves the running set', async () => {
+    vi.mocked(api.fetchCronStatus).mockResolvedValue({ running: { ab12cd34ef56: 1 } })
+    await openJob('Digest')
+    await waitFor(() => expect(api.fetchCronHistory).toHaveBeenCalledTimes(1))
+    const listCalls = vi.mocked(api.fetchCrons).mock.calls.length
+    // The next status poll (every 10s in the app) reports the run finished.
+    vi.mocked(api.fetchCronStatus).mockResolvedValue({ running: {} })
+    await qc.refetchQueries({ queryKey: keys.crons.status })
+    await waitFor(() => expect(api.fetchCronHistory).toHaveBeenCalledTimes(2))
+    expect(vi.mocked(api.fetchCrons).mock.calls.length).toBeGreaterThan(listCalls)
   })
 
   it('duplicates into a new editable copy that never reuses the original id', async () => {
