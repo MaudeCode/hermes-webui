@@ -174,6 +174,10 @@ export const MemorySchema = z.looseObject({
 })
 export type Memory = z.infer<typeof MemorySchema>
 
+// Persisted shape from the agent's cron.jobs store (see create_job there) plus
+// the WebUI projections (owner_profile, read_only, monitor, continuity).
+export const CronScheduleSchema = z.looseObject({ kind: z.string().optional(), expr: z.string().optional(), minutes: z.number().optional(), run_at: z.string().optional(), display: z.string().optional() })
+export const CronRepeatSchema = z.looseObject({ times: NullableNumber.optional(), completed: z.number().optional() })
 export const CronJobSchema = z.looseObject({
   read_only: z.boolean().optional(),
   owner_profile: NullableString.optional(),
@@ -181,22 +185,49 @@ export const CronJobSchema = z.looseObject({
   job_id: z.string().optional(),
   name: z.string().optional(),
   prompt: z.string().optional(),
-  schedule: z.union([z.string(), z.looseObject({})]).optional(),
+  schedule: z.union([z.string(), CronScheduleSchema]).optional(),
   schedule_display: z.string().optional(),
   enabled: z.boolean().optional(),
   paused: z.boolean().optional(),
+  paused_reason: NullableString.optional(),
+  state: NullableString.optional(),
+  last_status: NullableString.optional(),
+  last_error: NullableString.optional(),
+  last_delivery_error: NullableString.optional(),
+  // ISO string from cron/jobs.py; older servers emit epoch seconds.
+  next_run_at: z.union([z.string(), z.number(), z.null()]).optional(),
+  last_run_at: z.union([z.string(), z.number(), z.null()]).optional(),
+  repeat: z.union([CronRepeatSchema, z.number(), z.null()]).optional(),
   status: z.string().optional(),
   last_run: z.unknown().optional(),
   next_run: z.unknown().optional(),
   profile: NullableString.optional(),
   session_id: NullableString.optional(),
   model: NullableString.optional(),
+  provider: NullableString.optional(),
   workspace: NullableString.optional(),
+  workdir: NullableString.optional(),
+  deliver: NullableString.optional(),
+  skills: z.array(z.string()).optional(),
+  no_agent: z.boolean().optional(),
+  script: NullableString.optional(),
+  monitor: NullableString.optional(),
+  continuity: z.boolean().optional(),
+  context_from: z.union([z.array(z.string()), z.string(), z.null()]).optional(),
+  reasoning_effort: NullableString.optional(),
+  toast_notifications: z.boolean().optional(),
   running: z.boolean().optional(),
 })
+export type CronJob = z.infer<typeof CronJobSchema>
 export const CronsSchema = z.looseObject({ jobs: z.array(CronJobSchema), active_profile: z.string().optional(), all_profiles: z.boolean().optional(), other_profile_count: z.number().optional(), cron_unavailable: z.boolean().optional() })
 export type Crons = z.infer<typeof CronsSchema>
 export const CronMutationSchema = z.looseObject({ ok: z.boolean().optional(), job: CronJobSchema.optional(), job_id: z.string().optional(), status: z.string().optional(), error: z.string().optional() })
+export const CronRunUsageSchema = z.looseObject({ input_tokens: NullableNumber.optional(), output_tokens: NullableNumber.optional(), total_tokens: NullableNumber.optional(), estimated_cost_usd: NullableNumber.optional(), duration_seconds: NullableNumber.optional(), model: z.string().optional(), provider: z.string().optional() })
+export const CronRunSummarySchema = z.looseObject({ filename: z.string(), size: z.number(), modified: z.number(), usage: CronRunUsageSchema.optional() })
+export const CronHistorySchema = z.looseObject({ job_id: z.string().optional(), runs: z.array(CronRunSummarySchema), total: z.number().optional(), offset: z.number().optional() })
+export type CronHistory = z.infer<typeof CronHistorySchema>
+export const CronRunSchema = z.looseObject({ content: z.string().optional(), snippet: z.string().optional(), usage: CronRunUsageSchema.optional(), error: z.string().optional() })
+export const CronStatusSchema = z.looseObject({ running: z.union([z.boolean(), z.record(z.string(), z.number())]).optional() })
 
 export const PromptSchema = z.looseObject({ id: z.string().optional(), name: z.string().optional(), title: z.string().optional(), text: z.string().optional(), content: z.string().optional() })
 export const PromptsSchema = z.looseObject({ prompts: z.array(PromptSchema) })

@@ -53,7 +53,7 @@ export function RuntimeNoticeStack({ live, onRetry }: { live: LiveTurn | null; o
                 <div className="font-medium text-text">{n.title}</div>
                 {i === 0 && n.detail && <div className="mt-0.5 break-words text-xs text-muted">{n.detail}</div>}
               </div>
-              {n.action && <Button size="sm" onClick={n.action.run}>{n.action.label}</Button>}
+              {n.action && <Button onClick={n.action.run}>{n.action.label}</Button>}
               <button type="button" className="text-xs text-muted hover:text-text" onClick={() => setDismissed((d) => new Set([...d, `${n.kind}:${n.title}`]))}>{m.notice_dismiss()}</button>
             </div>
           ))}

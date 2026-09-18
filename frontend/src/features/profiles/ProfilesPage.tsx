@@ -56,7 +56,7 @@ export function ProfilesPage() {
                   {(p.enabled_skills ?? p.skill_count) !== undefined && <span>{m.profile_skill_count({ count: p.enabled_skills ?? p.skill_count ?? 0 })}</span>}
                 </div>
               </div>
-              {!isActive && <Button size="sm" onClick={() => switchProfile.mutate(p.name, { onSuccess: () => { showToast(m.profile_switched({ name: p.name })); window.location.reload() } })} title={m.profile_switch_title()}>{m.profile_use()}</Button>}
+              {!isActive && <Button onClick={() => switchProfile.mutate(p.name, { onSuccess: () => { showToast(m.profile_switched({ name: p.name })); window.location.reload() } })} title={m.profile_switch_title()}>{m.profile_use()}</Button>}
               {!p.is_default && !isActive && <IconButton label={m.profile_delete_title()} onClick={() => setDeleting(p.name)}><Trash2 size={14} aria-hidden="true" /></IconButton>}
             </li>
           )

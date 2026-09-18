@@ -98,10 +98,10 @@ export function TerminalPanel({ sessionId, workspace, onClose }: { sessionId: st
       <div className="composer-terminal-header flex items-center justify-between gap-2 border-b border-border px-3 py-1.5 text-xs">
         <div className="composer-terminal-title flex items-center gap-2 text-text"><span>{m.terminal_title()}</span><span className="text-muted">·</span><span className="truncate font-mono text-muted" id="terminalWorkspaceLabel">{workspace ?? ''}</span>{status === 'error' && <span className="text-error">{m.terminal_unavailable()}</span>}</div>
         <div className="composer-terminal-actions flex items-center gap-1">
-          <Button size="sm" variant="ghost" onClick={() => term.current?.clear()}>{m.terminal_clear()}</Button>
-          <Button size="sm" variant="ghost" onClick={() => { const sel = term.current?.getSelection() ?? ''; void navigator.clipboard.writeText(sel).then(() => showToast(m.copied())) }}>{m.terminal_copy_output()}</Button>
-          <Button size="sm" variant="ghost" onClick={() => { void restart() }}>{m.terminal_restart()}</Button>
-          <Button size="sm" variant="ghost" onClick={() => { void close() }}>{m.terminal_close()}</Button>
+          <Button variant="ghost" onClick={() => term.current?.clear()}>{m.terminal_clear()}</Button>
+          <Button variant="ghost" onClick={() => { const sel = term.current?.getSelection() ?? ''; void navigator.clipboard.writeText(sel).then(() => showToast(m.copied())) }}>{m.terminal_copy_output()}</Button>
+          <Button variant="ghost" onClick={() => { void restart() }}>{m.terminal_restart()}</Button>
+          <Button variant="ghost" onClick={() => { void close() }}>{m.terminal_close()}</Button>
         </div>
       </div>
       <div ref={host} className="composer-terminal-surface px-2 py-1" style={{ height }} aria-label="Workspace terminal" role="application" />

@@ -1,9 +1,9 @@
 import { useEffect, useRef, type ReactNode } from 'react'
-import { X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, X } from 'lucide-react'
 import { m } from '../paraglide/messages.js'
 import { cn } from '../ui/cn'
 import { MobileNav } from './MobileNav'
-import { closeMobileSidebar, setSidebarWidth, useIsDesktop, useShellState } from './useShellState'
+import { closeMobileSidebar, setSidebarWidth, toggleSidebarCollapsed, useIsDesktop, useShellState } from './useShellState'
 
 /**
  * Left column: on desktop a resizable panel next to the rail; on mobile a
@@ -21,12 +21,22 @@ export function Sidebar({ panel }: { panel: ReactNode }) {
     return () => document.removeEventListener('keydown', onKey)
   }, [mobileOpen])
 
+  // Drag the right edge to resize (180..480px, persisted on release). The width is written straight to the DOM while
+  // dragging: a React render per pointer move (and the panel's width transition) lags the pointer.
   const startResize = (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault()
     const startX = e.clientX
-    const startW = ref.current?.getBoundingClientRect().width ?? sidebarWidth
-    const move = (ev: PointerEvent) => setSidebarWidth(startW + (ev.clientX - startX) * (document.documentElement.dir === 'rtl' ? -1 : 1))
-    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up) }
+    const el = ref.current
+    const startW = el?.getBoundingClientRect().width ?? sidebarWidth
+    const dir = document.documentElement.dir === 'rtl' ? -1 : 1
+    let next = startW
+    el?.setAttribute('data-resizing', '1')
+    const move = (ev: PointerEvent) => { next = Math.min(480, Math.max(180, Math.round(startW + (ev.clientX - startX) * dir))); if (el) el.style.width = `${next}px` }
+    const up = () => {
+      el?.removeAttribute('data-resizing')
+      setSidebarWidth(next)
+      window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up)
+    }
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)
   }
@@ -54,6 +64,14 @@ export function Sidebar({ panel }: { panel: ReactNode }) {
         <span className="seam seam-br" aria-hidden="true" />
         {isDesktop && !collapsed && (
           <div className="resize-handle absolute top-0 bottom-0 w-[5px] cursor-col-resize z-10 transition-[background] duration-150 hover:bg-accent" id="sidebarResize" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" onPointerDown={startResize} />
+        )}
+        {/* Edge tab on the sidebar's right edge (the mirror of the right panel's), reachable while collapsed. */}
+        {isDesktop && (
+          <button type="button" className="workspace-panel-edge-toggle has-tooltip" id="btnSidebarEdgeToggle" data-tooltip={collapsed ? m.sidebar_show() : m.sidebar_hide()} aria-label={collapsed ? m.sidebar_show() : m.sidebar_hide()} aria-expanded={!collapsed} onClick={() => toggleSidebarCollapsed()}>
+            <span className="edge-tab-join edge-tab-join-top" aria-hidden="true" />
+            <span className="edge-tab-join edge-tab-join-bottom" aria-hidden="true" />
+            {collapsed ? <ChevronRight size={12} aria-hidden="true" /> : <ChevronLeft size={12} aria-hidden="true" />}
+          </button>
         )}
       </aside>
     </>

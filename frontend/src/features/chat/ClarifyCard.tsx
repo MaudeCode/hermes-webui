@@ -63,7 +63,7 @@ export function ClarifyCard({ sessionId, pending, onResolved }: { sessionId: str
           )}
           <form onSubmit={(e) => { e.preventDefault(); void respond(answer) }} className="mt-2 flex gap-2">
             <TextInput value={answer} onChange={(e) => setAnswer(e.target.value)} placeholder={choices.length ? m.clarify_composer_placeholder_choices() : m.clarify_composer_placeholder()} aria-label={m.clarify_heading()} />
-            <button type="submit" disabled={busy || !answer.trim()} className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50">{m.clarify_submit()}</button>
+            <button type="submit" disabled={busy || !answer.trim()} className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg disabled:opacity-50">{m.clarify_submit()}</button>
           </form>
           <div className="clarify-hint mt-1 text-[11px] text-muted">{m.clarify_hint()}</div>
         </div>

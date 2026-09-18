@@ -112,8 +112,8 @@ function TaskDialog({ task, columns, readOnly, onClose, onChanged }: { task: Kan
         </div>
         {!readOnly && (
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" onClick={() => act.mutate({ action: 'dispatch', body: {} })}>{m.kanban_dispatch()}</Button>
-            <Button size="sm" onClick={() => act.mutate({ action: 'patch', body: { archived: true } })}>{m.kanban_archive()}</Button>
+            <Button onClick={() => act.mutate({ action: 'dispatch', body: {} })}>{m.kanban_dispatch()}</Button>
+            <Button onClick={() => act.mutate({ action: 'patch', body: { archived: true } })}>{m.kanban_archive()}</Button>
           </div>
         )}
         <div>
@@ -121,7 +121,7 @@ function TaskDialog({ task, columns, readOnly, onClose, onChanged }: { task: Kan
           {!readOnly && (
             <form onSubmit={(e) => { e.preventDefault(); if (comment.trim()) { act.mutate({ action: 'comments', body: { body: comment.trim(), text: comment.trim() } }); setComment('') } }} className="flex gap-2">
               <TextInput value={comment} onChange={(e) => setComment(e.target.value)} placeholder={m.kanban_add_comment()} aria-label={m.kanban_add_comment()} />
-              <Button type="submit" size="sm">{m.add()}</Button>
+              <Button type="submit">{m.add()}</Button>
             </form>
           )}
         </div>

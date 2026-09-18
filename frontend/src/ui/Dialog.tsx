@@ -52,7 +52,7 @@ export function ConfirmDialog({ open, onOpenChange, title, description, confirmL
             <BaseAlertDialog.Close className="rounded-md border border-border bg-surface px-3 py-1.5 text-sm hover:bg-hover">{cancelLabel}</BaseAlertDialog.Close>
             <button
               type="button"
-              className={cn('rounded-md px-3 py-1.5 text-sm font-medium', danger ? 'bg-error text-white' : 'bg-accent text-white')}
+              className={cn('rounded-md px-3 py-1.5 text-sm font-medium', danger ? 'bg-error text-white' : 'bg-accent text-accent-fg')}
               onClick={() => {
                 void Promise.resolve(onConfirm()).finally(() => onOpenChange(false))
               }}

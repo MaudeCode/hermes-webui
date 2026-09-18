@@ -8,7 +8,7 @@ import { get, post, postForm } from './client'
 import {
   ActiveProfileSchema, AgentHealthSchema, ApprovalPendingEnvelopeSchema, ApprovalRespondRequestSchema, AuthStatusSchema, AuxiliaryModelsSchema,
   BackgroundStatusSchema, BootstrapSchema, CancelResponseSchema, ChatStartRequestSchema, ChatStartResponseSchema, ClarifyPendingEnvelopeSchema,
-  ClarifyRespondRequestSchema, ClarifyRespondResponseSchema, CommandsSchema, CronMutationSchema, CronsSchema, DashboardStatusSchema, DirListingSchema,
+  ClarifyRespondRequestSchema, ClarifyRespondResponseSchema, CommandsSchema, CronHistorySchema, CronMutationSchema, CronRunSchema, CronStatusSchema, CronsSchema, DashboardStatusSchema, DirListingSchema,
   DraftRequestSchema, DraftResponseSchema, ExtensionStatusSchema, FileContentSchema, GitInfoSchema, GoalResponseSchema, InsightsSchema,
   KanbanBoardSchema, KanbanBoardsSchema, LoginResponseSchema, LogsSchema, McpServersSchema, MemorySchema, ModelsSchema, NotesSourcesSchema, OkSchema,
   OnboardingOAuthSchema, OnboardingProbeSchema, OnboardingStatusSchema, PersonalitiesSchema, PluginsSchema, ProfilesSchema, ProjectsSchema,
@@ -176,10 +176,11 @@ export const fetchMemory = (workspace?: string) => get(`api/memory${qs({ workspa
 export const writeMemory = (body: { target: 'memory' | 'user' | 'soul'; content: string }) => post('api/memory/write', { section: body.target, content: body.content }, OkSchema, { retries: 0 })
 export const fetchCrons = (allProfiles = false) => get(`api/crons${qs({ all_profiles: allProfiles ? 1 : undefined })}`, CronsSchema)
 export const cronAction = (action: 'create' | 'update' | 'delete' | 'run' | 'pause' | 'resume', body: Record<string, unknown>) => post(`api/crons/${action}`, body, CronMutationSchema, { retries: 0 })
-export const fetchCronHistory = (job_id: string) => get(`api/crons/history${qs({ job_id })}`, z.looseObject({ history: z.array(z.unknown()).optional(), runs: z.array(z.unknown()).optional() }))
+export const fetchCronHistory = (job_id: string, limit = 50) => get(`api/crons/history${qs({ job_id, limit })}`, CronHistorySchema)
+export const fetchCronRun = (job_id: string, filename: string) => get(`api/crons/run${qs({ job_id, filename })}`, CronRunSchema)
 export const fetchCronOutput = (job_id: string, run_id?: string) => get(`api/crons/output${qs({ job_id, run_id })}`, z.looseObject({ output: z.string().optional(), error: z.string().optional() }))
 export const fetchCronDeliveryOptions = () => get('api/crons/delivery-options', z.looseObject({ platforms: z.array(z.unknown()).optional() }))
-export const fetchCronStatus = () => get('api/crons/status', z.looseObject({}))
+export const fetchCronStatus = () => get('api/crons/status', CronStatusSchema)
 export const fetchKanbanBoards = () => get('api/kanban/boards', KanbanBoardsSchema)
 export const fetchKanbanBoard = (params: Record<string, string | boolean | undefined> = {}) => get(`api/kanban/board${qs(params)}`, KanbanBoardSchema)
 export const switchKanbanBoard = (slug: string) => post(`api/kanban/boards/${encodeURIComponent(slug)}/switch`, {}, OkSchema.or(z.looseObject({})), { retries: 0 })
