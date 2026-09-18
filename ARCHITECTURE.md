@@ -88,7 +88,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       src/sw.ts            Service worker source (Workbox)
       scripts/             finalize-dist, build-sw, check-dist, i18n-gate, generate-routes, css-convert (legacy CSS -> layers + ledger),
                            css-computed-diff (compare computed styles between two builds)
-      e2e/                 Playwright suite + screenshot baselines
+      e2e/                 Playwright functional suite
     static/
       dist/                Committed production build served by Python (index.html shell,
                            assets/<hash>.js|css, sw.js, manifest.webmanifest, extension-sdk.js, FILES.txt)
@@ -592,8 +592,8 @@ winning over the structural utilities. The spacing scale is px-based
 `docs/architecture/css-conversion-ledger.md` records how the legacy stylesheet
 was converted (every legacy rule has a disposition); `scripts/css-convert.mjs`
 is the history tool that produced the first cut of those sheets.
-`e2e/skins.spec.ts` screenshots every skin in both schemes on a seeded
-transcript.
+`src/theme/skins.test.ts` validates every skin's token contract and generated
+CSS.
 
 ### 5.2 State
 
