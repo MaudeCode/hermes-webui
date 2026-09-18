@@ -30,7 +30,8 @@ const foreign: CronJob = { ...feed, id: 'f0e1f0e1f0e1', name: 'Other profile job
 function Workbench() {
   const [selected, setSelected] = useState<string | null>(null)
   const { sidebar, main } = useTasksWorkbench(selected, setSelected)
-  return <><aside data-testid="sidebar">{sidebar}</aside><main data-testid="main">{main}</main></>
+  // The shell's right-panel slot: the run panel portals into it.
+  return <><aside data-testid="sidebar">{sidebar}</aside><main data-testid="main">{main}</main><div id="rightpanelSlot" /></>
 }
 
 function renderPage(jobs: CronJob[]) {
@@ -106,29 +107,39 @@ describe('TasksPage', () => {
     expect(JSON.stringify(body)).not.toContain('ab12cd34ef56')
   })
 
-  it('lists the newest 50 runs and fetches one body only when opened', async () => {
+  it('lists the newest 50 runs with the latest preloaded into a collapsed right panel', async () => {
     const detail = await openJob('Digest')
     const history = await detail.findByRole('region', { name: /^runs$/i })
-    expect(within(history).getAllByRole('listitem')).toHaveLength(50)
+    expect(within(history).getAllByRole('row')).toHaveLength(50)
     expect(history).toHaveTextContent('latest 50 of 73')
     expect(api.fetchCronHistory).toHaveBeenCalledWith('ab12cd34ef56')
-    expect(api.fetchCronRun).not.toHaveBeenCalled()
-    await userEvent.click(within(history).getAllByRole('button')[0]!)
+    // The panel mounts collapsed with the newest run already fetched.
+    const panel = await screen.findByRole('complementary', { name: /^runs$/i })
     await waitFor(() => expect(api.fetchCronRun).toHaveBeenCalledTimes(1))
     expect(api.fetchCronRun).toHaveBeenCalledWith('ab12cd34ef56', runs[0]!.filename)
-    // Literal output: the markdown heading and table pipe survive verbatim.
-    expect((await within(history).findByText(/# Not markdown/)).tagName).toBe('PRE')
+    expect(document.documentElement.dataset.workspacePanel).toBe('closed')
+    // Any cell of a row opens it, not only the date.
+    await userEvent.click(within(history).getAllByRole('cell')[4]!)
+    expect(document.documentElement.dataset.workspacePanel).toBe('open')
+    await waitFor(() => expect(api.fetchCronRun).toHaveBeenCalledWith('ab12cd34ef56', runs[1]!.filename))
+    // Agent output renders as markdown: the heading becomes an element, not literal text.
+    expect(await within(panel).findByRole('heading', { name: 'Not markdown' })).toBeVisible()
+    // Clicking the open row again collapses the panel; the edge tab reopens it.
+    await userEvent.click(within(history).getAllByRole('cell')[4]!)
+    expect(document.documentElement.dataset.workspacePanel).toBe('closed')
+    await userEvent.click(within(panel).getByRole('button', { name: /show workspace panel/i }))
+    expect(document.documentElement.dataset.workspacePanel).toBe('open')
   })
 
   it('shows explicit empty and failed-detail states', async () => {
     vi.mocked(api.fetchCronHistory).mockResolvedValueOnce({ job_id: 'x', runs: [], total: 0, offset: 0 })
     const detail = await openJob('Digest')
     expect(await detail.findByText(/no runs yet/i)).toBeVisible()
+    expect(screen.queryByRole('complementary', { name: /^runs$/i })).toBeNull()
     vi.mocked(api.fetchCronRun).mockRejectedValueOnce(new Error('run not found'))
-    const detail2 = await selectJob('Feed')
-    const history = await detail2.findByRole('region', { name: /^runs$/i })
-    await userEvent.click(within(history).getAllByRole('button')[0]!)
-    expect(await within(history).findByRole('alert')).toHaveTextContent(/could not load this run.*run not found/i)
+    await selectJob('Feed')
+    const panel = await screen.findByRole('complementary', { name: /^runs$/i })
+    expect(await within(panel).findByRole('alert')).toHaveTextContent(/could not load this run.*run not found/i)
   })
 
   it('explains a needs-attention job and offers resume, run once and diagnostics', async () => {
