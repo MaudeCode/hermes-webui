@@ -1078,8 +1078,15 @@ def _append_recovered_context_projection(
             ):
                 return
         else:
+            # HWEB-78: a stream-owned row only duplicates its own stream's
+            # earlier projection. Matching text from another turn is history
+            # the dead run legitimately repeated, and the visible transcript
+            # already keeps that row, so the context must keep it too.
+            stream_id = recovered.get('_recovered_stream_id')
             for existing in reversed(context_messages[-8:]):
                 if not isinstance(existing, dict) or existing.get('role') != recovered.get('role'):
+                    continue
+                if stream_id and existing.get('_recovered_stream_id') != stream_id:
                     continue
                 if _normalize_journal_recovery_text(existing.get('content')) == recovered_text:
                     return

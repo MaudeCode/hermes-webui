@@ -15,6 +15,7 @@ from api.models import (
     Session,
     _append_journaled_partial_output,
     _append_recovered_pending_turn,
+    _append_recovered_turn_to_context,
 )
 from api.run_journal import append_run_event
 from api.streaming import _context_messages_for_new_turn
@@ -111,3 +112,55 @@ def test_deduped_existing_recovered_assistant_repairs_missing_context(hermes_hom
     next_context = _context_messages_for_new_turn(session, "升级完成了吗？")
     context_text = "\n".join(m.get("content", "") for m in next_context)
     assert "升级代码层面已经完成" in context_text
+
+
+def test_repeated_reply_recovers_into_context_once(hermes_home):
+    """HWEB-78: a dead run that repeats an earlier assistant reply must still
+    land in ``context_messages`` (the visible transcript already gets the row),
+    and repeated recovery must not duplicate it in either list.
+    """
+    sid = "recovered_context_repeat"
+    stream_id = "stream-repeat"
+    append_run_event(sid, stream_id, "token", {"text": "Nothing to upgrade."})
+
+    history = [
+        {"role": "user", "content": "upgrade?"},
+        {"role": "assistant", "content": "Nothing to upgrade."},
+    ]
+    session = Session(
+        session_id=sid,
+        title="repro",
+        messages=[dict(m) for m in history],
+        context_messages=[dict(m) for m in history],
+        pending_user_message="upgrade again?",
+    )
+
+    _append_recovered_pending_turn(session, timestamp=123)
+    assert _append_journaled_partial_output(session, stream_id) is True
+
+    def assistants(rows):
+        return [m for m in rows if m.get("role") == "assistant"]
+
+    assert len(assistants(session.messages)) == 2
+    assert len(assistants(session.context_messages)) == 2
+    assert session.context_messages[-1]["role"] == "assistant"
+    assert session.context_messages[-1]["_recovered_stream_id"] == stream_id
+
+    # Read-side retry replays the same journal against the already-repaired session.
+    assert _append_journaled_partial_output(session, stream_id, dedupe_existing=True) is False
+    assert len(assistants(session.messages)) == 2
+    assert len(assistants(session.context_messages)) == 2
+
+
+def test_untagged_recovered_assistant_context_row_still_deduplicates():
+    """A recovered row without a stream identity keeps the content dedupe."""
+    session = Session(
+        session_id="ctx_untagged",
+        title="repro",
+        messages=[],
+        context_messages=[{"role": "assistant", "content": "Same answer"}],
+    )
+    _append_recovered_turn_to_context(
+        session, {"role": "assistant", "content": "Same answer", "timestamp": 1},
+    )
+    assert len(session.context_messages) == 1
