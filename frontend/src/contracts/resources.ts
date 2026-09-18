@@ -194,8 +194,9 @@ export const CronJobSchema = z.looseObject({
   last_status: NullableString.optional(),
   last_error: NullableString.optional(),
   last_delivery_error: NullableString.optional(),
-  next_run_at: NullableString.optional(),
-  last_run_at: NullableString.optional(),
+  // ISO string from cron/jobs.py; older servers emit epoch seconds.
+  next_run_at: z.union([z.string(), z.number(), z.null()]).optional(),
+  last_run_at: z.union([z.string(), z.number(), z.null()]).optional(),
   repeat: z.union([CronRepeatSchema, z.number(), z.null()]).optional(),
   status: z.string().optional(),
   last_run: z.unknown().optional(),

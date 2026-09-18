@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { CronJob } from '../../contracts'
+import { CronJobSchema, type CronJob } from '../../contracts'
 import { cronDiagnostics, cronState, modelOptionFor, runResponse, splitModelOption, usageStrip } from './cronJob'
 
 // Persisted shape from cron.jobs.create_job with the WebUI projections applied.
@@ -32,6 +32,7 @@ describe('cronState', () => {
     expect(cronState({ ...legacy, status: 'error' })).toBe('error')
     expect(cronState({ ...legacy, status: 'error', next_run_at: null })).toBe('schedule_error')
     expect(cronState({ ...legacy, running: true })).toBe('running')
+    expect(CronJobSchema.parse({ ...recurring, last_run_at: 1_789_600_000, next_run_at: 1_789_686_400 }).next_run_at).toBe(1_789_686_400)
     // Legacy next_run keeps a recurring job out of the attention states.
     expect(cronState({ ...legacy, status: 'error', next_run_at: null, next_run: 1_789_600_000 })).toBe('error')
     expect(cronState(recurring, true)).toBe('running')
