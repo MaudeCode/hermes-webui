@@ -64,11 +64,12 @@ export function JobForm({ mode, job, jobs, onCancel, onSaved }: { mode: EditorMo
     } satisfies FormValues,
     onSubmit: async ({ value }) => {
       setError(null)
-      // The monitor input is disabled for script-only jobs, so a stale value is dropped rather than rejected.
-      const v = { ...value, name: value.name.trim(), schedule: value.schedule.trim(), prompt: value.prompt.trim(), script: value.script.trim(), monitor: value.no_agent ? '' : value.monitor.trim(), repeat: value.repeat.trim() }
+      const v = { ...value, name: value.name.trim(), schedule: value.schedule.trim(), prompt: value.prompt.trim(), script: value.script.trim(), monitor: value.monitor.trim(), repeat: value.repeat.trim() }
       if (!v.schedule) { setError(m.cron_schedule_required_example()); return }
       if (!v.no_agent && !v.prompt) { setError(m.cron_prompt_required()); return }
       if (v.no_agent && !v.script) { setError(m.cron_no_agent_script_required()); return }
+      // docs/scheduled-jobs.md: the save is blocked, never one of the two silently dropped; the monitor stays editable so it can be cleared.
+      if (v.no_agent && v.monitor) { setError(m.cron_monitor_no_agent_conflict()); return }
       if (v.repeat && !(/^\d+$/.test(v.repeat) && Number(v.repeat) >= 1)) { setError(m.cron_repeat_invalid()); return }
       const { model, provider } = splitModelOption(v.model, providerOf)
       try {
@@ -175,7 +176,7 @@ export function JobForm({ mode, job, jobs, onCancel, onSaved }: { mode: EditorMo
             <details className="mt-6" open={!!(job && (job.monitor || job.continuity || job.reasoning_effort || contextFromList(job).length))}>
               <summary className="cursor-pointer text-xs font-medium text-muted">{m.cron_advanced_label()}</summary>
               <div className={group}>
-                <form.Field name="monitor">{(f) => <FieldRow label={m.cron_monitor_label()} hint={noAgent ? m.cron_monitor_no_agent_hint() : m.cron_monitor_hint()} htmlFor="cronMonitor"><TextInput id="cronMonitor" value={f.state.value} onChange={(e) => f.handleChange(e.target.value)} placeholder={m.cron_monitor_placeholder()} disabled={noAgent} /></FieldRow>}</form.Field>
+                <form.Field name="monitor">{(f) => <FieldRow label={m.cron_monitor_label()} hint={noAgent ? m.cron_monitor_no_agent_hint() : m.cron_monitor_hint()} htmlFor="cronMonitor"><TextInput id="cronMonitor" value={f.state.value} onChange={(e) => f.handleChange(e.target.value)} placeholder={m.cron_monitor_placeholder()} /></FieldRow>}</form.Field>
                 <form.Field name="continuity">{(f) => <FieldRow label={m.cron_continuity_label()} hint={m.cron_continuity_hint()} htmlFor="cronContinuity" inline><Switch id="cronContinuity" checked={f.state.value} onCheckedChange={(checked) => f.handleChange(checked)} disabled={noAgent} /></FieldRow>}</form.Field>
                 <form.Field name="context_from">{(f) => (
                   <FieldRow label={m.cron_context_from_label()} hint={chainable.length ? m.cron_context_from_hint() : m.cron_context_from_empty_hint()}>

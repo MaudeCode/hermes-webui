@@ -25,6 +25,12 @@ describe('cronState', () => {
   })
   it('reports errors, running, and active', () => {
     expect(cronState({ ...recurring, last_status: 'error', last_error: 'boom' })).toBe('error')
+  })
+  it('honours the legacy paused/status fields from older agents', () => {
+    const { state: _s, last_status: _ls, ...legacy } = recurring
+    expect(cronState({ ...legacy, paused: true })).toBe('paused')
+    expect(cronState({ ...legacy, status: 'error' })).toBe('error')
+    expect(cronState({ ...legacy, status: 'error', next_run_at: null })).toBe('schedule_error')
     expect(cronState(recurring, true)).toBe('running')
     expect(cronState(recurring)).toBe('active')
   })

@@ -94,14 +94,19 @@ describe('TasksPage', () => {
     })
   })
 
-  it('sends a cleared name and drops the monitor when a job becomes script-only', async () => {
+  it('blocks a script-only save until the monitor is cleared, then sends the cleared name and monitor', async () => {
     const detail = await openJob('Digest')
     await userEvent.click(detail.getByRole('button', { name: /^edit/i }))
     const dialog = await screen.findByRole('form', { name: /edit job/i })
     await userEvent.clear(within(dialog).getByLabelText(/^name$/i))
     // Base UI puts the id on its hidden input, so the switch has no accessible name: it is the first switch in the form.
     await userEvent.click(within(dialog).getAllByRole('switch')[0]!)
-    expect(within(dialog).getByLabelText(/monitor/i)).toBeDisabled()
+    await userEvent.click(within(dialog).getByRole('button', { name: /^save$/i }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/monitor cannot be combined/i)
+    expect(api.cronAction).not.toHaveBeenCalled()
+    const monitor = within(dialog).getByLabelText(/monitor/i)
+    expect(monitor).toBeEnabled()
+    await userEvent.clear(monitor)
     await userEvent.click(within(dialog).getByRole('button', { name: /^save$/i }))
     await waitFor(() => expect(api.cronAction).toHaveBeenCalledTimes(1))
     expect(vi.mocked(api.cronAction).mock.calls[0]![1]).toMatchObject({ job_id: 'ab12cd34ef56', name: '', no_agent: true, monitor: '' })

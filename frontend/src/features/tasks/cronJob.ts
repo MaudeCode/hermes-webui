@@ -28,12 +28,14 @@ function hasUnlimitedRepeat(job: CronJob): boolean {
 }
 
 export function cronState(job: CronJob, running = false): CronState {
+  // Older agents report `paused` / `status` instead of `state` / `last_status`; both stay supported.
+  const errored = job.state === 'error' || job.last_status === 'error' || job.status === 'error'
   if (running) return 'running'
   if (isRecurring(job) && hasUnlimitedRepeat(job) && job.enabled === false && job.state === 'completed' && !job.next_run_at) return 'needs_attention'
-  if (isRecurring(job) && !job.next_run_at && (job.state === 'error' || job.last_status === 'error')) return 'schedule_error'
-  if (job.state === 'paused') return 'paused'
+  if (isRecurring(job) && !job.next_run_at && errored) return 'schedule_error'
+  if (job.state === 'paused' || job.paused) return 'paused'
   if (job.enabled === false) return 'off'
-  if (job.last_status === 'error') return 'error'
+  if (errored) return 'error'
   return 'active'
 }
 
