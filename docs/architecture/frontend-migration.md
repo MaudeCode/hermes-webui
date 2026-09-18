@@ -98,6 +98,10 @@ mount depth to the Python server named in the variable, which keeps state, sessi
 served by Vite. The dev document has no Python-injected `<base>`, so `freezeAppRoot` treats the origin root as the
 mount in development (`import.meta.env.DEV`). Without the variable, `npm run dev` runs the bare Start dev server.
 
+From the repository root, `./ctl.sh start --remote` is the attached wrapper for
+this mode. It reads `HERMES_WEBUI_DEV_PROXY` from the ignored `.env`, binds the
+local frontend to loopback, and forwards any remaining arguments to Vite.
+
 ## 4. Routing contract
 
 TanStack Router owns canonical URLs, path and search parsing, navigation,

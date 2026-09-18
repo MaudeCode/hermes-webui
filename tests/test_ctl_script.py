@@ -46,7 +46,7 @@ def run_ctl(
         "HERMES_WEBUI_CTL_ISOLATE_WORKTREE",
         "HERMES_WEBUI_CTL_DETACH_WORKTREE",
         "HERMES_WEBUI_NO_DOTENV",
-        "HERMES_WEBUI_CHAT_BACKEND",
+        "HERMES_WEBUI_DEV_PROXY",
         "XDG_RUNTIME_DIR",
     ):
         merged.pop(key, None)
@@ -77,7 +77,7 @@ def write_fake_python(path: Path) -> None:
             """
             #!/usr/bin/env bash
             printf 'fake-python args:%s\n' "$*" >> "${FAKE_PYTHON_LOG}"
-            printf 'host=%s port=%s state=%s backend=%s\n' "${HERMES_WEBUI_HOST:-}" "${HERMES_WEBUI_PORT:-}" "${HERMES_WEBUI_STATE_DIR:-}" "${HERMES_WEBUI_CHAT_BACKEND:-}" >> "${FAKE_PYTHON_LOG}"
+            printf 'host=%s port=%s state=%s\n' "${HERMES_WEBUI_HOST:-}" "${HERMES_WEBUI_PORT:-}" "${HERMES_WEBUI_STATE_DIR:-}" >> "${FAKE_PYTHON_LOG}"
             trap 'printf "terminated\n" >> "${FAKE_PYTHON_LOG}"; exit 0' TERM INT
             while true; do sleep 0.1; done
             """
@@ -285,47 +285,55 @@ def test_start_writes_pid_under_hermes_home_runs_foreground_no_browser_and_logs(
         assert not pid_file.exists()
 
 
-def test_remote_flag_opts_in_without_changing_default(tmp_path):
+def test_remote_flag_starts_frontend_against_configured_webui(tmp_path):
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     _seed_ctl_repo(repo_root)
+    (repo_root / "frontend" / "node_modules").mkdir(parents=True)
     (repo_root / ".env").write_text(
-        "HERMES_WEBUI_GATEWAY_BASE_URL=http://gateway.example:8642\n"
-        "HERMES_WEBUI_GATEWAY_API_KEY=test-gateway-key\n",
+        "HERMES_WEBUI_DEV_PROXY=https://webui.example.test\n",
         encoding="utf-8",
     )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    npm_log = tmp_path / "npm.log"
+    npm = fake_bin / "npm"
+    npm.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf 'args=%s\\npwd=%s\\nproxy=%s\\n' \"$*\" \"$PWD\" \"$HERMES_WEBUI_DEV_PROXY\" > \"$NPM_LOG\"\n",
+        encoding="utf-8",
+    )
+    npm.chmod(0o755)
 
-    def launch(home_name: str, port: int, *args: str) -> str:
-        home = tmp_path / home_name
-        fake_python = home / "fake-python"
-        fake_log = home / "fake-python.log"
-        home.mkdir()
-        write_fake_python(fake_python)
+    result = run_ctl(
+        tmp_path,
+        "start",
+        "--remote",
+        "--port",
+        "18993",
+        env={"PATH": f"{fake_bin}:{os.environ.get('PATH', '')}", "NPM_LOG": str(npm_log)},
+        repo_root=repo_root,
+        load_dotenv=True,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    output = npm_log.read_text(encoding="utf-8")
+    assert "args=run dev -- --host 127.0.0.1 --port 18993" in output
+    assert_path_in_text(repo_root / "frontend", output)
+    assert "proxy=https://webui.example.test" in output
+    assert not (tmp_path / ".hermes" / "webui.pid").exists()
+
+
+def test_remote_flag_requires_http_webui_target(tmp_path):
+    for value, message in (("", "must be set"), ("file:///tmp/webui", "must start with")):
         result = run_ctl(
-            home,
+            tmp_path,
             "start",
-            *args,
-            env={
-                "HERMES_WEBUI_PYTHON": str(fake_python),
-                "FAKE_PYTHON_LOG": str(fake_log),
-                "HERMES_WEBUI_PORT": str(port),
-                "HERMES_WEBUI_CTL_ALLOW_LAUNCHD_CONFLICT": "1",
-            },
-            repo_root=repo_root,
-            load_dotenv=True,
+            "--remote",
+            env={"HERMES_WEBUI_DEV_PROXY": value},
         )
-        assert result.returncode == 0, result.stderr + result.stdout
-        pid = wait_for_pid_file(home / ".hermes" / "webui.pid")
-        try:
-            return wait_for_file_text(fake_log, contains="backend=")
-        finally:
-            stop = run_ctl(home, "stop", repo_root=repo_root)
-            assert stop.returncode == 0, stop.stderr + stop.stdout
-            _kill_tree(pid)
-            assert_process_exits(pid)
-
-    assert "backend=\n" in launch("local", 18992)
-    assert "backend=gateway\n" in launch("gateway", 18993, "--remote")
+        assert result.returncode == 2
+        assert message in result.stderr
 
 
 def test_worktree_start_selects_next_free_port_and_reports_it(tmp_path):
