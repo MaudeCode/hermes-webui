@@ -1077,16 +1077,27 @@ def _append_recovered_context_projection(
                 recovered.get('attachments'),
             ):
                 return
+        elif recovered.get('_recovered_stream_id'):
+            # HWEB-78: the visible transcript already decided how many rows
+            # this stream owns with this text (a run may legitimately repeat a
+            # progress line; an older turn may hold the same reply). The
+            # context is a projection of it, so it carries the same count:
+            # append only while it has fewer such rows than `messages`.
+            def _same_row(message: dict) -> bool:
+                return (
+                    isinstance(message, dict)
+                    and message.get('role') == recovered.get('role')
+                    and message.get('_recovered_stream_id') == recovered.get('_recovered_stream_id')
+                    and _normalize_journal_recovery_text(message.get('content')) == recovered_text
+                )
+
+            visible_count = sum(1 for m in getattr(session, 'messages', None) or [] if _same_row(m))
+            projected_count = sum(1 for m in context_messages if _same_row(m))
+            if projected_count >= visible_count:
+                return
         else:
-            # HWEB-78: a stream-owned row only duplicates its own stream's
-            # earlier projection. Matching text from another turn is history
-            # the dead run legitimately repeated, and the visible transcript
-            # already keeps that row, so the context must keep it too.
-            stream_id = recovered.get('_recovered_stream_id')
             for existing in reversed(context_messages[-8:]):
                 if not isinstance(existing, dict) or existing.get('role') != recovered.get('role'):
-                    continue
-                if stream_id and existing.get('_recovered_stream_id') != stream_id:
                     continue
                 if _normalize_journal_recovery_text(existing.get('content')) == recovered_text:
                     return

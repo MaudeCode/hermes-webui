@@ -164,3 +164,30 @@ def test_untagged_recovered_assistant_context_row_still_deduplicates():
         session, {"role": "assistant", "content": "Same answer", "timestamp": 1},
     )
     assert len(session.context_messages) == 1
+
+
+def test_repeated_text_within_one_stream_keeps_every_context_row(hermes_home):
+    """A run that emits the same progress line twice keeps both rows in
+    ``context_messages``, matching the visible transcript."""
+    sid = "recovered_context_repeat_in_stream"
+    stream_id = "stream-repeat-in-stream"
+    for _ in range(2):
+        append_run_event(sid, stream_id, "interim_assistant", {"text": "Checking again."})
+
+    session = Session(
+        session_id=sid,
+        title="repro",
+        messages=[{"role": "user", "content": "check"}],
+        context_messages=[{"role": "user", "content": "check"}],
+    )
+
+    def assistants(rows):
+        return [m["content"] for m in rows if m.get("role") == "assistant"]
+
+    assert _append_journaled_partial_output(session, stream_id) is True
+    assert assistants(session.messages) == ["Checking again."] * 2
+    assert assistants(session.context_messages) == ["Checking again."] * 2
+
+    assert _append_journaled_partial_output(session, stream_id, dedupe_existing=True) is False
+    assert assistants(session.messages) == ["Checking again."] * 2
+    assert assistants(session.context_messages) == ["Checking again."] * 2
