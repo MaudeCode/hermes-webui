@@ -46,11 +46,11 @@ usage() {
 Usage: ./ctl.sh <command> [args]
 
 Commands:
-  start [--remote] [bootstrap args...]
-                              Start Hermes WebUI as a background daemon
+  start [bootstrap args...]   Start Hermes WebUI as a background daemon
+  start --remote [vite args...]
+                              Start the local frontend against a configured WebUI
   stop                        Stop the daemon started by ctl.sh
-  restart [--remote] [bootstrap args...]
-                              Stop, then start again
+  restart [bootstrap args...] Stop, then start again
   status                      Show daemon, host/port, log, and health status
   logs [--lines N] [--follow|--no-follow]
                               Show the daemon log (defaults to tail -n 100 -f)
@@ -874,6 +874,35 @@ start_cmd() {
   fi
 }
 
+start_remote_cmd() {
+  _load_repo_dotenv_preserving_env
+  case "${HERMES_WEBUI_DEV_PROXY:-}" in
+    http://* | https://*) ;;
+    '')
+      echo "[ctl] HERMES_WEBUI_DEV_PROXY must be set in .env for --remote." >&2
+      return 2
+      ;;
+    *)
+      echo "[ctl] HERMES_WEBUI_DEV_PROXY must start with http:// or https://." >&2
+      return 2
+      ;;
+  esac
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "[ctl] npm is required for --remote." >&2
+    return 2
+  fi
+  if [[ ! -d "${REPO_ROOT}/frontend/node_modules" ]]; then
+    echo "[ctl] Frontend dependencies are missing. Run 'cd frontend && npm ci' first." >&2
+    return 2
+  fi
+
+  echo "[ctl] Starting local frontend against HERMES_WEBUI_DEV_PROXY"
+  echo "[ctl] Note: passkey-only authentication cannot be used from a loopback frontend."
+  echo "[ctl] Press Ctrl-C to stop"
+  cd "${REPO_ROOT}/frontend"
+  exec npm run dev -- --host 127.0.0.1 "$@"
+}
+
 _warn_if_unmanaged_instance_serving() {
   # After stop concluded "nothing to do", check whether a server is STILL
   # answering on the configured port. Silently reporting "stopped" while a
@@ -1043,18 +1072,23 @@ if [[ $# -gt 0 ]]; then
 fi
 
 case "${cmd}" in
-  start | restart)
+  start)
     if [[ "${1:-}" == "--remote" ]]; then
-      export HERMES_WEBUI_CHAT_BACKEND=gateway
       shift
+      start_remote_cmd "$@"
+    else
+      start_cmd "$@"
     fi
     ;;
-esac
-
-case "${cmd}" in
-  start) start_cmd "$@" ;;
   stop) stop_cmd ;;
-  restart) stop_cmd; start_cmd "$@" ;;
+  restart)
+    if [[ "${1:-}" == "--remote" ]]; then
+      echo "[ctl] Remote frontend mode stays attached; stop it with Ctrl-C, then run 'ctl.sh start --remote' again." >&2
+      exit 2
+    fi
+    stop_cmd
+    start_cmd "$@"
+    ;;
   status) status_cmd ;;
   logs) logs_cmd "$@" ;;
   -h|--help|help|"") usage ;;
