@@ -261,3 +261,45 @@ def test_dedupe_pass_prefers_its_own_stream_row_over_untagged_history(hermes_hom
         assert _append_journaled_partial_output(session, "stream-b", dedupe_existing=True) is False
         streams = [m.get("_recovered_stream_id") for m in session.context_messages if m.get("role") == "assistant"]
         assert streams == [None, "stream-b"]
+
+
+def test_backfilled_context_row_keeps_transcript_order(hermes_home):
+    """Legacy state: the old content dedupe dropped row A (a repeat of older
+    text) but projected row B. The backfill must place A before B, not at
+    the tail, so the model sees the transcript's order."""
+    sid = "recovered_context_backfill_order"
+    stream_id = "stream-s"
+    append_run_event(sid, stream_id, "interim_assistant", {"text": "Still checking."})
+    append_run_event(sid, stream_id, "interim_assistant", {"text": "Found it."})
+
+    row_a = {
+        "role": "assistant", "content": "Still checking.",
+        "_recovered_from_run_journal": True, "_recovered_stream_id": stream_id,
+    }
+    row_b = {
+        "role": "assistant", "content": "Found it.",
+        "_recovered_from_run_journal": True, "_recovered_stream_id": stream_id,
+    }
+    session = Session(
+        session_id=sid,
+        title="repro",
+        messages=[
+            {"role": "user", "content": "check"},
+            {"role": "assistant", "content": "Still checking."},
+            {"role": "user", "content": "check again", "_recovered": True},
+            dict(row_a),
+            dict(row_b),
+        ],
+        context_messages=[
+            {"role": "user", "content": "check"},
+            {"role": "assistant", "content": "Still checking."},
+            {"role": "user", "content": "check again", "_recovered": True},
+            dict(row_b),
+        ],
+    )
+
+    for _ in range(2):
+        assert _append_journaled_partial_output(session, stream_id, dedupe_existing=True) is False
+        assert [m["content"] for m in session.context_messages[2:]] == [
+            "check again", "Still checking.", "Found it.",
+        ]
