@@ -93,10 +93,12 @@ owner's scope amendment).
 ### Development server
 
 `HERMES_WEBUI_DEV_PROXY=http://127.0.0.1:8797 npm run dev -- --host 0.0.0.0 --port 8798` (from `frontend/`) serves
-the app from source with hot module replacement. The Vite dev server forwards `api/` and `static/` requests at any
-mount depth to the Python server named in the variable, which keeps state, sessions and auth; everything else is
-served by Vite. The dev document has no Python-injected `<base>`, so `freezeAppRoot` treats the origin root as the
-mount in development (`import.meta.env.DEV`). Without the variable, `npm run dev` runs the bare Start dev server.
+the app from source with hot module replacement. The Vite dev server forwards `api/`, `static/`, `extensions/`,
+`plugins/`, and `dashboard-plugins/` requests at any mount depth to the Python server named in the variable, which
+keeps state, sessions and auth; everything else is served by Vite. The dev document has no Python-injected `<base>`,
+so `freezeAppRoot` treats the origin root as the mount in development (`import.meta.env.DEV`). Without the variable,
+`npm run dev` runs the bare Start dev server. Passkey-only authentication is not supported through a loopback dev
+origin because WebAuthn credentials remain bound to the deployed hostname; password authentication remains usable.
 
 From the repository root, `./ctl.sh start --remote` is the attached wrapper for
 this mode. It reads `HERMES_WEBUI_DEV_PROXY` from the ignored `.env`, binds the

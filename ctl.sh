@@ -897,6 +897,7 @@ start_remote_cmd() {
   fi
 
   echo "[ctl] Starting local frontend against HERMES_WEBUI_DEV_PROXY"
+  echo "[ctl] Note: passkey-only authentication cannot be used from a loopback frontend."
   echo "[ctl] Press Ctrl-C to stop"
   cd "${REPO_ROOT}/frontend"
   exec npm run dev -- --host 127.0.0.1 "$@"
