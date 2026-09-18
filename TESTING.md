@@ -42,16 +42,14 @@ npm run lint              # ESLint: typescript-eslint strict, React hooks/compil
 npm test                  # Vitest: contracts (live fixtures), stream reducer, client, host protocol, components
 npm run build             # gate + compile + deterministic build + service worker
 npm run check-dist        # optional: committed static/dist matches a clean build byte for byte
-npm run e2e               # Playwright against server.py (desktop 1280x800 + mobile 390x844, screenshot baselines)
+npm run e2e               # Playwright against server.py (desktop 1280x800 + mobile 390x844)
 ```
 
 The ESLint config forbids `fetch`, `EventSource`, `innerHTML` and
 `dangerouslySetInnerHTML` outside the reviewed modules (`api/client.ts`,
 `api/sse.ts`, `features/chat/render/`), so the typed client is the only HTTP
 path. `npm run e2e` boots two isolated `server.py` instances (open and
-password-protected) with Python from `HERMES_E2E_PYTHON` (default `python3`);
-baselines live in `frontend/e2e/__screenshots__/` and are refreshed with
-`npx playwright test --update-snapshots`.
+password-protected) with Python from `HERMES_E2E_PYTHON` (default `python3`).
 
 ## Python lint gate (ruff) — forward-looking, new-code-only
 

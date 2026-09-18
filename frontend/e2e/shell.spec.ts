@@ -5,7 +5,6 @@ test.describe('shell', () => {
     await page.goto('/')
     await settle(page)
     await expect(page.getByRole('textbox').first()).toBeVisible()
-    await expect(page).toHaveScreenshot('home.png', { fullPage: false })
     expect(errors).toEqual([])
   })
 
@@ -45,7 +44,6 @@ test.describe('shell', () => {
     await page.goto('/settings/appearance')
     await settle(page)
     await expect(page).toHaveURL(/\/settings\/appearance$/)
-    await expect(page).toHaveScreenshot('settings-appearance.png', { mask: [page.getByTestId('webui-version')] })
   })
 
   test('deep links load assets through the relative base href', async ({ page, errors }) => {

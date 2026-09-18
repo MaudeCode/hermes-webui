@@ -49,7 +49,7 @@ frontend/                       editable source (npm package "hermes-webui-front
     extensions/                 sandboxed host, bridge, manifest loading
     lib/                        small utilities (persisted JSON, safeNextPath, base url)
     sw.ts                       custom service worker (injectManifest)
-  e2e/                          Playwright specs and screenshot baselines
+  e2e/                          Playwright functional specs
 static/dist/                    committed production output served by Python
   index.html                    prerendered SPA shell with token placeholders
   assets/*.[hash].js|css        hashed chunks
@@ -214,8 +214,8 @@ replay, session replacement, profile change, and unmount. Invariants from
   component tokens or one of two traits (`square-controls`, `card-sessions`).
   The legacy stylesheet was converted with `frontend/scripts/css-convert.mjs`
   (now a history tool); `docs/architecture/css-conversion-ledger.md` gives every
-  one of its 4166 rules a disposition. `e2e/skins.spec.ts` screenshots each skin
-  in both schemes on a seeded transcript (`e2e/fixtures/`).
+  one of its 4166 rules a disposition. `skins.test.ts` validates every skin's
+  token contract and generated CSS.
 - Base UI provides dialogs, alert dialogs, menus, popovers, tooltips, tabs,
   selects, comboboxes, and focus management. The composer command palette uses
   Base UI Combobox; the approval card keeps its inline placement but uses the
@@ -288,8 +288,8 @@ Recorded on the ticket on 2026-09-15 by the ticket owner. Removed restrictions:
 no global state library; TanStack Virtual only where already required; no Start
 server functions or routes; the CI committed-output diff gate; the legacy theme
 and skin custom properties as the authoritative design tokens. The legacy
-stylesheet remains the visual parity baseline until the chrome is restyled with
-Tailwind against the screenshot baselines.
+stylesheet was the visual reference while the chrome was restyled with Tailwind.
+Current UI changes use PR before/after evidence and manual review.
 
 ## 13b. Validation-round adjustments
 
@@ -330,12 +330,12 @@ the parity matrix. Mechanisms worth knowing:
 | Lint | `npm run lint` | TS/React, service worker, contract rules |
 | Unit | `npm run test` (Vitest) | contracts, reducer, router search schemas, Query invalidation, forms, extension protocol, PWA helpers, rendering adapter, hostile corpus |
 | Behaviour | Vitest + RTL | focus, keyboard, live regions, forms, dialogs, menus, comboboxes, error states, reduced motion |
-| End to end | `npm run e2e` (Node Playwright) | navigation, hard refresh, chat lifecycle with the deterministic gateway, reconnect, auth, onboarding, extensions, PWA update, subpath mount, screenshot baselines at 1280x800 and 390x844 |
+| End to end | `npm run e2e` (Node Playwright) | navigation, hard refresh, chat lifecycle with the deterministic gateway, reconnect, auth, onboarding, extensions, PWA update, subpath mount at desktop and mobile viewports |
 | Python | `./scripts/test.sh` | SPA allowlist, bootstrap, auth/CSRF/profile boundaries, share, extension assets/sidecars, 404s, contract fixtures |
 | Packaging | `tests/test_hweb100_packaging.py`, Docker smoke | wheel and container include `static/dist/` and run without Node |
 
-Tests pin clocks, fonts (Inter bundled), animations (reduced motion), locale
-(`en`), data (fixtures), and viewport for deterministic screenshots.
+Tests pin clocks, locale (`en`), data, and viewport for deterministic browser
+checks.
 
 ## 15. Rollback
 
